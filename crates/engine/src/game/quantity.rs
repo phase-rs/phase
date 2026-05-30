@@ -2856,6 +2856,14 @@ pub(crate) fn resolve_player_count(
                                         && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
                                 })
                         }
+                        // CR 508.6: opponent this player attacked this turn.
+                        PlayerFilter::OpponentAttackedThisTurn => {
+                            p.id != controller
+                                && state
+                                    .attacked_defenders_this_turn
+                                    .get(&controller)
+                                    .is_some_and(|defenders| defenders.contains(&p.id))
+                        }
                         PlayerFilter::All => true,
                         PlayerFilter::HighestSpeed => {
                             let highest_speed = state

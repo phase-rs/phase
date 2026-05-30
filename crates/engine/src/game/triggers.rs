@@ -3706,6 +3706,9 @@ pub(crate) fn check_trigger_condition(
             // CR 120.1 + CR 510.1: a set-valued combat-damaged-this-turn
             // predicate has no single-player "whose turn" semantic.
             | PlayerFilter::OpponentDealtCombatDamage
+            // CR 508.6: a set-valued attacked-this-turn predicate has no
+            // single-player "whose turn" semantic.
+            | PlayerFilter::OpponentAttackedThisTurn
             | PlayerFilter::All
             | PlayerFilter::HighestSpeed
             | PlayerFilter::ZoneChangedThisWay

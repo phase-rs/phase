@@ -323,6 +323,12 @@ pub(crate) fn parse_quantity_ref_with_context(
                 filter: PlayerFilter::OpponentDealtCombatDamage,
             });
         }
+        // CR 508.6: "opponents you attacked [this turn]" (Militant Angel).
+        if parse_opponents_attacked_clause(rest).is_ok() {
+            return Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentAttackedThisTurn,
+            });
+        }
         // CR 109.4 + CR 109.5: "opponents who control <filter>" / "opponents who
         // don't control <filter>" / "players who control more <type> than you" →
         // PlayerCount over the population satisfying the shared control predicate.
@@ -833,6 +839,20 @@ fn parse_opponent_dealt_combat_damage_clause(
         tag(" "),
         alt((tag("were"), tag("was"))),
         tag(" dealt combat damage"),
+        opt(tag(" this turn")),
+    ))
+    .parse(input)
+    .map(|(rest, _)| (rest, ()))
+}
+
+/// CR 508.6: "opponents you attacked [this turn]". Trailing " this turn"
+/// optional (durations may be stripped upstream). No collision with "creature
+/// you attacked WITH this turn" (`AttackedThisTurn`) — different subject word,
+/// no " with".
+fn parse_opponents_attacked_clause(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    all_consuming((
+        alt((tag::<_, _, OracleError<'_>>("opponents"), tag("opponent"))),
+        tag(" you attacked"),
         opt(tag(" this turn")),
     ))
     .parse(input)
@@ -1744,6 +1764,13 @@ fn parse_for_each_clause_with_they_controller(
         });
     }
 
+    // CR 508.6: "opponent you attacked this turn".
+    if parse_opponents_attacked_clause(clause).is_ok() {
+        return Some(QuantityRef::PlayerCount {
+            filter: PlayerFilter::OpponentAttackedThisTurn,
+        });
+    }
+
     // "opponent"
     if clause == "opponent" || clause == "opponent you have" {
         return Some(QuantityRef::PlayerCount {
@@ -2308,6 +2335,49 @@ mod tests {
                 "phrase {phrase:?} must consume as OpponentDealtCombatDamage"
             );
         }
+    }
+
+    /// CR 508.6: "the number of opponents you attacked [this turn]" (Militant
+    /// Angel) routes to the dedicated `PlayerCount { OpponentAttackedThisTurn }`.
+    /// The trailing " this turn" is optional (durations may be stripped
+    /// upstream), and the singular "opponent" form hits the same arm.
+    #[test]
+    fn quantity_ref_opponents_you_attacked_is_player_count() {
+        for phrase in [
+            "the number of opponents you attacked this turn",
+            "the number of opponents you attacked",
+            "the number of opponent you attacked this turn",
+        ] {
+            assert_eq!(
+                parse_quantity_ref(phrase),
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentAttackedThisTurn,
+                }),
+                "phrase {phrase:?} must route to OpponentAttackedThisTurn"
+            );
+        }
+    }
+
+    /// CR 508.6: the for-each clause form ("opponent you attacked this turn")
+    /// reaches the same `PlayerCount { OpponentAttackedThisTurn }`.
+    #[test]
+    fn for_each_opponent_you_attacked_is_player_count() {
+        assert_eq!(
+            parse_for_each_clause("opponent you attacked this turn"),
+            Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentAttackedThisTurn,
+            }),
+        );
+    }
+
+    /// Collision guard: "creature you attacked WITH this turn" (the source-
+    /// referential attacked-with form) must stay `QuantityRef::AttackedThisTurn`
+    /// — the " with" subject distinguishes it from the player-population
+    /// "opponents you attacked" phrase.
+    #[test]
+    fn creature_you_attacked_with_this_turn_stays_attacked_this_turn() {
+        let qty = parse_for_each_clause("creature you attacked with this turn").unwrap();
+        assert_eq!(qty, QuantityRef::AttackedThisTurn);
     }
 
     #[test]
