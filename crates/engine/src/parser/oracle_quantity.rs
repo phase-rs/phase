@@ -1363,7 +1363,7 @@ fn parse_for_each_clause_with_they_controller(
     if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref_with_context(
         clause,
         &ParseContext {
-            relative_player_scope: Some(they_controller),
+            relative_player_scope: Some(they_controller.clone()),
             ..Default::default()
         },
     ) {
@@ -1621,9 +1621,22 @@ fn parse_for_each_clause_with_they_controller(
     }
 
     // "creature you control", "artifact you control", etc.
-    // Use parse_type_phrase (not parse_target) to avoid generating spurious
-    // target-fallback warnings for quantity text that isn't a target clause.
-    let (filter, remainder) = parse_type_phrase(clause);
+    // Use parse_type_phrase_with_ctx (not parse_target) to avoid generating
+    // spurious target-fallback warnings for quantity text that isn't a target
+    // clause.
+    //
+    // CR 109.5 + CR 109.4: thread the relative player scope so "they control"
+    // binds to the iterating/targeted/chosen player rather than collapsing to the
+    // caster. "you control" still resolves to ControllerRef::You inside
+    // parse_type_phrase_with_ctx (its suffix arm is ctx-independent), so The Scarab
+    // God and other caster-relative counts are unchanged. CR 608.2c: the controller
+    // follows instructions in order, so a per-player-scoped count reads the
+    // iterating player.
+    let mut tp_ctx = ParseContext {
+        relative_player_scope: Some(they_controller.clone()),
+        ..Default::default()
+    };
+    let (filter, remainder) = parse_type_phrase_with_ctx(clause, &mut tp_ctx);
     if !matches!(filter, TargetFilter::Any) && remainder.trim().is_empty() {
         return Some(QuantityRef::ObjectCount { filter });
     }
@@ -3029,6 +3042,74 @@ mod tests {
             matches!(qty, QuantityRef::ObjectCount { .. }),
             "Expected ObjectCount, got {qty:?}"
         );
+    }
+
+    /// CR 109.5 + CR 608.2c: "creature they control" inside a "for each [player]"
+    /// clause threads the relative player scope into the `ObjectCount` filter's
+    /// controller. Edit 1b swapped the no-ctx fallback (`parse_type_phrase`) for
+    /// the ctx-aware `parse_type_phrase_with_ctx`. Reverting Edit 1b discards the
+    /// scope, so "they control" collapses to `ControllerRef::You` and this assert
+    /// (ScopedPlayer) fails. Discriminating fail-on-revert guard for the parser fix.
+    #[test]
+    fn for_each_they_control_threads_scoped_player() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        let qty = parse_for_each_clause_with_context("creature they control", &ctx).unwrap();
+        let QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        } = qty
+        else {
+            panic!("Expected ObjectCount over Typed filter, got {qty:?}");
+        };
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::ScopedPlayer),
+            "\"they control\" must bind to the iterating player, not the caster"
+        );
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+    }
+
+    /// CR 109.4 + CR 115.1: "creature they control" with a `TargetPlayer` relative
+    /// scope (e.g. Burden of Greed's "for each artifact that player controls")
+    /// threads `TargetPlayer` through the fallback. Same fail-on-revert axis as
+    /// `for_each_they_control_threads_scoped_player` but for the targeted-player
+    /// scope.
+    #[test]
+    fn for_each_they_control_threads_target_player() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        };
+        let qty = parse_for_each_clause_with_context("artifact they control", &ctx).unwrap();
+        let QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        } = qty
+        else {
+            panic!("Expected ObjectCount over Typed filter, got {qty:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::TargetPlayer));
+    }
+
+    /// CR 109.5: "creature you control" stays bound to `ControllerRef::You` even
+    /// when a relative player scope is present, because the "you control" suffix
+    /// arm is context-independent. Confirms Edit 1b does not disturb caster-relative
+    /// counts (The Scarab God).
+    #[test]
+    fn for_each_you_control_stays_caster_with_scope_present() {
+        let ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        let qty = parse_for_each_clause_with_context("creature you control", &ctx).unwrap();
+        let QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        } = qty
+        else {
+            panic!("Expected ObjectCount over Typed filter, got {qty:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
     }
 
     #[test]
