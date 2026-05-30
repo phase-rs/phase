@@ -712,7 +712,70 @@ fn granted_spell_keywords(
         upsert_keyword_by_kind(&mut keywords, keyword.clone());
     }
 
+    // CR 611.2c: Player-scoped flash-timing grants applied by activated/triggered
+    // abilities (e.g. Teferi +1) live in the TCE table, not on a battlefield static.
+    transient_granted_spell_keywords(state, caster, spell_obj, origin_zone, &mut keywords);
+
     keywords
+}
+
+/// CR 611.2c + CR 601.3b: Player-scoped spell-casting keyword grants (e.g. Teferi,
+/// Time Raveler's +1 "you may cast sorcery spells as though they had flash") are
+/// registered by `effect.rs` as `SpecificPlayer { id }`-bound transient continuous
+/// effects rather than battlefield statics, so the grant survives the source
+/// permanent leaving play and expires on its own duration (CR 611.2a). This scan is
+/// the player-scoped counterpart to the `game_active_statics` loop in
+/// `granted_spell_keywords`; it mirrors the condition gating of the sibling player
+/// query `transient_grants_static_mode_to_player` (static_abilities.rs).
+fn transient_granted_spell_keywords(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: &crate::game::game_object::GameObject,
+    origin_zone: Zone,
+    keywords: &mut Vec<Keyword>,
+) {
+    for tce in &state.transient_continuous_effects {
+        let TargetFilter::SpecificPlayer { id } = tce.affected else {
+            continue;
+        };
+        if id != caster {
+            continue;
+        }
+        // CR 603.4 + CR 608.2h: mirror `transient_grants_static_mode_to_player`'s
+        // dual-condition gating exactly.
+        if let Duration::ForAsLongAs { ref condition } = tce.duration {
+            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        if let Some(ref condition) = tce.condition {
+            if !super::layers::evaluate_condition(state, condition, tce.controller, tce.source_id) {
+                continue;
+            }
+        }
+        for modification in &tce.modifications {
+            let ContinuousModification::GrantStaticAbility { definition } = modification else {
+                continue;
+            };
+            let StaticMode::CastWithKeyword { keyword } = &definition.mode else {
+                continue;
+            };
+            let matches = definition.affected.as_ref().is_none_or(|filter| {
+                super::filter::spell_object_matches_filter_from_state(
+                    state,
+                    spell_obj,
+                    origin_zone,
+                    caster,
+                    filter,
+                    tce.source_id,
+                    &state.all_creature_types,
+                )
+            });
+            if matches {
+                upsert_keyword_by_kind(keywords, keyword.clone());
+            }
+        }
+    }
 }
 
 /// CR 118.9 + CR 604.1: Collect an alternative MANA cost granted to `object_id`
@@ -27657,5 +27720,278 @@ mod tests {
             !available.contains(&stale_exile),
             "previous-turn exile card must not be surfaced by the static"
         );
+    }
+
+    /// PR #1441: Teferi, Time Raveler's +1 ("you may cast sorcery spells as
+    /// though they had flash") is a player-scoped flash-timing grant. The grant
+    /// must be a `SpecificPlayer`-bound transient continuous effect read by
+    /// `granted_spell_keywords`, so it survives Teferi leaving the battlefield
+    /// (CR 611.2c — a rules-modifying effect, not an object-characteristic one)
+    /// and expires on its own duration at the controller's next turn (CR 611.2a).
+    mod flash_timing_grant_seam {
+        use super::*;
+        use crate::game::effects::effect::resolve as resolve_effect;
+        use crate::game::turns::execute_untap;
+        use crate::game::zones::move_to_zone;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::ability::{Duration, PlayerScope, ResolvedAbility, StaticDefinition};
+        use crate::types::statics::StaticMode;
+
+        /// Parse the real Teferi, Time Raveler +1 effect AST and resolve it as an
+        /// ability controlled by `controller`, registering the player-scoped TCE
+        /// through the production pipeline (parser → effect.rs::resolve → TCE).
+        fn grant_teferi_flash(state: &mut GameState, controller: PlayerId, teferi: ObjectId) {
+            let parsed = parse_oracle_text(
+                "Each opponent can cast spells only any time they could cast a sorcery.\n\
+                 [+1]: Until your next turn, you may cast sorcery spells as though they had flash.\n\
+                 [\u{2212}3]: Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
+                "Teferi, Time Raveler",
+                &[],
+                &["Planeswalker".to_string()],
+                &["Teferi".to_string()],
+            );
+            // abilities[0] is the +1 GenericEffect grant.
+            let ability = ResolvedAbility::new(
+                (*parsed.abilities[0].effect).clone(),
+                vec![],
+                teferi,
+                controller,
+            );
+            let mut events = Vec::new();
+            resolve_effect(state, &ability, &mut events).expect("grant resolves");
+        }
+
+        /// Create a sorcery costing {1} in `player`'s hand with a trivial draw
+        /// spell ability, returning its ObjectId.
+        fn sorcery_in_hand(state: &mut GameState, player: PlayerId, card_id: CardId) -> ObjectId {
+            let id = create_object(
+                state,
+                card_id,
+                player,
+                "Test Sorcery".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::generic(1);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            id
+        }
+
+        fn teferi_on_battlefield(state: &mut GameState, owner: PlayerId) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(700),
+                owner,
+                "Teferi, Time Raveler".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Planeswalker);
+            id
+        }
+
+        fn sorcery_has_flash(state: &GameState, player: PlayerId, sorcery: ObjectId) -> bool {
+            effective_spell_keyword_kinds(state, player, sorcery).contains(&KeywordKind::Flash)
+        }
+
+        /// (a) After +1, a sorcery is instant-castable even outside the
+        /// sorcery-speed window (here: P0's main phase but with a non-empty
+        /// stack, so `is_sorcery_speed_window` is false). The grant — and only
+        /// the grant — permits the cast.
+        #[test]
+        fn plus_one_lets_sorcery_be_cast_outside_sorcery_window() {
+            let mut state = setup_game_at_main_phase();
+            let teferi = teferi_on_battlefield(&mut state, PlayerId(0));
+            let sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(701));
+            // Mana to pay the {1} cost so the cast clears payment and exercises
+            // the timing gate (the behavior under test), not the cost guard.
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+            // Force a non-sorcery-speed window: an object on the stack. P0 is the
+            // active player in PreCombatMain, so the only thing missing for a
+            // sorcery-speed window is the empty stack.
+            state.stack.push_back(StackEntry {
+                id: ObjectId(9000),
+                source_id: ObjectId(9000),
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(9000),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            assert!(
+                !restrictions::is_sorcery_speed_window(&state, PlayerId(0)),
+                "test setup must be outside the sorcery-speed window"
+            );
+
+            // Without the grant, the sorcery has no flash and would be rejected.
+            assert!(!sorcery_has_flash(&state, PlayerId(0), sorcery));
+
+            grant_teferi_flash(&mut state, PlayerId(0), teferi);
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), sorcery),
+                "sorcery must gain Flash from the player-scoped grant"
+            );
+
+            let mut events = Vec::new();
+            let result =
+                handle_cast_spell(&mut state, PlayerId(0), sorcery, CardId(701), &mut events);
+            assert!(
+                result.is_ok(),
+                "flash-granted sorcery must be castable outside the sorcery window: {result:?}"
+            );
+        }
+
+        /// (b) SEAM-DEFINING regression lock: after +1, move Teferi to the
+        /// graveyard through the real zone-change path (which fires
+        /// `prune_affected_object_left_effects`). The grant must SURVIVE because
+        /// it is bound to `SpecificPlayer`, not `SpecificObject`. This test FAILS
+        /// on the round-1 `SelfRef` → `SpecificObject` seam and PASSES on the
+        /// `Controller` → `SpecificPlayer` seam.
+        #[test]
+        fn grant_survives_teferi_leaving_battlefield() {
+            let mut state = setup_game_at_main_phase();
+            let teferi = teferi_on_battlefield(&mut state, PlayerId(0));
+            let sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(701));
+
+            grant_teferi_flash(&mut state, PlayerId(0), teferi);
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), sorcery),
+                "grant must be live immediately after +1"
+            );
+
+            // Real zone change → fires apply_zone_exit_cleanup →
+            // prune_affected_object_left_effects.
+            let mut events = Vec::new();
+            move_to_zone(&mut state, teferi, Zone::Graveyard, &mut events);
+            assert_eq!(
+                state.objects[&teferi].zone,
+                Zone::Graveyard,
+                "Teferi actually left the battlefield"
+            );
+
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), sorcery),
+                "player-scoped grant must survive Teferi leaving play (CR 611.2c); \
+                 this is the seam the round-1 SpecificObject binding broke"
+            );
+        }
+
+        /// (c) The grant expires at the grantee's next untap step (CR 611.2a:
+        /// `UntilNextTurnOf { Controller }`). It survives the opponent's untap
+        /// step and is pruned on the controller's.
+        #[test]
+        fn grant_expires_at_grantee_next_untap() {
+            let mut state = setup_game_at_main_phase();
+            let teferi = teferi_on_battlefield(&mut state, PlayerId(0));
+            let sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(701));
+
+            grant_teferi_flash(&mut state, PlayerId(0), teferi);
+            assert!(sorcery_has_flash(&state, PlayerId(0), sorcery));
+
+            // Opponent (P1) untap step first — the P0-controlled grant survives.
+            state.active_player = PlayerId(1);
+            let mut events = Vec::new();
+            execute_untap(&mut state, &mut events);
+            assert!(
+                sorcery_has_flash(&state, PlayerId(0), sorcery),
+                "grant must survive the opponent's untap step"
+            );
+
+            // P0's own untap step — the grant expires (CR 611.2a / CR 514.2).
+            state.active_player = PlayerId(0);
+            let mut events = Vec::new();
+            execute_untap(&mut state, &mut events);
+            assert!(
+                state.transient_continuous_effects.is_empty(),
+                "the UntilNextTurnOf grant must be pruned at the controller's untap step"
+            );
+            assert!(
+                !sorcery_has_flash(&state, PlayerId(0), sorcery),
+                "sorcery must lose Flash after the grant expires"
+            );
+        }
+
+        /// (e) Building-block test: a `SpecificPlayer`-bound TCE granting
+        /// `CastWithKeyword { Flash }` against a Sorcery-typed `affected` filter
+        /// applies Flash to sorceries the bound player casts, but not to
+        /// non-sorceries nor to spells cast by other players.
+        #[test]
+        fn specific_player_cast_with_keyword_tce_scopes_to_player_and_filter() {
+            let mut state = setup_game_at_main_phase();
+            let source = create_object(
+                &mut state,
+                CardId(800),
+                PlayerId(0),
+                "Grant Source".to_string(),
+                Zone::Battlefield,
+            );
+
+            let p0_sorcery = sorcery_in_hand(&mut state, PlayerId(0), CardId(801));
+            let p1_sorcery = sorcery_in_hand(&mut state, PlayerId(1), CardId(802));
+            let p0_instant = create_object(
+                &mut state,
+                CardId(803),
+                PlayerId(0),
+                "Test Instant".to_string(),
+                Zone::Hand,
+            );
+            {
+                let obj = state.objects.get_mut(&p0_instant).unwrap();
+                obj.card_types.core_types.push(CoreType::Instant);
+                obj.mana_cost = ManaCost::NoCost;
+            }
+
+            // affected = sorcery spells you cast.
+            let sorcery_filter = TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Sorcery).controller(ControllerRef::You),
+            );
+            let granted_static = StaticDefinition::new(StaticMode::CastWithKeyword {
+                keyword: Keyword::Flash,
+            })
+            .affected(sorcery_filter);
+            state.add_transient_continuous_effect(
+                source,
+                PlayerId(0),
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                TargetFilter::SpecificPlayer { id: PlayerId(0) },
+                vec![ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(granted_static),
+                }],
+                None,
+            );
+
+            assert!(
+                effective_spell_keyword_kinds(&state, PlayerId(0), p0_sorcery)
+                    .contains(&KeywordKind::Flash),
+                "sorcery cast by the bound player must gain Flash"
+            );
+            assert!(
+                !effective_spell_keyword_kinds(&state, PlayerId(0), p0_instant)
+                    .contains(&KeywordKind::Flash),
+                "non-sorcery must not gain Flash (filter scopes to sorceries)"
+            );
+            assert!(
+                !effective_spell_keyword_kinds(&state, PlayerId(1), p1_sorcery)
+                    .contains(&KeywordKind::Flash),
+                "sorcery cast by another player must not gain Flash (player scope)"
+            );
+        }
     }
 }

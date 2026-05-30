@@ -892,5 +892,23 @@ mod tests {
             can_activate_ability_now(&state, PlayerId(0), pw, 1),
             "-3 must be legal at 4 loyalty with an empty board (up-to-one target)"
         );
+
+        // Activating the +1 must put exactly the +1 grant (a GenericEffect) on
+        // the stack — never the -3 bounce. The original bug auto-dispatched the
+        // sole-legal -3 because the +1 was mis-parsed as a targeted ability.
+        let mut events = Vec::new();
+        handle_activate_loyalty(&mut state, PlayerId(0), pw, 0, &mut events)
+            .expect("+1 activation succeeds");
+        assert_eq!(state.stack.len(), 1, "exactly one ability on the stack");
+        let on_stack = state.stack.iter().next().unwrap();
+        assert_eq!(on_stack.source_id, pw, "the stacked ability is Teferi's +1");
+        assert!(
+            matches!(
+                on_stack.ability().map(|a| &a.effect),
+                Some(Effect::GenericEffect { .. })
+            ),
+            "the +1 (flash-timing GenericEffect) was activated, not the -3 bounce: {:?}",
+            on_stack.ability().map(|a| &a.effect)
+        );
     }
 }
