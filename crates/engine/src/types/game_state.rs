@@ -3883,8 +3883,11 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_decision_controller: Option<PlayerId>,
 
-    // Central object store
-    pub objects: im::HashMap<ObjectId, GameObject>,
+    // Central object store. Uses FxBuildHasher (fast, deterministic) instead of
+    // the default SipHash RandomState: ObjectId is a thin integer key and this
+    // map is looked up millions of times per large-board resolution — profiling
+    // showed SipHash hashing + HAMT lookup was ~35% of resolution CPU.
+    pub objects: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
     pub next_object_id: u64,
 
     // Shared zones
@@ -5041,7 +5044,7 @@ impl GameState {
             players,
             priority_player: PlayerId(0),
             turn_decision_controller: None,
-            objects: im::HashMap::new(),
+            objects: im::HashMap::default(),
             next_object_id: 1,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
