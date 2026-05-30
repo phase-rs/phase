@@ -1195,6 +1195,21 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             };
             return format!("{who} who controls {comparator:?} {count:?} matching permanents");
         }
+        // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class] whose [scalar
+        // attr] [comparator] [value]"
+        PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            comparator,
+            value,
+        } => {
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            return format!("{who} whose {attr:?} {comparator:?} {value:?}");
+        }
     }
     .into()
 }
@@ -5264,6 +5279,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::VotedFor { .. } => ("VotedFor", Handled),
         PlayerFilter::ParentObjectTargetController => ("ParentObjectTargetController", Handled),
         PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
+        PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
     }
 }
 

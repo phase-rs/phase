@@ -938,6 +938,27 @@ fn collect_matching_players(
                                 source_id,
                             )
                     }
+                    // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                    // whose [scalar attr] [comparator] [value]" — candidate
+                    // satisfies both `relation` and the per-candidate scalar
+                    // comparison. `attr` is read directly off `p`; `value` is
+                    // the controller-relative threshold, resolved once.
+                    PlayerFilter::PlayerAttribute {
+                        ref relation,
+                        ref attr,
+                        ref comparator,
+                        ref value,
+                    } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            value,
+                            source_controller,
+                            source_id,
+                        );
+                        crate::game::players::matches_relation(p.id, source_controller, *relation)
+                            && crate::game::effects::candidate_player_scalar(p, attr)
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                    }
                 }
         })
         .map(|p| p.id)
@@ -1078,6 +1099,27 @@ pub fn resolve_each_player(
                                 threshold,
                                 ability.source_id,
                             )
+                    }
+                    // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                    // whose [scalar attr] [comparator] [value]" — candidate
+                    // satisfies both `relation` and the per-candidate scalar
+                    // comparison. `attr` is read directly off `p`; `value` is
+                    // the controller-relative threshold, resolved once.
+                    PlayerFilter::PlayerAttribute {
+                        relation,
+                        attr,
+                        comparator,
+                        value,
+                    } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state,
+                            value,
+                            ability.controller,
+                            ability.source_id,
+                        );
+                        crate::game::players::matches_relation(p.id, ability.controller, *relation)
+                            && crate::game::effects::candidate_player_scalar(p, attr)
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
                 }
         })

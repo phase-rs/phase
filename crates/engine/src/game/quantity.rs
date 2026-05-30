@@ -2933,6 +2933,24 @@ pub(crate) fn resolve_player_count(
                                     source_id,
                                 )
                         }
+                        // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                        // whose [scalar attr] [comparator] [value]" — count
+                        // candidates satisfying both the `relation` predicate and
+                        // the per-candidate scalar comparison. Mirrors the arm in
+                        // `effects::mod::matches_player_scope` (the two copies must
+                        // stay in sync). `attr` is read directly off `p`; `value`
+                        // is the controller-relative threshold, resolved once.
+                        PlayerFilter::PlayerAttribute {
+                            relation,
+                            attr,
+                            comparator,
+                            value,
+                        } => {
+                            let threshold = resolve_quantity(state, value, controller, source_id);
+                            crate::game::players::matches_relation(p.id, controller, *relation)
+                                && crate::game::effects::candidate_player_scalar(p, attr)
+                                    .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                        }
                     }
             })
             .count(),
@@ -5665,6 +5683,100 @@ mod tests {
             resolve_quantity(&state, &at_least_you, PlayerId(0), ObjectId(1)),
             2,
             "GE includes the tied opponent — confirms the GT result is comparator-sensitive"
+        );
+    }
+
+    /// CR 122.1f: discriminating coverage for Glissa's Retriever — "the number
+    /// of opponents who have three or more poison counters". The per-candidate
+    /// poison total must be read off each candidate player, NOT the controller.
+    /// 3-player board: opp1 poison=3 (≥3 → counts), opp2 poison=1 (<3 →
+    /// excluded), CONTROLLER poison=5 (≥3 but is not an opponent → must NOT
+    /// leak in). Expect 1. A controller-scoped read of the threshold would have
+    /// nothing to do with this — the discriminator is that the controller's own
+    /// 5 poison never inflates the result, proving `candidate_player_scalar`
+    /// reads each candidate directly.
+    #[test]
+    fn resolve_player_count_opponents_who_have_n_poison_counters_is_per_candidate() {
+        use crate::types::ability::{Comparator, PlayerRelation};
+        use crate::types::format::FormatConfig;
+        use crate::types::player::PlayerCounterKind;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // Controller P0 has the MOST poison; if the read were controller-scoped
+        // instead of per-candidate, every opponent would erroneously satisfy the
+        // ≥3 test (the threshold N=3 is fixed; the leak would be on the attribute
+        // side). P1 qualifies, P2 does not, P0 is excluded as the controller.
+        state.players[0].poison_counters = 5;
+        state.players[1].poison_counters = 3;
+        state.players[2].poison_counters = 1;
+
+        let glissa = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::PlayerCounter {
+                        kind: PlayerCounterKind::Poison,
+                        scope: CountScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 3 }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &glissa, PlayerId(0), ObjectId(1)),
+            1,
+            "only opp1 (poison 3 ≥ 3) counts; opp2 (1) is excluded and the \
+             controller's own 5 poison must NOT leak in — proves per-candidate read"
+        );
+
+        // Discriminator on the threshold side: dropping opp1 below the threshold
+        // must drop the count to 0, confirming the comparison bites per candidate.
+        state.players[1].poison_counters = 2;
+        assert_eq!(
+            resolve_quantity(&state, &glissa, PlayerId(0), ObjectId(1)),
+            0,
+            "with no opponent at ≥3, the count is 0 even though the controller has 5"
+        );
+    }
+
+    /// CR 402.1: discriminating coverage for Wolfcaller's Howl — "the number of
+    /// your opponents with four or more cards in hand". Hand size is read off
+    /// each candidate. 3-player board: opp1 hand=4 (counts), opp2 hand=2
+    /// (excluded), CONTROLLER hand=9 (not an opponent → must not leak). Expect 1.
+    #[test]
+    fn resolve_player_count_opponents_with_n_cards_in_hand_is_per_candidate() {
+        use crate::types::ability::{Comparator, PlayerRelation, PlayerScope};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        let fill_hand = |state: &mut GameState, pid: usize, n: u64| {
+            for i in 0..n {
+                state.players[pid]
+                    .hand
+                    .push_back(ObjectId(1000 + pid as u64 * 100 + i));
+            }
+        };
+        fill_hand(&mut state, 0, 9); // controller — must not leak
+        fill_hand(&mut state, 1, 4); // opp1 — counts
+        fill_hand(&mut state, 2, 2); // opp2 — excluded
+
+        let wolfcaller = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 4 }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &wolfcaller, PlayerId(0), ObjectId(1)),
+            1,
+            "only opp1 (hand 4 ≥ 4) counts; the controller's 9-card hand must not leak in"
         );
     }
 

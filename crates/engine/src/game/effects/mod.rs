@@ -16,7 +16,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
-use crate::types::player::PlayerId;
+use crate::types::player::{Player, PlayerId};
 
 pub mod adapt;
 pub mod add_restriction;
@@ -303,6 +303,24 @@ pub(crate) fn matches_player_scope(
                                 source_id,
                             )
                     }
+                    // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                    // whose [scalar attr] [comparator] [value]" — the candidate
+                    // satisfies both `relation` and the per-candidate scalar
+                    // comparison. `value` is the controller-relative threshold,
+                    // resolved once; `attr` is read directly off the candidate.
+                    PlayerFilter::PlayerAttribute {
+                        relation,
+                        attr,
+                        comparator,
+                        value,
+                    } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state, value, controller, source_id,
+                        );
+                        crate::game::players::matches_relation(p.id, controller, *relation)
+                            && candidate_player_scalar(p, attr)
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                    }
                 }
         })
 }
@@ -344,6 +362,30 @@ pub(crate) fn player_control_count_compares(
         crate::game::arithmetic::usize_to_i32_saturating(count),
         threshold,
     )
+}
+
+/// CR 402.1 / 119.1 / 122.1f / 404.1: Read scalar `attr` for one candidate
+/// player DIRECTLY off the candidate `Player` (NOT via the controller-scoped
+/// `resolve_quantity`), so `PlayerFilter::PlayerAttribute` reads each player's
+/// own hand size / life / graveyard / player-counter rather than the
+/// controller's. Returns `None` for any non-scalar `QuantityRef`; the parser
+/// invariant guarantees only the scalar subset reaches here, and `None` fails
+/// the candidate predicate closed.
+pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<i32> {
+    use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
+    match attr {
+        // CR 402.1: cards in the candidate's hand.
+        QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
+        // CR 119.1: the candidate's current life total.
+        QuantityRef::LifeTotal { .. } => Some(p.life),
+        // CR 404.1: cards in the candidate's graveyard.
+        QuantityRef::GraveyardSize { .. } => Some(usize_to_i32_saturating(p.graveyard.len())),
+        // CR 122.1f (poison) + CR 122.1: the candidate's named player-counter total.
+        QuantityRef::PlayerCounter { kind, .. } => {
+            Some(u32_to_i32_saturating(p.player_counter(kind)))
+        }
+        _ => None,
+    }
 }
 
 /// Record the outer effect's `EffectKind` on the current `pending_continuation`
@@ -12630,6 +12672,100 @@ mod tests {
         assert_eq!(
             state.waiting_for, initial_waiting,
             "empty counter set must not prompt"
+        );
+    }
+
+    /// CR 402.1 / 119.1 / 122.1f / 404.1: `candidate_player_scalar` reads each
+    /// of the four scalar `QuantityRef` attributes directly off the candidate
+    /// `Player`, and returns `None` for any non-scalar `QuantityRef` (failing
+    /// the predicate closed). Exercises the building block across its full input
+    /// range, not a single card.
+    #[test]
+    fn candidate_player_scalar_reads_each_attribute() {
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // Give the player distinguishable scalar values so the wrong attribute
+        // can never accidentally pass.
+        {
+            let p = &mut state.players[1];
+            p.life = 17;
+            p.poison_counters = 4;
+            p.hand.push_back(ObjectId(1));
+            p.hand.push_back(ObjectId(2));
+            p.hand.push_back(ObjectId(3));
+            p.graveyard.push_back(ObjectId(4));
+            p.graveyard.push_back(ObjectId(5));
+            p.player_counter(&PlayerCounterKind::Experience); // no-op read
+            p.add_player_counters(&PlayerCounterKind::Experience, 6);
+        }
+        let p = &state.players[1];
+
+        // CR 402.1: hand size reads p.hand.len(), ignoring the inert PlayerScope.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::HandSize {
+                    player: PlayerScope::Controller
+                }
+            ),
+            Some(3)
+        );
+        // CR 119.1: life total reads p.life.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer
+                }
+            ),
+            Some(17)
+        );
+        // CR 404.1: graveyard size reads p.graveyard.len().
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::GraveyardSize {
+                    player: PlayerScope::Controller
+                }
+            ),
+            Some(2)
+        );
+        // CR 122.1f: poison reads the dedicated poison_counters field.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Poison,
+                    scope: crate::types::ability::CountScope::ScopedPlayer,
+                }
+            ),
+            Some(4)
+        );
+        // CR 122.1: a generic player counter reads the player_counters map.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Experience,
+                    scope: crate::types::ability::CountScope::ScopedPlayer,
+                }
+            ),
+            Some(6)
+        );
+        // Non-scalar QuantityRef → None (parser invariant; fails the predicate
+        // closed rather than reading a controller-scoped quantity off a
+        // candidate).
+        assert_eq!(
+            candidate_player_scalar(p, &QuantityRef::Variable { name: "X".into() }),
+            None
+        );
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::ObjectCount {
+                    filter: TargetFilter::Any
+                }
+            ),
+            None
         );
     }
 }

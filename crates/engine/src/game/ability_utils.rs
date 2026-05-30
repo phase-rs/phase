@@ -1755,6 +1755,12 @@ fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
         QuantityRef::PlayerCount {
             filter: crate::types::ability::PlayerFilter::ControlsCount { filter, .. },
         } => filter_references_target_creature_quantity(filter),
+        // CR 402.1 / 119.1 / 122.1f / 404.1: a player-scalar predicate is read
+        // off each candidate player, never off a target creature, so it cannot
+        // reference the resolving ability's target-creature slot.
+        QuantityRef::PlayerCount {
+            filter: crate::types::ability::PlayerFilter::PlayerAttribute { .. },
+        } => false,
         _ => false,
     }
 }

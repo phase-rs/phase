@@ -3378,6 +3378,30 @@ pub enum PlayerFilter {
         comparator: Comparator,
         count: Box<QuantityExpr>,
     },
+    /// CR 402.1 (hand) / CR 119.1 (life) / CR 122.1f (poison) / CR 404.1
+    /// (graveyard): Each player satisfying `relation` whose scalar player
+    /// attribute `attr`, read PER CANDIDATE PLAYER, satisfies `comparator`
+    /// against `value`. `attr` is the per-player-scalar `QuantityRef` subset
+    /// (`HandSize` / `LifeTotal` / `GraveyardSize` / `PlayerCounter`) — read
+    /// directly off the candidate `Player` at runtime, never via the
+    /// controller-scoped quantity resolver, so its embedded `PlayerScope` /
+    /// `CountScope` carries no game-state meaning here.
+    ///
+    /// Covers "opponents who have N or more poison counters" (Glissa's
+    /// Retriever) and "your opponents with N or more cards in hand"
+    /// (Wolfcaller's Howl). `value` is the controller-relative threshold,
+    /// resolved once per evaluation (candidate-independent).
+    ///
+    /// `attr` and `value` are boxed to break the `QuantityExpr →
+    /// QuantityRef::PlayerCount → PlayerFilter::PlayerAttribute →
+    /// {QuantityRef, QuantityExpr}` reference cycle that would otherwise give
+    /// the enum infinite size.
+    PlayerAttribute {
+        relation: PlayerRelation,
+        attr: Box<QuantityRef>,
+        comparator: Comparator,
+        value: Box<QuantityExpr>,
+    },
 }
 
 /// An expression that produces an integer for quantity comparisons.

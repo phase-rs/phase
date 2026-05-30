@@ -26,9 +26,9 @@ use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_effect::parse_controls_permanent_object;
 use crate::parser::oracle_target::{parse_type_phrase, parse_type_phrase_with_ctx};
 use crate::types::ability::{
-    AggregateFunction, ControllerRef, CountScope, DevotionColors, FilterProp, ObjectProperty,
-    ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef,
-    TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    AggregateFunction, Comparator, ControllerRef, CountScope, DevotionColors, FilterProp,
+    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
+    QuantityRef, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -360,6 +360,17 @@ pub(crate) fn parse_quantity_ref_with_context(
                         },
                     });
                 }
+            }
+        }
+        // CR 402.1 / 119.1 / 122.1f / 404.1: "opponents who have N or more
+        // <kind> counters" (Glissa's Retriever) / "your opponents with N or
+        // more cards in hand" (Wolfcaller's Howl) → PlayerCount over the
+        // population whose per-candidate scalar attribute compares to N. Tried
+        // before the generic ObjectCount fall-through so the player population —
+        // not battlefield permanents — is counted.
+        if let Ok((remainder, filter)) = parse_player_attribute_predicate(rest) {
+            if remainder.trim().is_empty() {
+                return Some(QuantityRef::PlayerCount { filter });
             }
         }
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
@@ -826,6 +837,95 @@ fn parse_opponent_dealt_combat_damage_clause(
     ))
     .parse(input)
     .map(|(rest, _)| (rest, ()))
+}
+
+/// CR 402.1 / 119.1 / 122.1f / 404.1: Parse a player population whose scalar
+/// attribute crosses a threshold, into `PlayerFilter::PlayerAttribute`. Reached
+/// after `"the number of "` has been stripped.
+///
+/// Grammar (composed by prefix dispatch, not enumerated permutations):
+///   `<population> <attr-clause>`
+/// where `<population>` fixes the `PlayerRelation` and `<attr-clause>` is one of
+/// the per-player-scalar shapes — currently:
+///   - `who have <N> or more <kind> counters` → `PlayerCounter { kind }`
+///     (Glissa's Retriever; `parse_player_counter_kind` covers poison / rad /
+///     experience / ticket, so the whole counter class is handled, not one card).
+///   - `with <N> or more cards in hand` → `HandSize` (Wolfcaller's Howl).
+///
+/// All shapes are `GE`-against-`Fixed(N)` ("N or more"). The embedded
+/// `PlayerScope` / `CountScope` is inert at runtime (`candidate_player_scalar`
+/// reads the candidate directly), so a neutral `ScopedPlayer` is emitted to
+/// document "their" / "each player's own" semantics.
+fn parse_player_attribute_predicate(input: &str) -> OracleResult<'_, PlayerFilter> {
+    let (input, relation) = parse_player_population(input)?;
+    let (input, (attr, count)) = alt((
+        parse_player_counter_attr_clause,
+        parse_hand_size_attr_clause,
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        PlayerFilter::PlayerAttribute {
+            relation,
+            attr: Box::new(attr),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Fixed { value: count }),
+        },
+    ))
+}
+
+/// CR 102.2 + CR 109.5: Population word fixing the `PlayerRelation`. The
+/// optional `"your "` possessive and singular forms are accepted for the
+/// grammatically-degenerate phrasings. "opponents"/"opponent" → Opponent;
+/// "players"/"player" → All.
+fn parse_player_population(input: &str) -> OracleResult<'_, PlayerRelation> {
+    let (input, _) = opt(tag("your ")).parse(input)?;
+    alt((
+        value(PlayerRelation::Opponent, tag("opponents ")),
+        value(PlayerRelation::Opponent, tag("opponent ")),
+        value(PlayerRelation::All, tag("players ")),
+        value(PlayerRelation::All, tag("player ")),
+    ))
+    .parse(input)
+}
+
+/// CR 122.1f + CR 122.1: "who have N or more <kind> counters" → the candidate's
+/// named player-counter total. Delegates kind recognition to the shared
+/// `parse_player_counter_kind` grammar so poison / rad / experience / ticket are
+/// all covered.
+fn parse_player_counter_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i32)> {
+    let (input, _) = tag("who have ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more ").parse(input)?;
+    let (input, kind) = nom_quantity::parse_player_counter_kind(input)?;
+    let (input, _) = tag(" counter").parse(input)?;
+    let (input, _) = opt(tag("s")).parse(input)?;
+    Ok((
+        input,
+        (
+            QuantityRef::PlayerCounter {
+                kind,
+                scope: CountScope::ScopedPlayer,
+            },
+            n as i32,
+        ),
+    ))
+}
+
+/// CR 402.1: "with N or more cards in hand" → the candidate's hand size.
+fn parse_hand_size_attr_clause(input: &str) -> OracleResult<'_, (QuantityRef, i32)> {
+    let (input, _) = tag("with ").parse(input)?;
+    let (input, n) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more cards in hand").parse(input)?;
+    Ok((
+        input,
+        (
+            QuantityRef::HandSize {
+                player: PlayerScope::ScopedPlayer,
+            },
+            n as i32,
+        ),
+    ))
 }
 
 fn anaphoric_power_expr() -> QuantityExpr {
@@ -2500,6 +2600,131 @@ mod tests {
             other => {
                 panic!("Expected PlayerCount{{ControlsCount(opponents more lands)}}, got {other:?}")
             }
+        }
+    }
+
+    // CR 122.1f: Glissa's Retriever — "the number of opponents who have three or
+    // more poison counters" → PlayerCount{PlayerAttribute{Opponent,
+    // PlayerCounter{Poison}, GE, Fixed(3)}}. The "N or more <kind> counters"
+    // clause routes the poison kind through the shared player-counter-kind
+    // grammar, so rad / experience / ticket parse for free.
+    #[test]
+    fn parse_quantity_ref_opponents_who_have_n_poison_counters() {
+        use crate::types::player::PlayerCounterKind;
+        let qty =
+            parse_quantity_ref("the number of opponents who have three or more poison counters")
+                .unwrap();
+        match qty {
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::Opponent,
+                        attr,
+                        comparator: Comparator::GE,
+                        value,
+                    },
+            } => {
+                assert_eq!(
+                    *attr,
+                    QuantityRef::PlayerCounter {
+                        kind: PlayerCounterKind::Poison,
+                        scope: CountScope::ScopedPlayer,
+                    }
+                );
+                assert_eq!(*value, QuantityExpr::Fixed { value: 3 });
+            }
+            other => panic!("Expected PlayerCount{{PlayerAttribute(poison)}}, got {other:?}"),
+        }
+    }
+
+    // CR 122.1: the player-counter attribute clause covers the whole counter
+    // class, not just Glissa's poison — rad / experience parse identically.
+    #[test]
+    fn parse_quantity_ref_opponents_who_have_n_counters_covers_class() {
+        use crate::types::player::PlayerCounterKind;
+        for (phrase, kind) in [
+            ("rad", PlayerCounterKind::Rad),
+            ("experience", PlayerCounterKind::Experience),
+        ] {
+            let text = format!("the number of opponents who have two or more {phrase} counters");
+            match parse_quantity_ref(&text) {
+                Some(QuantityRef::PlayerCount {
+                    filter:
+                        PlayerFilter::PlayerAttribute {
+                            attr,
+                            comparator: Comparator::GE,
+                            value,
+                            ..
+                        },
+                }) => {
+                    assert_eq!(
+                        *attr,
+                        QuantityRef::PlayerCounter {
+                            kind,
+                            scope: CountScope::ScopedPlayer,
+                        }
+                    );
+                    assert_eq!(*value, QuantityExpr::Fixed { value: 2 });
+                }
+                other => panic!("Expected PlayerAttribute({phrase}), got {other:?}"),
+            }
+        }
+    }
+
+    // CR 402.1: Wolfcaller's Howl — "the number of your opponents with four or
+    // more cards in hand" → PlayerCount{PlayerAttribute{Opponent, HandSize, GE,
+    // Fixed(4)}}. The optional leading "your " possessive is stripped before the
+    // population word.
+    #[test]
+    fn parse_quantity_ref_your_opponents_with_n_cards_in_hand() {
+        let qty =
+            parse_quantity_ref("the number of your opponents with four or more cards in hand")
+                .unwrap();
+        match qty {
+            QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::Opponent,
+                        attr,
+                        comparator: Comparator::GE,
+                        value,
+                    },
+            } => {
+                assert_eq!(
+                    *attr,
+                    QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }
+                );
+                assert_eq!(*value, QuantityExpr::Fixed { value: 4 });
+            }
+            other => panic!("Expected PlayerCount{{PlayerAttribute(hand)}}, got {other:?}"),
+        }
+    }
+
+    // The "your " possessive is optional — bare "opponents with N or more cards
+    // in hand" parses to the same shape.
+    #[test]
+    fn parse_quantity_ref_opponents_with_n_cards_in_hand_no_possessive() {
+        match parse_quantity_ref("the number of opponents with two or more cards in hand") {
+            Some(QuantityRef::PlayerCount {
+                filter:
+                    PlayerFilter::PlayerAttribute {
+                        relation: PlayerRelation::Opponent,
+                        attr,
+                        comparator: Comparator::GE,
+                        value,
+                    },
+            }) => {
+                assert_eq!(
+                    *attr,
+                    QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }
+                );
+                assert_eq!(*value, QuantityExpr::Fixed { value: 2 });
+            }
+            other => panic!("Expected PlayerAttribute(hand, no possessive), got {other:?}"),
         }
     }
 

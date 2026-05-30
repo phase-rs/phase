@@ -202,6 +202,31 @@ fn players_for_filter(
                 .map(|player| player.id)
                 .collect()
         }
+        // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class] whose [scalar
+        // attr] [comparator] [value]" — candidates satisfying both `relation`
+        // and the per-candidate scalar comparison. `attr` is read directly off
+        // each candidate; `value` is the controller-relative threshold,
+        // resolved once.
+        PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            comparator,
+            value,
+        } => {
+            let threshold =
+                crate::game::quantity::resolve_quantity(state, value, controller, source_id);
+            state
+                .players
+                .iter()
+                .filter(|player| !player.is_eliminated)
+                .filter(|player| {
+                    crate::game::players::matches_relation(player.id, controller, *relation)
+                        && crate::game::effects::candidate_player_scalar(player, attr)
+                            .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
+                })
+                .map(|player| player.id)
+                .collect()
+        }
     }
 }
 

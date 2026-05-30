@@ -3650,6 +3650,9 @@ pub(crate) fn check_trigger_condition(
             // set-valued — it has no single-player "whose turn" semantic.
             // Fail-closed alongside the other set-valued variants.
             | PlayerFilter::ControlsCount { .. }
+            // CR 402.1 / 119.1 / 122.1f / 404.1: a player-scalar population
+            // predicate is likewise set-valued — no "whose turn" semantic.
+            | PlayerFilter::PlayerAttribute { .. }
             | PlayerFilter::OpponentOtherThanTriggering => false,
         },
         // CR 603.4: "if you control N or more [type]" — generalized control count.
