@@ -122,23 +122,19 @@ pub fn choose_attackers_with_targets_with_profile(
             continue;
         }
 
-        let best_blocker_value = opponent_blockers
-            .iter()
-            .filter(|&&bid| can_block_pair(state, bid, id))
-            .map(|&bid| (bid, evaluate_creature(state, bid)))
-            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        match best_blocker_value {
+        // CR 509.1a: Evaluate the attack against the defender's *best* block, not
+        // its cheapest creature. Assuming the defender chump-trades with its
+        // weakest body let the AI swing doomed creatures into a "favorable trade"
+        // the defender would never offer — it instead kills the attacker for free
+        // with a first-striker or a larger body (gamestate1: a 1/1 animated land
+        // sent into a 2/1 first strike).
+        match defender_best_block(state, id, my_value, &opponent_blockers) {
             None => attacking_ids.push(id),
-            Some((blocker_id, blocker_value)) => {
-                // CR 702.7b + CR 702.4b + CR 702.2c: Use keyword-aware combat
-                // evaluation (first strike, double strike, deathtouch) instead of
-                // raw P/T comparison.
-                let blocker_obj = state.objects.get(&blocker_id).unwrap();
-                let (blocker_kills_attacker, blocker_survives) =
-                    evaluate_block_outcome(blocker_obj, obj);
-                let kills_blocker = !blocker_survives;
-                let attacker_survives = !blocker_kills_attacker;
+            Some(DefenderBlock {
+                blocker_value,
+                kills_blocker,
+                attacker_survives,
+            }) => {
                 let free_damage = kills_blocker && attacker_survives;
                 let favorable_trade = kills_blocker && my_value <= blocker_value;
                 if should_attack_given_objective(
@@ -1361,6 +1357,68 @@ fn can_block_with_engine_map(
     }
 }
 
+/// The block a rational defending player would commit against one attacker,
+/// described from the ATTACKER's point of view.
+struct DefenderBlock {
+    /// Value of the blocking creature the defender chooses.
+    blocker_value: f64,
+    /// Whether the attacker kills that blocker in the exchange.
+    kills_blocker: bool,
+    /// Whether the attacker survives the exchange.
+    attacker_survives: bool,
+}
+
+/// CR 509.1a: Choose the block the defending player would actually make against
+/// a single attacker. A rational defender maximizes its own value — it kills the
+/// attacker when that is value-positive, preferring a blocker that survives the
+/// exchange (a "free" kill via first strike or a larger body, CR 702.7b) and
+/// otherwise the cheapest creature whose loss the kill justifies. Returns `None`
+/// when no creature can legally block (the attack connects unimpeded).
+///
+/// This deliberately models the defender's *best* block rather than its cheapest
+/// creature. The cheapest-blocker model let the AI swing doomed creatures on the
+/// false premise of a favorable trade the defender would sidestep — e.g. a 1/1
+/// attacker into a 2/1 first-striker that eats it for free while a 2/1 token sat
+/// nearby looking like an even trade.
+fn defender_best_block(
+    state: &GameState,
+    attacker_id: ObjectId,
+    attacker_value: f64,
+    blockers: &[ObjectId],
+) -> Option<DefenderBlock> {
+    let attacker = state.objects.get(&attacker_id)?;
+    blockers
+        .iter()
+        .filter(|&&bid| can_block_pair(state, bid, attacker_id))
+        .filter_map(|&bid| {
+            let blocker = state.objects.get(&bid)?;
+            let blocker_value = evaluate_creature(state, bid);
+            // CR 702.7b + CR 702.4b + CR 702.2c: keyword-aware outcome (first
+            // strike, double strike, deathtouch), not a raw P/T comparison.
+            let (blocker_kills_attacker, blocker_survives) =
+                evaluate_block_outcome(blocker, attacker);
+            // Defender utility: the attacker value it removes (only if the block
+            // is lethal) minus the value of its own blocker (only if that blocker
+            // dies). A free kill scores `attacker_value`; a trade nets the
+            // difference; a chump that dies for nothing scores negative.
+            let defender_gain = (if blocker_kills_attacker {
+                attacker_value
+            } else {
+                0.0
+            }) - (if blocker_survives { 0.0 } else { blocker_value });
+            Some((
+                defender_gain,
+                DefenderBlock {
+                    blocker_value,
+                    kills_blocker: !blocker_survives,
+                    attacker_survives: !blocker_kills_attacker,
+                },
+            ))
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(_, outcome)| outcome)
+}
+
 /// Evaluate whether a single blocker kills the attacker and/or survives combat,
 /// accounting for first strike (CR 702.7), double strike (CR 702.4), and
 /// deathtouch (CR 702.2).
@@ -1624,6 +1682,49 @@ mod tests {
         assert!(
             !attackers.contains(&small),
             "Should skip 1/1 into 5/5 when life is equal"
+        );
+    }
+
+    /// Regression (gamestate1): the AI must evaluate an attack against the
+    /// defender's *best* block, not its cheapest creature. A 2/2 attacker faces a
+    /// 1/1 chump (which it would profitably eat) and a 3/3 (which kills it for
+    /// free). The old min-value-blocker model picked the 1/1, saw "free damage,"
+    /// and attacked — but the defender blocks with the 3/3 and the 2/2 dies for
+    /// nothing. The live bug was the first-strike variant (1/1 land into a 2/1
+    /// first-striker); a larger body is the same "kills and survives" class and
+    /// makes a value-independent, deterministic test.
+    #[test]
+    fn does_not_attack_when_a_better_blocker_kills_for_free() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        // Cheapest blocker: a 1/1 the attacker would profitably trade up against.
+        add_creature(&mut state, PlayerId(1), "Squirrel", 1, 1, vec![]);
+        // Best blocker: a 3/3 that kills the 2/2 and survives — a free kill.
+        add_creature(&mut state, PlayerId(1), "Centaur", 3, 3, vec![]);
+
+        let attackers = choose_attackers(&state, PlayerId(0));
+        assert!(
+            !attackers.contains(&attacker),
+            "AI must not attack a 2/2 when the defender holds a 3/3 that eats it \
+             for free, even though a 1/1 chump is also available"
+        );
+    }
+
+    /// Companion to the regression above: when the defender's *best* block is
+    /// still a losing chump (a 1/1 in front of a 4/4), the attack is correctly
+    /// declared — the rational-defender model must not become so pessimistic that
+    /// it refuses profitable swings.
+    #[test]
+    fn attacks_when_best_block_is_only_a_chump() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Rhino", 4, 4, vec![]);
+        add_creature(&mut state, PlayerId(1), "Squirrel", 1, 1, vec![]);
+        add_creature(&mut state, PlayerId(1), "Goblin", 1, 1, vec![]);
+
+        let attackers = choose_attackers(&state, PlayerId(0));
+        assert!(
+            attackers.contains(&attacker),
+            "AI should attack a 4/4 when every available block is a chump it survives"
         );
     }
 

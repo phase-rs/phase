@@ -1754,6 +1754,36 @@ pub fn parse_type_phrase_with_ctx<'a>(
         );
     }
 
+    // CR 700.9 (modified) + CR 109.4 (control): "<typed filter> other than ~"
+    // excludes the ability source from the population. FilterProp::Another
+    // (filter.rs:2206) matches every object except the source, so the count
+    // omits the source permanent (Thundering Raiju: "modified creatures you
+    // control other than this creature" — normalized to "~"). The trailing
+    // self-reference is recognized via `nom_target::parse_self_reference`
+    // ("~"/"it"/"this creature"/…) plus an explicit "itself" alternative, which
+    // `parse_self_reference` does not cover.
+    {
+        let remaining_other_than = lower[pos..].trim_start();
+        let other_than_offset = lower[pos..].len() - remaining_other_than.len();
+        if let Ok((rest, _)) = (
+            tag::<_, _, OracleError<'_>>("other than "),
+            alt((
+                nom_target::parse_self_reference,
+                value(
+                    TargetFilter::SelfRef,
+                    tag::<_, _, OracleError<'_>>("itself"),
+                ),
+            )),
+        )
+            .parse(remaining_other_than)
+        {
+            if !properties.contains(&FilterProp::Another) {
+                properties.push(FilterProp::Another);
+            }
+            pos += other_than_offset + (remaining_other_than.len() - rest.len());
+        }
+    }
+
     // CR 205.3 + CR 205.4b: "that isn't a <Subtype>" relative-clause negation.
     // Checked before `parse_that_clause_suffix` so the subtype exclusion short-circuits
     // the generic that-clause branch (which does not recognize subtype negation).
@@ -1766,6 +1796,30 @@ pub fn parse_type_phrase_with_ctx<'a>(
     if let Some((that_props, consumed)) = parse_that_clause_suffix(&lower[pos..]) {
         properties.extend(that_props);
         pos += consumed;
+    }
+
+    // CR 109.4: "that <player> control(s)" relative clause supplying the object
+    // controller — e.g. "permanents you own that your opponents control"
+    // (Zedruu). Placed after `parse_that_clause_suffix` so the quality/combat/
+    // attachment "that …" clauses get first crack, and gated on
+    // `controller.is_none()` so it only fills a controller not already set
+    // (e.g. by an earlier "you control"/"an opponent controls" suffix). The
+    // controller phrase delegates to `parse_controller_suffix`, which routes the
+    // bare "your opponents control"/"an opponent controls" forms through
+    // `nom_filter::parse_zone_controller`. Composes with a preceding "you own"
+    // → `FilterProp::Owned{You}`, yielding the owned-but-opponent-controlled
+    // population.
+    if controller.is_none() {
+        let remaining_that_ctrl = lower[pos..].trim_start();
+        let that_ctrl_offset = lower[pos..].len() - remaining_that_ctrl.len();
+        if let Ok((after_that, _)) =
+            tag::<_, _, OracleError<'_>>("that ").parse(remaining_that_ctrl)
+        {
+            if let Some((ctrl, consumed)) = parse_controller_suffix(after_that, ctx) {
+                controller = Some(ctrl);
+                pos += that_ctrl_offset + "that ".len() + consumed;
+            }
+        }
     }
 
     // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
@@ -6312,6 +6366,47 @@ mod tests {
         );
     }
 
+    // A2 (Zedruu): "you own" sets `FilterProp::Owned{You}`; the trailing
+    // "that your opponents control" relative clause supplies the object
+    // controller via the new `controller.is_none()`-gated "that <ctrl>" arm,
+    // yielding the owned-but-opponent-controlled population. The full phrase is
+    // consumed (empty remainder).
+    #[test]
+    fn permanents_you_own_that_your_opponents_control() {
+        let (f, rest) = parse_type_phrase("permanents you own that your opponents control");
+        assert_eq!(rest, "");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::Opponent)
+                    .properties(vec![FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    }])
+            )
+        );
+    }
+
+    // A2: the same phrase routed through `parse_quantity_ref` yields an
+    // ObjectCount over the owned-but-opponent-controlled population.
+    #[test]
+    fn quantity_ref_permanents_you_own_that_your_opponents_control() {
+        use crate::parser::oracle_quantity::parse_quantity_ref;
+        let qty =
+            parse_quantity_ref("the number of permanents you own that your opponents control");
+        match qty {
+            Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(typed),
+            }) => {
+                assert_eq!(typed.controller, Some(ControllerRef::Opponent));
+                assert!(typed.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::You,
+                }));
+            }
+            other => panic!("Expected ObjectCount{{owned-by-you,opp-controlled}}, got {other:?}"),
+        }
+    }
+
     #[test]
     fn other_creatures_you_control() {
         let (f, _) = parse_type_phrase("other creatures you control");
@@ -8897,6 +8992,68 @@ mod tests {
         } else {
             panic!("Expected Typed filter, got {filter:?}");
         }
+    }
+
+    /// CR 700.9 + CR 109.4: "modified creatures you control other than ~"
+    /// (Thundering Raiju). The "modified" adjective adds `FilterProp::Modified`
+    /// and the trailing "other than ~" adds `FilterProp::Another` so the count
+    /// omits the source permanent.
+    #[test]
+    fn parse_type_phrase_modified_creatures_other_than_self() {
+        let (filter, rest) = parse_type_phrase("modified creatures you control other than ~");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.contains(&FilterProp::Modified),
+            "missing Modified in {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "missing Another in {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 109.4: "other than this creature" (the un-normalized form) also adds
+    /// `FilterProp::Another` via the "other than <self-ref>" suffix.
+    #[test]
+    fn parse_type_phrase_other_than_this_creature() {
+        let (filter, rest) = parse_type_phrase("creatures you control other than this creature");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "missing Another in {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 700.9 + CR 109.4: end-to-end quantity ref for Thundering Raiju —
+    /// "the number of modified creatures you control other than ~" →
+    /// `ObjectCount { Typed(Creature, You, [Modified, Another]) }`.
+    #[test]
+    fn parse_quantity_ref_modified_creatures_other_than_self() {
+        let q = crate::parser::oracle_quantity::parse_quantity_ref(
+            "the number of modified creatures you control other than ~",
+        )
+        .expect("should parse");
+        let QuantityRef::ObjectCount { filter } = q else {
+            panic!("Expected ObjectCount, got {q:?}");
+        };
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::Modified));
+        assert!(tf.properties.contains(&FilterProp::Another));
     }
 
     #[test]
