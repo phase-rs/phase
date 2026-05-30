@@ -18705,8 +18705,11 @@ mod crew_tests {
 mod station_tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{
+        ContinuousModification, StaticCondition, StaticDefinition, TargetFilter,
+    };
     use crate::types::card_type::CoreType;
-    use crate::types::counter::CounterType;
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -18984,6 +18987,102 @@ mod station_tests {
         assert_eq!(
             charge, 5,
             "CR 113.7a: snapshot_power applied even when tapped creature left battlefield"
+        );
+    }
+
+    #[test]
+    fn station_threshold_static_reapplies_and_spacecraft_becomes_creature() {
+        let (mut state, spacecraft_id, p5, _) = setup_station_scenario();
+
+        {
+            let spacecraft = state.objects.get_mut(&spacecraft_id).unwrap();
+            spacecraft.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .condition(StaticCondition::HasCounters {
+                        counters: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
+                        minimum: 8,
+                        maximum: None,
+                    })
+                    .modifications(vec![
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Creature,
+                        },
+                        ContinuousModification::SetPower { value: 5 },
+                        ContinuousModification::SetToughness { value: 5 },
+                    ])
+                    .description("CR 721.2b: Spacecraft is an artifact creature at 8+".to_string()),
+            );
+        }
+
+        // First station activation: 5 charge counters, below threshold.
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateStation {
+                spacecraft_id,
+                creature_id: None,
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateStation {
+                spacecraft_id,
+                creature_id: Some(p5),
+            },
+        )
+        .unwrap();
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+
+        assert!(
+            !state
+                .objects
+                .get(&spacecraft_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "spacecraft should still be noncreature below threshold"
+        );
+
+        // Simulate a later main phase where the same creature can station again.
+        state.objects.get_mut(&p5).unwrap().tapped = false;
+        state.phase = Phase::PreCombatMain;
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Second station activation: another 5 counters, crossing threshold.
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateStation {
+                spacecraft_id,
+                creature_id: None,
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateStation {
+                spacecraft_id,
+                creature_id: Some(p5),
+            },
+        )
+        .unwrap();
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+
+        assert!(
+            state
+                .objects
+                .get(&spacecraft_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "spacecraft should become a creature at 8+ charge counters"
         );
     }
 
