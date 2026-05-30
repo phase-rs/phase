@@ -1,17 +1,17 @@
 {
   "intro": {
-    "quickTitle": "Quick Draft",
+    "quickTitle": "Draft Rápido",
     "podTitle": "Pod Draft",
     "subtitle": "Así funciona",
     "startDrafting": "Empezar a draftear",
     "quick": {
       "step1": "Abrirás 3 sobres de 14 cartas cada uno",
-      "step2": "Elige una carta por sobre y luego pasa el resto a los drafteadores de IA",
+      "step2": "Elige una carta por sobre y luego pasa el resto a los drafters de IA",
       "step3": "Los sobres alternan de dirección en cada ronda — izquierda, derecha, izquierda",
       "step4": "Tras todas las elecciones, construye un mazo de 40 cartas y juega una partida"
     },
     "pod": {
-      "step1": "Estás drafteando con {{count}} jugadores en un pod",
+      "step1": "Estás haciendo draft con {{count}} jugadores en un pod",
       "step2": "Abre 3 sobres de 14 cartas — elige una, pasa el resto",
       "step3": "Los sobres alternan de dirección en cada ronda — izquierda, derecha, izquierda",
       "step4": "Tras el draft, construye un mazo de 40 cartas y juega partidas de torneo"
@@ -57,8 +57,8 @@
     "label": "Asiento {{number}}",
     "passingLeft": "→ Pasando a la izquierda →",
     "passingRight": "← Pasando a la derecha ←",
-    "connected": "Connected",
-    "disconnected": "Disconnected"
+    "connected": "Conectado",
+    "disconnected": "Desconectado"
   },
   "setSelector": {
     "botDifficulty": "Dificultad de los bots",
@@ -113,8 +113,8 @@
     "title": "Draft",
     "startNew": "Empezar nuevo",
     "quickDraft": {
-      "title": "Quick Draft",
-      "description": "Draftea 3 sobres con 7 drafteadores de IA, construye un mazo de 40 cartas y luego juega una partida Bo1 contra uno de ellos."
+      "title": "Draft Rápido",
+      "description": "Draftea 3 sobres con 7 drafters de IA, construye un mazo de 40 cartas y luego juega una partida Bo1 contra uno de ellos."
     },
     "cubeDraft": {
       "title": "Cube Draft",
@@ -159,9 +159,9 @@
   },
   "cubeSetup": {
     "defaultCubeName": "Cube personalizado",
-    "fetchError": "No se pudo obtener la lista del cube",
-    "startError": "No se pudo iniciar el cube draft",
-    "cubeName": "Nombre del cube",
+    "fetchError": "No se pudo obtener la lista del Cube",
+    "startError": "No se pudo iniciar el Cube Draft",
+    "cubeName": "Nombre del Cube",
     "seats": "Asientos",
     "packs": "Sobres",
     "packSize": "Tamaño del sobre",
@@ -175,7 +175,7 @@
     "addablesCustomOnly": "Solo personalizadas",
     "customAddableCards": "Cartas añadibles personalizadas",
     "customAddablePlaceholder": "Un nombre de carta por línea",
-    "startCubeDraft": "Empezar cube draft"
+    "startCubeDraft": "Empezar Cube Draft"
   },
   "formatPicker": {
     "title": "Tu mazo está listo",
@@ -195,14 +195,14 @@
     }
   },
   "run": {
-    "draftRun": "Recorrido de draft",
+    "draftRun": "Ejecutar Draft",
     "upNext": "A continuación — Partida {{number}}",
     "nextMatch": "Siguiente partida",
-    "endRun": "Terminar recorrido",
+    "endRun": "Terminar Draft",
     "done": "Listo",
-    "perfectRun": "Recorrido perfecto",
-    "runComplete": "Recorrido completado",
-    "runOver": "Recorrido terminado",
+    "perfectRun": "Draft perfecto",
+    "runComplete": "Draft completado",
+    "runOver": "Draft terminado",
     "finishedFlawless": "Terminaste {{wins}}–{{losses}}. Impecable.",
     "finishedCongrats": "Terminaste {{wins}}–{{losses}}. ¡Felicidades!",
     "finishedRecord": "Terminaste con un récord de {{wins}}–{{losses}}.",
@@ -225,7 +225,7 @@
   },
   "page": {
     "cubeDraftTitle": "Cube Draft",
-    "quickDraftTitle": "Quick Draft",
+    "quickDraftTitle": "Draft Rápido",
     "setDraftTab": "Set Draft",
     "cubeTab": "Cube"
   },
@@ -248,9 +248,9 @@
     "namePlaceholder": "Introduce tu nombre...",
     "draftType": "Tipo de draft",
     "kindPremier": "Premier",
-    "kindPremierDesc": "Partidas de torneo al mejor de uno tras la construcción de mazo. Rondas más rápidas, sin sideboard entre juegos.",
+    "kindPremierDesc": "Partidas de torneo al mejor de uno tras la construcción de mazo. Rondas más rápidas, sin banquillo entre juegos.",
     "kindTraditional": "Tradicional",
-    "kindTraditionalDesc": "Partidas de torneo al mejor de tres tras la construcción de mazo, con sideboard entre juegos.",
+    "kindTraditionalDesc": "Partidas de torneo al mejor de tres tras la construcción de mazo, con banquillo entre juegos.",
     "tournamentFormat": "Formato de torneo",
     "tournamentSwiss": "Suizo",
     "tournamentSwissDesc": "Todos siguen jugando durante tres rondas, incluso tras una derrota.",
@@ -288,24 +288,24 @@
     "waitingNextRound": "Esperando a que el anfitrión inicie la siguiente ronda...",
     "nextRoundShortly": "La siguiente ronda empezará en breve...",
     "pauseReason": {
-      "PlayerDisconnected": "Draft paused — a player disconnected.",
-      "PausedByHost": "Draft paused by host.",
-      "DisconnectGraceExpired": "A player did not return in time."
+      "PlayerDisconnected": "Draft en pausa — un jugador está desconectado.",
+      "PausedByHost": "Draft pausado por el anfitrión.",
+      "DisconnectGraceExpired": "Un jugador no ha vuelto antes de que acabe el tiempo."
     }
   },
   "betweenGames": {
-    "game": "Juego {{number}}",
-    "lostPreviousGame": "Perdiste el juego anterior. Elige:",
+    "game": "Partida {{number}}",
+    "lostPreviousGame": "Perdiste la partida anterior. Elige:",
     "seconds": "{{count}}s",
     "secondsRemaining": "{{count}}s restantes",
     "playFirst": "Jugar primero",
     "drawFirst": "Robar primero",
-    "sideboarding": "Sideboard",
-    "waitingSideboard": "Esperando a que el oponente envíe su sideboard...",
-    "sideboardGame": "Sideboard — Juego {{number}}",
-    "sideboardHint": "Haz los cambios de sideboard y luego envía. Tu grupo está disponible a continuación.",
-    "submitSideboard": "Enviar sideboard",
-    "preparingNext": "Preparando el siguiente juego..."
+    "sideboarding": "Banquillo",
+    "waitingSideboard": "Esperando a que el oponente envíe su banquillo...",
+    "sideboardGame": "Banquillo — Partida {{number}}",
+    "sideboardHint": "Haz cambios en el banquillo y luego envía los datos. Tu selección está disponible a continuación.",
+    "submitSideboard": "Enviar banquillo",
+    "preparingNext": "Preparando la siguiente partida..."
   },
   "podComplete": {
     "title": "Draft completado",

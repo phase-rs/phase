@@ -86,7 +86,7 @@
   },
   "sync": {
     "title": "Sincronización en la nube",
-    "description": "Inicia sesión para sincronizar tus mazos, preferencias y suscripciones de feeds entre dispositivos. Tus datos viven en tu cuenta y se actualizan automáticamente cuando cambian.",
+    "description": "Inicia sesión para sincronizar tus mazos, preferencias y suscripciones de feeds entre dispositivos. Tus datos se alojan en tu cuenta y se actualizan automáticamente cuando cambian.",
     "signInWith": "Iniciar sesión con {{provider}}",
     "signOut": "Cerrar sesión",
     "signedInAs": "Sesión iniciada como {{name}}",
