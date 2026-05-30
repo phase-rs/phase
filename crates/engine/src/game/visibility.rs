@@ -91,12 +91,24 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             HashSet::new()
         };
 
+    // Sandbox debug exposure: a viewer who holds debug permission in a sandbox
+    // game (CR is silent; this is an out-of-game capability) sees the names of
+    // cards in their *own* library, so the debug "move card from library to
+    // hand" picker can identify a specific card. Opponents' libraries remain
+    // hidden — sandbox is shared, but reading an opponent's deck is not. The
+    // FE's debug picker alphabetizes within each zone bucket, so exposing names
+    // does not leak draw order. The actual `library` Vec order on the wire is
+    // left untouched (preserving simulate-mode draw semantics) but is never
+    // surfaced as draw order anywhere the viewer can observe it.
+    let sandbox_self_library_visible =
+        state.format_config.allow_debug_actions && state.debug_permitted.contains(&viewer);
     let all_library_ids: Vec<ObjectId> = filtered
         .players
         .iter()
         .flat_map(|p| p.library.iter().copied())
         .collect();
     for obj_id in all_library_ids {
+        let owner = state.objects.get(&obj_id).map(|o| o.owner);
         let visible = manifest_dread_visible.contains(&obj_id)
             || dig_visible.contains(&obj_id)
             || search_visible.contains(&obj_id)
@@ -105,7 +117,8 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             // public during DigChoice. For private digs ("look at"), revealed_cards won't
             // contain dig cards, so the exclusion still applies.
             || (state.revealed_cards.contains(&obj_id)
-                && !manifest_dread_cards.contains(&obj_id));
+                && !manifest_dread_cards.contains(&obj_id))
+            || (sandbox_self_library_visible && owner == Some(viewer));
         if !visible
             && !effect_zone_hand_cards.contains(&obj_id)
             && !drawn_choice_hand_cards.contains(&obj_id)
@@ -234,6 +247,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     if let WaitingFor::OutsideGameChoice {
         player,
+        source_id,
         reveal,
         up_to,
         destination,
@@ -243,6 +257,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::OutsideGameChoice {
                 player,
+                source_id,
                 choices: Vec::new(),
                 count: 0,
                 reveal,
@@ -302,6 +317,29 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 400.2: Hand and library are hidden zones. Mana-ability exile costs
+    // can choose from hand/graveyard/battlefield depending on the printed cost;
+    // redact hidden-zone choices for opponents while preserving public-zone
+    // graveyard/battlefield choices.
+    if let WaitingFor::ExileForManaAbility {
+        player,
+        zone,
+        count,
+        cards: _,
+        ref pending_mana_ability,
+    } = state.waiting_for
+    {
+        if matches!(zone, Zone::Hand | Zone::Library) && !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::ExileForManaAbility {
+                player,
+                zone,
+                count,
+                cards: vec![ObjectId(0); count],
+                pending_mana_ability: pending_mana_ability.clone(),
+            };
+        }
+    }
+
     if let WaitingFor::BeholdForCost {
         player,
         count,
@@ -343,7 +381,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         destination,
         enter_tapped,
         enter_transformed,
-        under_your_control,
+        enters_under_player,
         enters_attacking,
         owner_library,
         track_exiled_by_source,
@@ -363,7 +401,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 destination,
                 enter_tapped,
                 enter_transformed,
-                under_your_control,
+                enters_under_player,
                 enters_attacking,
                 owner_library,
                 track_exiled_by_source,
@@ -429,6 +467,41 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 603.3b + CR 400.2: Per-controller ordering pass — keep the
+    // placement spine visible to everyone (groups, group sizes,
+    // controllers, ordered flags) but strip each group's private
+    // payload from viewers who are not that group's controller.
+    if let Some(order) = filtered.pending_trigger_order.as_mut() {
+        for group in &mut order.groups {
+            if !can_view_private_for_player(group.controller) {
+                for ctx in &mut group.triggers {
+                    redact_pending_trigger_context_for_observer(ctx);
+                }
+            }
+        }
+    }
+
+    // CR 603.3b + CR 400.2: Same redaction surface applies to the singleton
+    // `pending_trigger` (the currently-targeting trigger) and its sidecar
+    // `pending_trigger_event_batch` (full simultaneous-event set consumed when
+    // it reaches the stack). Gate on the pending trigger's own controller.
+    if let Some(pending) = filtered.pending_trigger.as_mut() {
+        if !can_view_private_for_player(pending.controller) {
+            redact_pending_trigger_for_observer(pending);
+            filtered.pending_trigger_event_batch.clear();
+        }
+    }
+
+    // CR 113.2c + CR 603.2 + CR 603.3b: `deferred_triggers` holds the FIFO
+    // queue of same-pass triggers waiting on the active `pending_trigger` to
+    // resolve. Each entry is a `PendingTriggerContext` with the same private
+    // payload shape — redact per controller.
+    for ctx in &mut filtered.deferred_triggers {
+        if !can_view_private_for_player(ctx.pending.controller) {
+            redact_pending_trigger_context_for_observer(ctx);
+        }
+    }
+
     filtered
 }
 
@@ -463,6 +536,37 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
     }
 }
 
+/// CR 603.3b + CR 400.2: A pending trigger awaiting its
+/// controller's ordering choice may carry private data —
+/// the firing `GameEvent` can reference hidden-zone objects
+/// (library look/scry/surveil/mill triggers), and the
+/// modal/distribute/mode_abilities/description fields describe
+/// the controller's not-yet-public choices. Strip every payload
+/// an opponent has no rules-permission to see, leaving only
+/// the public spine (source_id, controller, timestamp, ability,
+/// condition, target_constraints, subject_match_count,
+/// may_trigger_origin) needed for the engine to keep running on
+/// the wire and for the opponent's frontend to render an
+/// "opponent is ordering N triggers" indicator.
+fn redact_pending_trigger_for_observer(pending: &mut crate::game::triggers::PendingTrigger) {
+    pending.trigger_event = None;
+    pending.modal = None;
+    pending.distribute = None;
+    pending.mode_abilities.clear();
+    pending.description = None;
+}
+
+/// CR 603.3b + CR 400.2: Wrapping-context variant of
+/// [`redact_pending_trigger_for_observer`] that also clears the
+/// `trigger_events` sidecar (the full simultaneous-event set for
+/// batched triggers, which can reference hidden-zone objects).
+fn redact_pending_trigger_context_for_observer(
+    ctx: &mut crate::game::triggers::PendingTriggerContext,
+) {
+    redact_pending_trigger_for_observer(&mut ctx.pending);
+    ctx.trigger_events.clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,8 +574,8 @@ mod tests {
     use crate::types::ability::{BeholdCostAction, Effect, ResolvedAbility};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoMayChoice, CastPaymentMode, CastingVariant, MayTriggerAutoChoiceKey, MayTriggerOrigin,
-        PendingBeginGameAbility, PendingCast,
+        AutoMayChoice, CastPaymentMode, CastingVariant, ManaAbilityResume, MayTriggerAutoChoiceKey,
+        MayTriggerOrigin, PendingBeginGameAbility, PendingCast, PendingManaAbility,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -509,7 +613,28 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+        })
+    }
+
+    fn dummy_pending_mana_ability(
+        player: PlayerId,
+        source_id: ObjectId,
+    ) -> Box<PendingManaAbility> {
+        Box::new(PendingManaAbility {
+            player,
+            source_id,
+            ability_index: 0,
+            color_override: None,
+            resume: ManaAbilityResume::Priority,
+            chosen_tappers: Vec::new(),
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            batch_siblings: Vec::new(),
         })
     }
 
@@ -639,6 +764,119 @@ mod tests {
         assert_eq!(
             filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
             Some("Hidden Card")
+        );
+    }
+
+    /// Sandbox debug exposure: a viewer with debug permission in a sandbox
+    /// game sees their own library card names (so the debug "move from
+    /// library to hand" picker can identify a specific card). Opponents'
+    /// libraries stay hidden — sandbox is a shared playground for your own
+    /// materials, not an opponent-deck-leak. The FE alphabetizes the picker
+    /// within each zone, so name exposure alone leaks no draw order.
+    #[test]
+    fn sandbox_debug_permitted_sees_own_library_but_not_opponent_library() {
+        let mut state = GameState::new(FormatConfig::standard().with_sandbox(), 2, 42);
+        state.debug_permitted.insert(PlayerId(0));
+        state.debug_permitted.insert(PlayerId(1));
+        let own = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "My Library Card".to_string(),
+            Zone::Library,
+        );
+        let opp = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Library Card".to_string(),
+            Zone::Library,
+        );
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            filtered.objects.get(&own).map(|obj| obj.name.as_str()),
+            Some("My Library Card"),
+            "viewer must see their own library names in sandbox+permitted"
+        );
+        assert_eq!(
+            filtered.objects.get(&opp).map(|obj| obj.name.as_str()),
+            Some("Hidden Card"),
+            "opponent's library stays hidden even in sandbox"
+        );
+    }
+
+    /// Without the sandbox capability, debug permission alone must not
+    /// expose the library — defense in depth against accidentally leaving
+    /// `debug_permitted` populated in a non-sandbox game.
+    #[test]
+    fn non_sandbox_keeps_own_library_hidden_even_when_debug_permitted() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        state.debug_permitted.insert(PlayerId(0));
+        let own = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "My Library Card".to_string(),
+            Zone::Library,
+        );
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            filtered.objects.get(&own).map(|obj| obj.name.as_str()),
+            Some("Hidden Card"),
+            "non-sandbox must keep library hidden regardless of debug_permitted"
+        );
+    }
+
+    /// CR 400.7 + CR 122.2: A card that was publicly revealed in hand (e.g.
+    /// by Duress, Telepathy, Coercion) and is then shuffled back into its
+    /// owner's library becomes a new object. If that card is later drawn
+    /// again, the persistent reveal memory must NOT leak into the new
+    /// hand-zone object — opponents should not retroactively know the
+    /// freshly drawn card's identity. This drives the cleanup in
+    /// `apply_zone_exit_cleanup` (zones.rs) through real `move_to_zone`
+    /// calls, not a shape assertion on the HashSet directly.
+    #[test]
+    fn public_reveal_memory_clears_when_card_changes_zones() {
+        use crate::game::zones::move_to_zone;
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Duressed Card".to_string(),
+            Zone::Hand,
+        );
+        state.public_revealed_cards.insert(card_id);
+
+        // While in hand, the opponent (PlayerId(0)) sees it by name.
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
+            Some("Duressed Card"),
+            "reveal memory should show the card while it is in hand"
+        );
+
+        // Hand → Library: the reveal memory must be dropped at the zone
+        // boundary. The library-zone gate in `is_visible_revealed_card`
+        // would otherwise hide it incidentally — we check the underlying
+        // set so the test would have caught the original bug.
+        let mut events = Vec::new();
+        move_to_zone(&mut state, card_id, Zone::Library, &mut events);
+        assert!(
+            !state.public_revealed_cards.contains(&card_id),
+            "public_revealed_cards must be cleared on zone change (CR 400.7)"
+        );
+
+        // Library → Hand (draw the same storage id back). Without the fix,
+        // the persistent flag would resurface visibility for the opponent.
+        move_to_zone(&mut state, card_id, Zone::Hand, &mut events);
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(
+            filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
+            Some("Hidden Card"),
+            "re-drawn card must not inherit prior reveal state — it is a new object per CR 400.7"
         );
     }
 
@@ -886,6 +1124,56 @@ mod tests {
     }
 
     #[test]
+    fn exile_for_mana_ability_from_hand_is_hidden_from_non_controller() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Hidden mana cost card".to_string(),
+            Zone::Hand,
+        );
+        let other_card_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Other hidden mana cost card".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::ExileForManaAbility {
+            player: PlayerId(1),
+            zone: Zone::Hand,
+            count: 1,
+            cards: vec![card_id, other_card_id],
+            pending_mana_ability: dummy_pending_mana_ability(PlayerId(1), ObjectId(50)),
+        };
+
+        let filtered_self = filter_state_for_viewer(&state, PlayerId(1));
+        match filtered_self.waiting_for {
+            WaitingFor::ExileForManaAbility {
+                zone, cards, count, ..
+            } => {
+                assert_eq!(zone, Zone::Hand);
+                assert_eq!(cards, vec![card_id, other_card_id]);
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected ExileForManaAbility, got {other:?}"),
+        }
+
+        let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
+        match filtered_opp.waiting_for {
+            WaitingFor::ExileForManaAbility {
+                zone, cards, count, ..
+            } => {
+                assert_eq!(zone, Zone::Hand);
+                assert_eq!(cards, vec![ObjectId(0)]);
+                assert_eq!(count, 1);
+            }
+            other => panic!("expected ExileForManaAbility, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn behold_for_cost_hides_matching_hand_choices_from_non_controller() {
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
         let public_choice = create_object(
@@ -1018,6 +1306,38 @@ mod tests {
                 );
             }
             other => panic!("expected ExileForCost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exile_for_mana_ability_graveyard_is_not_redacted() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Titans' Nest filler".to_string(),
+            Zone::Graveyard,
+        );
+        state.waiting_for = WaitingFor::ExileForManaAbility {
+            player: PlayerId(1),
+            zone: Zone::Graveyard,
+            count: 1,
+            cards: vec![card_id],
+            pending_mana_ability: dummy_pending_mana_ability(PlayerId(1), ObjectId(50)),
+        };
+
+        let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
+        match filtered_opp.waiting_for {
+            WaitingFor::ExileForManaAbility { zone, cards, .. } => {
+                assert_eq!(zone, Zone::Graveyard);
+                assert_eq!(
+                    cards,
+                    vec![card_id],
+                    "graveyard mana ability cost choices must NOT be redacted"
+                );
+            }
+            other => panic!("expected ExileForManaAbility, got {other:?}"),
         }
     }
 

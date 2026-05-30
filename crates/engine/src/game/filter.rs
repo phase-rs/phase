@@ -11,9 +11,9 @@ use crate::game::quantity::{
     counter_count_from_map, resolve_quantity, resolve_quantity_with_targets,
 };
 use crate::types::ability::{
-    ChoiceValue, ChosenAttribute, ControllerRef, FilterProp, PtStat, PtValueScope, QuantityExpr,
-    ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter,
+    ChoiceValue, ChosenAttribute, CombatRelation, CombatRelationSubject, ControllerRef, FilterProp,
+    PtStat, PtValueScope, QuantityExpr, ResolvedAbility, SharedQuality, SharedQualityRelation,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
@@ -185,10 +185,27 @@ impl<'a> FilterContext<'a> {
 }
 
 fn scoped_player_or_controller(
+    state: &GameState,
     ability: Option<&ResolvedAbility>,
     source_controller: Option<PlayerId>,
 ) -> Option<PlayerId> {
-    ability.and_then(|a| a.scoped_player).or(source_controller)
+    ability
+        .and_then(|a| a.scoped_player)
+        .or_else(|| crate::game::quantity::triggering_event_player(state))
+        .or(source_controller)
+}
+
+fn parent_target_controller_player(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+) -> Option<PlayerId> {
+    ability.and_then(|a| {
+        crate::game::targeting::resolve_effect_player_ref(
+            state,
+            a,
+            &TargetFilter::ParentTargetController,
+        )
+    })
 }
 
 fn controller_ref_player(
@@ -201,16 +218,16 @@ fn controller_ref_player(
     match controller {
         ControllerRef::You => source_controller,
         ControllerRef::Opponent => None,
-        ControllerRef::ScopedPlayer => scoped_player_or_controller(ability, source_controller),
+        ControllerRef::ScopedPlayer => {
+            scoped_player_or_controller(state, ability, source_controller)
+        }
         ControllerRef::TargetPlayer => ability.and_then(|a| {
             a.targets.iter().find_map(|t| match t {
                 TargetRef::Player(pid) => Some(*pid),
                 TargetRef::Object(_) => None,
             })
         }),
-        ControllerRef::ParentTargetController => {
-            ability.and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
-        }
+        ControllerRef::ParentTargetController => parent_target_controller_player(state, ability),
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, source_id)
         }
@@ -236,6 +253,37 @@ pub fn matches_target_filter(
 ) -> bool {
     filter_inner(
         state,
+        object_id,
+        filter,
+        ctx.source_id,
+        ctx.source_controller,
+        ctx.ability,
+        ctx.recipient_id,
+    )
+}
+
+/// CR 109.5 + CR 400.3: In owner-scoped zones (hand, library, graveyard),
+/// Oracle text still says "your card" even though cards are owned rather than
+/// controlled there. Evaluate the same typed filter with ownership standing in
+/// for controller so control-change LKI on the object cannot exclude its owner.
+pub fn matches_target_filter_in_owner_zone(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if obj.is_phased_out() {
+        return false;
+    }
+
+    let mut owner_scoped = obj.clone();
+    owner_scoped.controller = owner_scoped.owner;
+    filter_inner_for_object(
+        state,
+        &owner_scoped,
         object_id,
         filter,
         ctx.source_id,
@@ -373,6 +421,7 @@ pub fn matches_target_filter_on_lki_snapshot(
         linked_exile_snapshot: vec![],
         is_token: false,
         combat_status: Default::default(),
+        co_departed: Vec::new(),
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
@@ -496,7 +545,7 @@ fn filter_inner_for_object(
                         }
                     }
                     ControllerRef::ScopedPlayer => {
-                        match scoped_player_or_controller(ability, source_controller) {
+                        match scoped_player_or_controller(state, ability, source_controller) {
                             Some(pid) if pid == obj.controller => {}
                             _ => return false,
                         }
@@ -520,9 +569,7 @@ fn filter_inner_for_object(
                         }
                     }
                     ControllerRef::ParentTargetController => {
-                        let target_player = ability.and_then(|a| {
-                            crate::game::ability_utils::parent_target_controller(a, state)
-                        });
+                        let target_player = parent_target_controller_player(state, ability);
                         match target_player {
                             Some(pid) if pid == obj.controller => {}
                             _ => return false,
@@ -795,7 +842,7 @@ fn zone_change_filter_inner(
                         return false;
                     }
                     ControllerRef::ScopedPlayer => {
-                        match scoped_player_or_controller(ability, source_controller) {
+                        match scoped_player_or_controller(state, ability, source_controller) {
                             Some(pid) if pid == record.controller => {}
                             _ => return false,
                         }
@@ -815,9 +862,7 @@ fn zone_change_filter_inner(
                         }
                     }
                     ControllerRef::ParentTargetController => {
-                        let target_player = ability.and_then(|a| {
-                            crate::game::ability_utils::parent_target_controller(a, state)
-                        });
+                        let target_player = parent_target_controller_player(state, ability);
                         match target_player {
                             Some(pid) if pid == record.controller => {}
                             _ => return false,
@@ -1578,6 +1623,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::AttackingController
         | FilterProp::Blocking
         | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
         | FilterProp::Unblocked
         | FilterProp::Tapped
         | FilterProp::Untapped
@@ -1602,6 +1648,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
+        | FilterProp::Renowned
         // CR 700.9: Modified requires on-battlefield attachments/counters,
         // unavailable from a stack-snapshot record.
         | FilterProp::Modified
@@ -1674,14 +1721,53 @@ struct SourceContext<'a> {
 /// or `state.lki_cache`.
 fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> Option<String> {
     let ability = ability?;
-    let id = ability.targets.iter().find_map(|t| match t {
-        crate::types::ability::TargetRef::Object(id) => Some(*id),
-        crate::types::ability::TargetRef::Player(_) => None,
-    })?;
+    let id = first_object_target(ability)?;
     if let Some(obj) = state.objects.get(&id) {
         return Some(obj.name.clone());
     }
     state.lki_cache.get(&id).map(|lki| lki.name.clone())
+}
+
+fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
+    ability.targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => Some(*id),
+        TargetRef::Player(_) => None,
+    })
+}
+
+fn combat_relation_subject_id(
+    subject: CombatRelationSubject,
+    source: &SourceContext<'_>,
+) -> Option<ObjectId> {
+    match subject {
+        CombatRelationSubject::Source => Some(source.id),
+        CombatRelationSubject::ParentTarget => source.ability.and_then(first_object_target),
+    }
+}
+
+fn matches_combat_relation(
+    state: &GameState,
+    object_id: ObjectId,
+    relation: CombatRelation,
+    subject: CombatRelationSubject,
+    source: &SourceContext<'_>,
+) -> bool {
+    let Some(subject_id) = combat_relation_subject_id(subject, source) else {
+        return false;
+    };
+    match relation {
+        CombatRelation::BlockingOrBlockedBy => state.combat.as_ref().is_some_and(|combat| {
+            let candidate_blocks_subject = combat
+                .blocker_to_attacker
+                .get(&object_id)
+                .is_some_and(|attackers| attackers.contains(&subject_id));
+            let subject_blocks_candidate = combat
+                .blocker_to_attacker
+                .get(&subject_id)
+                .is_some_and(|attackers| attackers.contains(&object_id));
+            candidate_blocks_subject || subject_blocks_candidate
+        }),
+    }
 }
 
 fn referenced_targets_for_filter<'a>(
@@ -1753,6 +1839,28 @@ fn resolve_filter_threshold(
     }
 }
 
+fn pt_value_from_pair(stat: PtStat, power: Option<i32>, toughness: Option<i32>) -> i32 {
+    match stat {
+        PtStat::Power => power.unwrap_or(0),
+        PtStat::Toughness => toughness.unwrap_or(0),
+        PtStat::TotalPowerToughness => power.unwrap_or(0) + toughness.unwrap_or(0),
+    }
+}
+
+fn object_pt_value(obj: &GameObject, stat: PtStat, scope: PtValueScope) -> i32 {
+    match scope {
+        PtValueScope::Current => pt_value_from_pair(stat, obj.power, obj.toughness),
+        PtValueScope::Base => pt_value_from_pair(stat, obj.base_power, obj.base_toughness),
+    }
+}
+
+fn zone_change_pt_value(record: &ZoneChangeRecord, stat: PtStat, scope: PtValueScope) -> i32 {
+    match scope {
+        PtValueScope::Current => pt_value_from_pair(stat, record.power, record.toughness),
+        PtValueScope::Base => pt_value_from_pair(stat, record.base_power, record.base_toughness),
+    }
+}
+
 fn matches_last_chosen_land_or_nonland_kind(
     choice: &Option<ChoiceValue>,
     core_types: &[CoreType],
@@ -1812,6 +1920,9 @@ fn matches_filter_prop(
                 .get(&object_id)
                 .is_some_and(|attackers| attackers.contains(&source.id))
         }),
+        FilterProp::CombatRelation { relation, subject } => {
+            matches_combat_relation(state, object_id, *relation, *subject, source)
+        }
         // CR 509.1h: Unblocked = attacking creature that was never assigned blockers.
         // unblocked_attackers checks the permanent `blocked` flag, not the current blocker list.
         FilterProp::Unblocked => combat::unblocked_attackers(state).contains(&object_id),
@@ -1941,7 +2052,7 @@ fn matches_filter_prop(
                 source.controller.is_some() && source.controller != Some(obj.owner)
             }
             ControllerRef::ScopedPlayer => {
-                scoped_player_or_controller(source.ability, source.controller)
+                scoped_player_or_controller(state, source.ability, source.controller)
                     .is_some_and(|pid| pid == obj.owner)
             }
             // CR 109.5: Ownership relative to a chosen target player.
@@ -1955,10 +2066,10 @@ fn matches_filter_prop(
                     })
                 })
                 .is_some_and(|pid| pid == obj.owner),
-            ControllerRef::ParentTargetController => source
-                .ability
-                .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
-                .is_some_and(|pid| pid == obj.owner),
+            ControllerRef::ParentTargetController => {
+                parent_target_controller_player(state, source.ability)
+                    .is_some_and(|pid| pid == obj.owner)
+            }
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == obj.owner)
@@ -2105,10 +2216,11 @@ fn matches_filter_prop(
         // every object from individual match checks.
         FilterProp::OtherThanTriggerObject => true,
         FilterProp::HasColor { color } => obj.color.contains(color),
-        // CR 208 + CR 208.4b: Power/toughness comparison against a dynamic
-        // threshold. `scope = Base` reads `base_power`/`base_toughness` (the
-        // value after layer 7b, ignoring counters/modifiers per CR 208.4b);
-        // `scope = Current` reads the fully-modified `power`/`toughness`.
+        // CR 208 + CR 208.4b: Power/toughness metric comparison against a
+        // dynamic threshold. `scope = Base` reads `base_power`/`base_toughness`
+        // (the value after layer 7b, ignoring counters/modifiers per
+        // CR 208.4b); `scope = Current` reads the fully-modified
+        // `power`/`toughness`.
         // Dynamic thresholds (`QuantityRef::Variable { "X" }`) resolve against
         // the ability's `chosen_x` via `FilterContext::from_ability`.
         FilterProp::PtComparison {
@@ -2116,16 +2228,10 @@ fn matches_filter_prop(
             scope,
             comparator,
             value,
-        } => {
-            let lhs = match (stat, scope) {
-                (PtStat::Power, PtValueScope::Current) => obj.power,
-                (PtStat::Power, PtValueScope::Base) => obj.base_power,
-                (PtStat::Toughness, PtValueScope::Current) => obj.toughness,
-                (PtStat::Toughness, PtValueScope::Base) => obj.base_toughness,
-            }
-            .unwrap_or(0);
-            comparator.evaluate(lhs, resolve_filter_threshold(state, value, source))
-        }
+        } => comparator.evaluate(
+            object_pt_value(obj, *stat, *scope),
+            resolve_filter_threshold(state, value, source),
+        ),
         // Disjunctive composite: any inner prop matches.
         FilterProp::AnyOf { props } => props
             .iter()
@@ -2201,6 +2307,8 @@ fn matches_filter_prop(
         ),
         // CR 701.60b: Match creatures with the suspected designation.
         FilterProp::Suspected => obj.is_suspected,
+        // CR 702.112b: Match permanents with the renowned designation.
+        FilterProp::Renowned => obj.is_renowned,
         // CR 700.9: A permanent is modified if it has one or more counters on
         // it (CR 122), is equipped (CR 301.5), or is enchanted by an Aura
         // controlled by its controller (CR 303.4).
@@ -2384,11 +2492,11 @@ fn zone_change_record_matches_property(
         }
         // CR 201.2: Name match (case-insensitive) on the event-time object.
         FilterProp::Named { name } => record.name.eq_ignore_ascii_case(name),
-        // CR 208 + CR 208.4b: Power/toughness threshold on the event-time
-        // object. A `None` value (non-creature in some zones) treats as 0,
-        // matching live-state behavior. The zone-change snapshot captures both
-        // the current (post-layer-7) and base (layer-7b, per CR 613.4b) values
-        // at move-time, so `scope = Base` reads `record.base_power`/
+        // CR 208 + CR 208.4b: Power/toughness metric threshold on the
+        // event-time object. A `None` value (non-creature in some zones) treats
+        // as 0, matching live-state behavior. The zone-change snapshot captures
+        // both the current (post-layer-7) and base (layer-7b, per CR 613.4b)
+        // values at move-time, so `scope = Base` reads `record.base_power`/
         // `record.base_toughness` while `scope = Current` reads
         // `record.power`/`record.toughness`. This makes the look-back
         // (leaves-the-battlefield / dies) path as precise as live-object
@@ -2399,16 +2507,10 @@ fn zone_change_record_matches_property(
             scope,
             comparator,
             value,
-        } => {
-            let lhs = match (stat, scope) {
-                (PtStat::Power, PtValueScope::Current) => record.power,
-                (PtStat::Power, PtValueScope::Base) => record.base_power,
-                (PtStat::Toughness, PtValueScope::Current) => record.toughness,
-                (PtStat::Toughness, PtValueScope::Base) => record.base_toughness,
-            }
-            .unwrap_or(0);
-            comparator.evaluate(lhs, resolve_filter_threshold(state, value, source))
-        }
+        } => comparator.evaluate(
+            zone_change_pt_value(record, *stat, *scope),
+            resolve_filter_threshold(state, value, source),
+        ),
         // CR 202.3: Mana value threshold on the event-time object.
         FilterProp::Cmc { comparator, value } => comparator.evaluate(
             record.mana_value as i32,
@@ -2453,7 +2555,7 @@ fn zone_change_record_matches_property(
                 source.controller.is_some() && source.controller != Some(record.owner)
             }
             ControllerRef::ScopedPlayer => {
-                scoped_player_or_controller(source.ability, source.controller)
+                scoped_player_or_controller(state, source.ability, source.controller)
                     .is_some_and(|pid| pid == record.owner)
             }
             // CR 109.5: Ownership relative to a chosen target player.
@@ -2466,10 +2568,10 @@ fn zone_change_record_matches_property(
                     })
                 })
                 .is_some_and(|pid| pid == record.owner),
-            ControllerRef::ParentTargetController => source
-                .ability
-                .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
-                .is_some_and(|pid| pid == record.owner),
+            ControllerRef::ParentTargetController => {
+                parent_target_controller_player(state, source.ability)
+                    .is_some_and(|pid| pid == record.owner)
+            }
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == record.owner)
@@ -2523,7 +2625,7 @@ fn zone_change_record_matches_property(
         FilterProp::Blocking => record.combat_status.blocking,
         // `ZoneChangeCombatStatus` snapshots role, not the blocker-to-attacker
         // relation. Source-relative blocker checks require live combat state.
-        FilterProp::BlockingSource => false,
+        FilterProp::BlockingSource | FilterProp::CombatRelation { .. } => false,
         FilterProp::Unblocked => {
             record.combat_status.attacking && !record.combat_status.blocked
         }
@@ -2600,6 +2702,7 @@ fn zone_change_record_matches_property(
         | FilterProp::IsChosenLandOrNonlandKind
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
+        | FilterProp::Renowned
         // CR 700.9: Modified is a live-battlefield predicate (counters +
         // attachments) — a zone-change snapshot cannot represent it.
         | FilterProp::Modified
@@ -2642,7 +2745,7 @@ fn attachment_controller_matches(
             .controller
             .is_some_and(|controller| controller != attachment_controller),
         Some(ControllerRef::ScopedPlayer) => {
-            scoped_player_or_controller(source.ability, source.controller)
+            scoped_player_or_controller(state, source.ability, source.controller)
                 .is_some_and(|pid| pid == attachment_controller)
         }
         Some(ControllerRef::TargetPlayer) => source
@@ -2654,10 +2757,10 @@ fn attachment_controller_matches(
                 })
             })
             .is_some_and(|pid| pid == attachment_controller),
-        Some(ControllerRef::ParentTargetController) => source
-            .ability
-            .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
-            .is_some_and(|pid| pid == attachment_controller),
+        Some(ControllerRef::ParentTargetController) => {
+            parent_target_controller_player(state, source.ability)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
         Some(ControllerRef::DefendingPlayer) => {
             combat::defending_player_for_attacker(state, source.id)
                 .is_some_and(|pid| pid == attachment_controller)
@@ -3248,6 +3351,49 @@ mod tests {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
         assert!(matches_target_filter(&state, id, &TargetFilter::Any, id));
+    }
+
+    #[test]
+    fn pt_comparison_total_power_toughness_matches_sum() {
+        use crate::types::ability::{PtStat, PtValueScope, TypedFilter};
+
+        let mut state = setup();
+        let id = add_creature(&mut state, PlayerId(0), "Summed Bear");
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.power = Some(3);
+        obj.toughness = Some(3);
+        obj.base_power = Some(2);
+        obj.base_toughness = Some(2);
+
+        let total_filter = |scope, comparator, value| {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::TotalPowerToughness,
+                    scope,
+                    comparator,
+                    value: QuantityExpr::Fixed { value },
+                },
+            ]))
+        };
+
+        assert!(!matches_target_filter(
+            &state,
+            id,
+            &total_filter(PtValueScope::Current, Comparator::LE, 5),
+            id,
+        ));
+        assert!(matches_target_filter(
+            &state,
+            id,
+            &total_filter(PtValueScope::Current, Comparator::GE, 6),
+            id,
+        ));
+        assert!(matches_target_filter(
+            &state,
+            id,
+            &total_filter(PtValueScope::Base, Comparator::LE, 4),
+            id,
+        ));
     }
 
     #[test]
@@ -4141,6 +4287,64 @@ mod tests {
             other_blocker,
             &filter,
             attacker,
+        ));
+    }
+
+    #[test]
+    fn combat_relation_matches_creatures_blocking_or_blocked_by_parent_target() {
+        use crate::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let target_attacker = add_creature(&mut state, PlayerId(0), "Target Attacker");
+        let target_blocker = add_creature(&mut state, PlayerId(1), "Target Blocker");
+        let unrelated_attacker = add_creature(&mut state, PlayerId(0), "Unrelated Attacker");
+        let unrelated_blocker = add_creature(&mut state, PlayerId(1), "Unrelated Blocker");
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(target_attacker, PlayerId(1)),
+                AttackerInfo::attacking_player(unrelated_attacker, PlayerId(1)),
+            ],
+            blocker_assignments: [
+                (target_attacker, vec![target_blocker]),
+                (unrelated_attacker, vec![unrelated_blocker]),
+            ]
+            .into(),
+            blocker_to_attacker: [
+                (target_blocker, vec![target_attacker]),
+                (unrelated_blocker, vec![unrelated_attacker]),
+            ]
+            .into(),
+            ..CombatState::default()
+        });
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(target_attacker)],
+            source,
+            PlayerId(0),
+        );
+        let ctx = FilterContext::from_ability(&ability);
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockingOrBlockedBy,
+                subject: CombatRelationSubject::ParentTarget,
+            },
+        ]));
+
+        assert!(crate::game::filter::matches_target_filter(
+            &state,
+            target_blocker,
+            &filter,
+            &ctx
+        ));
+        assert!(!crate::game::filter::matches_target_filter(
+            &state,
+            unrelated_blocker,
+            &filter,
+            &ctx
         ));
     }
 
@@ -6966,6 +7170,7 @@ mod tests {
             linked_exile_snapshot: vec![],
             is_token: false,
             combat_status: Default::default(),
+            co_departed: Vec::new(),
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");

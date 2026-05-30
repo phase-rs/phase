@@ -234,8 +234,6 @@ export function DeckBuilder({
         onLoad={requestLoad}
         format={format}
         onFormatChange={onFormatChange}
-        bracket={bracket}
-        onBracketChange={setBracket}
       />
 
       <DeckBuilderTabBar
@@ -394,6 +392,8 @@ export function DeckBuilder({
                         onSetAsCommander={isCommander ? handleSetCommander : undefined}
                         isCommanderEligible={isCommander ? isCommanderEligible : undefined}
                         onOpenArtPicker={handleOpenArtPicker}
+                        commanders={commanders}
+                        onRemoveCommander={handleRemoveCommander}
                       />
                     </div>
                   ) : (
@@ -403,8 +403,10 @@ export function DeckBuilder({
                       cardDataCache={cardDataCache}
                       onAddCard={handleAddCardByName}
                       onRemoveCard={handleRemoveCard}
+                      onMoveCard={handleMoveCard}
                       onRemoveCommander={handleRemoveCommander}
                       onCardHover={onCardHover}
+                      format={format}
                     />
                   )}
                 </div>
@@ -430,6 +432,7 @@ export function DeckBuilder({
                 isCommanderEligible={isCommanderEligible}
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}
+                onCardHover={onCardHover}
               />
             )}
             <StatsPanel
@@ -439,6 +442,7 @@ export function DeckBuilder({
               isCommander={isCommander}
               estimate={estimate}
               manualBracket={bracket}
+              onBracketChange={setBracket}
               auditEmptyReason={auditEmptyReason}
               onCardClick={handleScrollToCard}
             />

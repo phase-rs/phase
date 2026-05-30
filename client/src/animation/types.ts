@@ -17,17 +17,9 @@ export type PacingCategory = "effects" | "combat" | "banners";
 
 export const PACING_CATEGORIES: readonly PacingCategory[] = ["effects", "combat", "banners"] as const;
 
-export const PACING_LABELS: Record<PacingCategory, string> = {
-  effects: "Effect Pacing",
-  combat: "Combat Pacing",
-  banners: "Banner Pacing",
-};
-
-export const PACING_DESCRIPTIONS: Record<PacingCategory, string> = {
-  effects: "Spell casts, zone changes, deaths, life changes, counters, tap/untap.",
-  combat: "Combat damage timing — how long blockers and attackers linger before damage resolves.",
-  banners: "Turn-start banner display.",
-};
+// Per-category labels/descriptions are frontend-authored display text and are
+// translated at the render site via `t("pacing.labels.<category>")` /
+// `t("pacing.descriptions.<category>")` (settings namespace).
 
 export const PACING_DEFAULT = 1.0;
 export const PACING_MIN = 0;

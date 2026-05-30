@@ -16,4 +16,5 @@ pub mod error;
 pub mod filter;
 pub mod primitives;
 pub mod quantity;
+pub mod return_as_aura;
 pub mod target;

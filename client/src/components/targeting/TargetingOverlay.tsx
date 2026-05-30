@@ -16,6 +16,7 @@ export function TargetingOverlay() {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
   const objects = useGameStore((s) => s.gameState?.objects);
+  const stack = useGameStore((s) => s.gameState?.stack);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
   const clearSelectedCards = useUiStore((s) => s.clearSelectedCards);
 
@@ -24,6 +25,18 @@ export function TargetingOverlay() {
   const isCopyRetarget = waitingFor?.type === "CopyRetarget";
   const canKeepCurrentTargets = isCopyRetarget && waitingFor.data.target_slots.every((slot) => slot.current != null);
   const isExploreChoice = waitingFor?.type === "ExploreChoice";
+  // CR 303.4 + CR 303.4g + CR 115.1: Return-as-Aura attach pick. Picker is a
+  // CHOICE (not a target), but the action shape mirrors ExploreChoice
+  // (`GameAction::ChooseTarget` with the chosen ObjectId).
+  const isReturnAsAuraTarget = waitingFor?.type === "ReturnAsAuraTarget";
+  // CR 115.7: Single-target retargets (Bolt Bend, Redirect) are picked on the
+  // board through this overlay; multi-target retargets keep the dialog.
+  const isRetargetChoice = waitingFor?.type === "RetargetChoice" && waitingFor.data.scope.type === "Single";
+  // CR 115.7: Name the spell/ability being retargeted (the entry the redirect
+  // resolved onto), so the player knows what they are choosing a new target for.
+  const retargetSpellName = isRetargetChoice
+    ? objects?.[stack?.[waitingFor.data.stack_entry_index]?.source_id ?? -1]?.name
+    : undefined;
   const isTapCreatureChoice = waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost";
   const targetSlots = isTargetSelection ? waitingFor.data.target_slots : [];
   const selection = isTargetSelection ? waitingFor.data.selection : null;
@@ -37,6 +50,8 @@ export function TargetingOverlay() {
     : waitingFor?.type === "TargetSelection"
       ? waitingFor.data.pending_cast?.object_id
       : waitingFor?.type === "ExploreChoice"
+        ? waitingFor.data.source_id
+      : waitingFor?.type === "ReturnAsAuraTarget"
         ? waitingFor.data.source_id
       : waitingFor?.type === "TapCreaturesForManaAbility"
         ? (waitingFor.data.pending_mana_ability as { source_id?: number } | undefined)?.source_id
@@ -83,7 +98,7 @@ export function TargetingOverlay() {
     return () => clearSelectedCards();
   }, [clearSelectedCards, isTapCreatureChoice]);
 
-  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isTapCreatureChoice) return null;
+  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isReturnAsAuraTarget && !isRetargetChoice && !isTapCreatureChoice) return null;
 
   // Only show targeting UI for the human player
   if (!canActForWaitingState) return null;
@@ -122,6 +137,12 @@ export function TargetingOverlay() {
                   })()
               : isExploreChoice
                 ? t("targeting.chooseCreatureToExplore")
+              : isReturnAsAuraTarget
+                ? t("targeting.chooseReturnAsAuraTarget")
+              : isRetargetChoice
+                ? (retargetSpellName
+                    ? t("targeting.chooseNewTargetForSpell", { spell: retargetSpellName })
+                    : t("targeting.chooseNewTarget"))
               : isTapCreatureChoice
                 ? t("targeting.tapUntappedCreatures", { count: waitingFor.data.count })
               : inferredPrompt ?? (

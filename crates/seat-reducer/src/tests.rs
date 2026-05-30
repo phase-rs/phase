@@ -1,4 +1,4 @@
-use engine::game::deck_loading::PlayerDeckPayload;
+use engine::game::deck_loading::PlayerDeckList;
 use engine::types::format::FormatConfig;
 use phase_ai::config::Platform;
 
@@ -6,11 +6,12 @@ use crate::types::*;
 
 struct NoOpResolver;
 impl DeckResolver for NoOpResolver {
-    fn resolve(&self, _choice: &DeckChoice) -> Result<PlayerDeckPayload, String> {
-        Ok(PlayerDeckPayload {
+    fn resolve(&self, _choice: &DeckChoice) -> Result<PlayerDeckList, String> {
+        Ok(PlayerDeckList {
             main_deck: vec![],
             sideboard: vec![],
             commander: vec![],
+            bracket_tier: Default::default(),
         })
     }
 }

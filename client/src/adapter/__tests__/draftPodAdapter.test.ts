@@ -14,8 +14,20 @@ import type { DraftPodHostEvent } from "../draftPodHostAdapter";
 import { DraftPodGuestAdapter } from "../draftPodGuestAdapter";
 import type { DraftPodGuestEvent } from "../draftPodGuestAdapter";
 import type { DraftPlayerView } from "../draft-adapter";
+import { loadDraftHostSession } from "../../services/draftPersistence";
 
 // ── Mocks ──────────────────────────────────────────────────────────────
+
+// Mock the draft-adapter module — vitest cannot resolve the lazy
+// `@wasm/draft` import that DraftAdapter's `ensureDraftWasm` performs.
+// The host adapter only uses DraftAdapter to populate the cube CARD_DB;
+// the Set-mode tests below never exercise that path, so a no-op mock is
+// sufficient.
+vi.mock("../draft-adapter", () => ({
+  DraftAdapter: vi.fn().mockImplementation(() => ({
+    loadCardDatabase: vi.fn(async () => 0),
+  })),
+}));
 
 // Mock the connection module
 vi.mock("../../network/connection", () => ({
@@ -41,7 +53,7 @@ const mockHostRequestPause = vi.fn();
 const mockHostRequestResume = vi.fn();
 const mockHostDispose = vi.fn();
 const mockHostTerminateDraft = vi.fn(async () => {});
-const mockHostRestoreFromPersisted = vi.fn(async () => null);
+const mockHostRestoreFromPersisted = vi.fn(async (): Promise<DraftPlayerView | null> => null);
 
 vi.mock("../p2p-draft-host", () => ({
   P2PDraftHost: vi.fn().mockImplementation(() => ({
@@ -154,7 +166,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("transitions to lobby after initialization", async () => {
     await adapter.initialize({
-      setPoolJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -173,7 +185,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("can suspend without terminating the persisted host draft", async () => {
     await adapter.initialize({
-      setPoolJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -193,7 +205,7 @@ describe("DraftPodHostAdapter", () => {
 
     await expect(
       adapter.initialize({
-        setPoolJson: "{}",
+        poolInput: { type: "Set", data: { set_pool_json: "{}" } },
         kind: "Premier",
         podSize: 8,
         hostDisplayName: "Host",
@@ -208,7 +220,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates startDraft to P2PDraftHost", async () => {
     await adapter.initialize({
-      setPoolJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -220,9 +232,43 @@ describe("DraftPodHostAdapter", () => {
     expect(mockHostStartDraft).toHaveBeenCalledOnce();
   });
 
+  it("restores MatchInProgress host sessions without falling back to drafting", async () => {
+    vi.mocked(loadDraftHostSession).mockResolvedValue({
+      persistenceId: "draft-1",
+      roomCode: "ABCDE",
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      seatTokens: { 0: "host" },
+      seatNames: { 0: "Host" },
+      kickedTokens: [],
+      draftStarted: true,
+      draftCode: "ABCDE",
+      draftSessionJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+    });
+    const restoredView = mockView("MatchInProgress");
+    mockHostRestoreFromPersisted.mockResolvedValue(restoredView);
+
+    await adapter.initialize({
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
+      kind: "Premier",
+      podSize: 8,
+      hostDisplayName: "Host",
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      persistenceId: "draft-1",
+    });
+
+    expect(adapter.status).toBe("matchInProgress");
+    expect(events).toContainEqual({ type: "viewUpdated", view: restoredView });
+  });
+
   it("delegates submitPick and returns view", async () => {
     await adapter.initialize({
-      setPoolJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -237,7 +283,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates submitDeck and returns view", async () => {
     await adapter.initialize({
-      setPoolJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -252,7 +298,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("delegates host controls (kick, pause, resume)", async () => {
     await adapter.initialize({
-      setPoolJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -278,7 +324,7 @@ describe("DraftPodHostAdapter", () => {
 
   it("maps P2PDraftHost events to DraftPodHostEvents", async () => {
     await adapter.initialize({
-      setPoolJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -307,11 +353,26 @@ describe("DraftPodHostAdapter", () => {
 
     hostEventHandler({ type: "allDecksSubmitted" });
     expect(adapter.status).toBe("pairing");
+
+    hostEventHandler({
+      type: "bo3ChoosePlayDraw",
+      matchId: "match-1",
+      gameNumber: 2,
+      score: { p0_wins: 0, p1_wins: 1, draws: 0 },
+      timerMs: 10_000,
+    });
+    expect(events).toContainEqual({
+      type: "bo3ChoosePlayDraw",
+      matchId: "match-1",
+      gameNumber: 2,
+      score: { p0_wins: 0, p1_wins: 1, draws: 0 },
+      timerMs: 10_000,
+    });
   });
 
   it("cleans up on dispose", async () => {
     await adapter.initialize({
-      setPoolJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",
@@ -330,7 +391,7 @@ describe("DraftPodHostAdapter", () => {
     const unsub = adapter.onEvent((e) => extraEvents.push(e));
 
     await adapter.initialize({
-      setPoolJson: "{}",
+      poolInput: { type: "Set", data: { set_pool_json: "{}" } },
       kind: "Premier",
       podSize: 8,
       hostDisplayName: "Host",

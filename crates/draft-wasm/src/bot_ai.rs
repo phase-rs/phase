@@ -35,7 +35,9 @@ pub fn bot_pick(
         AiDifficulty::Medium | AiDifficulty::Hard => {
             pick_by_evaluation(pack, prior_picks, card_db, false)
         }
-        AiDifficulty::VeryHard => pick_by_evaluation(pack, prior_picks, card_db, true),
+        AiDifficulty::VeryHard | AiDifficulty::CEDH => {
+            pick_by_evaluation(pack, prior_picks, card_db, true)
+        }
     }
 }
 

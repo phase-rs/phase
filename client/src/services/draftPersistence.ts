@@ -12,7 +12,10 @@
 
 import { createStore, del, get, set } from "idb-keyval";
 
+import type { PoolInput } from "../adapter/draft-adapter";
 import { ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
+
+export type { PoolInput } from "../adapter/draft-adapter";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -42,8 +45,8 @@ export interface PersistedDraftHostSession {
   draftCode: string;
   /** Serialized DraftSession JSON from draft-wasm. Null if draft hasn't started. */
   draftSessionJson: string | null;
-  /** Original set pool JSON for re-initialization on resume. */
-  setPoolJson: string;
+  /** Pool source for re-initialization on resume (Set pool JSON or Cube list + settings). */
+  poolInput: PoolInput;
 }
 
 /**
@@ -119,7 +122,16 @@ export async function loadDraftHostSession(
       DRAFT_HOST_PREFIX + id,
       getDraftStore(),
     );
-    return s ?? null;
+    if (!s) return null;
+    // C6 shape guard: legacy snapshots (pre-#1253) carried a flat
+    // `setPoolJson: string` field instead of the PoolInput discriminated
+    // union. Discriminate on the new shape; reject anything that doesn't
+    // self-identify as Set or Cube so the resume path falls back to
+    // "no draft pod to resume" instead of crashing on `persisted.poolInput.data`.
+    if (s.poolInput?.type !== "Set" && s.poolInput?.type !== "Cube") {
+      return null;
+    }
+    return s;
   } catch {
     return null;
   }

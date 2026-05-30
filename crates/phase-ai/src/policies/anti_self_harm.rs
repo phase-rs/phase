@@ -784,9 +784,9 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, FilterProp, PtValue,
-        ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
-        TypedFilter,
+        AbilityDefinition, AbilityKind, BounceSelection, ContinuousModification, ControllerRef,
+        FilterProp, PtValue, ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition,
+        TypeFilter, TypedFilter,
     };
     use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
@@ -899,7 +899,7 @@ mod tests {
                 target: TargetFilter::Typed(creature_card),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1726,6 +1726,7 @@ mod tests {
                         .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
                 ),
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
         )]);
 
@@ -1785,6 +1786,7 @@ mod tests {
                         .controller(engine::types::ability::ControllerRef::You),
                 ),
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
         )]);
 
@@ -2721,7 +2723,7 @@ mod tests {
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -2739,6 +2741,7 @@ mod tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         let config = AiConfig::default();
@@ -2826,7 +2829,7 @@ mod tests {
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -2844,6 +2847,7 @@ mod tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         let config = AiConfig::default();

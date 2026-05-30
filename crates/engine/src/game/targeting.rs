@@ -19,6 +19,50 @@ pub fn find_legal_targets(
     source_controller: PlayerId,
     source_id: ObjectId,
 ) -> Vec<TargetRef> {
+    let target_ctx =
+        super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
+    find_legal_targets_with_context(state, filter, source_controller, source_id, &target_ctx)
+}
+
+pub(crate) fn find_legal_targets_for_ability(
+    state: &GameState,
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    let target_ctx = super::filter::FilterContext::from_ability(ability);
+    find_legal_targets_with_context(
+        state,
+        filter,
+        ability.controller,
+        ability.source_id,
+        &target_ctx,
+    )
+}
+
+pub(crate) fn find_legal_targets_for_ability_with_controller(
+    state: &GameState,
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+    source_controller: PlayerId,
+) -> Vec<TargetRef> {
+    let target_ctx =
+        super::filter::FilterContext::from_ability_with_controller(ability, source_controller);
+    find_legal_targets_with_context(
+        state,
+        filter,
+        source_controller,
+        ability.source_id,
+        &target_ctx,
+    )
+}
+
+fn find_legal_targets_with_context(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+    target_ctx: &super::filter::FilterContext,
+) -> Vec<TargetRef> {
     let mut targets = Vec::new();
 
     // SpecificObject is runtime-bound (not used for target selection)
@@ -35,7 +79,13 @@ pub fn find_legal_targets(
     if let TargetFilter::Or { filters } = filter {
         let mut seen = HashSet::new();
         for branch in filters {
-            for target in find_legal_targets(state, branch, source_controller, source_id) {
+            for target in find_legal_targets_with_context(
+                state,
+                branch,
+                source_controller,
+                source_id,
+                target_ctx,
+            ) {
                 if seen.insert(target.clone()) {
                     targets.push(target);
                 }
@@ -119,16 +169,13 @@ pub fn find_legal_targets(
 
     let explicit_zones = extract_explicit_zones(filter);
 
-    let target_ctx =
-        super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
     if !explicit_zones.is_empty() {
         // Explicit zone search: ONLY search the specified zones
         for zone in &explicit_zones {
             match zone {
                 Zone::Battlefield => {
                     for &obj_id in &state.battlefield {
-                        if super::filter::matches_target_filter(state, obj_id, filter, &target_ctx)
-                        {
+                        if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
                             let obj = match state.objects.get(&obj_id) {
                                 Some(o) => o,
                                 None => continue,
@@ -143,8 +190,7 @@ pub fn find_legal_targets(
                     state,
                     state.exile.iter().copied(),
                     filter,
-                    source_controller,
-                    source_id,
+                    target_ctx,
                     false,
                     &mut targets,
                 ),
@@ -154,8 +200,7 @@ pub fn find_legal_targets(
                             state,
                             player.graveyard.iter().copied(),
                             filter,
-                            source_controller,
-                            source_id,
+                            target_ctx,
                             false,
                             &mut targets,
                         );
@@ -167,8 +212,7 @@ pub fn find_legal_targets(
                             state,
                             player.hand.iter().copied(),
                             filter,
-                            source_controller,
-                            source_id,
+                            target_ctx,
                             false,
                             &mut targets,
                         );
@@ -180,8 +224,7 @@ pub fn find_legal_targets(
                             state,
                             player.library.iter().copied(),
                             filter,
-                            source_controller,
-                            source_id,
+                            target_ctx,
                             false,
                             &mut targets,
                         );
@@ -190,12 +233,13 @@ pub fn find_legal_targets(
                 Zone::Stack => {
                     for entry in &state.stack {
                         let obj_id = entry.id;
-                        if stack_entry_matches_filter(
+                        if stack_entry_matches_filter_with_context(
                             state,
                             entry,
                             filter,
                             source_controller,
                             source_id,
+                            target_ctx,
                         ) {
                             let obj = match state.objects.get(&obj_id) {
                                 Some(o) => o,
@@ -213,11 +257,18 @@ pub fn find_legal_targets(
     } else {
         // No explicit zone: default behavior (battlefield + stack for Card type)
         if filter_targets_stack_spells(filter) {
-            add_stack_spells(state, filter, source_controller, source_id, &mut targets);
+            add_stack_spells(
+                state,
+                filter,
+                source_controller,
+                source_id,
+                target_ctx,
+                &mut targets,
+            );
         }
 
         for &obj_id in &state.battlefield {
-            if super::filter::matches_target_filter(state, obj_id, filter, &target_ctx) {
+            if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
                 let obj = match state.objects.get(&obj_id) {
                     Some(o) => o,
                     None => continue,
@@ -241,6 +292,20 @@ pub fn validate_targets(
     source_id: ObjectId,
 ) -> Vec<TargetRef> {
     let legal = find_legal_targets(state, filter, source_controller, source_id);
+    validate_targets_against_legal(targets, legal)
+}
+
+pub(crate) fn validate_targets_for_ability(
+    state: &GameState,
+    targets: &[TargetRef],
+    filter: &TargetFilter,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    let legal = find_legal_targets_for_ability(state, filter, ability);
+    validate_targets_against_legal(targets, legal)
+}
+
+fn validate_targets_against_legal(targets: &[TargetRef], legal: Vec<TargetRef>) -> Vec<TargetRef> {
     if legal.len() <= 8 {
         targets
             .iter()
@@ -679,6 +744,7 @@ pub(crate) fn extract_source_from_event(
         // trigger fires from; `source_id` is the permanent tapped for mana.
         GameEvent::TappedForMana { source_id, .. } => Some(*source_id),
         GameEvent::CounterAdded { object_id, .. } => Some(*object_id),
+        GameEvent::Evolved { object_id } => Some(*object_id),
         GameEvent::CounterRemoved { object_id, .. } => Some(*object_id),
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
         GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
@@ -692,6 +758,7 @@ pub(crate) fn extract_source_from_event(
         GameEvent::TurnedFaceUp { object_id } => Some(*object_id),
         GameEvent::Cycled { object_id, .. } => Some(*object_id),
         GameEvent::CreatureSuspected { object_id } => Some(*object_id),
+        GameEvent::Detained { object_id } => Some(*object_id),
         GameEvent::CaseSolved { object_id } => Some(*object_id),
         GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids.len() == 1 => {
             attacker_ids.first().copied()
@@ -756,10 +823,10 @@ pub(crate) fn extract_player_from_event(
         GameEvent::AttackersDeclared { attacker_ids, .. } => attacker_ids
             .iter()
             .find_map(|id| state.objects.get(id).map(|obj| obj.controller)),
-        // For object-centric events, extract the controller
-        GameEvent::BecomesTarget { source_id, .. } => {
-            state.objects.get(source_id).map(|obj| obj.controller)
-        }
+        GameEvent::BecomesTarget { target, source_id } => match target {
+            TargetRef::Player(player_id) => Some(*player_id),
+            TargetRef::Object(_) => state.objects.get(source_id).map(|obj| obj.controller),
+        },
         // CR 603.7c: "that player" for DamageDone triggers refers to the damaged player.
         GameEvent::DamageDealt { target, .. } => match target {
             TargetRef::Player(pid) => Some(*pid),
@@ -804,6 +871,10 @@ pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent)
         GameEvent::CounterAdded { count, .. } => Some(*count as i32),
         GameEvent::CounterRemoved { count, .. } => Some(*count as i32),
         GameEvent::Discarded { .. } => Some(1),
+        // CR 508.1m + CR 603.2c: Batched attack-trigger context stores the
+        // attackers that satisfied the trigger subject, so "that many" reads
+        // the size of that contextual attack event.
+        GameEvent::AttackersDeclared { attacker_ids, .. } => Some(attacker_ids.len() as i32),
         // CR 706.2: the final number of a die roll is its result. Lets
         // `EventContextAmount` resolve "where X is the result" pump effects.
         GameEvent::DieRolled { result, .. } => Some(*result as i32),
@@ -840,9 +911,29 @@ pub(crate) fn stack_entry_matches_filter(
     source_controller: PlayerId,
     source_id: ObjectId,
 ) -> bool {
+    let target_ctx =
+        super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
+    stack_entry_matches_filter_with_context(
+        state,
+        entry,
+        filter,
+        source_controller,
+        source_id,
+        &target_ctx,
+    )
+}
+
+fn stack_entry_matches_filter_with_context(
+    state: &GameState,
+    entry: &StackEntry,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+    target_ctx: &super::filter::FilterContext,
+) -> bool {
     match &entry.kind {
         StackEntryKind::Spell { .. } => {
-            stack_spell_entry_matches_filter(state, entry, filter, source_controller, source_id)
+            stack_spell_entry_matches_filter(state, entry, filter, source_id, target_ctx)
         }
         StackEntryKind::ActivatedAbility { .. }
         | StackEntryKind::TriggeredAbility { .. }
@@ -929,15 +1020,16 @@ fn add_zone_targets(
     state: &GameState,
     object_ids: impl IntoIterator<Item = ObjectId>,
     filter: &TargetFilter,
-    source_controller: PlayerId,
-    source_id: ObjectId,
+    target_ctx: &super::filter::FilterContext,
     require_full_targeting: bool,
     targets: &mut Vec<TargetRef>,
 ) {
-    let ctx =
-        super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
+    let source_id = target_ctx.source_id;
+    let source_controller = target_ctx
+        .source_controller
+        .expect("target enumeration context must include a source controller");
     for obj_id in object_ids {
-        if super::filter::matches_target_filter(state, obj_id, filter, &ctx) {
+        if super::filter::matches_target_filter(state, obj_id, filter, target_ctx) {
             let obj = match state.objects.get(&obj_id) {
                 Some(o) => o,
                 None => continue,
@@ -958,10 +1050,11 @@ fn add_stack_spells(
     filter: &TargetFilter,
     source_controller: PlayerId,
     source_id: ObjectId,
+    target_ctx: &super::filter::FilterContext,
     targets: &mut Vec<TargetRef>,
 ) {
     for entry in &state.stack {
-        if !stack_spell_entry_matches_filter(state, entry, filter, source_controller, source_id) {
+        if !stack_spell_entry_matches_filter(state, entry, filter, source_id, target_ctx) {
             continue;
         }
 
@@ -979,8 +1072,8 @@ fn stack_spell_entry_matches_filter(
     state: &GameState,
     entry: &StackEntry,
     filter: &TargetFilter,
-    source_controller: PlayerId,
     source_id: ObjectId,
+    target_ctx: &super::filter::FilterContext,
 ) -> bool {
     if !matches!(entry.kind, StackEntryKind::Spell { .. }) {
         return false;
@@ -1037,9 +1130,7 @@ fn stack_spell_entry_matches_filter(
         }
     }
 
-    let controlled_ctx =
-        super::filter::FilterContext::from_source_with_controller(source_id, source_controller);
-    stack_spell_matches_filter(state, entry.id, filter, &controlled_ctx)
+    stack_spell_matches_filter(state, entry.id, filter, target_ctx)
 }
 
 fn stack_spell_matches_filter(
@@ -1319,6 +1410,28 @@ pub(crate) fn latest_tracked_set_id(state: &GameState) -> Option<TrackedSetId> {
         .map(|(&id, _)| id)
 }
 
+/// CR 510.2 + CR 608.2c: In a simultaneous combat-damage event, "those
+/// creatures" on the resolving trigger can refer to the filtered source set
+/// carried by `CombatDamageDealtToPlayer`.
+pub(crate) fn current_combat_damage_source_filter(state: &GameState) -> Option<TargetFilter> {
+    let source_ids = match state.current_trigger_event.as_ref()? {
+        GameEvent::CombatDamageDealtToPlayer { source_ids, .. } => source_ids,
+        _ => return None,
+    };
+
+    match source_ids.as_slice() {
+        [] => None,
+        [id] => Some(TargetFilter::SpecificObject { id: *id }),
+        ids => Some(TargetFilter::Or {
+            filters: ids
+                .iter()
+                .copied()
+                .map(|id| TargetFilter::SpecificObject { id })
+                .collect(),
+        }),
+    }
+}
+
 /// CR 608.2c: Bind the `TrackedSetId(0)` sentinel in a `TargetFilter` to the
 /// most recent non-empty tracked set.
 ///
@@ -1326,9 +1439,12 @@ pub(crate) fn latest_tracked_set_id(state: &GameState) -> Option<TrackedSetId> {
 /// exiled card") and its type-filtered intersection `TrackedSetFiltered` ("X
 /// cards revealed this way"). Filters that are not sentinel-backed — already
 /// bound tracked-set filters and every non-tracked-set filter — are returned
-/// unchanged. When no tracked set is available the sentinel is left in place so
-/// downstream resolution still sees a (vacuously matching nothing) filter
-/// rather than a silently mismatched concrete id.
+/// unchanged. The active chain-local set wins first; when no chain set is
+/// available, combat-damage trigger context can supply a filtered source set;
+/// otherwise the latest non-empty tracked set is used for legacy callers. If
+/// none of those exists, the sentinel is left in place so downstream resolution
+/// still sees a (vacuously matching nothing) filter rather than a silently
+/// mismatched concrete id.
 ///
 /// This is the single authority for sentinel binding: `ChangeZone` resolution,
 /// chained-ability resolution, and the delayed-trigger / counter / permission
@@ -1341,22 +1457,33 @@ pub(crate) fn resolve_tracked_set_sentinel(
     match filter {
         TargetFilter::TrackedSet {
             id: TrackedSetId(0),
-        } => match latest_tracked_set_id(state) {
-            Some(id) => TargetFilter::TrackedSet { id },
-            None => TargetFilter::TrackedSet {
+        } => state
+            .chain_tracked_set_id
+            .map(|id| TargetFilter::TrackedSet { id })
+            .or_else(|| current_combat_damage_source_filter(state))
+            .or_else(|| latest_tracked_set_id(state).map(|id| TargetFilter::TrackedSet { id }))
+            .unwrap_or(TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
-            },
-        },
+            }),
         TargetFilter::TrackedSetFiltered {
             id: TrackedSetId(0),
             filter,
-        } => match latest_tracked_set_id(state) {
-            Some(id) => TargetFilter::TrackedSetFiltered { id, filter },
-            None => TargetFilter::TrackedSetFiltered {
-                id: TrackedSetId(0),
-                filter,
-            },
-        },
+        } => {
+            if let Some(id) = state.chain_tracked_set_id {
+                TargetFilter::TrackedSetFiltered { id, filter }
+            } else if let Some(source_filter) = current_combat_damage_source_filter(state) {
+                TargetFilter::And {
+                    filters: vec![source_filter, *filter],
+                }
+            } else if let Some(id) = latest_tracked_set_id(state) {
+                TargetFilter::TrackedSetFiltered { id, filter }
+            } else {
+                TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter,
+                }
+            }
+        }
         other => other,
     }
 }

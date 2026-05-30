@@ -68,7 +68,12 @@ pub fn resolve(
 
     // If all categories are empty for all players, skip directly to sacrifice.
     if eligible.iter().all(|e| e.is_empty()) && remaining_players.is_empty() {
+        // CR 603.10a: the permanents this sweep sacrifices left the battlefield
+        // together — stamp the sub-slice so a co-departing leaves-the-battlefield
+        // observer among them observes the rest.
+        let before = events.len();
         sacrifice_unchosen(state, &[], &player_order, ability.source_id, events);
+        crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[before..]);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseAndSacrificeRest,
             source_id: ability.source_id,
@@ -95,7 +100,11 @@ pub fn resolve(
     if let Some(auto_choices) = try_auto_resolve(&eligible) {
         let kept: Vec<ObjectId> = auto_choices.iter().filter_map(|&opt| opt).collect();
         if remaining_players.is_empty() {
+            // CR 603.10a: co-departing observer among the sacrificed group
+            // observes the rest — stamp the sweep's sub-slice.
+            let before = events.len();
             sacrifice_unchosen(state, &kept, &player_order, ability.source_id, events);
+            crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[before..]);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::ChooseAndSacrificeRest,
                 source_id: ability.source_id,
@@ -201,7 +210,11 @@ pub(crate) fn advance_to_next_player(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     if remaining.is_empty() {
+        // CR 603.10a: terminal APNAP sweep — the sacrificed group left the
+        // battlefield together, so stamp this sub-slice for co-departing observers.
+        let before = events.len();
         sacrifice_unchosen(state, &all_kept, scoped_players, source_id, events);
+        crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[before..]);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseAndSacrificeRest,
             source_id,

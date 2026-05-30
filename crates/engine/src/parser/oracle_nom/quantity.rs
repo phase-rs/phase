@@ -530,6 +530,11 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_entered_this_turn_ref,
         parse_tokens_created_this_turn_tail,
         parse_number_of_distinct_colors_among_permanents_tail,
+        // CR 107.1 + CR 700.1: "[type] controlled by the player who controls
+        // the fewest/most" — must precede `parse_number_of_controlled_type`,
+        // whose " you control" suffix would otherwise not match but whose
+        // type-word prefix overlaps.
+        parse_controlled_by_extremum_player,
         parse_number_of_controlled_type,
         parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
@@ -583,6 +588,25 @@ fn parse_number_of_distinct_colors_among_permanents_tail(
     Ok(("", QuantityRef::DistinctColorsAmongPermanents { filter }))
 }
 
+/// CR 122.1: Parse the iteration source "kind of counter on/among <filter>" →
+/// `QuantityRef::DistinctCounterKindsAmong { filter }`. Counter-side analogue of
+/// `parse_number_of_distinct_colors_among_permanents_tail`. Used by Bribe
+/// Taker's "for each kind of counter on permanents you control" — the filter is
+/// any controlled-permanent type phrase, so the combinator covers the whole
+/// class, not one card. Both "on" and "among" surface forms are accepted.
+fn parse_for_each_distinct_counter_kinds_among(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("kind of counter ").parse(input)?;
+    let (rest, _) = alt((tag("on "), tag("among "))).parse(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if !remainder.trim().is_empty() || matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok(("", QuantityRef::DistinctCounterKindsAmong { filter }))
+}
+
 /// CR 201.2 + CR 603.4: Parse "differently named <type-phrase>" after
 /// "the number of" → `QuantityRef::ObjectCountDistinct { filter, qualities: [Name] }`.
 ///
@@ -623,15 +647,59 @@ fn parse_distinct_named_objects(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
 }
 
+/// CR 107.1 + CR 700.1: Parse "[type-phrase] controlled by the player who
+/// controls the fewest" (and "… the most") after "the number of" →
+/// `QuantityRef::ControlledByEachPlayer { filter, aggregate }`.
+///
+/// Used by Balance / Restore Balance / Balancing Act for the equalization
+/// minimum ("a number of lands they control equal to the number of lands
+/// controlled by the player who controls the fewest"). Battlefield-scoped: the
+/// hand-zone analogue is `HandSize { AllPlayers { Min } }`, parsed elsewhere.
+fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, filter) = super::target::parse_type_phrase(input)?;
+    if !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let (rest, aggregate) = preceded(
+        tag(" controlled by the player who controls the "),
+        alt((
+            value(AggregateFunction::Min, tag("fewest")),
+            value(AggregateFunction::Max, tag("most")),
+        )),
+    )
+    .parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ControlledByEachPlayer { filter, aggregate },
+    ))
+}
+
 /// Parse "[type(s)] you control" after "the number of".
 fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, tf) = parse_type_filter_word(input)?;
+    let (rest, head) = parse_type_filter_word(input)?;
     let (rest, _) = tag(" you control").parse(rest)?;
+    // CR 205.2b: "<head> you control that are <t1> and/or <t2>" restricts the
+    // controlled population to objects that have any of the listed card types.
+    // CR 205.2b makes a multi-type object satisfy any of its types, so a
+    // permanent that is both a creature and a Vehicle is counted once via the
+    // `AnyOf` disjunction (Collision Course). When the relative clause names a
+    // single type, that type alone replaces the head. A non-type "that are"
+    // clause (e.g. "that are tapped") leaves the suffix unconsumed so a later
+    // arm can handle it rather than mis-parsing it here.
+    let (rest, type_filters) =
+        match opt(preceded(tag(" that are "), parse_type_filter_list)).parse(rest)? {
+            (r, Some(list)) if list.len() > 1 => (r, vec![TypeFilter::AnyOf(list)]),
+            (r, Some(list)) => (r, list),
+            (r, None) => (r, vec![head]),
+        };
     Ok((
         rest,
         QuantityRef::ObjectCount {
             filter: TargetFilter::Typed(TypedFilter {
-                type_filters: vec![tf],
+                type_filters,
                 controller: Some(ControllerRef::You),
                 properties: Vec::new(),
             }),
@@ -1658,6 +1726,10 @@ fn parse_for_each_clause_ref_with_they_controller(
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_mana_spent_to_cast_ref,
+        // CR 122.1: "kind of counter on/among <filter>" (Bribe Taker). Placed
+        // before the generic `<type> you control` arm so the leading "kind"
+        // token does not commit to it.
+        parse_for_each_distinct_counter_kinds_among,
         parse_for_each_controlled_type,
     )))
     .parse(input)
@@ -2455,8 +2527,11 @@ pub fn parse_the_number_of_player_counters(input: &str) -> OracleResult<'_, Quan
 }
 
 /// CR 122.1: Typed alt over named player-counter kinds. Each arm emits the
-/// `PlayerCounterKind` variant directly (no intermediate string).
-fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind> {
+/// `PlayerCounterKind` variant directly (no intermediate string). `pub(crate)`
+/// so the `PlayerCounter` player-attribute predicate parser
+/// (`oracle_quantity::parse_player_attribute_predicate`) shares this single
+/// kind grammar rather than re-enumerating counter tags.
+pub(crate) fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind> {
     alt((
         value(PlayerCounterKind::Experience, tag("experience")),
         value(PlayerCounterKind::Poison, tag("poison")),
@@ -3154,6 +3229,33 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_for_each_distinct_counter_kinds_among() {
+        // CR 122.1: "kind of counter on permanents you control" iteration source.
+        let (rest, q) =
+            parse_for_each_clause_ref("kind of counter on permanents you control").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::DistinctCounterKindsAmong { filter } => match filter {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.type_filters, vec![TypeFilter::Permanent]);
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected typed permanent filter, got {other:?}"),
+            },
+            other => panic!("expected DistinctCounterKindsAmong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_for_each_distinct_counter_kinds_among_creatures() {
+        // "among" surface form + a non-permanent type phrase.
+        let (rest, q) =
+            parse_for_each_clause_ref("kind of counter among creatures you control").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(q, QuantityRef::DistinctCounterKindsAmong { .. }));
+    }
+
+    #[test]
     fn test_parse_number_of_object_name_words() {
         let (rest, q) =
             parse_quantity_ref("the number of words in target creature's name").unwrap();
@@ -3252,6 +3354,57 @@ mod tests {
                     aggregate: AggregateFunction::Sum,
                     exclude: None,
                 },
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_controlled_by_fewest_player() {
+        // CR 107.1: Balance's equalization minimum.
+        let (rest, q) = parse_quantity_ref(
+            "the number of lands controlled by the player who controls the fewest",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ControlledByEachPlayer {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+                aggregate: AggregateFunction::Min,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_controlled_by_most_player() {
+        // The `Max` direction — "the player who controls the most".
+        let (rest, q) = parse_quantity_ref(
+            "the number of creatures controlled by the player who controls the most",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ControlledByEachPlayer {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+                aggregate: AggregateFunction::Max,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_controlled_by_fewest_permanents() {
+        // Balancing Act's "permanents" filter routes through the same arm.
+        let (rest, q) = parse_quantity_ref(
+            "the number of permanents controlled by the player who controls the fewest",
+        )
+        .unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ControlledByEachPlayer {
+                filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+                aggregate: AggregateFunction::Min,
             }
         );
         assert_eq!(rest, "");
@@ -4382,6 +4535,26 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    #[test]
+    fn test_parse_half_your_library_rounded_up() {
+        let (rest, q) = parse_quantity("half your library, rounded up").unwrap();
+        assert_eq!(
+            q,
+            QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types: Vec::new(),
+                        scope: CountScope::Controller,
+                    },
+                }),
+                divisor: 2,
+                rounding: RoundingMode::Up,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
     /// Legacy Oracle text for life-loss cards used "his or her life" before
     /// the 2014 "their" reword. Resolves to the same `TargetLifeTotal` ref.
     #[test]
@@ -4642,5 +4815,114 @@ mod tests {
                 "phrase {phrase:?} must yield ObjectManaValue{{CostPaidObject}}"
             );
         }
+    }
+
+    /// CR 700.12: "the number of outlaws you control" counts every permanent
+    /// with an outlaw creature type (Assassin/Mercenary/Pirate/Rogue/Warlock).
+    /// Laughing Jasper Flint. Routes through `parse_number_of_controlled_type`
+    /// once `parse_type_filter_word` recognizes the "outlaws" head noun.
+    #[test]
+    fn parse_quantity_ref_the_number_of_outlaws_you_control() {
+        let outlaws = TypeFilter::AnyOf(
+            ["Assassin", "Mercenary", "Pirate", "Rogue", "Warlock"]
+                .iter()
+                .map(|s| TypeFilter::Subtype((*s).to_string()))
+                .collect(),
+        );
+        let (rest, q) = parse_quantity_ref("the number of outlaws you control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![outlaws],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// CR 205.2b: "permanents you control that are creatures and/or Vehicles"
+    /// restricts the controlled population to the listed types, merged into an
+    /// `AnyOf` disjunction so a creature-Vehicle is counted once. Collision
+    /// Course.
+    #[test]
+    fn parse_quantity_ref_controlled_type_disjunction_clause() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of permanents you control that are creatures and/or vehicles",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::AnyOf(vec![
+                        TypeFilter::Creature,
+                        TypeFilter::Subtype("Vehicle".to_string()),
+                    ])],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// Regression: a plain controlled-type count without a "that are" clause
+    /// keeps the single head type.
+    #[test]
+    fn parse_quantity_ref_controlled_type_no_clause_keeps_head() {
+        let (rest, q) = parse_quantity_ref("the number of creatures you control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// A single-type "that are" clause replaces the head with that one type
+    /// (no `AnyOf` wrapper).
+    #[test]
+    fn parse_quantity_ref_controlled_type_single_clause() {
+        let (rest, q) =
+            parse_quantity_ref("the number of permanents you control that are artifacts").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// A non-type "that are" clause (e.g. "that are tapped") must NOT be
+    /// consumed by the optional type-list clause — the `opt` returns `None` and
+    /// the count keeps the head type, leaving the clause for a later parser.
+    #[test]
+    fn parse_quantity_ref_controlled_type_non_type_clause_falls_through() {
+        let (rest, q) =
+            parse_number_of_controlled_type("creatures you control that are tapped").unwrap();
+        assert_eq!(rest, " that are tapped");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
     }
 }

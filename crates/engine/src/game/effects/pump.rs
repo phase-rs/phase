@@ -245,8 +245,8 @@ fn pt_modifications(
         PtValue::Fixed(n) if *n != 0 => {
             mods.push(ContinuousModification::AddPower { value: *n });
         }
-        PtValue::Variable(alias) => {
-            if let Some(resolved) = resolve_pt_variable(alias, ability) {
+        PtValue::Variable(value) => {
+            if let Some(resolved) = resolve_variable_pt(value, ability) {
                 if resolved != 0 {
                     mods.push(ContinuousModification::AddPower { value: resolved });
                 }
@@ -264,8 +264,8 @@ fn pt_modifications(
         PtValue::Fixed(n) if *n != 0 => {
             mods.push(ContinuousModification::AddToughness { value: *n });
         }
-        PtValue::Variable(alias) => {
-            if let Some(resolved) = resolve_pt_variable(alias, ability) {
+        PtValue::Variable(value) => {
+            if let Some(resolved) = resolve_variable_pt(value, ability) {
                 if resolved != 0 {
                     mods.push(ContinuousModification::AddToughness { value: resolved });
                 }
@@ -282,18 +282,12 @@ fn pt_modifications(
     mods
 }
 
-/// CR 107.3a: X in an activation cost defines matching X/-X values while the
-/// activated ability is on the stack.
-fn resolve_pt_variable(alias: &str, ability: &ResolvedAbility) -> Option<i32> {
-    let x = ability
-        .chosen_x
-        .map(|value| value.min(i32::MAX as u32) as i32)?;
-    if alias.eq_ignore_ascii_case("X") {
-        Some(x)
-    } else if alias.eq_ignore_ascii_case("-X") {
-        Some(-x)
-    } else {
-        None
+fn resolve_variable_pt(value: &str, ability: &ResolvedAbility) -> Option<i32> {
+    let chosen = i32::try_from(ability.chosen_x?).unwrap_or(i32::MAX);
+    match value {
+        "X" | "x" => Some(chosen),
+        "-X" | "-x" => Some(chosen.saturating_neg()),
+        _ => None,
     }
 }
 
@@ -372,6 +366,31 @@ mod tests {
 
         assert_eq!(state.objects[&obj_id].power, Some(1));
         assert_eq!(state.objects[&obj_id].toughness, Some(1));
+    }
+
+    #[test]
+    fn pump_resolves_variable_pt_against_chosen_x() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = make_creature(&mut state, "Bear", 5, 5, PlayerId(0));
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Variable("-X".to_string()),
+                toughness: PtValue::Variable("-X".to_string()),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.chosen_x = Some(3);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&obj_id].power, Some(2));
+        assert_eq!(state.objects[&obj_id].toughness, Some(2));
     }
 
     #[test]
@@ -477,31 +496,6 @@ mod tests {
             "propagated parent target must NOT be pumped by SelfRef sub-ability"
         );
         assert_eq!(state.objects[&other].toughness, Some(3));
-    }
-
-    #[test]
-    fn pump_variable_x_uses_chosen_x_for_positive_and_negative_pt() {
-        let mut state = GameState::new_two_player(42);
-        let obj_id = make_creature(&mut state, "Target", 5, 3, PlayerId(0));
-
-        let mut ability = ResolvedAbility::new(
-            Effect::Pump {
-                power: PtValue::Variable("X".to_string()),
-                toughness: PtValue::Variable("-X".to_string()),
-                target: TargetFilter::Any,
-            },
-            vec![TargetRef::Object(obj_id)],
-            ObjectId(100),
-            PlayerId(0),
-        );
-        ability.chosen_x = Some(3);
-        let mut events = Vec::new();
-
-        resolve(&mut state, &ability, &mut events).unwrap();
-        evaluate_layers(&mut state);
-
-        assert_eq!(state.objects[&obj_id].power, Some(8));
-        assert_eq!(state.objects[&obj_id].toughness, Some(0));
     }
 
     /// CR 701.10c (issue #323 class): chained `DoublePT { target: SelfRef }`

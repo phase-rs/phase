@@ -4,7 +4,15 @@
   },
   "aiDifficulty": {
     "label": "AI difficulty",
-    "ariaLabel": "AI difficulty: {{difficulty}}"
+    "ariaLabel": "AI difficulty: {{difficulty}}",
+    "levels": {
+      "VeryEasy": "Very Easy",
+      "Easy": "Easy",
+      "Medium": "Medium",
+      "Hard": "Hard",
+      "VeryHard": "Very Hard",
+      "CEDH": "cEDH"
+    }
   },
   "bracketFilter": {
     "label": "Bracket filter"
@@ -31,7 +39,7 @@
     },
     "draft": {
       "title": "Draft",
-      "description": "Quick Draft against AI, plus experimental cube and pod draft options."
+      "description": "Quick Draft against AI, cube draft, or host a pod draft."
     },
     "decks": {
       "title": "Decks",
@@ -88,6 +96,11 @@
     "difficulty": "Difficulty",
     "deckRandom": "Random",
     "deckRandomCount": "Random ({{count}})",
+    "cedhToggle": {
+      "label": "cEDH mode",
+      "hint": "All opponents play cEDH. Every deck must be bracket 5.",
+      "badge": "cEDH"
+    },
     "source": {
       "feed": "Feed",
       "user": "User",
@@ -109,9 +122,16 @@
   "importDeck": {
     "title": "Import Deck",
     "tabPaste": "Paste Text",
+    "tabUrl": "From URL",
     "tabFile": "From File",
     "deckNamePlaceholder": "Deck name",
+    "urlPlaceholder": "https://moxfield.com/decks/… or https://archidekt.com/decks/…",
+    "urlHint": "Imports a public deck from Moxfield or Archidekt.",
     "import": "Import",
+    "importing": "Importing…",
+    "errorInvalidUrl": "Enter a valid Moxfield or Archidekt deck URL.",
+    "errorNetworkFailure": "Couldn't reach the deck import service. Check your connection and try again.",
+    "errorGeneric": "Failed to import deck.",
     "fileSupports": "Supports .dck, .dec, .txt, and MTGA format",
     "chooseFile": "Choose File"
   },
@@ -205,7 +225,8 @@
     "browseAll": "Browse All",
     "loadMore": "Load More",
     "selectedDeck": "Selected deck",
-    "chooseDeckToContinue": "Choose a deck to continue"
+    "chooseDeckToContinue": "Choose a deck to continue",
+    "filterAll": "All"
   },
   "subscriptions": {
     "emptyTitle": "No feed subscriptions",
@@ -213,5 +234,13 @@
     "feedMeta_one": "· {{count}} deck · Updated {{date}}",
     "feedMeta_other": "· {{count}} decks · Updated {{date}}",
     "error": "Error: {{error}}"
+  },
+  "myDecksPage": {
+    "eyebrow": "Decks",
+    "title": "Decks.",
+    "description": "Open a saved list, import a new one, or continue in deck builder."
+  },
+  "loadGameState": {
+    "readFailed": "Failed to read file"
   }
 }

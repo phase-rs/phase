@@ -4,10 +4,11 @@ use crate::types::ability::{
     CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
     PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
 };
-use crate::types::actions::{GameAction, LearnOption};
+use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, ChosenDamageSource, GameState, PayableResource, PendingContinuation, WaitingFor,
+    ActionResult, ChosenDamageSource, GameState, OutsideGameChoiceSource, PayableResource,
+    PendingContinuation, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -126,6 +127,75 @@ fn route_rest_partition(
     }
 }
 
+/// CR 701.22a / CR 701.25a: Scry and surveil put the kept cards on top of the
+/// library "in any order", so a legal keep-on-top selection is any duplicate-free
+/// subset of the looked-at cards (order is the player's free choice). Because the
+/// multiplayer server bypasses its candidate-enumeration legality gate for these
+/// freeform states (see `WaitingFor::accepts_freeform_card_selection`), `apply()`
+/// is the real validation boundary: a foreign id or a duplicate would corrupt the
+/// library `retain`+`insert` (relocating or duplicating a card), so reject both
+/// here. Mirrors the order-agnostic subset semantics of `selection_mismatch`.
+fn validate_keep_on_top_selection(
+    selection: &[ObjectId],
+    looked_at: &[ObjectId],
+) -> Result<(), EngineError> {
+    let mut seen = std::collections::HashSet::new();
+    for id in selection {
+        if !looked_at.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "keep-on-top selection contains a card that was not looked at".to_string(),
+            ));
+        }
+        if !seen.insert(*id) {
+            return Err(EngineError::InvalidAction(
+                "keep-on-top selection contains a duplicate card".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// CR 401.2 + CR 608.2c: Validate a `DigChoice` keep-selection. A dig
+/// ("look at the top N, put [some] into your hand/elsewhere") may only act on
+/// the cards it actually looked at, and only on those matching the effect's
+/// filter. Mirrors `validate_keep_on_top_selection` (used by scry/surveil) but
+/// additionally enforces the filter, since `DigChoice` is one of the freeform
+/// card-selection states the multiplayer server forwards unvalidated — so
+/// `apply` is the sole legality boundary.
+///
+/// `looked_at` is the full revealed set; `selectable` is the subset matching the
+/// effect's filter (equal to `looked_at` when the effect has no filter, and
+/// empty when a filter matched nothing — in which case the only legal selection
+/// is empty). Previously the filter check was skipped whenever `selectable` was
+/// empty, which let a filtered dig that matched zero cards accept arbitrary
+/// object ids — moving cards the effect never looked at into the chooser's hand,
+/// or inserting foreign ids into the library and corrupting its order.
+fn validate_dig_selection(
+    kept: &[ObjectId],
+    looked_at: &[ObjectId],
+    selectable: &[ObjectId],
+) -> Result<(), EngineError> {
+    let mut seen = std::collections::HashSet::new();
+    for id in kept {
+        if !seen.insert(*id) {
+            return Err(EngineError::InvalidAction(
+                "dig selection contains a duplicate card".to_string(),
+            ));
+        }
+        if !looked_at.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "dig selection contains a card that was not looked at".to_string(),
+            ));
+        }
+        if !selectable.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "dig selection contains a card that does not match the effect's filter".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// CR 701.23a + CR 614.1 / CR 110.5b: Apply a cultivate-class search-destination
 /// split. `primary_ids` are routed to `primary_destination` through the full
 /// `change_zone::resolve` ETB pipeline (carrying `enter_tapped` so ETB-tapped
@@ -156,7 +226,7 @@ fn apply_search_partition(
                 target: crate::types::ability::TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: split.primary_enter_tapped,
                 enters_attacking: false,
                 up_to: false,
@@ -187,6 +257,9 @@ pub(super) fn handle_resolution_choice(
             GameAction::SelectCards { cards: top_cards },
         ) => {
             let all_cards = cards;
+            // CR 701.22a: the keep-on-top set must be a duplicate-free subset of
+            // the looked-at cards (any order is legal).
+            validate_keep_on_top_selection(&top_cards, &all_cards)?;
             let bottom_cards: Vec<_> = all_cards
                 .iter()
                 .filter(|id| !top_cards.contains(id))
@@ -285,9 +358,11 @@ pub(super) fn handle_resolution_choice(
             WaitingFor::RevealUntilKeptChoice {
                 player,
                 hit_card,
+                source_id,
                 accept_zone,
                 decline_zone,
                 enter_tapped,
+                enters_attacking,
                 revealed_misses,
                 rest_destination,
             },
@@ -301,6 +376,17 @@ pub(super) fn handle_resolution_choice(
                     if let Some(obj) = state.objects.get_mut(&hit_card) {
                         obj.tapped = true;
                     }
+                }
+                // CR 508.4: "...tapped and attacking" — place the accepted card
+                // in combat. `source_id` (the ability source / trigger attacker)
+                // supplies the defending player, matching the synchronous path.
+                if enters_attacking && accept_zone == Zone::Battlefield {
+                    let controller = state
+                        .objects
+                        .get(&hit_card)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(player);
+                    crate::game::combat::enter_attacking(state, hit_card, source_id, controller);
                 }
             } else if decline_zone == rest_destination {
                 misses.push(hit_card);
@@ -817,25 +903,12 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
 
-            if kept
-                .iter()
-                .enumerate()
-                .any(|(index, card_id)| kept[index + 1..].contains(card_id))
-            {
-                return Err(EngineError::InvalidAction(
-                    "Selected cards must be unique".to_string(),
-                ));
-            }
-
-            if !selectable_cards.is_empty() {
-                for card_id in &kept {
-                    if !selectable_cards.contains(card_id) {
-                        return Err(EngineError::InvalidAction(
-                            "Selected card does not match filter".to_string(),
-                        ));
-                    }
-                }
-            }
+            // CR 401.2 + CR 608.2c: the keep-selection must be unique, drawn from
+            // the cards actually looked at, and (when the dig has a filter) from
+            // the filter-matching subset. The previous check skipped filter/look-
+            // at validation entirely whenever `selectable_cards` was empty, so a
+            // filtered dig that matched nothing accepted arbitrary object ids.
+            validate_dig_selection(&kept, &cards, &selectable_cards)?;
 
             let unkept: Vec<_> = cards
                 .iter()
@@ -906,14 +979,36 @@ pub(super) fn handle_resolution_choice(
         }
         (
             WaitingFor::SurveilChoice { player, cards },
-            GameAction::SelectCards {
-                cards: to_graveyard,
-            },
+            GameAction::SelectCards { cards: top_cards },
         ) => {
+            // CR 701.25a: To surveil N, put any number of the looked-at cards into
+            // your graveyard and the rest on top of your library in any order. The
+            // action payload mirrors scry — it is the ordered keep-on-top set;
+            // every looked-at card not in it is put into the graveyard.
+            let all_cards = cards;
+            // CR 701.25a: the keep-on-top set must be a duplicate-free subset of
+            // the looked-at cards (any order is legal).
+            validate_keep_on_top_selection(&top_cards, &all_cards)?;
+            let to_graveyard: Vec<_> = all_cards
+                .iter()
+                .filter(|id| !top_cards.contains(id))
+                .copied()
+                .collect();
+            // CR 701.25a: every looked-at card not kept on top is put into the
+            // graveyard (emitting its zone-change events).
             for &obj_id in &to_graveyard {
-                if cards.contains(&obj_id) {
-                    zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
-                }
+                zones::move_to_zone(state, obj_id, Zone::Graveyard, events);
+            }
+            // CR 701.25a: the kept cards rest on top of the library in the
+            // player's chosen order (top_cards[0] becomes the topmost card).
+            let player_state = state
+                .players
+                .iter_mut()
+                .find(|candidate| candidate.id == player)
+                .expect("player exists");
+            player_state.library.retain(|id| !top_cards.contains(id));
+            for (index, &card_id) in top_cards.iter().enumerate() {
+                player_state.library.insert(index, card_id);
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -1172,57 +1267,120 @@ pub(super) fn handle_resolution_choice(
         (
             WaitingFor::OutsideGameChoice {
                 player,
+                source_id,
                 choices,
                 count,
                 reveal,
                 up_to,
                 destination,
             },
-            GameAction::ChooseOutsideGameCards { sideboard_indices },
+            GameAction::ChooseOutsideGameCards { selections },
         ) => {
             let valid = if up_to {
-                sideboard_indices.len() <= count
+                selections.len() <= count
             } else {
-                sideboard_indices.len() == count
+                selections.len() == count
             };
             if !valid {
                 return Err(EngineError::InvalidAction(format!(
                     "Must select {}{} outside-game card(s), got {}",
                     if up_to { "up to " } else { "exactly " },
                     count,
-                    sideboard_indices.len()
+                    selections.len()
                 )));
             }
-            let mut requested_counts = HashMap::new();
-            for index in &sideboard_indices {
-                *requested_counts.entry(*index).or_insert(0usize) += 1;
+            // CR 400.11 + CR 406.3: Each selection must match an offered choice
+            // and (for sideboard) not exceed the remaining copies. Face-up
+            // exile selections are single-object so duplicates of the same
+            // object_id are illegal.
+            let mut sideboard_counts: HashMap<usize, usize> = HashMap::new();
+            let mut exile_seen: std::collections::HashSet<ObjectId> =
+                std::collections::HashSet::new();
+            for selection in &selections {
+                match selection {
+                    OutsideGameSelection::Sideboard { sideboard_index } => {
+                        *sideboard_counts.entry(*sideboard_index).or_insert(0) += 1;
+                    }
+                    OutsideGameSelection::FaceUpExile { object_id } => {
+                        if !exile_seen.insert(*object_id) {
+                            return Err(EngineError::InvalidAction(
+                                "Same face-up exile card selected more than once".to_string(),
+                            ));
+                        }
+                    }
+                }
             }
-            for (index, requested_count) in requested_counts {
-                let Some(choice) = choices
-                    .iter()
-                    .find(|choice| choice.sideboard_index == index)
-                else {
+            for (sideboard_index, requested_count) in &sideboard_counts {
+                let Some(choice) = choices.iter().find(|choice| match &choice.source {
+                    OutsideGameChoiceSource::Sideboard {
+                        sideboard_index: idx,
+                        ..
+                    } => idx == sideboard_index,
+                    _ => false,
+                }) else {
                     return Err(EngineError::InvalidAction(
-                        "Selected card not in outside-game choices".to_string(),
+                        "Selected sideboard slot not in outside-game choices".to_string(),
                     ));
                 };
-                if requested_count > choice.entry.count as usize {
+                if *requested_count > choice.count as usize {
                     return Err(EngineError::InvalidAction(
                         "Selected more copies than are available outside the game".to_string(),
                     ));
                 }
             }
+            for object_id in &exile_seen {
+                if !choices.iter().any(|choice| match &choice.source {
+                    OutsideGameChoiceSource::FaceUpExile { object_id: oid } => oid == object_id,
+                    _ => false,
+                }) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected face-up exile card not in outside-game choices".to_string(),
+                    ));
+                }
+            }
 
             let mut chosen_ids = Vec::new();
-            for sideboard_index in sideboard_indices {
-                let object_id = effects::search_outside_game::put_sideboard_entry_into_game(
-                    state,
-                    player,
-                    sideboard_index,
-                    destination,
-                )
-                .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
-                chosen_ids.push(object_id);
+            for selection in selections {
+                match selection {
+                    OutsideGameSelection::Sideboard { sideboard_index } => {
+                        let object_id =
+                            effects::search_outside_game::put_sideboard_entry_into_game(
+                                state,
+                                player,
+                                sideboard_index,
+                                destination,
+                            )
+                            .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
+                        chosen_ids.push(object_id);
+                    }
+                    OutsideGameSelection::FaceUpExile { object_id } => {
+                        match effects::search_outside_game::put_face_up_exile_into(
+                            state,
+                            object_id,
+                            destination,
+                            source_id,
+                            player,
+                            events,
+                        )
+                        .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?
+                        {
+                            effects::change_zone::ZoneMoveResult::Done => {
+                                chosen_ids.push(object_id);
+                            }
+                            effects::change_zone::ZoneMoveResult::NeedsChoice(choice_player) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
             }
 
             if reveal {
@@ -1355,6 +1513,41 @@ pub(super) fn handle_resolution_choice(
                 events,
             )
             .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+            // CR 614.12a: For an "enters with your choice of counter" replacement
+            // (Denry Klin), the entering permanent's battlefield-entry ZoneChanged
+            // event was deferred into `state.deferred_entry_events` by the ETB-
+            // replacement capture in `engine_replacement.rs` so observers don't
+            // fire before the choice is made. Now that `resolve_branch` has folded
+            // the chosen counter onto the still-entering permanent, replay the
+            // deferred entry through the trigger pipeline so ETB observers see the
+            // counter as the permanent enters (pre-entry per CR 614.12a, not a
+            // post-entry counter add). For a normal (non-entry) `ChooseOneOf`,
+            // `deferred_entry_events` is empty, so this is a no-op — the
+            // disambiguator. This is safe because `deferred_entry_events` is
+            // populated ONLY by the ETB-replacement capture (sole production
+            // write-site), and `CopyTargetChoice` drains it via its own
+            // `handle_copy_target_choice` handler, so it is never non-empty during
+            // an unrelated `ChooseBranch`.
+            let deferred = std::mem::take(&mut state.deferred_entry_events);
+            let source_still_on_bf = state
+                .objects
+                .get(&source_id)
+                .is_some_and(|o| o.zone == Zone::Battlefield);
+            if !deferred.is_empty() && source_still_on_bf {
+                super::triggers::process_triggers(state, &deferred);
+                let delayed = super::triggers::check_delayed_triggers(state, &deferred);
+                events.extend(delayed);
+            }
+            // CR 608.2c + CR 122.1: advance any paused resolution chain after the
+            // branch resolves. This is the standard post-resolution step every
+            // sibling choice handler runs. It no-ops when no `pending_continuation`
+            // / `pending_repeat_iteration` exists (each drain block is guarded by
+            // `if let Some(..) = ..take()`), so it is safe for existing `ChooseOneOf`
+            // consumers and for the deferred-entry replay above (mutually exclusive
+            // slots). Required so a `repeat_for: DistinctCounterKindsAmong` loop
+            // paused on `ChooseOneOfBranch` advances past the first counter kind to
+            // prompt for each remaining kind (Bribe Taker).
+            effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -1581,7 +1774,7 @@ pub(super) fn handle_resolution_choice(
                 destination,
                 enter_tapped,
                 enter_transformed,
-                under_your_control,
+                enters_under_player,
                 enters_attacking,
                 owner_library: _,
                 track_exiled_by_source,
@@ -1681,7 +1874,7 @@ pub(super) fn handle_resolution_choice(
                         destination: dest_zone,
                         enter_transformed,
                         enter_tapped,
-                        under_your_control,
+                        enters_under_player,
                         enters_attacking,
                         enter_with_counters: vec![],
                         duration: None,
@@ -1708,7 +1901,7 @@ pub(super) fn handle_resolution_choice(
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
                                         enter_tapped: ctx.enter_tapped,
-                                        under_your_control: ctx.under_your_control,
+                                        enters_under_player: ctx.enters_under_player,
                                         enters_attacking: ctx.enters_attacking,
                                         enter_with_counters: ctx.enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
@@ -1724,6 +1917,49 @@ pub(super) fn handle_resolution_choice(
                                     events,
                                     state.waiting_for.clone(),
                                 ));
+                            }
+                        }
+                    }
+                }
+                EffectKind::Tap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_tap(state, card_id, source_id, events)
+                        {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
+                            }
+                        }
+                    }
+                }
+                EffectKind::Untap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_untap(state, card_id, events) {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
                             }
                         }
                     }
@@ -1786,12 +2022,28 @@ pub(super) fn handle_resolution_choice(
             }
             if matches!(
                 effect_kind,
-                EffectKind::ChangeZone | EffectKind::BounceAll | EffectKind::PutAtLibraryPosition
+                EffectKind::Sacrifice
+                    | EffectKind::ChangeZone
+                    | EffectKind::BounceAll
+                    | EffectKind::Tap
+                    | EffectKind::Untap
+                    | EffectKind::PutAtLibraryPosition
             ) && state.pending_continuation.is_some()
             {
+                let tracked = if matches!(effect_kind, EffectKind::Sacrifice) {
+                    events[events_before_effect..]
+                        .iter()
+                        .filter_map(|event| match event {
+                            GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    chosen.clone()
+                };
                 let tracked_id = TrackedSetId(state.next_tracked_set_id);
                 state.next_tracked_set_id += 1;
-                state.tracked_object_sets.insert(tracked_id, chosen.clone());
+                state.tracked_object_sets.insert(tracked_id, tracked);
                 state.chain_tracked_set_id = Some(tracked_id);
             }
             state.last_effect_count = Some(chosen.len() as i32);
@@ -1821,6 +2073,17 @@ pub(super) fn handle_resolution_choice(
                 EffectKind::Sacrifice | EffectKind::ChangeZone | EffectKind::BounceAll
             );
             if moves_permanents {
+                // CR 603.10a: the chosen permanents left the battlefield together
+                // in this single resolution event, so co-departing
+                // leaves-the-battlefield observers among them (Blood Artist among
+                // the sacrificed group) observe each other. Stamp only the
+                // sub-slice this handler produced — never the whole events vector —
+                // so earlier sequential departures in this resolution aren't grouped
+                // with these.
+                super::zones::mark_simultaneous_departures(
+                    &mut events[events_before_effect..events_after_move],
+                    &super::zones::departed_subset(state, &chosen),
+                );
                 if let Some(wf) = batch_or_drain_observer_triggers(
                     state,
                     events,
@@ -1986,6 +2249,7 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             state.ring_bearer.insert(player, Some(target));
+            state.layers_dirty = true;
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (WaitingFor::ChooseDungeon { player, options }, GameAction::ChooseDungeon { dungeon }) => {
@@ -2172,6 +2436,16 @@ pub(super) fn handle_resolution_choice(
             } else {
                 // The sacrifice (if any) is complete. Mark its event slice.
                 let events_after_sacrifice = events.len();
+                // CR 603.10a + CR 608.2f + CR 701.21a: the permanents sacrificed by
+                // `sacrifice_unchosen` (keep-one-sacrifice-rest: Cataclysm,
+                // Tragic Arrogance) left the battlefield together in this single
+                // resolution event, so a co-departing leaves-the-battlefield
+                // observer among them (Blood Artist) observes the rest. Stamp the
+                // sacrifice sub-slice before the B1/B2 trigger dispatch reads it.
+                super::zones::stamp_simultaneous_from_slice(
+                    state,
+                    &mut events[events_before_sacrifice..events_after_sacrifice],
+                );
                 // Step B: if the sacrifice did not itself pause (no replacement
                 // choice was raised by `sacrifice_unchosen`), resolve any
                 // reflexive continuation. `state.waiting_for` is the `Priority`

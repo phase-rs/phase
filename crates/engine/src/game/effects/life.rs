@@ -150,7 +150,16 @@ pub fn apply_life_gain(
     };
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            Ok(apply_life_gain_after_replacement(state, event, events))
+            let gained = apply_life_gain_after_replacement(state, event, events);
+            // CR 614.6 + CR 704.3: Drain any mandatory-post-effect continuation
+            // (cross-event substitutes such as Lich; same-event work beyond the
+            // applier's amount substitution) inside this resolution step so
+            // SBAs and priority never fall between the (possibly substituted)
+            // life gain and its substitute. Mirrors the drain pattern in
+            // `effects/draw.rs::draw_through_replacement`. The `Prevented` arm
+            // below already drains via `drain_substitution_continuation`.
+            drain_substitution_continuation(state, events);
+            Ok(gained)
         }
         ReplacementResult::Prevented => {
             // CR 614.1a + CR 614.12a — Issue #317: Drain substitute effect
@@ -1136,6 +1145,18 @@ mod tests {
             state.players[0].life,
             p0_life_before + 6,
             "Boon Reflection doubles the gain to 6 — scaling, not substitution"
+        );
+        // CR 614.6: the applier substituted the amount; the `post_effect`
+        // filter must suppress stashing the same GainLife execute as a
+        // continuation, and the Execute-arm drain must clear any residual
+        // template. A leaked Template here would drain on the next zone
+        // change as a phantom GainLife — same defect class as Jace
+        // empty-library win.
+        assert!(
+            state.post_replacement_continuation.is_none(),
+            "GainLife→GainLife amount-substitution must not leak a post-replacement \
+             continuation; found {:?}",
+            state.post_replacement_continuation
         );
     }
 }

@@ -8,6 +8,8 @@
   "preview": {
     "holdCtrlBack": "Hold Ctrl for back face",
     "holdCtrlFront": "Hold Ctrl for front face",
+    "holdCtrlFlip": "Hold Ctrl to flip",
+    "flip": "Flip",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",
@@ -60,6 +62,7 @@
   },
   "permanent": {
     "expandGroup": "Expand {{name}} group",
+    "collapseGroup": "Collapse {{name}} group",
     "chooseToken": "Choose {{name}} token",
     "pick": "Pick",
     "close": "close",
@@ -72,7 +75,9 @@
     "underAttack_other": "Attacked by {{count}} creatures",
     "target": "Target",
     "copy": "Copy",
-    "copyTooltip": "Token copy of a real card"
+    "copyTooltip": "Token copy of a real card",
+    "ringBearer": "Ring",
+    "ringBearerTooltip": "Ring-bearer"
   },
   "player": {
     "opponent": "Opp {{seat}}",
@@ -194,8 +199,15 @@
     "energyAriaLabel_one": "{{count}} energy counter",
     "energyAriaLabel_other": "{{count}} energy counters",
     "energyTooltip": "Energy: {{count}}",
-    "ringAriaLabel": "The Ring tempts you (level {{level}})",
+    "ringAriaLabel": "The Ring tempts you (level {{level}}), Ring-bearer: {{bearer}}",
     "ringTooltip": "The Ring tempts you — level {{level}}",
+    "ringBearerTooltip": "Ring-bearer: {{name}}",
+    "noRingBearer": "none",
+    "noRingBearerTooltip": "No Ring-bearer",
+    "ringLevel1": "1. Ring-bearer is legendary and can't be blocked by creatures with greater power.",
+    "ringLevel2": "2. When it attacks, draw a card, then discard a card.",
+    "ringLevel3": "3. When it becomes blocked by a creature, that creature's controller sacrifices it at end of combat.",
+    "ringLevel4": "4. When it deals combat damage to a player, each opponent loses 3 life.",
     "radAriaLabel_one": "{{count}} rad counter",
     "radAriaLabel_other": "{{count}} rad counters",
     "radTooltip": "Rad counters: {{count}}",
@@ -291,6 +303,8 @@
     "phased": "Phased",
     "followingActiveOpponent": "Following active opponent. Focus switches to the opponent whose turn it is.",
     "followActiveOpponent": "Follow active opponent. Focus will switch to the opponent whose turn it is.",
+    "compactHud": "Compact opponent HUD. Collapses each opponent to a single thin row (name + life); tap an opponent to focus their full board.",
+    "expandHud": "Expand opponent HUD. Shows each opponent's hand and board breakdown.",
     "targetPlayer": "Target {{name}}",
     "viewBoardThenTarget": "View {{name}}'s board (click again to target {{name}})",
     "viewBoard": "View {{name}}'s board",
@@ -315,6 +329,13 @@
     "confirmAttackers": "Confirm Attackers ({{count}})",
     "confirmBlockers": "Confirm Blockers ({{count}})",
     "clickAttackerToAssignBlocker": "Click an attacker to assign blocker",
+    "menaceRequirement": "Must be blocked by {{count}} or not at all",
+    "blockNeedsBadge": "Needs {{required}}",
+    "blockProgressBadge": "{{assigned}} / {{required}}",
+    "blockSatisfiedBadge": "✓ {{required}}",
+    "blockIncompleteAttacker": "{{assigned}} of {{required}} blockers assigned",
+    "blockIncomplete_one": "{{count}} attacker needs another blocker",
+    "blockIncomplete_other": "{{count}} attackers need another blocker",
     "assignDamageTitle": "Assign {{amount}} Combat Damage",
     "assignDamageSubtitle": "{{name}} — Remaining: {{remaining}}",
     "assignDamageButton": "Assign Damage",
@@ -357,7 +378,10 @@
     "chooseTargetForCopySlot": "Choose target for copy: slot {{current}} of {{total}}",
     "chooseNewTargetForCopy": "Choose new target for copy",
     "chooseTargetForCopy": "Choose target for copy",
+    "chooseNewTarget": "Choose the spell's new target",
+    "chooseNewTargetForSpell": "Choose a new target for {{spell}}",
     "chooseCreatureToExplore": "Choose which creature explores next",
+    "chooseReturnAsAuraTarget": "Choose a permanent to enchant",
     "tapUntappedCreatures_one": "Tap {{count}} untapped creature",
     "tapUntappedCreatures_other": "Tap {{count}} untapped creatures",
     "chooseTargetOf": "Choose target {{current}} of {{total}}",
@@ -420,6 +444,7 @@
     "blockersDeclared_one": "{{count}} blocker assigned",
     "blockersDeclared_other": "{{count}} blockers assigned",
     "becomesTarget": "Object {{objectId}} targeted by {{sourceId}}",
+    "becomesTargetPlayer": "{{player}} targeted by {{sourceId}}",
     "replacementApplied": "Replacement applied: {{eventType}}",
     "companionRevealed": "{{player}} revealed companion: {{cardName}}",
     "companionMovedToHand": "{{player}} put companion {{cardName}} into hand",
@@ -619,6 +644,15 @@
       "keepTapped": "Keep tapped",
       "keepTappedDescription": "{{name}} stays tapped this untap step."
     },
+    "exert": {
+      "creatureFallback": "Creature",
+      "title": "Exert {{name}}?",
+      "subtitle": "Choose whether to exert this attacker. An exerted creature won't untap during your next untap step.",
+      "exert": "Exert",
+      "exertDescription": "{{name}} won't untap next turn, triggering its exert ability.",
+      "decline": "Don't exert",
+      "declineDescription": "{{name}} attacks normally and untaps as usual."
+    },
     "cost": {
       "discardCard": "discard a card",
       "life": "{{amount}} life",
@@ -671,6 +705,13 @@
     "startMatch": "Start Match",
     "startMatchWithOpponents": "Start Match ({{count}} opp.)",
     "deckNotLegal": "Deck is not legal in {{format}}.",
+    "cedhWarning": "Your deck is bracket {{bracket}} vs. a cEDH AI — expect to lose fast.",
+    "cedhWarningUntagged": "untagged",
+    "bracketViolation": {
+      "title": "cEDH bracket lock",
+      "body": "All decks at a cEDH table must be declared bracket 5. Update your deck's bracket in the deck builder and try again.",
+      "returnToSetup": "Return to setup"
+    },
     "selectDeckPrompt": "Select a deck",
     "commanderNote": "Commander: 100-card singleton, commander damage at {{threshold}}",
     "formatChip": {
@@ -745,6 +786,7 @@
       "title": "Choose Ring-bearer",
       "subtitle": "Choose a creature you control"
     },
+    "reorderHint": "Drag to reorder · the top card is drawn first",
     "scry": {
       "title": "Scry",
       "subtitle_one": "Look at the top {{count}} card of your library",
@@ -860,6 +902,20 @@
       "title": "Exile",
       "subtitle_one": "Choose {{count}} permanent to exile",
       "subtitle_other": "Choose {{count}} permanents to exile"
+    },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
     },
     "multiTarget": {
       "title": "Choose Targets",
@@ -1049,6 +1105,14 @@
     "bestowNormalLabel": "Cast as Creature",
     "bestowAltLabel": "Cast with Bestow",
     "bestowSubtitle": "Cast {{name}} normally as a creature, or pay its Bestow cost to cast it as an Aura.",
+    "awakenEyebrow": "Awaken",
+    "awakenNormalLabel": "Cast Normally",
+    "awakenAltLabel": "Cast with Awaken",
+    "awakenSubtitle": "Cast {{name}} normally, or pay its Awaken cost to also put +1/+1 counters on a land you control and turn it into a 0/0 Elemental creature with haste.",
+    "cleaveEyebrow": "Cleave",
+    "cleaveNormalLabel": "Cast Normally",
+    "cleaveAltLabel": "Cast with Cleave",
+    "cleaveSubtitle": "Cast {{name}} normally, or pay its Cleave cost to remove the bracketed text.",
     "additionalExile": "+ Exile a card",
     "additionalSacrifice": "+ Sacrifice a permanent",
     "additionalPayLife": "+ Pay life",
@@ -1229,6 +1293,12 @@
     "no": "No",
     "dontAskAgain": "Don't ask again this game"
   },
+  "topOrBottom": {
+    "cardFallback": "Card",
+    "title": "Put {{name}} on top or bottom of library",
+    "top": "Top of library",
+    "bottom": "Bottom of library"
+  },
   "permanentTypeSlot": {
     "eyebrow": "Permanent Type",
     "title": "Choose Type Slot",
@@ -1239,6 +1309,9 @@
     "proliferateSubtitle": "Choose any number of permanents and players with counters. Each chosen target gets one more counter of each kind already there.",
     "chooseObjectsTitle": "Choose Permanents",
     "chooseObjectsSubtitle": "Choose any number of permanents. You pay a cost for each one chosen.",
+    "selectAll": "All",
+    "selectNone": "None",
+    "selectMine": "My side",
     "confirm": "Confirm"
   },
   "replacement": {
@@ -1252,7 +1325,8 @@
     "scopeSingle": "Choose a new target for the spell",
     "scopeMulti": "Choose new targets for the spell",
     "subtitle": "{{scope}}. Current: {{current}}",
-    "confirm": "Confirm"
+    "confirm": "Confirm",
+    "badgeNewTarget": "New target"
   },
   "separatePiles": {
     "chooserName": "Player {{number}}",
@@ -1313,5 +1387,31 @@
     "subtitleLabel": "Choose a label for {{name}}",
     "subtitleVoteRemaining": "Cast a vote ({{count}} remaining)",
     "subtitleVote": "Cast your vote"
+  },
+  "advance": {
+    "resolve": "Resolve",
+    "passPriority": "Pass Priority",
+    "toPhase": "To {{phase}}"
+  },
+  "outsideGame": {
+    "fromExile": "From exile",
+    "fromSideboard": "From sideboard"
+  },
+  "phaseName": {
+    "Upkeep": "Upkeep",
+    "Draw": "Draw",
+    "PreCombatMain": "Main Phase 1",
+    "BeginCombat": "Begin Combat",
+    "DeclareAttackers": "Declare Attackers",
+    "DeclareBlockers": "Declare Blockers",
+    "CombatDamage": "Combat Damage",
+    "EndCombat": "End Combat",
+    "PostCombatMain": "Main Phase 2",
+    "End": "End Step",
+    "Cleanup": "Cleanup"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }

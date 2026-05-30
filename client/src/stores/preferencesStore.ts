@@ -59,6 +59,11 @@ export type SpellPaymentMode = "auto" | "manual";
  *  User-chosen so a player can keep the stack off whichever side of the
  *  battlefield they care about — e.g. dock left to free the right action rail. */
 export type StackDockSide = "left" | "right";
+/** Opponent HUD density in the multi-opponent rail. "comfortable" = the full
+ *  two-row tab (name + life over the board-composition breakdown); "compact" =
+ *  a single thin row (small avatar + name + life) that trades the breakdown for
+ *  vertical real-estate. Player-toggleable from the rail. */
+export type OpponentHudDensity = "comfortable" | "compact";
 /** "auto-wubrg" picks a random battlefield matching the dominant mana color.
  *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image.
@@ -124,14 +129,15 @@ function buildDefaultPreferences(): PreferencesState {
     showKeywordStrip: true,
     battlefieldPeekOnHover: true,
     stackDockSide: "right",
+    opponentHudDensity: "comfortable",
     aiSeats: [defaultAiSeat()],
+    cedhMode: false,
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
     aiBracketFilter: [] as CommanderBracket[],
     lastFormat: null,
     lastMatchType: "Bo1",
     lastPlayerCount: 2,
-    experimentalFeatures: false,
     dismissedFlowHelpNudge: false,
     dismissedSandboxToolsNudge: false,
     artChain: [] as ArtChainEntry[],
@@ -178,14 +184,20 @@ interface PreferencesState {
   battlefieldPeekOnHover: boolean;
   /** Screen edge the stack panel docks to and collapses toward. */
   stackDockSide: StackDockSide;
+  /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
+  opponentHudDensity: OpponentHudDensity;
   aiSeats: AiSeatPref[];
+  /** Table-wide cEDH toggle. When true, every AI opponent plays at cEDH
+   *  (bracket 5) regardless of its per-seat difficulty, and the AI/human deck
+   *  pools are restricted to bracket-5 decks. cEDH is a table property, not a
+   *  per-seat difficulty — see `effectiveAiDifficulty` in `services/cedhLock`. */
+  cedhMode: boolean;
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
   aiBracketFilter: CommanderBracket[];
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
   lastPlayerCount: number;
-  experimentalFeatures: boolean;
   dismissedFlowHelpNudge: boolean;
   dismissedSandboxToolsNudge: boolean;
   artChain: ArtChainEntry[];
@@ -198,6 +210,7 @@ interface PreferencesActions {
   setHudLayout: (layout: HudLayout) => void;
   setFollowActiveOpponent: (enabled: boolean) => void;
   setStackDockSide: (side: StackDockSide) => void;
+  setOpponentHudDensity: (density: OpponentHudDensity) => void;
   setLogDefaultState: (state: LogDefaultState) => void;
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
@@ -231,13 +244,14 @@ interface PreferencesActions {
    *  shrinking truncates trailing slots. Called whenever the player count
    *  changes so the UI always has exactly `playerCount - 1` panels to render. */
   ensureAiSeatCount: (count: number) => void;
+  /** Toggle the table-wide cEDH mode (all AI play cEDH, deck pools → bracket 5). */
+  setCedhMode: (enabled: boolean) => void;
   setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
   setAiCoverageFloor: (floor: number) => void;
   setAiBracketFilter: (brackets: CommanderBracket[]) => void;
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
-  setExperimentalFeatures: (enabled: boolean) => void;
   setDismissedFlowHelpNudge: (dismissed: boolean) => void;
   setDismissedSandboxToolsNudge: (dismissed: boolean) => void;
   addArtChainEntry: (entry: ArtChainEntry) => void;
@@ -293,6 +307,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setHudLayout: (layout) => set({ hudLayout: layout }),
       setFollowActiveOpponent: (enabled) => set({ followActiveOpponent: enabled }),
       setStackDockSide: (side) => set({ stackDockSide: side }),
+      setOpponentHudDensity: (density) => set({ opponentHudDensity: density }),
       setLogDefaultState: (state) => set({ logDefaultState: state }),
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
@@ -362,13 +377,13 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           }
           return { aiSeats: grown };
         }),
+      setCedhMode: (enabled) => set({ cedhMode: enabled }),
       setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
       setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
       setAiBracketFilter: (brackets) => set({ aiBracketFilter: brackets }),
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
-      setExperimentalFeatures: (enabled) => set({ experimentalFeatures: enabled }),
       setDismissedFlowHelpNudge: (dismissed) => set({ dismissedFlowHelpNudge: dismissed }),
       setDismissedSandboxToolsNudge: (dismissed) => set({ dismissedSandboxToolsNudge: dismissed }),
       addArtChainEntry: (entry) =>
@@ -417,7 +432,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 10,
+      version: 12,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -542,6 +557,34 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
 
         if (version < 10) {
           migrated = { ...migrated, stackDockSide: "right" };
+        }
+
+        // v10 → v11: Add opponentHudDensity; legacy stores default to the
+        // comfortable two-row rail (the prior fixed behavior).
+        if (version < 11) {
+          migrated = { ...migrated, opponentHudDensity: "comfortable" };
+        }
+
+        // v11 → v12: cEDH is no longer a per-seat difficulty — it's the
+        // table-wide `cedhMode` toggle. Derive the flag from any seat that was
+        // set to "CEDH" (the old cascade forced every seat to it) and reset
+        // those seats to the default difficulty so the per-seat dropdowns no
+        // longer surface "CEDH".
+        if (version < 12) {
+          const legacy = migrated as {
+            aiSeats?: Array<{ difficulty?: string } & Record<string, unknown>>;
+          } & Record<string, unknown>;
+          const seats = Array.isArray(legacy.aiSeats) ? legacy.aiSeats : [];
+          const wasCedh = seats.some((s) => s?.difficulty === "CEDH");
+          migrated = {
+            ...legacy,
+            cedhMode: wasCedh,
+            aiSeats: seats.map((s) =>
+              s?.difficulty === "CEDH"
+                ? { ...s, difficulty: DEFAULT_AI_DIFFICULTY }
+                : s,
+            ),
+          };
         }
 
         return migrated;

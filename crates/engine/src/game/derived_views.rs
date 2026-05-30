@@ -700,6 +700,7 @@ mod tests {
                     trigger_event: None,
                     description: Some("landfall".into()),
                     source_name: String::new(),
+                    subject_match_count: None,
                 },
             });
         }
@@ -827,6 +828,7 @@ mod tests {
                 linked_exile_snapshot: Vec::new(),
                 is_token: false,
                 combat_status: Default::default(),
+                co_departed: Vec::new(),
             }),
         };
         let ability = ResolvedAbility::new(
@@ -849,6 +851,7 @@ mod tests {
                 trigger_event: Some(trigger_event),
                 description: Some("hidden-zone trigger".to_string()),
                 source_name: "Watcher".to_string(),
+                subject_match_count: None,
             },
         });
 

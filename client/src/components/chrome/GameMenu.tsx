@@ -8,6 +8,7 @@ import { VolumeControl } from "./VolumeControl.tsx";
 import { clearGame } from "../../stores/gameStore.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
+import { useConcedeHandler } from "../../hooks/useConcedeHandler.ts";
 
 interface GameMenuProps {
   gameId: string;
@@ -44,6 +45,15 @@ export function GameMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const cardDataMeta = useCardDataMeta();
   const isDraft = searchParams.get("source") === "draft" && !!searchParams.get("draftId");
+  const isDraftPodMatch = searchParams.get("mode") === "draft-match";
+
+  const handleConcede = useConcedeHandler({
+    gameId,
+    isOnlineMode,
+    isDraft,
+    isDraftPodMatch,
+    onConcede,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -144,21 +154,19 @@ export function GameMenu({
             variant="danger"
             onClick={() => {
               setOpen(false);
+              // Online concedes route through the confirmation dialog
+              // (`onConcede` opens it). All other modes go straight through
+              // the unified concede hook, which dispatches `Concede` to the
+              // engine before clearing local state — see useConcedeHandler.
               if (isOnlineMode && onConcede) {
                 onConcede();
-              } else if (isDraft) {
-                useDraftStore.getState().recordMatchResult(gameId, "loss").then(() => {
-                  clearGame(gameId);
-                  navigate("/draft/quick?resume=1");
-                });
-              } else {
-                clearGame(gameId);
-                navigate("/");
+                return;
               }
+              handleConcede();
             }}
           />
           <MenuButton
-            label={isDraft ? t("gameMenu.backToDraft") : t("gameMenu.mainMenu")}
+            label={isDraft || isDraftPodMatch ? t("gameMenu.backToDraft") : t("gameMenu.mainMenu")}
             onClick={() => {
               setOpen(false);
               if (isDraft) {
@@ -166,6 +174,8 @@ export function GameMenu({
                   clearGame(gameId);
                   navigate("/draft/quick?resume=1");
                 });
+              } else if (isDraftPodMatch) {
+                navigate("/draft-pod");
               } else {
                 navigate("/");
               }

@@ -27,7 +27,7 @@ use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
     parse_chosen_qualifier_subject, parse_continuous_modifications, parse_static_line_multi,
 };
-use super::super::oracle_target::{parse_target, parse_type_phrase};
+use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{
     parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
@@ -626,7 +626,7 @@ pub(super) fn parse_subject_application(
         .parse(lower.as_str())
         .is_ok()
     {
-        let (filter, _) = parse_target(&subject["another ".len()..]);
+        let (filter, _) = parse_target_with_ctx(&subject["another ".len()..], ctx);
         let filter = add_another_property(filter);
         return subject_filter_application(filter, true);
     }
@@ -634,7 +634,16 @@ pub(super) fn parse_subject_application(
         .parse(lower.as_str())
         .is_ok()
     {
-        let (filter, _) = parse_target(subject);
+        // CR 109.4 + CR 115.1 + CR 603.2: thread the parse context so that
+        // controller-suffix resolution inside `parse_target` (notably the
+        // "that player controls" relative reference) can see the enclosing
+        // trigger's `relative_player_scope` and emit
+        // `ControllerRef::TargetPlayer` for the attacked / damaged player
+        // instead of falling back to `You`. Without `ctx`, the subject-form
+        // path of "target creature that player controls becomes …" (Gornog,
+        // the Red Reaper) silently bound the target to the trigger
+        // controller's own creatures.
+        let (filter, _) = parse_target_with_ctx(subject, ctx);
         return subject_filter_application(filter, true);
     }
     if tag::<_, _, OracleError<'_>>("up to ")
@@ -643,7 +652,7 @@ pub(super) fn parse_subject_application(
     {
         let (target_text, multi_target) = super::strip_optional_target_prefix(subject);
         if multi_target.is_some() {
-            let (filter, _) = parse_target(target_text);
+            let (filter, _) = parse_target_with_ctx(target_text, ctx);
             let mut application = subject_filter_application(filter, true)?;
             application.multi_target = multi_target;
             return Some(application);
@@ -661,7 +670,7 @@ pub(super) fn parse_subject_application(
             .parse(after_prefix)
             .is_ok()
         {
-            let (filter, _) = parse_target(target_text);
+            let (filter, _) = parse_target_with_ctx(target_text, ctx);
             let mut application = subject_filter_application(filter, true)?;
             application.multi_target = Some(MultiTargetSpec::unlimited(0));
             return Some(application);
@@ -683,7 +692,7 @@ pub(super) fn parse_subject_application(
             {
                 let consumed = lower.len() - after_prefix.len();
                 let target_text = &subject[consumed..];
-                let (filter, _) = parse_target(target_text);
+                let (filter, _) = parse_target_with_ctx(target_text, ctx);
                 let mut application = subject_filter_application(filter, true)?;
                 application.multi_target = Some(MultiTargetSpec::fixed(min, max));
                 return Some(application);
@@ -862,6 +871,11 @@ pub(super) fn parse_subject_application(
                 })
             } else if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
                 TargetFilter::ScopedPlayer
+            } else if matches!(
+                ctx.relative_player_scope,
+                Some(ControllerRef::ParentTargetController)
+            ) {
+                TargetFilter::ParentTargetController
             } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
@@ -905,6 +919,19 @@ pub(super) fn parse_subject_application(
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
             false,
         );
+    }
+    // CR 102.2: In a two-player game, a player's opponent is the other player.
+    // Parse both singular/plural bare subject forms via combinators and require
+    // full consumption so possessive/modal tails don't get coerced.
+    let mut your_opponent_subject = map(
+        all_consuming(preceded(
+            tag("your "),
+            alt((tag("opponents"), tag::<_, _, OracleError<'_>>("opponent"))),
+        )),
+        |_| TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+    );
+    if let Ok((_, filter)) = your_opponent_subject.parse(lower.as_str()) {
+        return subject_filter_application(filter, false);
     }
     // CR 506.3d: "defending player" as subject — resolves from combat state.
     if lower == "defending player" {
@@ -1133,6 +1160,14 @@ pub(super) fn parse_subject_application(
     None
 }
 
+pub(super) fn parse_leading_subject_application(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<SubjectApplication> {
+    let subject_text = extract_subject_text(text)?;
+    parse_subject_application(&subject_text, ctx)
+}
+
 /// CR 608.2k: Resolve bare pronoun "they" based on parser context.
 /// In trigger effects where the subject is a player (e.g., "an opponent"),
 /// "they" refers to the triggering player (`TriggeringPlayer`). A player-type
@@ -1143,6 +1178,17 @@ pub(super) fn parse_subject_application(
 fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
         return TargetFilter::ScopedPlayer;
+    }
+    // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" or
+    // "attacks a player" trigger introduces the damaged/attacked player as the
+    // event referent (the parser stamps `relative_player_scope = TargetPlayer`).
+    // "They" inside such an effect ("they lose half their life") refers to that
+    // event player, which auto-resolves from the triggering event
+    // (`TriggeringPlayer`) — NOT a chosen target. Without this, "they" fell
+    // through to `ParentTarget`, leaving the effect with no player to act on
+    // (Unstoppable Slasher's half-life loss silently resolved as "lose 0").
+    if matches!(ctx.relative_player_scope, Some(ControllerRef::TargetPlayer)) {
+        return TargetFilter::TriggeringPlayer;
     }
     // CR 608.2c + CR 109.4: "They" after a `Choose(Player)` clause refers to
     // the chosen player — a player-only `Typed` filter carrying the chosen
@@ -2571,6 +2617,8 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
         alt((
             value((), tag::<_, _, OracleError<'_>>("all ")),
             value((), tag("an opponent ")),
+            value((), tag("your opponent ")),
+            value((), tag("your opponents ")),
             value((), tag("any number of ")),
             value((), tag("defending player ")),
             value((), tag("each of ")),
@@ -2872,10 +2920,10 @@ mod tests {
         );
 
         let sub_ability = ability.sub_ability.as_ref().expect("If you do sub-ability");
-        assert!(matches!(
-            sub_ability.condition,
-            Some(crate::types::ability::AbilityCondition::IfYouDo)
-        ));
+        assert!(sub_ability
+            .condition
+            .as_ref()
+            .is_some_and(crate::types::ability::AbilityCondition::is_optional_effect_performed));
         let Effect::GenericEffect {
             static_abilities, ..
         } = &*sub_ability.effect
@@ -2908,6 +2956,14 @@ mod tests {
         assert!(starts_with_subject_prefix(
             "an opponent sacrifices a creature"
         ));
+    }
+
+    #[test]
+    fn starts_with_subject_prefix_your_opponents() {
+        assert!(starts_with_subject_prefix(
+            "your opponents can't gain life this turn"
+        ));
+        assert!(starts_with_subject_prefix("your opponent discards a card"));
     }
 
     #[test]
@@ -3024,6 +3080,78 @@ mod tests {
             app.affected,
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
         );
+    }
+
+    #[test]
+    fn parse_subject_your_opponents() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("your opponents", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert_eq!(
+            app.affected,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        assert!(app.target.is_none());
+    }
+
+    #[test]
+    fn parse_subject_your_opponents_possessive_is_not_bare_opponent_scope() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("your opponents' creatures", &mut ctx);
+        if let Some(app) = result {
+            assert_ne!(
+                app.affected,
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+            );
+        }
+    }
+
+    #[test]
+    fn parse_subject_your_opponent_may_is_not_treated_as_bare_subject() {
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("your opponent may", &mut ctx);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn your_opponents_cant_gain_life_builds_restriction() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "Your opponents can't gain life this turn",
+            &mut ctx,
+        )
+        .expect("your opponents life-lock should parse");
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, got {:?}",
+                clause.effect
+            );
+        };
+
+        assert_eq!(target, None);
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(static_abilities.len(), 1);
+        let def = &static_abilities[0];
+        assert_eq!(def.mode, StaticMode::CantGainLife);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert!(def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantGainLife
+            }
+        )));
     }
 
     #[test]
@@ -3222,6 +3350,22 @@ mod tests {
         assert_eq!(result.unwrap().affected, TargetFilter::TriggeringPlayer);
     }
 
+    #[test]
+    fn parse_subject_that_player_trigger_context_honors_parent_target_controller_scope() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            relative_player_scope: Some(ControllerRef::ParentTargetController),
+            ..ParseContext::default()
+        };
+        let result = parse_subject_application("that player", &mut ctx);
+
+        assert!(result.is_some());
+        assert_eq!(
+            result.unwrap().affected,
+            TargetFilter::ParentTargetController
+        );
+    }
+
     // CR 115.1d: "any number of target" subject prefix tests
     #[test]
     fn parse_subject_any_number_of_target_creatures() {
@@ -3257,6 +3401,49 @@ mod tests {
             app.affected
         );
         assert_eq!(app.multi_target, Some(MultiTargetSpec::unlimited(0)),);
+    }
+
+    #[test]
+    fn parse_subject_another_target_honors_relative_player_scope() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let result =
+            parse_subject_application("another target creature that player controls", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert!(
+            matches!(app.affected, TargetFilter::Typed(ref t)
+                if t.type_filters.contains(&TypeFilter::Creature)
+                && t.controller == Some(ControllerRef::TargetPlayer)
+                && t.properties.iter().any(|prop| matches!(prop, FilterProp::Another))),
+            "should parse another creature controlled by target player, got {:?}",
+            app.affected
+        );
+    }
+
+    #[test]
+    fn parse_subject_up_to_one_target_honors_relative_player_scope() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let result =
+            parse_subject_application("up to one target creature that player controls", &mut ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert!(
+            matches!(app.affected, TargetFilter::Typed(ref t)
+                if t.type_filters.contains(&TypeFilter::Creature)
+                && t.controller == Some(ControllerRef::TargetPlayer)),
+            "should parse creature controlled by target player, got {:?}",
+            app.affected
+        );
+        assert_eq!(
+            app.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 }))
+        );
     }
 
     #[test]

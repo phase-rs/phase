@@ -14,7 +14,9 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::attribution::EffectRef;
-use crate::types::card_type::{is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet};
+use crate::types::card_type::{
+    is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
+};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::{DayNight, GameState};
 use crate::types::identifiers::ObjectId;
@@ -372,6 +374,7 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         }
         StaticCondition::Not { condition } => condition_uses_recipient_context(condition),
         StaticCondition::RecipientHasCounters { .. } => true,
+        StaticCondition::RecipientMatchesFilter { .. } => true,
         _ => false,
     }
 }
@@ -491,6 +494,21 @@ fn evaluate_condition_with_context(
             .and_then(|id| state.objects.get(&id))
             .map(|obj| counter_condition_matches(obj, counters, *minimum, *maximum))
             .unwrap_or(false),
+        // CR 611.3a: True when the recipient (effective subject) of the continuous
+        // effect matches `filter`. The anaphoric "it" binds to the per-recipient
+        // object being modified this layer cycle; tests THIS recipient against the
+        // type/subtype/color filter (not mere existence of some matching object).
+        // No recipient → false (mirrors the RecipientHasCounters defensive default).
+        StaticCondition::RecipientMatchesFilter { filter } => recipient_id
+            .map(|id| {
+                matches_target_filter(
+                    state,
+                    id,
+                    filter,
+                    &FilterContext::from_source_with_recipient(state, source_id, id),
+                )
+            })
+            .unwrap_or(false),
         // CR 716.3: Level abilities are active at or above the specified level.
         StaticCondition::ClassLevelGE { level } => state
             .objects
@@ -513,10 +531,9 @@ fn evaluate_condition_with_context(
             .get(&source_id)
             .is_some_and(|obj| obj.entered_battlefield_turn == Some(state.turn_number)),
         // CR 701.54a: True when this creature is the ring-bearer for its controller.
-        StaticCondition::IsRingBearer => state
-            .ring_bearer
-            .get(&controller)
-            .is_some_and(|bearer| *bearer == Some(source_id)),
+        StaticCondition::IsRingBearer => {
+            super::effects::ring::is_current_ring_bearer(state, controller, source_id)
+        }
         // CR 701.54c: True when the controller's ring level is at least this value.
         StaticCondition::RingLevelAtLeast { level } => {
             state.ring_level.get(&controller).copied().unwrap_or(0) >= *level
@@ -950,6 +967,18 @@ pub fn evaluate_layers(state: &mut GameState) {
     }
 
     super::pairing::cleanup_invalid_pairs(state);
+    if super::effects::ring::normalize_ring_bearers(state) {
+        evaluate_layers(state);
+        return;
+    }
+
+    // CR 603.6a + CR 611.2e: Layer evaluation just finalized post-layer
+    // trigger sets on every battlefield permanent (granted triggers from
+    // sliver lords, Changeling, Bramble Sovereign, suppress-triggers statics).
+    // Rebuild the TriggerIndex so the next event scan reads the post-layer
+    // trigger set — CR 603.2 requires the post-layer view. Destructive
+    // rebuild replaces both `by_key` and `unclassified` from scratch.
+    crate::types::game_state::TriggerIndex::rebuild_from_battlefield(state);
 
     // Step 5: Clear dirty flag
     state.layers_dirty = false;
@@ -988,7 +1017,44 @@ pub(crate) fn collect_shared_active_continuous_effects(
         effects.extend(active_continuous_effects_from_static_source(state, obj));
     });
     gather_transient_continuous_effects(state, &mut effects);
+    gather_ring_emblem_continuous_effects(state, &mut effects);
     effects
+}
+
+fn gather_ring_emblem_continuous_effects(
+    state: &GameState,
+    effects: &mut Vec<ActiveContinuousEffect>,
+) {
+    for &player in state.ring_level.keys() {
+        let Some(bearer_id) = super::effects::ring::ring_bearer_for(state, player) else {
+            continue;
+        };
+        let timestamp = state
+            .objects
+            .get(&bearer_id)
+            .map(|obj| obj.timestamp)
+            .unwrap_or_default();
+        let modification = ContinuousModification::AddSupertype {
+            supertype: Supertype::Legendary,
+        };
+        // CR 701.54c: The Ring emblem makes its controller's Ring-bearer
+        // legendary. Model the emblem's type-changing continuous effect in
+        // layer 4 with the bearer as the affected object.
+        effects.push(ActiveContinuousEffect {
+            source_id: bearer_id,
+            controller: player,
+            def_index: None,
+            transient_id: None,
+            mod_index: 0,
+            layer: modification.layer(),
+            timestamp,
+            modification,
+            affected_filter: TargetFilter::SpecificObject { id: bearer_id },
+            condition: None,
+            mode: StaticMode::Continuous,
+            characteristic_defining: false,
+        });
+    }
 }
 
 fn for_each_static_effect_source(
@@ -1183,6 +1249,15 @@ fn active_continuous_effects_from_static_definitions(
 /// the next layer evaluation triggered by `layers_dirty`. No known Magic card
 /// exercises a quoted-within-quoted grant, so this is acceptable for now;
 /// revisit if such a card appears.
+///
+/// Intra-static identity-key limitation: synthesized inner effects use
+/// `(source_id = recipient_id, def_index = None, transient_id = None)`, the same
+/// triple `depends_on` keys on to suppress dependency edges between one static's
+/// own clauses (CR 613.7a). Two DISTINCT grants of type-changing + type-referencing
+/// inner modifications onto the SAME recipient therefore share one identity key, so
+/// `depends_on` would suppress the cross-grant edge between them as if they were one
+/// static. No known card grants two such interacting static abilities to the same
+/// recipient; documented here for the next maintainer who hits that case.
 fn expand_granted_static_effects(
     state: &GameState,
     host_source_id: ObjectId,
@@ -1575,6 +1650,18 @@ pub(crate) fn order_active_continuous_effects(
 /// Check if effect `a` depends on effect `b`.
 /// If `b` changes types and `a`'s filter is type-based, `a` depends on `b`.
 fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &GameState) -> bool {
+    // CR 613.7a + CR 613.8a: A single static ability's modifications share one
+    // timestamp and apply in the order written (613.7a). "Depend on" (613.8a) is a
+    // relationship between an effect and ANOTHER effect (distinct generators) — it
+    // never governs the internal sequencing of one ability's own clauses. Suppress
+    // dependency edges between modifications flattened from the same static so that
+    // e.g. RemoveAllSubtypes{Creature} wipes pre-existing subtypes and a later
+    // AddSubtype survives, exactly as written.
+    if a.source_id == b.source_id && a.def_index == b.def_index && a.transient_id == b.transient_id
+    {
+        return false;
+    }
+
     if matches!(b.modification, ContinuousModification::CopyValues { .. }) {
         return true;
     }
@@ -2591,7 +2678,7 @@ mod tests {
         GainLifePlayer, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
         StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
     };
-    use crate::types::card_type::CoreType;
+    use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::TransientContinuousEffect;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -3258,6 +3345,57 @@ mod tests {
         );
     }
 
+    /// CR 509.1b + CR 613.1f + CR 702.18a: End-to-end runtime confirmation that
+    /// Whispersilk Cloak's compound "Equipped creature can't be blocked and has
+    /// shroud." drives a real `parse_static_line_multi` output through the layer
+    /// pipeline and grants Shroud to the equipped creature. The keyword companion
+    /// (split out from the `CantBeBlocked` restriction) must actually reach the
+    /// equipped creature — not silently dropped.
+    #[test]
+    fn whispersilk_compound_grants_shroud_through_layers() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        let defs = crate::parser::oracle_static::parse_static_line_multi(
+            "Equipped creature can't be blocked and has shroud.",
+        );
+        assert_eq!(defs.len(), 2, "parser must emit 2 defs, got {defs:?}");
+
+        let equipment = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Whispersilk Cloak".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&equipment).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".into());
+            obj.attached_to = Some(bear.into());
+            obj.timestamp = ts;
+            for def in defs {
+                obj.static_definitions.push(def);
+            }
+        }
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .attachments
+            .push(equipment);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let equipped = state.objects.get(&bear).unwrap();
+        assert!(
+            equipped.has_keyword(&Keyword::Shroud),
+            "equipped creature must gain Shroud from the keyword companion"
+        );
+    }
+
     /// CR 301.5 + CR 303.4 + CR 613.4c: End-to-end runtime confirmation of
     /// the Strong Back / Mantle of the Ancients class — "Enchanted creature
     /// gets +N/+N for each Aura and Equipment attached to it." The pronoun
@@ -3401,6 +3539,50 @@ mod tests {
         let final_other = state.objects.get(&other).unwrap();
         assert_eq!(final_other.power, Some(2));
         assert_eq!(final_other.toughness, Some(2));
+    }
+
+    /// CR 205.4a + CR 613.4c: Jodah-style static anthem — "Legendary creatures
+    /// you control get +X/+X, where X is the number of legendary creatures you
+    /// control." The affected filter must test the legendary supertype, and
+    /// the dynamic amount must count the same supertype-qualified population.
+    #[test]
+    fn dynamic_legendary_anthem_counts_and_affects_legendary_creatures_you_control() {
+        let mut state = setup();
+        let jodah = make_creature(&mut state, "Jodah, the Unifier", 5, 5, PlayerId(0));
+        let ally = make_creature(&mut state, "Legendary Ally", 2, 2, PlayerId(0));
+        let ordinary = make_creature(&mut state, "Ordinary Bear", 2, 2, PlayerId(0));
+        let opponent_legend = make_creature(&mut state, "Opponent Legend", 2, 2, PlayerId(1));
+
+        for id in [jodah, ally, opponent_legend] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Drive Jodah's real Oracle line through the parser so this runtime test
+        // also fails if the supertype-descriptor parse regresses (closing the
+        // parser->layers seam, not hand-building the expected StaticDefinition).
+        let def = crate::parser::oracle_static::parse_static_line(
+            "Legendary creatures you control get +X/+X, where X is the number of legendary creatures you control.",
+        )
+        .expect("Jodah anthem static should parse");
+        state
+            .objects
+            .get_mut(&jodah)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&jodah].power, Some(7));
+        assert_eq!(state.objects[&jodah].toughness, Some(7));
+        assert_eq!(state.objects[&ally].power, Some(4));
+        assert_eq!(state.objects[&ally].toughness, Some(4));
+        assert_eq!(state.objects[&ordinary].power, Some(2));
+        assert_eq!(state.objects[&ordinary].toughness, Some(2));
+        assert_eq!(state.objects[&opponent_legend].power, Some(2));
+        assert_eq!(state.objects[&opponent_legend].toughness, Some(2));
     }
 
     #[test]
@@ -8092,6 +8274,338 @@ mod tests {
         assert!(
             !opc.has_keyword(&Keyword::Lifelink),
             "Opponent commander no lifelink"
+        );
+    }
+
+    /// Adds a creature subtype to an object and re-snapshots its base card types so
+    /// the layer reset preserves the printed subtype.
+    fn add_subtype(state: &mut GameState, id: ObjectId, subtype: &str) {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.subtypes.push(subtype.to_string());
+        obj.base_card_types = obj.card_types.clone();
+    }
+
+    fn recipient_filter_condition(text: &str) -> StaticCondition {
+        let (rest, condition) = crate::parser::oracle_nom::condition::parse_condition(text)
+            .expect("recipient condition should parse");
+        assert_eq!(rest, "", "condition should fully consume: {text:?}");
+        condition
+    }
+
+    /// CR 611.3a: SelfRef self-static "has defender as long as it's a Wall" — the
+    /// anaphoric "it" binds to the source itself. A Wall creature therefore keeps
+    /// Defender (Mistform Wall regression guard). Drives the real `evaluate_layers`.
+    #[test]
+    fn recipient_selfref_wall_keeps_defender() {
+        let mut state = setup();
+        let wall = make_creature(&mut state, "Mistform Wall", 0, 4, PlayerId(0));
+        add_subtype(&mut state, wall, "Wall");
+
+        let condition = recipient_filter_condition("as long as it's a Wall");
+        let def = StaticDefinition::continuous()
+            .condition(condition)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Defender,
+            }]);
+        {
+            let obj = state.objects.get_mut(&wall).unwrap();
+            Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
+            obj.static_definitions.push(def);
+        }
+
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&wall].has_keyword(&Keyword::Defender),
+            "Wall recipient matches the gate — Defender must be granted"
+        );
+    }
+
+    /// CR 611.3a: SelfRef self-static gated "as long as it's a Wall" on a NON-Wall
+    /// creature — recipient is the source, which is not a Wall, so the gate fails
+    /// and the keyword is NOT granted. Complements the positive case above.
+    #[test]
+    fn recipient_selfref_nonwall_no_defender() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Grizzly Bears", 2, 2, PlayerId(0));
+
+        let condition = recipient_filter_condition("as long as it's a Wall");
+        let def = StaticDefinition::continuous()
+            .condition(condition)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Defender,
+            }]);
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            Arc::make_mut(&mut obj.base_static_definitions).push(def.clone());
+            obj.static_definitions.push(def);
+        }
+
+        evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&bear].has_keyword(&Keyword::Defender),
+            "Non-Wall recipient fails the gate — Defender must NOT be granted"
+        );
+    }
+
+    /// CR 611.3a: per-recipient gating — an anthem-style static affecting all
+    /// creatures, gated "as long as it's a Zombie", buffs ONLY the Zombie recipient
+    /// and leaves the non-Zombie creature untouched. This is the Depala/Earth Surge
+    /// correctness case: the gate is re-evaluated per affected object, not once for
+    /// the source. Drives the real `evaluate_layers`.
+    #[test]
+    fn recipient_per_object_anthem_buffs_only_matching() {
+        let mut state = setup();
+
+        let anthem = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Zombie Lord".to_string(),
+            Zone::Battlefield,
+        );
+        let anthem_ts = state.next_timestamp();
+        let condition = recipient_filter_condition("as long as it's a Zombie");
+        {
+            let obj = state.objects.get_mut(&anthem).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = anthem_ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .condition(condition)
+                    .affected(TargetFilter::Typed(TypedFilter::creature()))
+                    .modifications(vec![
+                        ContinuousModification::AddPower { value: 1 },
+                        ContinuousModification::AddToughness { value: 1 },
+                    ]),
+            );
+        }
+
+        let zombie = make_creature(&mut state, "Zombie", 2, 2, PlayerId(0));
+        add_subtype(&mut state, zombie, "Zombie");
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        evaluate_layers(&mut state);
+
+        let zombie_obj = &state.objects[&zombie];
+        assert_eq!(zombie_obj.power, Some(3), "Zombie recipient is buffed");
+        assert_eq!(zombie_obj.toughness, Some(3), "Zombie recipient is buffed");
+
+        let bear_obj = &state.objects[&bear];
+        assert_eq!(
+            bear_obj.power,
+            Some(2),
+            "Non-Zombie recipient must NOT be buffed (per-recipient gate)"
+        );
+        assert_eq!(
+            bear_obj.toughness,
+            Some(2),
+            "Non-Zombie recipient must NOT be buffed (per-recipient gate)"
+        );
+    }
+
+    /// CR 205.1a + CR 613.1d (Layer 4) + CR 105.3 + CR 613.1e (Layer 5):
+    /// End-to-end confirmation of the Frogify class — a non-additive "is a 1/1
+    /// blue Frog creature" Aura *replaces* the enchanted creature's card types,
+    /// creature subtypes, and color, rather than adding to them. A Red Human
+    /// Wizard 2/2 becomes exactly a 1/1 blue Frog creature with no residual
+    /// Human/Wizard subtypes and no residual red color.
+    #[test]
+    fn frogify_aura_replaces_subtypes_color_and_type() {
+        let mut state = setup();
+        // RemoveAllSubtypes{Creature} resolves creature-type membership against
+        // state.all_creature_types — the wipe and the new Frog must be known.
+        state.all_creature_types = vec![
+            "Human".to_string(),
+            "Wizard".to_string(),
+            "Frog".to_string(),
+        ];
+
+        let creature = make_creature(&mut state, "Human Wizard", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.subtypes.push("Human".to_string());
+            obj.card_types.subtypes.push("Wizard".to_string());
+            obj.color = vec![ManaColor::Red];
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_color = obj.color.clone();
+        }
+
+        // Create the Frogify Aura carrying the modifications the parser now emits.
+        let aura = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Frogify".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(creature.into());
+            obj.timestamp = ts;
+
+            let enchanted_creature = TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(enchanted_creature)
+                    .modifications(vec![
+                        ContinuousModification::RemoveAllAbilities,
+                        ContinuousModification::SetCardTypes {
+                            core_types: vec![CoreType::Creature],
+                        },
+                        ContinuousModification::SetColor {
+                            colors: vec![ManaColor::Blue],
+                        },
+                        ContinuousModification::SetPower { value: 1 },
+                        ContinuousModification::SetToughness { value: 1 },
+                        ContinuousModification::RemoveAllSubtypes {
+                            set: SubtypeSet::Creature,
+                        },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Frog".to_string(),
+                        },
+                    ]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let c = state.objects.get(&creature).unwrap();
+        assert_eq!(c.power, Some(1), "Frogify sets base power to 1");
+        assert_eq!(c.toughness, Some(1), "Frogify sets base toughness to 1");
+        assert_eq!(
+            c.color,
+            vec![ManaColor::Blue],
+            "non-additive color must replace Red with Blue"
+        );
+        assert_eq!(
+            c.card_types.subtypes,
+            vec!["Frog".to_string()],
+            "Human and Wizard must be wiped, only Frog remains: {:?}",
+            c.card_types.subtypes
+        );
+        assert_eq!(
+            c.card_types.core_types,
+            vec![CoreType::Creature],
+            "card types must be replaced with exactly Creature: {:?}",
+            c.card_types.core_types
+        );
+    }
+
+    /// CR 613.7a + CR 613.8a: A single static ability's modifications share one
+    /// timestamp and apply in WRITTEN order; "depend on" (CR 613.8a) only
+    /// sequences effects from DISTINCT generators and must never reorder one
+    /// static's own clauses. This is the discriminating regression guard for
+    /// the Frogify/Aura type-clearing bug.
+    ///
+    /// The graph is deliberately PARTIAL and ASYMMETRIC so the CR 613.8b
+    /// cycle-fallback (which would otherwise silently return the pre-sorted
+    /// written order and mask the bug) cannot rescue it. Two Type-layer (CR
+    /// 613.1d) clauses share the static's one type-referencing filter:
+    ///   0. `RemoveAllSubtypes{Creature}` — NOT in `depends_on`'s
+    ///      `b_changes_types` set (it is a bulk wipe, not an Add/Remove of a
+    ///      named type).
+    ///   1. `AddSubtype{Frog}`            — IS in `b_changes_types`.
+    ///
+    /// With the guard suppressed, `depends_on` yields exactly ONE directed
+    /// edge: `depends_on(RemoveAllSubtypes, AddSubtype) == true` (b adds a
+    /// type, a's filter references a type) while the reverse is `false`
+    /// (RemoveAllSubtypes is not a `b_changes_types` variant). One edge, no
+    /// cycle → the toposort REORDERS `AddSubtype{Frog}` ahead of the wipe, so
+    /// Frog is added then immediately wiped → subtypes become EMPTY.
+    ///
+    /// With the guard intact the intra-static edge is suppressed, the toposort
+    /// falls through to the `mod_index` pre-sort (written) order: the wipe
+    /// clears Human/Wizard FIRST, then `AddSubtype{Frog}` survives → exactly
+    /// `[Frog]`. The assertion therefore passes ONLY when the guard preserves
+    /// written order, and fails if the dependency reorder is allowed.
+    #[test]
+    fn same_static_modifications_apply_in_written_order() {
+        let mut state = setup();
+        state.all_creature_types = vec![
+            "Human".to_string(),
+            "Wizard".to_string(),
+            "Frog".to_string(),
+        ];
+
+        // Creature with pre-existing creature subtypes that RemoveAllSubtypes
+        // must wipe.
+        let creature = make_creature(&mut state, "Human Wizard", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.subtypes.push("Human".to_string());
+            obj.card_types.subtypes.push("Wizard".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // One static carrying, in written order:
+        //   RemoveAllSubtypes{Creature} -> wipes Human, Wizard (applied FIRST)
+        //   AddSubtype{Frog}            -> added AFTER the wipe, MUST survive
+        // Written order is Frogify-correct; a dependency reorder would put the
+        // Add before the wipe and erase Frog.
+        let aura = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "TypeClearingAura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(creature.into());
+            obj.timestamp = ts;
+
+            let enchanted_creature = TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(enchanted_creature)
+                    .modifications(vec![
+                        ContinuousModification::RemoveAllSubtypes {
+                            set: SubtypeSet::Creature,
+                        },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Frog".to_string(),
+                        },
+                    ]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
+
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        let c = state.objects.get(&creature).unwrap();
+        assert_eq!(
+            c.card_types.subtypes,
+            vec!["Frog".to_string()],
+            "written-order wipe-then-add must yield exactly [Frog]; a dependency \
+             reorder of the Add ahead of RemoveAllSubtypes would erase Frog and \
+             leave the subtype list empty: {:?}",
+            c.card_types.subtypes
         );
     }
 }

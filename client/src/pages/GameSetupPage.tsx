@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
@@ -18,8 +18,10 @@ import {
   getDeckCardCount,
 } from "../components/menu/deckHelpers";
 import { menuButtonClass } from "../components/menu/buttonStyles";
-import { ACTIVE_DECK_KEY, touchDeckPlayed } from "../constants/storage";
+import { ACTIVE_DECK_KEY, loadSavedDeckBracket, touchDeckPlayed } from "../constants/storage";
 import { useCardImage } from "../hooks/useCardImage";
+import { BRACKET_LABEL } from "../types/bracket";
+import { effectiveAiDifficulty, isDeckCedhLegal } from "../services/cedhLock";
 import { FORMAT_DEFAULTS } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useCardDataStore } from "../stores/cardDataStore";
@@ -69,7 +71,11 @@ export function GameSetupPage() {
   const [playerCount, setPlayerCount] = useState(2);
   const [matchType, setMatchType] = useState<MatchType>("Bo1");
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
-  const [compatibilities, setCompatibilities] = useState<Record<string, DeckCompatibilityResult>>({});
+  // We only ever read the active deck's compat (see `selectedCompat` below),
+  // so MyDecks pushes up just that one entry instead of the entire map. Holding
+  // the full map here previously caused a re-render every time *any* deck's
+  // compat scanner result arrived — ~10/sec storm on the deck-select screen.
+  const [selectedCompat, setSelectedCompat] = useState<DeckCompatibilityResult | null>(null);
   const [firstPlayer, setFirstPlayer] = useState<"random" | "play" | "draw">("random");
   const [legalAiDeckCount, setLegalAiDeckCount] = useState<number | null>(null);
   const [setupError, setSetupError] = useState<string | null>(() => {
@@ -119,18 +125,27 @@ export function GameSetupPage() {
     setSetupError(null);
   }
 
-  const handleSelectDeck = (name: string) => {
+  // useCallback so the prop identity passed to MyDecks/SavedDeckTile2 stays
+  // stable across this component's re-renders. Without it, every commit here
+  // creates fresh closures, which React 19's profiler explicitly flags on
+  // SavedDeckTile2 as `onTileClick`/`onEditDeck` "Referentially unequal
+  // function closure" — causing all visible deck tiles to re-render on every
+  // parent commit.
+  const handleSelectDeck = useCallback((name: string) => {
     setActiveDeckName(name);
     localStorage.setItem(ACTIVE_DECK_KEY, name);
-  };
+  }, []);
 
-  const handleEditDeck = (name: string) => {
-    const returnTo = `${location.pathname}${location.search}`;
-    const formatParam = selectedFormat ? `&format=${selectedFormat.toLowerCase()}` : "";
-    navigate(
-      `/deck-builder?deck=${encodeURIComponent(name)}${formatParam}&returnTo=${encodeURIComponent(returnTo)}`,
-    );
-  };
+  const handleEditDeck = useCallback(
+    (name: string) => {
+      const returnTo = `${location.pathname}${location.search}`;
+      const formatParam = selectedFormat ? `&format=${selectedFormat.toLowerCase()}` : "";
+      navigate(
+        `/deck-builder?deck=${encodeURIComponent(name)}${formatParam}&returnTo=${encodeURIComponent(returnTo)}`,
+      );
+    },
+    [location.pathname, location.search, navigate, selectedFormat],
+  );
 
   const handleStartAI = () => {
     if (!activeDeckName || !formatConfig) return;
@@ -146,8 +161,12 @@ export function GameSetupPage() {
     const prefs = usePreferencesStore.getState();
     prefs.ensureAiSeatCount(opponentCount);
     const prefSeats = usePreferencesStore.getState().aiSeats.slice(0, opponentCount);
+    // cEDH is a table-wide toggle, not a per-seat difficulty: when it's on,
+    // every seat's engine difficulty resolves to "CEDH" (the per-seat value is
+    // preserved in prefs for when cEDH is turned off).
+    const cedhMode = prefs.cedhMode;
     const aiSeats = prefSeats.map((s) => ({
-      difficulty: s.difficulty,
+      difficulty: effectiveAiDifficulty(s.difficulty, cedhMode),
       deckId: s.deckId === "Random" ? null : s.deckId,
     }));
     const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
@@ -159,8 +178,8 @@ export function GameSetupPage() {
     );
   };
 
-  // Sidebar deck preview
-  const selectedCompat = activeDeckName ? compatibilities[activeDeckName] : undefined;
+  // Sidebar deck preview. `selectedCompat` is now state pushed up from MyDecks
+  // (active-deck-only) rather than derived from a full compatibilities map.
   const noDeckSelected = !activeDeckName;
   const deckBlockedForSelectedFormat = selectedCompat?.selected_format_compatible === false;
   const noLegalAiDecks = legalAiDeckCount === 0;
@@ -169,6 +188,15 @@ export function GameSetupPage() {
   // trap the user on this screen.
   const cardDataLoading = cardStatus === "loading";
   const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
+
+  // cEDH warning: shown when the human deck is not bracket 5 but the table is
+  // in cEDH mode (all AI play cEDH).
+  const cedhMode = usePreferencesStore((s) => s.cedhMode);
+  const humanDeckBracket = activeDeckName ? loadSavedDeckBracket(activeDeckName) : null;
+  const showCedhWarning =
+    activeDeckName !== null &&
+    cedhMode &&
+    !isDeckCedhLegal(humanDeckBracket);
   const representativeCard = useMemo(
     () => (activeDeckName ? getRepresentativeCard(activeDeckName) : null),
     [activeDeckName],
@@ -250,7 +278,7 @@ export function GameSetupPage() {
             onEditDeck={handleEditDeck}
             activeDeckName={activeDeckName}
             bare
-            onCompatibilityUpdate={setCompatibilities}
+            onActiveDeckCompatChange={setSelectedCompat}
           />
 
           {/* Sidebar */}
@@ -320,6 +348,20 @@ export function GameSetupPage() {
                     <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                       {selectedCompat.selected_format_reasons[0]
                         ?? t("gameSetup.deckNotLegal", { format: selectedFormat })}
+                    </div>
+                  )}
+
+                  {showCedhWarning && (
+                    <div
+                      role="alert"
+                      className="mt-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-200"
+                    >
+                      {t("gameSetup.cedhWarning", {
+                        bracket:
+                          humanDeckBracket !== null
+                            ? `${humanDeckBracket} (${BRACKET_LABEL[humanDeckBracket]})`
+                            : t("gameSetup.cedhWarningUntagged"),
+                      })}
                     </div>
                   )}
                 </div>
@@ -467,7 +509,7 @@ export function GameSetupPage() {
                   tone: "emerald",
                   size: "lg",
                   disabled: cannotStartAi,
-                  className: "w-full",
+                  className: "w-full whitespace-nowrap px-6",
                 })}
               >
                 {playerCount > 2

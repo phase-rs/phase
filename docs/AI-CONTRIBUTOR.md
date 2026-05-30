@@ -10,12 +10,88 @@ If you are the LLM executing this: read top to bottom and follow every step. Do 
 
 ## 0. Quality Floor — self-confirm before touching code
 
-Before Step 1, confirm the following. **Model** and **Thinking level** are advisory — proceed even if your runtime is below them, but report your actual configuration accurately so the maintainer's automation can triage the resulting PR. **Subagent support** and **Autonomy** are hard requirements: without them, abort.
+Before Step 1, confirm the following. **Tool support** and **Autonomy** are hard requirements: without them, abort. **Model** is load-bearing — see §0.1 for tier routing; report your actual model accurately on a `Model:` line in the PR body. **Thinking level** is advisory.
 
-- **Model (advisory):** Best results come from Claude Opus 4.7+ or Codex 5.4+. Weaker models produce less idiomatic code and may silently skip verification steps; the maintainer prefers a flagged PR from a weaker model to no PR at all. Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-7`, `Model: claude-sonnet-4-6`, `Model: codex-5.4`). Do not editorialize this line — upstream automation parses it.
+- **Model (load-bearing):** §0.1 routes you to either the full pipeline (Frontier tier) or the same pipeline with mandatory pre-PR gates (Standard tier). Report your model on a single canonical line in the PR body (e.g. `Model: claude-opus-4-7`, `Model: claude-sonnet-4-6`, `Model: codex-5.4`). Do not editorialize this line — `/pr-contribution-handler` parses it (and the matching `Tier:` line in §0.1.4) to prioritize PRs. Claiming Frontier when you are Standard wastes maintainer time on a PR that will fail the §0.1.2 gates anyway.
 - **Thinking (advisory):** Medium or higher. On Claude Code this is the default for Opus; on Codex CLI pass `--reasoning medium` or higher. Report on a `Thinking:` line in the PR body.
-- **Subagent / tool support (required):** You can spawn subagents (Claude Code: Agent tool; Codex: equivalent), use `WebFetch`, run shell commands, and invoke skills. Without these, you cannot run `engine-implementer` and must abort.
+- **Tool support (required):** You can invoke skills, use `WebFetch`, run shell commands, and use an independent reviewer or fresh context when requested. Without these, you cannot run `$engine-implementer` and must abort.
 - **Autonomy (required):** You will not pause for human input during the run. Every decision fork defaults to the architecturally idiomatic path as defined by `CLAUDE.md`, `AGENTS.md`, and the skills under `.claude/skills/`.
+
+---
+
+## 0.1. Capability tier and Standard-tier gates
+
+Skill references in this section use the `$skill` / `/skill` convention defined in §0.25 — the forward reference is intentional so tier routing precedes notation.
+
+### 0.1.1. Tier table
+
+| Tier     | Models | Procedure |
+|----------|--------|-----------|
+| Frontier | `claude-opus-4-7`+, `gpt-5-5`+, `codex-5-5`+ | Full pipeline per §4 onward. Trusted to self-comply with `CLAUDE.md`. |
+| Standard | `claude-sonnet-4-6`, `claude-haiku-4-5`, `gpt-5-3` through `gpt-5-4`, `codex-5-3` through `codex-5-4` | Full pipeline allowed, but both gates in §0.1.2 must pass before opening the PR. |
+
+If you cannot determine your model, assume Standard. Below Standard (no tools, no autonomy), abort per §0.
+
+### 0.1.2. Standard-tier pre-PR gates
+
+Both gates run on your diff before you push and open a PR. Failure on either → stop, do not open the PR, trigger §0.1.3 honesty clause.
+
+**Gate A — Combinator-purity script.** Run from the repo root:
+
+```bash
+./scripts/check-parser-combinators.sh
+```
+
+Paste the full output (including the success line or the violation list) into the PR body under a `## Gate A` heading. Non-zero exit = stop. The script catches the patterns Standard-tier models most frequently violate despite the `CLAUDE.md` nom mandate: `.contains("…")`, `.split_once`, `.starts_with("…")`, match-arm string literals, and chained `if let Ok = tag(...)` blocks. Do not skip this step. Do not edit the pasted output.
+
+**Gate B — Pattern anchoring.** Before writing your change, identify ≥2 existing analogous implementations in the same module(s) you are about to edit. Cite them in the PR body under `## Anchored on` with `file:line` references and a one-line description of what pattern you are following:
+
+```
+## Anchored on
+- crates/engine/src/parser/oracle_static.rs:412 — existing `alt()` extension for keyword granting
+- crates/engine/src/parser/oracle_static.rs:687 — existing continuous-modification wiring
+```
+
+Your new code must visibly mirror these analogs — same combinator family, same naming convention, same module placement. `/pr-contribution-handler` audits these citations (paths must exist, cited code must use the same combinator family as the new code, cited module class must match the modified module class). Fabricated, broken, or unrelated citations signal the maintainer to apply elevated scrutiny and increase the inline cleanup cost — they slow your PR down rather than helping it across the finish line.
+
+### 0.1.3. Honesty clause
+
+When a gate fails or you cannot find compliant analogs to anchor on, do NOT open a partial/WIP PR and do NOT edit Gate A output to mask violations. Stop and report to the user with:
+
+- The gate that failed and its raw output.
+- The missing primitive or pattern (e.g. "no existing parser arm in `oracle_trigger.rs` handles this triggering-condition shape").
+- File paths inspected + relevant CR section.
+- Recommendation to re-run the task on a Frontier-tier model.
+
+### 0.1.4. PR-body tier declaration
+
+Every PR body must include a single canonical line on its own line:
+
+```
+Tier: Frontier
+```
+
+or
+
+```
+Tier: Standard
+```
+
+`/pr-contribution-handler` parses this to sort processing order (Frontier PRs first — higher base quality, faster to merge). Missing or malformed → treated as Standard. Do not editorialize.
+
+---
+
+## 0.25. Notation — skill invocation
+
+Throughout this document, skills are written with a leading `$` (Codex convention), e.g. `$engine-implementer`, `$review-impl`, `$review-engine-plan`, `$engine-planner`. If you are running under Claude Code, substitute a leading `/` instead — `/engine-implementer`, `/review-impl`, etc. Both forms invoke the same skill file under `.claude/skills/<name>/SKILL.md`. Pick the form your runtime understands; do not mix them in a single command.
+
+---
+
+## 0.5. Out-of-scope paths — `mtgish` is dormant
+
+`mtgish/`, `crates/mtgish-import/`, and `data/mtgish-*` are **dormant** — they are NOT live consumers of the engine, parser, or card data. The runtime pipeline is MTGJSON → `crates/engine/src/parser/` → `client/public/card-data.json`.
+
+Do not modify any mtgish path. Do not mirror new engine variants, struct-variant fields, or parser changes into `mtgish-import` "for consistency." PRs that only touch mtgish files will be rejected on sight. If a tool, audit, or skill steers you toward mtgish, treat the reference as historical and stay in `crates/engine/`.
 
 ---
 
@@ -41,6 +117,32 @@ If the contributor lacks `gh`, fall back to a plain `git clone` and tell them (i
 
 ---
 
+## 2.5. Bootstrap the repo (Developer track only)
+
+Run **once per fresh clone** before invoking `$engine-implementer`. This downloads MTGJSON, generates `client/public/card-data.json`, fetches the local copy of the Comprehensive Rules, installs frontend deps, and configures git hooks:
+
+```bash
+./scripts/setup.sh --agent
+```
+
+The `--agent` flag skips the three Scryfall image sidecars (`scryfall-data.json`, `scryfall-token-images.json`, `scryfall-printings.json`). They are runtime-only image data for the React frontend in a browser — no Rust integration test, parser tool, `cargo coverage`, `cargo semantic-audit`, or vitest test depends on them. Skipping saves a ~500 MB Scryfall bulk download with zero impact on the signal §6 verification consumes.
+
+**Required for §6 verification:**
+- `client/public/card-data.json` — without this, integration tests in `crates/engine/tests/integration/*.rs` self-skip with `"skipping: client/public/card-data.json not generated"` and `cargo coverage` / `cargo semantic-audit` / `cargo parser-gaps` cannot read parsed AST shape for any card. Agents without this file have no signal beyond unit tests.
+- `client/public/card-names.json`, `coverage-data.json`, `coverage-summary.json`, `card-data-meta.json`, `set-list.json`, `decks.json` — sidecars consumed by `cargo coverage` and the parser audit binaries.
+- `docs/MagicCompRules.txt` — gitignored. Required for the CR-annotation rule (`grep -n "^701.21" docs/MagicCompRules.txt`); without it you cannot verify CR numbers and §0.1 honesty applies.
+- `.git/config` git-hooks include — applies the repo's pre-commit hooks (including the `check-parser-combinators.sh` gate).
+
+**Also produced, but not consumed by Developer-track §6:**
+- `client/src/wasm/*` — WASM artifacts. Required by `pnpm run type-check` / vitest because TypeScript files import their generated `.d.ts`, but §6 doesn't run either. Safe to ignore unless your card touches frontend code.
+- `client/node_modules/` — required by `pnpm` commands. Same caveat.
+
+Agent mode also implies `--no-tilt` internally: even if `tilt` is on your PATH, setup.sh runs `gen-card-data.sh` and `build-wasm.sh` inline rather than deferring them to `tilt up`, so the required artifacts above are guaranteed present when the script exits.
+
+Skip this section entirely on the Non-developer track — CI runs everything `--agent` mode produces.
+
+---
+
 ## 3. Pick a card
 
 **If the human named a card**, use that name verbatim. Normalize casing as needed for `client/public/card-data.json` lookups (typically lowercase).
@@ -60,7 +162,7 @@ Record the chosen card name. It will appear in the branch name, commit message, 
 
 ---
 
-## 4. Implement with `engine-implementer`
+## 4. Implement with `$engine-implementer`
 
 Create a branch (with a collision guard so re-runs on the same fork don't fail):
 
@@ -75,31 +177,35 @@ done
 git checkout -b "$slug"
 ```
 
-Then invoke the `engine-implementer` agent (Claude Code: use the Agent tool with `subagent_type: engine-implementer`; Codex: see [Appendix A](#appendix-a--codex-cli-equivalents)) with this prompt, substituting `<NAME>`:
+Then invoke the `$engine-implementer` skill with this prompt, substituting `<NAME>`:
 
 > Implement full engine support for the card "<NAME>". Follow `CLAUDE.md` and `AGENTS.md` design principles without exception: build for the class not the card, nom combinators on first pass, CR annotations verified against `docs/MagicCompRules.txt` (and for each cited rule, also read its adjacent rules in the same section — cite the *authorizing* rule for the effect, not just the *layering* rule), idiomatic Rust, engine owns all logic, frontend is display-only. Reuse existing building blocks before writing new ones. Do not ask for clarification — on any ambiguity, take the architecturally idiomatic path. If scope expands beyond a single effect (e.g. the card requires new infrastructure, a new keyword, a new replacement pipeline), proceed anyway and explicitly note the scope expansion in your final report under a heading "Scope Expansion".
 
-`engine-implementer`'s published contract is: plan (via `engine-planner` sub-agent) → implement → run `/review-impl`. Do **not** spawn a second reviewer on top — *if it actually ran the review.* Validate that next.
+`$engine-implementer`'s published contract is: plan with `engine-planner` → review the plan with `$review-engine-plan` until clean → implement → verify → review the implementation with `$review-impl` until clean → commit. Validate that next.
+
+**Standard tier:** the §0.1.2 gates apply to whatever diff `$engine-implementer` produces. Run both Gate A and Gate B before §5; if either fails, do NOT continue to §7 — return to fix the violations, or stop per §0.1.3 if they cannot be fixed without exceeding tier.
 
 ---
 
 ## 5. Validate the review actually happened and was addressed
 
-> This is the most important step. `engine-implementer` frequently claims to have run `/review-impl` without actually doing so, or runs it and acknowledges findings without fixing them. The outside caller (you, the LLM reading this) must verify.
+> This is the most important step. `$engine-implementer` must actually run `$review-impl` and address findings before committing. The outside caller (you, the LLM reading this) must verify.
 
 Apply **all three** checks:
 
-1. **Review section exists with concrete findings.** The agent's final report must contain an explicit `/review-impl` section enumerating findings with file:line references. Generic phrasing like "review passed" or "no issues found" with no enumerated items counts as *missing*, not clean.
+1. **Review section exists with concrete findings.** The final report must contain an explicit `$review-impl` section enumerating findings with file:line references, or a clear clean-review result that states an implementation review ran against the full diff.
 2. **Findings were addressed with code.** For every finding classified as a defect, gap, or missing case, there must be a corresponding change in `git diff HEAD~ HEAD` (or the working tree if not yet committed). An acknowledgement without a diff is a failure.
-3. **Clean-review cross-check (fresh context).** If the report claims zero findings, **spawn a new subagent** for an independent pass — do NOT re-message the still-running `engine-implementer`, and do NOT call `/review-impl` from the same context. Claude Code: invoke the `Agent` tool with `subagent_type: feature-dev:code-reviewer` (or `code-quality-reviewer`); Codex: open a fresh sandbox session. Hand it ONLY the unified diff (`git diff HEAD~ HEAD`), `CLAUDE.md`, and the relevant skills under `.claude/skills/`. No prior conversation. The subagent must explicitly check: (a) **nom-mandate compliance** — flag any `match` over a stringified parser-text variable with string-literal arms, any chained `if let Ok(..) = tag(..)` blocks, and any string-method dispatch (`.contains("…")`, `.find("…")`, `.split_once`, etc.); (b) **CR-citation completeness** — for each cited rule, did the implementation also cite the *authorizing* rule, not just the *layering* rule? (c) **pattern coverage** — does this work for ≥10 cards or just one? (d) **logic placement** — engine vs frontend per `CLAUDE.md`; (e) **building-block reuse** — did the implementation duplicate logic an existing helper already handles? Re-implementing what `oracle_util.rs`, `oracle_quantity.rs`, `game/filter.rs`, `game/zones.rs`, etc. already provide is a defect even if the new code works; (f) **bool-flag avoidance** — any new `bool` field/parameter where a typed enum (`ControllerRef`, `Comparator`, `Option<T>`, etc.) would express the design space better is a defect. If the cross-check produces findings, the original review was incomplete — feed them back and loop.
+3. **Clean-review cross-check (fresh context).** If the report claims zero findings, run an independent pass when your environment supports it; otherwise note the limitation in the PR body. Hand the reviewer ONLY the unified diff (`git diff HEAD~ HEAD`), `CLAUDE.md`, and the relevant skills under `.claude/skills/`. No prior conversation. The reviewer must explicitly check: (a) **nom-mandate compliance** — flag any `match` over a stringified parser-text variable with string-literal arms, any chained `if let Ok(..) = tag(..)` blocks, and any string-method dispatch (`.contains("…")`, `.find("…")`, `.split_once`, etc.); (b) **CR-citation completeness** — for each cited rule, did the implementation also cite the *authorizing* rule, not just the *layering* rule? (c) **pattern coverage** — does this work for ≥10 cards or just one? (d) **logic placement** — engine vs frontend per `CLAUDE.md`; (e) **building-block reuse** — did the implementation duplicate logic an existing helper already handles? Re-implementing what `oracle_util.rs`, `oracle_quantity.rs`, `game/filter.rs`, `game/zones.rs`, etc. already provide is a defect even if the new code works; (f) **bool-flag avoidance** — any new `bool` field/parameter where a typed enum (`ControllerRef`, `Comparator`, `Option<T>`, etc.) would express the design space better is a defect. If the cross-check produces findings, feed them back into `$engine-implementer` and loop.
 
-**If any check fails:** send a follow-up message to the still-running `engine-implementer` agent (Claude Code: `SendMessage` by agent name) instructing it to actually execute `/review-impl` and address every finding with code changes. Do **not** proceed to Step 6 until validation passes. Retry at most 2 times; on a third failure, abort the run and record the gap in the PR body under a "Validation Failures" heading so the maintainer can triage.
+**If any check fails:** rerun `$engine-implementer` or continue the same skill workflow with explicit instructions to execute `$review-impl` and address every finding with code changes. Do **not** proceed to Step 6 until validation passes. Retry at most 2 times; on a third failure, abort the run and record the gap in the PR body under a "Validation Failures" heading so the maintainer can triage.
 
 ---
 
 ## 6. Verify (track-specific)
 
 **Developer track** — run in this order. On any failure, fix in-loop (max 2 retries) before proceeding. If still failing after retries, record the failure in the PR body under "CI Failures" and continue to Step 7 — do not abort.
+
+Step 2.5 (`./scripts/setup.sh --agent`) is a prerequisite for this section — `cargo coverage` and `cargo semantic-audit` both read `client/public/card-data.json`, and the integration suite self-skips without it.
 
 If Tilt is running locally (`tilt get uiresource clippy >/dev/null 2>&1` succeeds), prefer `tilt-wait.sh` for clippy/tests/card-data — it reuses Tilt's already-warm rebuild loop instead of fighting it for the cargo target lock. See CLAUDE.md § "Canonical verification pattern".
 
@@ -196,15 +302,15 @@ Print the PR URL. Print a one-line status: `success`, `partial`, or `aborted`. E
 
 ---
 
-## Appendix A — Codex CLI equivalents
+## Appendix A — Skill equivalents
 
-Codex CLI does not support Claude-specific subagent invocation or skill names (`engine-implementer`, `/review-impl`, `commit-push-pr`). Substitute as follows:
+Use skills when the runtime supports them:
 
-- **Invoking `engine-implementer`:** read `.claude/agents/engine-implementer.md` and follow its pipeline manually — first run the planning phase (read `.claude/agents/engine-planner.md`, produce a plan with its six mandatory architectural sections), then implement, then run the review step from `.claude/commands/review-impl.md`.
-- **Invoking `/review-impl`:** open `.claude/commands/review-impl.md` and execute its checklist against the uncommitted diff.
+- **Invoking `$engine-implementer`:** load `.claude/skills/engine-implementer/SKILL.md` and follow its full plan → review → implement → verify → review → commit pipeline.
+- **Invoking `$review-impl`:** load `.claude/skills/review-impl/SKILL.md` and execute its checklist against the uncommitted diff or commit diff.
 - **Invoking `commit-push-pr`:** run the raw `git` + `gh` sequence shown in Step 7.
 
-Every other step (quality floor, track selection, clone, card pick, validation, verify, report) is tool-agnostic and applies to Codex identically.
+Every other step (quality floor, track selection, clone, card pick, validation, verify, report) is tool-agnostic.
 
 ---
 
@@ -218,7 +324,8 @@ Paste one of these into your LLM. That is the entire interaction.
 Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
 and follow the Developer track end-to-end to implement the card {CARD_NAME, or
 say "pick one" and let the LLM choose}. Use medium thinking. Do not stop for
-my input. Open a PR when done.
+my input. Apply the §0.1 tier routing — if you are Standard tier, BOTH §0.1.2
+gates must pass before opening the PR. Open a PR when done.
 ```
 
 ### B.2 — Non-developer track, URL-only
@@ -227,7 +334,9 @@ my input. Open a PR when done.
 Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
 and follow the Non-developer track end-to-end to implement the card {CARD_NAME,
 or say "pick one"}. Skip local verification — GitHub Actions will run CI on the
-PR. Use medium thinking. Do not stop for my input. Open a PR when done.
+PR. Use medium thinking. Do not stop for my input. Apply the §0.1 tier routing
+— if you are Standard tier, BOTH §0.1.2 gates must pass before opening the PR.
+Open a PR when done.
 ```
 
 ### B.3 — Non-developer track, fully self-contained (for UIs without web fetch)
@@ -240,7 +349,7 @@ Requirements: Best results with Claude Opus 4.7+ or Codex 5.4+ at medium+
 thinking, but proceed even if your runtime is below that — just report your
 actual model on a single canonical "Model:" line in the PR body (e.g.
 "Model: claude-sonnet-4-6"). Do NOT editorialize that line. Hard requirements:
-you can spawn subagents, run shell commands, and you will not pause for input.
+you can invoke skills, run shell commands, and you will not pause for input.
 
 Steps:
 1. gh repo fork phase-rs/phase --clone --remote && cd phase
@@ -249,17 +358,17 @@ Steps:
    and pick a card with supported==false and small gap_count.
 3. git checkout -b card/<slug>  (if the branch already exists locally or on
    origin, append "-2", "-3", etc. — see Step 4 in docs/AI-CONTRIBUTOR.md).
-4. Invoke the engine-implementer agent to implement the card. Tell it: follow
-   CLAUDE.md and AGENTS.md without exception, nom combinators on first pass,
-   CR annotations verified against docs/MagicCompRules.txt (and cite the
+4. Invoke the $engine-implementer skill to implement the card. Tell it: follow
+   CLAUDE.md and AGENTS.md without exception, plan with engine-planner, review
+   the plan with $review-engine-plan until clean, use nom combinators on first
+   pass, verify CR annotations against docs/MagicCompRules.txt (and cite the
    authorizing rule, not just the layering rule), do not ask for clarification,
-   take the idiomatic path, proceed even if scope expands.
-5. Validate engine-implementer actually ran /review-impl AND addressed every
+   take the idiomatic path, proceed even if scope expands, review the
+   implementation with $review-impl until clean, then commit.
+5. Validate $engine-implementer actually ran $review-impl AND addressed every
    finding with code changes. If not, send it a follow-up to do so (max 2
-   retries). If the review claims zero findings, spawn a NEW subagent (Claude
-   Code: Agent tool with subagent_type feature-dev:code-reviewer or
-   code-quality-reviewer) and hand it only the diff + CLAUDE.md — do not
-   re-review from inside the same context.
+   retries). If the review claims zero findings, use an independent reviewer
+   or fresh context when available and hand it only the diff + CLAUDE.md.
 6. Skip local verification (I don't have a Rust toolchain).
 7. git push to my fork and open a PR with title "Add <Card Name>" (or
    "Partial: <Card Name>" only if validation or CI failures were unresolved).
@@ -267,6 +376,17 @@ Steps:
    --label flags — the upstream auto-labeler applies ai-contribution and
    needs-maintainer automatically based on the branch name and body content.
 8. Print the PR URL and exit.
+
+Tier gates: identify your model. If you are Standard tier (claude-sonnet-4-6,
+claude-haiku-4-5, gpt-5-3 through gpt-5-4, codex-5-3 through codex-5-4), BEFORE
+pushing the PR you MUST: (a) run ./scripts/check-parser-combinators.sh and
+paste the full output under a `## Gate A` heading in the PR body, (b) include
+a `## Anchored on` section with at least 2 file:line citations to existing
+analogous implementations in the same module(s) you edited, (c) include a
+`Tier: Standard` line. If either gate fails, do NOT open the PR — stop and
+report the failed gate output to the user with a recommendation to re-run on
+a Frontier-tier model. Frontier tier (claude-opus-4-7+, gpt-5-5+, codex-5-5+)
+includes a `Tier: Frontier` line and the same `## Anchored on` section.
 
 Card: {CARD_NAME or "pick one"}
 ```

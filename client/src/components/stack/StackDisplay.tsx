@@ -62,6 +62,9 @@ const PANEL_PADDING_Y = 14;
 const PANEL_HEADER_HEIGHT = 36;
 const COLLAPSED_PEEK_PX = 28;
 const STACK_RIGHT_OFFSET_PX = 112;
+// Minimum gap kept between the panel and the top/bottom viewport edges so the
+// header controls never clip off-screen on short windows or deep stacks.
+const VERTICAL_VIEWPORT_INSET = 12;
 
 function getViewportSize() {
   if (typeof window === "undefined") {
@@ -162,9 +165,14 @@ export function StackDisplay() {
     viewport.width < 640 ? 12 :
       viewport.width < 1024 ? 28 :
         viewport.width < 1440 ? 56 : STACK_RIGHT_OFFSET_PX;
-  const topPosition =
-    viewport.width < 640 ? "38%" :
-      viewport.width < 1024 ? "43%" : "50%";
+  // Vertical anchor as a fraction of viewport height (narrower viewports nudge
+  // the panel above dead-center to clear the hand/board). The fraction is
+  // clamped to a pixel top below so the panel header — the only controls (swap,
+  // collapse, count) — can never be pushed off the top edge when the pile is
+  // taller than the viewport.
+  const topFraction =
+    viewport.width < 640 ? 0.38 :
+      viewport.width < 1024 ? 0.43 : 0.5;
   const collapsedPeekPx = viewport.width < 768 ? 24 : COLLAPSED_PEEK_PX;
 
   const pileWidth = cardSize.width + staggerX * (displayStack.length - 1);
@@ -175,12 +183,23 @@ export function StackDisplay() {
   // Collapse slides the panel out toward its docked edge: right dock → positive
   // x (off the right), left dock → negative x (off the left).
   const collapsedX = dockedLeft ? -collapsedOffset : collapsedOffset;
+  // Resolve the fractional anchor to an explicit, viewport-clamped pixel top.
+  // Centering on `topFraction` is the default, but when the pile is taller than
+  // the viewport (deep stacks / short windows) a centered top edge slides above
+  // y=0 and clips the header controls. Clamp the top edge into
+  // [inset, viewport - panelHeight - inset]; when the panel can't fit, the lower
+  // bound collapses to `inset` so it pins to the top (header stays visible) and
+  // overflow spills off the bottom (oldest entries) instead.
+  const panelTopPx = Math.min(
+    Math.max(viewport.height * topFraction - panelHeight / 2, VERTICAL_VIEWPORT_INSET),
+    Math.max(VERTICAL_VIEWPORT_INSET, viewport.height - panelHeight - VERTICAL_VIEWPORT_INSET),
+  );
   // Anchor to the docked edge. Only the right side reserves room for the right
   // action rail (`--game-right-rail-offset`); the left edge has no such rail.
   const panelAnchorStyle: CSSProperties = dockedLeft
-    ? { top: topPosition, left: `calc(env(safe-area-inset-left) + ${rightOffsetPx}px)` }
+    ? { top: panelTopPx, left: `calc(env(safe-area-inset-left) + ${rightOffsetPx}px)` }
     : {
-        top: topPosition,
+        top: panelTopPx,
         right: `calc(env(safe-area-inset-right) + ${rightOffsetPx}px + var(--game-right-rail-offset, 0px))`,
       };
 
@@ -204,7 +223,10 @@ export function StackDisplay() {
         // transparent region would otherwise hover over (and swallow clicks
         // meant for) battlefield objects. Click-through here; the real
         // interactive surfaces below opt back in with `pointer-events-auto`.
-        className="pointer-events-none fixed top-1/2 z-[35] -translate-y-1/2"
+        // Vertical position comes entirely from the clamped pixel `top` in
+        // `panelAnchorStyle` — no `top-1/2`/`-translate-y-1/2` centering, which
+        // would let a tall panel's header slide above the viewport top edge.
+        className="pointer-events-none fixed z-[35]"
         style={panelAnchorStyle}
       >
         <motion.div

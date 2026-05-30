@@ -23,6 +23,7 @@ import type { SeatPublicView } from "../../adapter/draft-adapter";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { useDraftPodStore } from "../../stores/draftPodStore";
+import { BotIndicator } from "./BotIndicator";
 
 // ── Seat Card ─────────────────────────────────────────────────────────
 
@@ -50,6 +51,7 @@ function SeatCard({
       ? t("lobby.botSeat")
       : t("lobby.waitingSeat")
     : seat.display_name;
+  const botLabel = t("lobby.botSeat");
 
   const borderColor = isLocalSeat
     ? "border-emerald-400/40"
@@ -96,6 +98,7 @@ function SeatCard({
         >
           {seatLabel}
         </span>
+        {seat.is_bot && <BotIndicator label={botLabel} />}
       </div>
 
       {/* Role badge */}
@@ -141,6 +144,8 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
   const toggleBotFill = useDraftPodStore((s) => s.toggleBotFill);
   const startDraft = useDraftPodStore((s) => s.startDraft);
   const config = useDraftPodStore((s) => s.config);
+  const poolMode = useDraftPodStore((s) => s.poolMode);
+  const cubeForm = useDraftPodStore((s) => s.cubeForm);
 
   const isHost = role === "host";
   const filledSeats = seats.filter((s) => s.display_name).length;
@@ -185,7 +190,9 @@ export function DraftPodLobby({ onLeave }: DraftPodLobbyProps) {
         <div>
           <h2 className="menu-display text-2xl text-white">{t("lobby.title")}</h2>
           <p className="mt-1 text-sm text-white/50">
-            {config.setName || config.setCode} &mdash;{" "}
+            {poolMode === "cube"
+              ? cubeForm?.cubeName ?? config.setName
+              : config.setName || config.setCode} &mdash;{" "}
             {t("lobby.draftKind", { kind: config.kind })}
           </p>
         </div>

@@ -117,7 +117,7 @@ const MANA_COST_KEYWORDS = new Set([
   "Mutate", "Disturb", "Disguise", "Blitz", "Overload", "Spectacle",
   "Surge", "Encore", "Buyback", "Echo", "Outlast", "Scavenge", "Fortify",
   "Prototype", "Plot", "Craft", "Offspring", "Impending", "LevelUp",
-  "Warp", "Sneak", "WebSlinging", "Squad",
+  "Warp", "Sneak", "WebSlinging", "Squad", "Cleave",
 ]);
 
 /** Keywords parameterized with a u32. */

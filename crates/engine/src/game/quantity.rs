@@ -499,6 +499,26 @@ pub fn resolve_quantity_with_targets(
     }
 }
 
+/// CR 608.2c: Resolve a condition quantity from the printed ability controller's
+/// perspective while preserving target/chosen-X and scoped-player bindings.
+///
+/// Player-scoped effect resolution temporarily rebinds `ability.controller` to
+/// the player being affected. Conditional clauses such as "if creatures you
+/// control have total toughness 40 or greater" still refer to the source's
+/// controller, not that temporary recipient.
+pub(crate) fn resolve_quantity_for_ability_condition(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+) -> i32 {
+    let Some(original_controller) = ability.original_controller else {
+        return resolve_quantity_with_targets(state, expr, ability);
+    };
+    let mut condition_ability = ability.clone();
+    condition_ability.controller = original_controller;
+    resolve_quantity_with_targets(state, expr, &condition_ability)
+}
+
 /// Resolve a QuantityExpr with ability targets/chosen-X plus a per-object
 /// recipient binding for `FilterProp::AttachedToRecipient`.
 pub(crate) fn resolve_quantity_with_targets_and_recipient(
@@ -683,13 +703,23 @@ fn resolve_ref(
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
     // in nested filter thresholds) when available, falling back to the controller
     // override used by `resolve_quantity_scoped`. CR 107.2 governs the fallback
-    // path when no ability is in scope (X → 0).
+    // path when no ability is in scope (X -> 0).
     //
     // CR 613.4c: The optional `recipient` from `QuantityContext` flows into
     // `FilterContext::recipient_id` so recipient-relative filter properties
     // resolve against the per-object recipient bound by the layer evaluator.
     let mut filter_ctx = match ability {
-        Some(a) => FilterContext::from_ability(a),
+        // CR 109.5: "you"/"your" on a triggered ability refer to the ability's
+        // (printed) controller. A quantity is a value sub-expression, not an effect
+        // target: while a `player_scope` iteration rebinds `ability.controller` to
+        // each affected player, "Zombies you control" in the quantity still means the
+        // printed/original controller (The Scarab God upkeep X). CR 608.2c: the
+        // ability's controller follows its instructions. Effect-target resolution
+        // keeps the scoped controller via the bare `from_ability` constructor.
+        Some(a) => FilterContext::from_ability_with_controller(
+            a,
+            a.original_controller.unwrap_or(a.controller),
+        ),
         None => FilterContext::from_source_with_controller(source_id, controller),
     };
     filter_ctx.recipient_id = ctx.recipient;
@@ -697,6 +727,20 @@ fn resolve_ref(
     match qty {
         // CR 402: hand size for the scoped player(s).
         QuantityRef::HandSize { player: scope } => {
+            // CR 608.2e (§8): a cross-player `AllPlayers` hand extremum is the
+            // discard-clause equalization minimum — freeze it against the
+            // clause's pre-clause board if a snapshot was captured. Single-
+            // player scopes (Controller/ScopedPlayer/Target/...) re-resolve
+            // live; only the aggregated form is snapshot.
+            if matches!(scope, PlayerScope::AllPlayers { .. }) {
+                if let Some(v) = state
+                    .clause_minimum_snapshot
+                    .as_ref()
+                    .and_then(|s| s.get(qty))
+                {
+                    return v;
+                }
+            }
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
                 usize_to_i32_saturating(p.hand.len())
             })
@@ -931,6 +975,51 @@ fn resolve_ref(
                 AggregateFunction::Sum => values.sum(),
             }
         }
+        // CR 107.1 + CR 700.1: min/max across players of the count of
+        // battlefield objects matching `filter` each player controls.
+        QuantityRef::ControlledByEachPlayer { filter, aggregate } => {
+            // CR 608.2e (§8): prefer the clause-local snapshot if this clause
+            // captured one — that freezes the extremum against the board as it
+            // stood when the clause began, so an earlier APNAP player's
+            // sacrifices do not shrink a later player's minimum.
+            if let Some(v) = state
+                .clause_minimum_snapshot
+                .as_ref()
+                .and_then(|s| s.get(qty))
+            {
+                return v;
+            }
+            // Battlefield-scoped: this variant carries no zone axis.
+            let zone_ids = crate::game::targeting::zone_object_ids(
+                state,
+                crate::types::zones::Zone::Battlefield,
+            );
+            aggregate_over_players(state.players.iter(), *aggregate, |p| {
+                // CR 109.5: evaluate `filter` as if `p` were "you" — count
+                // battlefield objects `p` controls matching the filter. The
+                // explicit `obj.controller == p.id` gate enforces the "they
+                // control" semantics even when `filter` itself carries no
+                // controller clause (Balance's Arm A parses a bare "lands"
+                // type phrase); the rebound `FilterContext` additionally makes
+                // any `controller: You` clause inside `filter` read `p`.
+                let pctx = match ability {
+                    Some(a) => FilterContext::from_ability_with_controller(a, p.id),
+                    None => FilterContext::from_source_with_controller(source_id, p.id),
+                };
+                usize_to_i32_saturating(
+                    zone_ids
+                        .iter()
+                        .filter(|&&id| {
+                            state
+                                .objects
+                                .get(&id)
+                                .is_some_and(|obj| obj.controller == p.id)
+                                && matches_target_filter(state, id, filter, &pctx)
+                        })
+                        .count(),
+                )
+            })
+        }
         QuantityRef::CountersOnObjects {
             counter_type,
             filter,
@@ -1143,15 +1232,33 @@ fn resolve_ref(
         QuantityRef::ExiledFromHandThisResolution => {
             u32_to_i32_saturating(state.exiled_from_hand_this_resolution)
         }
-        // CR 608.2c: Numeric value from the triggering event.
-        // Falls back to the preceding effect's count or amount for sub_ability
-        // continuations where current_trigger_event has no amount (e.g.,
-        // "discard up to N, then draw that many"; "dealt excess damage this
-        // way, add that much {R}").
+        // CR 603.2c: Numeric value carried by the triggering event,
+        // resolution-precedence ordered:
+        //
+        //   1. `current_trigger_match_count` — the filtered subject count of a
+        //      batched trigger ("one or more <FILTER> <verb>"), set by
+        //      `stack::resolve_top` for the resolution. This is the canonical
+        //      "that many" for Ur-Dragon-style batched triggers; without it
+        //      the `extract_amount_from_event` cascade below falls through to
+        //      0 on `AttackersDeclared` and similar batched events.
+        //   2. `extract_amount_from_event(current_trigger_event)` — scalar
+        //      events with an inherent amount (damage dealt, life changed,
+        //      cards drawn, counters added/removed, die rolls).
+        //   3. `last_effect_counts_by_player` — APNAP per-player counts from
+        //      the preceding effect in the same resolution.
+        //   4. `last_effect_count` / `last_effect_amount` — sub_ability
+        //      continuation fallbacks (e.g. "discard up to N, then draw that
+        //      many"; "dealt excess damage this way, add that much {R}").
+        //   5. `0` — undefined.
         QuantityRef::EventContextAmount => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(crate::game::targeting::extract_amount_from_event)
+            .current_trigger_match_count
+            .map(u32_to_i32_saturating)
+            .or_else(|| {
+                state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_amount_from_event)
+            })
             .or_else(|| {
                 ctx.scoped_player.and_then(|player| {
                     (!state.last_effect_counts_by_player.is_empty()).then(|| {
@@ -1241,6 +1348,13 @@ fn resolve_ref(
                 }
             }
             usize_to_i32_saturating(seen.len())
+        }
+        // CR 122.1: Count distinct counter kinds among permanents matching the
+        // filter (controller-relative, CR 109.4). Counter-side dual of
+        // `DistinctColorsAmongPermanents`. Each `CounterType` present on at
+        // least one matching permanent contributes once.
+        QuantityRef::DistinctCounterKindsAmong { filter } => {
+            usize_to_i32_saturating(distinct_counter_kinds_among(state, filter, &filter_ctx).len())
         }
         // CR 305.6: Count distinct basic land types among lands controlled by
         // the referenced player. Domain counts distinct land subtypes, not
@@ -1586,6 +1700,11 @@ fn resolve_ref(
             .objects
             .get(&ctx.self_object())
             .map(|obj| usize_to_i32_saturating(obj.kickers_paid.len()))
+            .unwrap_or(0),
+        QuantityRef::AdditionalCostPaymentCount => state
+            .objects
+            .get(&ctx.self_object())
+            .map(|obj| u32_to_i32_saturating(obj.additional_cost_payment_count))
             .unwrap_or(0),
         QuantityRef::ConvokedCreatureCount => state
             .objects
@@ -1997,6 +2116,40 @@ fn object_id_for_scope(
         // referents read through `ability` slots, not `state.objects`.
         ObjectScope::CostPaidObject | ObjectScope::Anaphoric => None,
     }
+}
+
+/// CR 122.1: Distinct counter kinds present on permanents matching `filter`
+/// (controller-relative, CR 109.4). Mirrors `DistinctColorsAmongPermanents`'s
+/// resolver (zone from `filter.extract_in_zone()`, `zone_object_ids`,
+/// `matches_target_filter`), enumerating `obj.counters.keys()` the same way
+/// proliferate does. Returns a `Vec<CounterType>` SORTED by `CounterType::as_str`
+/// for determinism — `CounterType` has no `Ord` (and must not gain one), so the
+/// underlying `HashSet` iteration order is nondeterministic and would cause
+/// replay desync if returned directly. Used both as the `len()` source for
+/// `QuantityRef::DistinctCounterKindsAmong` resolution and as the per-iteration
+/// kind sequence for `repeat_for` counter-kind loops.
+pub(crate) fn distinct_counter_kinds_among(
+    state: &GameState,
+    filter: &TargetFilter,
+    filter_ctx: &FilterContext<'_>,
+) -> Vec<CounterType> {
+    let zone = filter
+        .extract_in_zone()
+        .unwrap_or(crate::types::zones::Zone::Battlefield);
+    let mut seen: HashSet<CounterType> = HashSet::new();
+    for &id in crate::game::targeting::zone_object_ids(state, zone).iter() {
+        if !matches_target_filter(state, id, filter, filter_ctx) {
+            continue;
+        }
+        if let Some(obj) = state.objects.get(&id) {
+            for ct in obj.counters.keys() {
+                seen.insert(ct.clone());
+            }
+        }
+    }
+    let mut kinds: Vec<CounterType> = seen.into_iter().collect();
+    kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    kinds
 }
 
 pub(crate) fn counter_count_from_map(
@@ -2757,21 +2910,46 @@ pub(crate) fn resolve_player_count(
                         // single-player-count meaning here (no parent object
                         // target is in scope for a player-count quantity).
                         PlayerFilter::ParentObjectTargetController => false,
-                        // CR 109.4 + CR 700.1: "each [player class] who
-                        // [doesn't] control [filter]" — count candidates that
+                        // CR 109.4 + CR 109.5: "each [player class] who controls
+                        // [comparator] [count] [filter]" — count candidates that
                         // satisfy both the `relation` predicate and the
-                        // controls/controls-none predicate. Mirrors the arm in
-                        // `effects::mod::matches_player_scope` (the two copies
+                        // controlled-permanent count comparison. Mirrors the arm
+                        // in `effects::mod::matches_player_scope` (the two copies
                         // must stay in sync).
-                        PlayerFilter::ControlsPermanent {
+                        PlayerFilter::ControlsCount {
                             relation,
-                            presence,
                             filter,
+                            comparator,
+                            count,
                         } => {
+                            let threshold = resolve_quantity(state, count, controller, source_id);
                             crate::game::players::matches_relation(p.id, controller, *relation)
-                                && crate::game::effects::player_controls_matching_permanent(
-                                    state, p.id, presence, filter, source_id,
+                                && crate::game::effects::player_control_count_compares(
+                                    state,
+                                    p.id,
+                                    filter,
+                                    *comparator,
+                                    threshold,
+                                    source_id,
                                 )
+                        }
+                        // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                        // whose [scalar attr] [comparator] [value]" — count
+                        // candidates satisfying both the `relation` predicate and
+                        // the per-candidate scalar comparison. Mirrors the arm in
+                        // `effects::mod::matches_player_scope` (the two copies must
+                        // stay in sync). `attr` is read directly off `p`; `value`
+                        // is the controller-relative threshold, resolved once.
+                        PlayerFilter::PlayerAttribute {
+                            relation,
+                            attr,
+                            comparator,
+                            value,
+                        } => {
+                            let threshold = resolve_quantity(state, value, controller, source_id);
+                            crate::game::players::matches_relation(p.id, controller, *relation)
+                                && crate::game::effects::candidate_player_scalar(p, attr)
+                                    .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                         }
                     }
             })
@@ -3071,6 +3249,89 @@ mod tests {
             obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
         }
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), spell), 0);
+    }
+
+    /// CR 122.1 + CR 109.4: count distinct counter kinds among permanents the
+    /// resolving player controls. An opponent's counter kind must be EXCLUDED,
+    /// and the same kind on two controlled permanents counts once. Order is
+    /// deterministic (sorted by `as_str`).
+    #[test]
+    fn resolve_distinct_counter_kinds_among_controlled_permanents() {
+        let mut state = GameState::new_two_player(42);
+
+        // Controller's permanent A: +1/+1 counter.
+        let perm_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Perm A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_a).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 1);
+        }
+        // Controller's permanent B: Lore counter (distinct kind).
+        let perm_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Perm B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.counters.insert(CounterType::Lore, 1);
+        }
+        // Controller's permanent C: another +1/+1 (same kind as A — counts once).
+        let perm_c = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Perm C".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&perm_c).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Plus1Plus1, 3);
+        }
+        // OPPONENT's permanent: Stun counter — MUST be excluded (CR 109.4).
+        let opp_perm = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Opp Perm".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&opp_perm).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.counters.insert(CounterType::Stun, 1);
+        }
+
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Permanent],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+
+        // Direct helper: distinct kinds among controlled permanents = {P1P1, Lore},
+        // sorted by as_str ("P1P1" < "lore" by byte order; uppercase 'P' = 0x50,
+        // lowercase 'l' = 0x6C).
+        let ctx = FilterContext::from_source_with_controller(perm_a, PlayerId(0));
+        let kinds = distinct_counter_kinds_among(&state, &filter, &ctx);
+        assert_eq!(kinds, vec![CounterType::Plus1Plus1, CounterType::Lore]);
+
+        // QuantityRef resolution returns the count (2).
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCounterKindsAmong {
+                filter: filter.clone(),
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), perm_a), 2);
     }
 
     #[test]
@@ -4431,6 +4692,240 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
     }
 
+    /// CR 109.5: "you"/"your" on a triggered ability refer to the printed
+    /// controller of the source object, not the player a `player_scope`
+    /// iteration is temporarily affecting. During each-opponent resolution the
+    /// engine rebinds `ResolvedAbility::controller` to the scoped player while
+    /// preserving the printed controller in `original_controller`. A quantity
+    /// sub-expression ("Zombies you control" on The Scarab God) must read the
+    /// printed controller, so this asserts the count comes from P0 (printed
+    /// caster) even though `controller` has been rebound to P1 (scoped
+    /// opponent). Reverting the `quantity.rs` seam to a bare `from_ability`
+    /// would count P1's creatures (0) and fail this test.
+    #[test]
+    fn resolve_quantity_you_control_uses_original_controller_under_player_scope() {
+        let mut state = GameState::new_two_player(42);
+        // P0 (printed caster) controls 2 creatures.
+        for i in 0..2 {
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("P0 Creature {i}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        // P1 (scoped opponent) controls 0 creatures — asymmetric so the seam is
+        // discriminating: a correct fix returns 2, the buggy path returns 0.
+
+        // Source object is controlled by P0.
+        let source = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Simulate mid-`player_scope` iteration: `controller` has been rebound to
+        // the scoped opponent (P1), but `original_controller` retains the printed
+        // caster (P0).
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        ability.original_controller = Some(PlayerId(0));
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+
+        // "creatures you control" resolves against the printed controller (P0 → 2),
+        // not the scoped opponent (P1 → 0).
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 2);
+    }
+
+    /// Build an asymmetric board (P0 = `p0_creatures`, P1 = `p1_creatures`) plus a
+    /// P0-controlled source object. Mirrors the harness shape of
+    /// `resolve_quantity_you_control_uses_original_controller_under_player_scope`
+    /// so the "they control" relative-scope tests are discriminating.
+    fn asymmetric_creature_board(p0_creatures: u32, p1_creatures: u32) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let mut next_card = 1u64;
+        let mut add_creatures = |state: &mut GameState, owner: PlayerId, n: u32| {
+            for i in 0..n {
+                let id = create_object(
+                    state,
+                    CardId(next_card),
+                    owner,
+                    format!("{owner:?} Creature {i}"),
+                    Zone::Battlefield,
+                );
+                next_card += 1;
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+            }
+        };
+        add_creatures(&mut state, PlayerId(0), p0_creatures);
+        add_creatures(&mut state, PlayerId(1), p1_creatures);
+        let source = create_object(
+            &mut state,
+            CardId(next_card),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        (state, source)
+    }
+
+    /// CR 115.10 + CR 608.2c: runtime-seam companion to the parser fix
+    /// (`oracle_quantity::tests::for_each_they_control_threads_scoped_player`).
+    /// Once the parser threads "they control" into a
+    /// `ControllerRef::ScopedPlayer` filter, this verifies the resolver consumes
+    /// it correctly: with `controller` rebound to the scoped opponent (P1) and
+    /// `original_controller` retaining the caster (P0), the `ScopedPlayer` count
+    /// follows `scoped_player` (P1 → 5), NOT the caster's board (P0 → 3). The
+    /// asymmetric board makes the assertion discriminating against any resolver
+    /// regression that read the caster instead.
+    #[test]
+    fn for_each_they_control_scoped_player_counts_iterating_player() {
+        let (state, source) = asymmetric_creature_board(3, 5);
+
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        ability.original_controller = Some(PlayerId(0));
+        ability.scoped_player = Some(PlayerId(1));
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                ),
+            },
+        };
+
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 5);
+    }
+
+    /// CR 109.4 + CR 115.1: runtime-seam companion to
+    /// `oracle_quantity::tests::for_each_they_control_threads_target_player`. The
+    /// resolver reads a `ControllerRef::TargetPlayer` filter against the first
+    /// `TargetRef::Player` (P1 → 5), NOT the caster (P0 → 3). Covers Burden of
+    /// Greed / Emissary of Despair / Hoard Hauler ("for each [type] that player
+    /// controls").
+    #[test]
+    fn for_each_they_control_target_player_counts_targeted_player() {
+        let (state, source) = asymmetric_creature_board(3, 5);
+
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        ability.original_controller = Some(PlayerId(0));
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+        };
+
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 5);
+    }
+
+    /// CR 608.2c + CR 109.4: runtime-seam companion for the chosen-player scope.
+    /// The resolver reads a `ControllerRef::ChosenPlayer { index: 0 }` filter
+    /// against `chosen_players[0]` (P1 → 5), NOT the caster (P0 → 3). Covers
+    /// Benevolent Offering's second clause ("for each creature the chosen player
+    /// controls").
+    #[test]
+    fn for_each_they_control_chosen_player_counts_chosen_player() {
+        let (state, source) = asymmetric_creature_board(3, 5);
+
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        ability.original_controller = Some(PlayerId(0));
+        ability.chosen_players = vec![PlayerId(1)];
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ChosenPlayer { index: 0 }),
+                ),
+            },
+        };
+
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 5);
+    }
+
+    /// CR 109.5: "creatures you control" stays bound to the printed caster (P0 → 3)
+    /// even while `controller` is rebound to the scoped opponent (P1) mid-iteration —
+    /// the complement of `for_each_they_control_scoped_player_counts_iterating_player`,
+    /// confirming the fix doesn't disturb "you control" counts.
+    #[test]
+    fn for_each_you_control_stays_caster_under_player_scope() {
+        let (state, source) = asymmetric_creature_board(3, 5);
+
+        let mut ability = crate::types::ability::ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        ability.original_controller = Some(PlayerId(0));
+        ability.scoped_player = Some(PlayerId(1));
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 3);
+    }
+
     #[test]
     fn resolve_quantity_object_count_creatures_blocking_source() {
         use crate::game::combat::{AttackerInfo, CombatState};
@@ -5036,12 +5531,14 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
     }
 
-    /// CR 109.4: `resolve_player_count` for `PlayerFilter::ControlsPermanent`
-    /// counts candidates by the controls / controls-none predicate. Kept in
-    /// sync with `effects::matches_player_scope`'s identical arm.
+    /// CR 109.4 + CR 109.5: `resolve_player_count` for
+    /// `PlayerFilter::ControlsCount` counts candidates by the controlled-permanent
+    /// count comparison. Kept in sync with `effects::matches_player_scope`'s
+    /// identical arm. `{ EQ, Fixed(0) }` ≡ old `ControlsNone`; `{ GE, Fixed(1) }`
+    /// ≡ old `Controls`.
     #[test]
     fn resolve_player_count_controls_permanent_presence() {
-        use crate::types::ability::{ControlPresence, PlayerRelation, TypeFilter, TypedFilter};
+        use crate::types::ability::{Comparator, PlayerRelation, TypeFilter, TypedFilter};
         use crate::types::format::FormatConfig;
 
         let mut state = GameState::new(FormatConfig::commander(), 3, 42);
@@ -5062,32 +5559,224 @@ mod tests {
         let elf_filter =
             TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Elf".to_string())));
 
-        // "each opponent who doesn't control an Elf" — controller P0:
+        // "each opponent who doesn't control an Elf" (count == 0) — controller P0:
         // opponents are P1 (controls Elf → excluded) and P2 → count 1.
         let none = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::ControlsPermanent {
+                filter: PlayerFilter::ControlsCount {
                     relation: PlayerRelation::Opponent,
-                    presence: ControlPresence::ControlsNone,
                     filter: elf_filter.clone(),
+                    comparator: Comparator::EQ,
+                    count: Box::new(QuantityExpr::Fixed { value: 0 }),
                 },
             },
         };
         assert_eq!(resolve_quantity(&state, &none, PlayerId(0), ObjectId(1)), 1);
 
-        // "each opponent who controls an Elf" — only P1 → count 1.
+        // "each opponent who controls an Elf" (count >= 1) — only P1 → count 1.
         let controls = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::ControlsPermanent {
+                filter: PlayerFilter::ControlsCount {
                     relation: PlayerRelation::Opponent,
-                    presence: ControlPresence::Controls,
                     filter: elf_filter,
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Fixed { value: 1 }),
                 },
             },
         };
         assert_eq!(
             resolve_quantity(&state, &controls, PlayerId(0), ObjectId(1)),
             1
+        );
+    }
+
+    /// CR 109.4 + CR 109.5: discriminating coverage for the comparative
+    /// "controls more <type> than you" shape. 3-player board: controller P0
+    /// controls 1 creature, opponent P1 controls 2, opponent P2 controls 0.
+    /// "the number of opponents who control more creatures than you" must count
+    /// exactly the opponent who controls *strictly more* (P1) → 1. A `GE`
+    /// comparator against the same `You` count would also include P2's tie-or-
+    /// fewer reading wrongly, so this test discriminates the GT semantics.
+    #[test]
+    fn resolve_player_count_controls_more_creatures_than_you() {
+        use crate::types::ability::{
+            Comparator, ControllerRef, PlayerRelation, TypeFilter, TypedFilter,
+        };
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+
+        let add_creature = |state: &mut GameState, owner: PlayerId, id: u64| {
+            let c = create_object(
+                state,
+                CardId(id),
+                owner,
+                format!("Bear {id}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&c)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        };
+        // P0 (controller): 1 creature. P1: 2 creatures. P2: 0 creatures.
+        add_creature(&mut state, PlayerId(0), 900);
+        add_creature(&mut state, PlayerId(1), 901);
+        add_creature(&mut state, PlayerId(1), 902);
+
+        let bare_creature = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        let you_creature = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        );
+
+        // GT: only P1 (2 > 1) counts; P2 (0 > 1 is false) and P0 (not an
+        // opponent) do not → 1.
+        let more_than_you = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::Opponent,
+                    filter: bare_creature.clone(),
+                    comparator: Comparator::GT,
+                    count: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: you_creature.clone(),
+                        },
+                    }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &more_than_you, PlayerId(0), ObjectId(1)),
+            1,
+            "only the opponent with strictly more creatures than the controller counts"
+        );
+
+        // Discriminator: flipping the comparator to GE (>=1) would also include
+        // P2, whose 0 creatures is NOT >= the controller's 1 — but P1's 2 >= 1
+        // and would still count. To prove the GT/GE distinction bites, give P2
+        // exactly 1 creature (tie with controller). Then GT still yields 1 (only
+        // P1), but GE would yield 2 (P1 and P2).
+        add_creature(&mut state, PlayerId(2), 903);
+        assert_eq!(
+            resolve_quantity(&state, &more_than_you, PlayerId(0), ObjectId(1)),
+            1,
+            "a tied opponent (P2: 1 == controller's 1) is excluded by GT"
+        );
+        let at_least_you = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::ControlsCount {
+                    relation: PlayerRelation::Opponent,
+                    filter: bare_creature,
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: you_creature,
+                        },
+                    }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &at_least_you, PlayerId(0), ObjectId(1)),
+            2,
+            "GE includes the tied opponent — confirms the GT result is comparator-sensitive"
+        );
+    }
+
+    /// CR 122.1f: discriminating coverage for Glissa's Retriever — "the number
+    /// of opponents who have three or more poison counters". The per-candidate
+    /// poison total must be read off each candidate player, NOT the controller.
+    /// 3-player board: opp1 poison=3 (≥3 → counts), opp2 poison=1 (<3 →
+    /// excluded), CONTROLLER poison=5 (≥3 but is not an opponent → must NOT
+    /// leak in). Expect 1. A controller-scoped read of the threshold would have
+    /// nothing to do with this — the discriminator is that the controller's own
+    /// 5 poison never inflates the result, proving `candidate_player_scalar`
+    /// reads each candidate directly.
+    #[test]
+    fn resolve_player_count_opponents_who_have_n_poison_counters_is_per_candidate() {
+        use crate::types::ability::{Comparator, PlayerRelation};
+        use crate::types::format::FormatConfig;
+        use crate::types::player::PlayerCounterKind;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // Controller P0 has the MOST poison; if the read were controller-scoped
+        // instead of per-candidate, every opponent would erroneously satisfy the
+        // ≥3 test (the threshold N=3 is fixed; the leak would be on the attribute
+        // side). P1 qualifies, P2 does not, P0 is excluded as the controller.
+        state.players[0].poison_counters = 5;
+        state.players[1].poison_counters = 3;
+        state.players[2].poison_counters = 1;
+
+        let glissa = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::PlayerCounter {
+                        kind: PlayerCounterKind::Poison,
+                        scope: CountScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 3 }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &glissa, PlayerId(0), ObjectId(1)),
+            1,
+            "only opp1 (poison 3 ≥ 3) counts; opp2 (1) is excluded and the \
+             controller's own 5 poison must NOT leak in — proves per-candidate read"
+        );
+
+        // Discriminator on the threshold side: dropping opp1 below the threshold
+        // must drop the count to 0, confirming the comparison bites per candidate.
+        state.players[1].poison_counters = 2;
+        assert_eq!(
+            resolve_quantity(&state, &glissa, PlayerId(0), ObjectId(1)),
+            0,
+            "with no opponent at ≥3, the count is 0 even though the controller has 5"
+        );
+    }
+
+    /// CR 402.1: discriminating coverage for Wolfcaller's Howl — "the number of
+    /// your opponents with four or more cards in hand". Hand size is read off
+    /// each candidate. 3-player board: opp1 hand=4 (counts), opp2 hand=2
+    /// (excluded), CONTROLLER hand=9 (not an opponent → must not leak). Expect 1.
+    #[test]
+    fn resolve_player_count_opponents_with_n_cards_in_hand_is_per_candidate() {
+        use crate::types::ability::{Comparator, PlayerRelation, PlayerScope};
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        let fill_hand = |state: &mut GameState, pid: usize, n: u64| {
+            for i in 0..n {
+                state.players[pid]
+                    .hand
+                    .push_back(ObjectId(1000 + pid as u64 * 100 + i));
+            }
+        };
+        fill_hand(&mut state, 0, 9); // controller — must not leak
+        fill_hand(&mut state, 1, 4); // opp1 — counts
+        fill_hand(&mut state, 2, 2); // opp2 — excluded
+
+        let wolfcaller = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 4 }),
+                },
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &wolfcaller, PlayerId(0), ObjectId(1)),
+            1,
+            "only opp1 (hand 4 ≥ 4) counts; the controller's 9-card hand must not leak in"
         );
     }
 
@@ -6211,6 +6900,60 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
 
+    /// CR 603.2c: When the batched-trigger subject count is set,
+    /// `EventContextAmount` reads it ahead of any event-extracted amount
+    /// (issue #707).
+    #[test]
+    fn resolve_event_context_amount_uses_trigger_match_count_when_set() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = Some(3);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);
+    }
+
+    /// CR 603.2c: With no match-count set, `EventContextAmount` falls through
+    /// to `extract_amount_from_event` as before — the new precedence rule
+    /// must not regress existing scalar-event resolution.
+    #[test]
+    fn resolve_event_context_amount_falls_through_when_match_count_none() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = None;
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 5,
+            is_combat: false,
+            excess: 0,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 5);
+    }
+
+    /// CR 603.2c: When both the batched match-count and an event-extracted
+    /// amount are present, the match-count wins — the trigger is "one or
+    /// more <FILTER> <verb>" and the "that many" semantics belong to the
+    /// filtered subject count, not the event's intrinsic amount.
+    #[test]
+    fn resolve_event_context_amount_match_count_takes_precedence_over_event() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = Some(7);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 2,
+            is_combat: false,
+            excess: 0,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 7);
+    }
+
     #[test]
     fn resolve_event_context_source_power_live_object() {
         let mut state = GameState::new_two_player(42);
@@ -7193,5 +7936,149 @@ mod tests {
             !runner.state().battlefield.contains(&victim),
             "the sacrificed creature must have left the battlefield"
         );
+    }
+
+    /// Create `n` battlefield lands controlled by `owner`.
+    fn add_lands(state: &mut GameState, owner: PlayerId, n: usize) {
+        for i in 0..n {
+            let id = create_object(
+                state,
+                CardId(9000 + i as u64),
+                owner,
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+    }
+
+    fn lands_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))
+    }
+
+    #[test]
+    fn controlled_by_each_player_min_picks_the_fewest() {
+        // CR 107.1: P0 has 3 lands, P1 has 1 → Min resolves to 1.
+        let mut state = GameState::new_two_player(42);
+        add_lands(&mut state, PlayerId(0), 3);
+        add_lands(&mut state, PlayerId(1), 1);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ControlledByEachPlayer {
+                filter: lands_filter(),
+                aggregate: AggregateFunction::Min,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 1);
+    }
+
+    #[test]
+    fn controlled_by_each_player_max_picks_the_most() {
+        // P0 has 3 lands, P1 has 1 → Max resolves to 3.
+        let mut state = GameState::new_two_player(42);
+        add_lands(&mut state, PlayerId(0), 3);
+        add_lands(&mut state, PlayerId(1), 1);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ControlledByEachPlayer {
+                filter: lands_filter(),
+                aggregate: AggregateFunction::Max,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 3);
+    }
+
+    #[test]
+    fn controlled_by_each_player_min_zero_when_a_player_has_none() {
+        // A player controlling no matching objects drives Min to 0.
+        let mut state = GameState::new_two_player(42);
+        add_lands(&mut state, PlayerId(0), 4);
+        // P1 has no lands.
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ControlledByEachPlayer {
+                filter: lands_filter(),
+                aggregate: AggregateFunction::Min,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 0);
+    }
+
+    #[test]
+    fn controlled_by_each_player_min_across_three_players() {
+        // CR 102.1: the aggregate spans every player — P0=5, P1=2, P2=4 → Min 2.
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 42);
+        add_lands(&mut state, PlayerId(0), 5);
+        add_lands(&mut state, PlayerId(1), 2);
+        add_lands(&mut state, PlayerId(2), 4);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ControlledByEachPlayer {
+                filter: lands_filter(),
+                aggregate: AggregateFunction::Min,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 2);
+    }
+
+    #[test]
+    fn controlled_by_each_player_prefers_clause_snapshot() {
+        // CR 608.2e: when a clause-local snapshot is present, the resolver
+        // returns the frozen value rather than the live board count — proving
+        // the snapshot mechanism overrides live evaluation.
+        let mut state = GameState::new_two_player(42);
+        add_lands(&mut state, PlayerId(0), 3);
+        add_lands(&mut state, PlayerId(1), 1);
+        let qref = QuantityRef::ControlledByEachPlayer {
+            filter: lands_filter(),
+            aggregate: AggregateFunction::Min,
+        };
+        // Live board would yield 1; freeze a different value into the snapshot.
+        let mut snap = crate::types::game_state::ClauseMinimumSnapshot::default();
+        snap.insert(qref.clone(), 7);
+        state.clause_minimum_snapshot = Some(snap);
+        let qty = QuantityExpr::Ref { qty: qref };
+        assert_eq!(
+            resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)),
+            7,
+            "snapshot value must override the live board count"
+        );
+    }
+
+    #[test]
+    fn hand_size_all_players_min_prefers_clause_snapshot() {
+        // CR 608.2e: the discard clause's `HandSize { AllPlayers { Min } }`
+        // also honors the clause snapshot. Live hands differ from the frozen
+        // value; the frozen value must win.
+        let mut state = GameState::new_two_player(42);
+        let qref = QuantityRef::HandSize {
+            player: PlayerScope::AllPlayers {
+                aggregate: AggregateFunction::Min,
+                exclude: None,
+            },
+        };
+        let mut snap = crate::types::game_state::ClauseMinimumSnapshot::default();
+        snap.insert(qref.clone(), 5);
+        state.clause_minimum_snapshot = Some(snap);
+        let qty = QuantityExpr::Ref { qty: qref };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 5);
+    }
+
+    #[test]
+    fn hand_size_all_players_min_live_when_no_snapshot() {
+        // Without a snapshot, `HandSize { AllPlayers { Min } }` resolves live —
+        // the empty starting hands of a fresh two-player game give Min 0.
+        let state = GameState::new_two_player(42);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 0);
     }
 }

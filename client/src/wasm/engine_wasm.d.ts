@@ -29,6 +29,16 @@ export function classify_deck_js(names_js: any): any;
 export function clear_game_state(): void;
 
 /**
+ * CR 702.124: Of `candidates`, which can legally pair with `first_commander`
+ * as a co-commander? Applies the full partner family (generic Partner, Partner
+ * with [Name], Friends Forever, Character Select, Doctor's Companion, Choose a
+ * Background) via the engine's single-authority `can_pair_commanders`. The
+ * frontend must not re-derive partner-pairing rules — it filters its candidate
+ * list through this. Returns an empty array if the database isn't loaded.
+ */
+export function commanderPartnerCandidates(first_commander: string, candidates: any): any;
+
+/**
  * Create a default 2-player game state.
  */
 export function create_initial_state(): any;
@@ -61,7 +71,8 @@ export function getFormatRegistry(): any;
 
 /**
  * Get the AI's chosen action for the current game state.
- * `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard".
+ * `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard",
+ * "CEDH" (case-insensitive; see `AiDifficulty::from_label`).
  * `player_id` is the seat index of the AI player (0-based).
  */
 export function get_ai_action(difficulty: string, player_id: number): any;
@@ -243,6 +254,15 @@ export function restore_game_state(json_str: string): void;
 export function resume_multiplayer_host_state(json_str: string): void;
 
 /**
+ * Search the loaded card database. The engine is the single authority for the
+ * rules data search filters on — format legality, set membership, card types,
+ * mana value, and colors — so deck-builder search runs here, never as a
+ * third-party API call. Returns `{ results, total }` (see `CardSearchResults`),
+ * or an error if the database is not loaded or the query is malformed.
+ */
+export function search_cards_js(query: any): any;
+
+/**
  * Select an action from merged scores using softmax.
  * Called after collecting scored candidates from parallel workers and merging.
  * `scores_json` is a JSON array of `[GameAction, score]` tuples.
@@ -302,6 +322,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
+    readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
     readonly export_game_state_json: () => [number, number, number, number];
@@ -323,6 +344,7 @@ export interface InitOutput {
     readonly resolve_all: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number];
+    readonly search_cards_js: (a: any) => [number, number, number];
     readonly select_action_from_scores: (a: number, b: number, c: number, d: number, e: bigint) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];

@@ -15,39 +15,12 @@ use engine::game::DeckEntry;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
-use crate::deck_profile::{ArchetypeClassification, DeckProfile};
-use crate::features::{
-    aggro_pressure, aristocrats, control, landfall, mana_ramp, plus_one_counters,
-    spellslinger_prowess, tokens_wide, tribal, DeckFeatures,
-};
+use crate::features::DeckFeatures;
 use crate::plan::{derive_snapshot, PlanSnapshot};
 use crate::planner::quick_state_hash;
 use crate::policies::registry::PolicyId;
 use crate::projection::{project_to, BailReason, Projection, ProjectionHorizon, ProjectionKey};
-use crate::strategy_profile::StrategyProfile;
 use crate::synergy::SynergyGraph;
-
-fn features_for(deck: &[DeckEntry]) -> DeckFeatures {
-    let profile = DeckProfile::analyze(deck);
-    let archetype = match &profile.classification {
-        ArchetypeClassification::Pure(arch) => *arch,
-        ArchetypeClassification::Hybrid { primary, .. } => *primary,
-    };
-    let strategy = StrategyProfile::for_profile(&profile);
-    DeckFeatures {
-        archetype,
-        strategy,
-        landfall: landfall::detect(deck),
-        mana_ramp: mana_ramp::detect(deck),
-        tribal: tribal::detect(deck),
-        control: control::detect(deck),
-        aristocrats: aristocrats::detect(deck),
-        aggro_pressure: aggro_pressure::detect(deck),
-        tokens_wide: tokens_wide::detect(deck),
-        plus_one_counters: plus_one_counters::detect(deck),
-        spellslinger_prowess: spellslinger_prowess::detect(deck),
-    }
-}
 
 /// Per-game cache shared by all decisions.
 #[derive(Debug, Clone, Default)]
@@ -78,7 +51,7 @@ impl AiSession {
 
         for pool in &state.deck_pools {
             let deck: &[DeckEntry] = &pool.current_main;
-            let player_features = features_for(deck);
+            let player_features = DeckFeatures::analyze(deck, pool.bracket_tier);
             let snapshot = derive_snapshot(&player_features);
             let graph = SynergyGraph::build(deck);
             features.insert(pool.player, player_features);
@@ -97,9 +70,15 @@ impl AiSession {
 
     /// Build a session for a single player from an explicit deck list.
     /// Used by `AiContext::analyze_with` when only one player's deck is known.
-    pub fn from_single_deck(player: PlayerId, deck: &[DeckEntry]) -> Self {
+    /// `tier` is the declared bracket tier; callers without tier information
+    /// (e.g., pure deck-analysis paths) should pass `CommanderBracketTier::Core`.
+    pub fn from_single_deck(
+        player: PlayerId,
+        deck: &[DeckEntry],
+        tier: engine::game::bracket_estimate::CommanderBracketTier,
+    ) -> Self {
         let mut session = Self::default();
-        let player_features = features_for(deck);
+        let player_features = DeckFeatures::analyze(deck, tier);
         let snapshot = derive_snapshot(&player_features);
         let graph = SynergyGraph::build(deck);
         session.features.insert(player, player_features);
@@ -117,6 +96,9 @@ impl AiSession {
     /// Used by callers that build a session incrementally (e.g., via
     /// `AiContext::analyze_with`, which only seeds the AI's own deck).
     ///
+    /// `tier` is the declared bracket tier from the player's `PlayerDeckPool`.
+    /// Callers without pool access should pass `CommanderBracketTier::Core`.
+    ///
     /// **Staleness note**: this no-ops on re-calls for an already-populated
     /// player. That's safe because `AiSession` is currently rebuilt per
     /// `choose_action` call (see `AiContext::analyze_with` in
@@ -125,11 +107,16 @@ impl AiSession {
     /// cross-decision lifetime (e.g., Phase 4's `SessionCompute`), add an
     /// `invalidate_player_features(player)` hook and call it from any site
     /// that mutates `state.deck_pools`.
-    pub fn ensure_player_features(&mut self, player: PlayerId, deck: &[DeckEntry]) {
+    pub fn ensure_player_features(
+        &mut self,
+        player: PlayerId,
+        deck: &[DeckEntry],
+        tier: engine::game::bracket_estimate::CommanderBracketTier,
+    ) {
         if self.features.contains_key(&player) || deck.is_empty() {
             return;
         }
-        let features = features_for(deck);
+        let features = DeckFeatures::analyze(deck, tier);
         let snapshot = derive_snapshot(&features);
         self.features.insert(player, features);
         self.plan.insert(player, snapshot);
@@ -231,4 +218,126 @@ pub enum PolicyState {
         held_fetch_count: u8,
         last_held_turn: u32,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use engine::game::bracket_estimate::CommanderBracketTier;
+    use engine::types::game_state::GameState;
+    use engine::types::player::PlayerId;
+
+    use super::AiSession;
+
+    fn make_pool_with_tier(
+        player: PlayerId,
+        tier: CommanderBracketTier,
+    ) -> engine::types::game_state::PlayerDeckPool {
+        engine::types::game_state::PlayerDeckPool {
+            player,
+            bracket_tier: tier,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cedh_tier_pool_records_cedh_bracket() {
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools.clear();
+        state
+            .deck_pools
+            .push(make_pool_with_tier(PlayerId(0), CommanderBracketTier::Cedh));
+        state
+            .deck_pools
+            .push(make_pool_with_tier(PlayerId(1), CommanderBracketTier::Core));
+
+        let session = AiSession::from_game(&state);
+
+        let p0_features = session
+            .features
+            .get(&PlayerId(0))
+            .expect("player 0 features should be populated");
+        assert_eq!(
+            p0_features.bracket_tier,
+            CommanderBracketTier::Cedh,
+            "PlayerDeckPool with CommanderBracketTier::Cedh must record the Cedh tier"
+        );
+
+        let p1_features = session
+            .features
+            .get(&PlayerId(1))
+            .expect("player 1 features should be populated");
+        assert_ne!(
+            p1_features.bracket_tier,
+            CommanderBracketTier::Cedh,
+            "PlayerDeckPool with CommanderBracketTier::Core must not record Cedh"
+        );
+    }
+
+    #[test]
+    fn optimized_tier_pool_records_non_cedh_bracket() {
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools.clear();
+        state.deck_pools.push(make_pool_with_tier(
+            PlayerId(0),
+            CommanderBracketTier::Optimized,
+        ));
+        state
+            .deck_pools
+            .push(make_pool_with_tier(PlayerId(1), CommanderBracketTier::Core));
+
+        let session = AiSession::from_game(&state);
+
+        let p0_features = session
+            .features
+            .get(&PlayerId(0))
+            .expect("player 0 features should be populated");
+        assert_eq!(
+            p0_features.bracket_tier,
+            CommanderBracketTier::Optimized,
+            "CommanderBracketTier::Optimized (highest non-cEDH tier) must be recorded as-is"
+        );
+        assert_ne!(p0_features.bracket_tier, CommanderBracketTier::Cedh);
+    }
+
+    #[test]
+    fn bracket_tier_propagates_through_load_deck_into_state() {
+        use engine::game::bracket_estimate::CommanderBracketTier;
+        use engine::game::deck_loading::{load_deck_into_state, DeckPayload, PlayerDeckPayload};
+
+        let mut state = GameState::new_two_player(42);
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                bracket_tier: CommanderBracketTier::Cedh,
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                bracket_tier: CommanderBracketTier::Optimized,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        load_deck_into_state(&mut state, &payload);
+
+        let p0_pool = state
+            .deck_pools
+            .iter()
+            .find(|p| p.player == PlayerId(0))
+            .expect("player 0 pool must exist after load");
+        assert_eq!(
+            p0_pool.bracket_tier,
+            CommanderBracketTier::Cedh,
+            "bracket_tier must round-trip through load_deck_into_state for player 0"
+        );
+
+        let p1_pool = state
+            .deck_pools
+            .iter()
+            .find(|p| p.player == PlayerId(1))
+            .expect("player 1 pool must exist after load");
+        assert_eq!(
+            p1_pool.bracket_tier,
+            CommanderBracketTier::Optimized,
+            "bracket_tier must round-trip through load_deck_into_state for player 1"
+        );
+    }
 }

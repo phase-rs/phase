@@ -104,10 +104,17 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const isHumanTargetSelection =
     (waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection")
     && waitingFor.data.player === playerId;
+  // CR 115.7: A single-target retarget can redirect to another spell/ability on
+  // the stack (Bolt Bend on a counterspell), so stack entries are click targets.
+  const isRetargetChoice = waitingFor?.type === "RetargetChoice"
+    && waitingFor.data.player === playerId
+    && waitingFor.data.scope.type === "Single";
   const currentTargetRefs = isHumanTargetSelection
     ? waitingFor.data.selection.current_legal_targets
-    : [];
-  const isValidTarget = isHumanTargetSelection && currentTargetRefs.some(
+    : isRetargetChoice
+      ? waitingFor.data.legal_new_targets
+      : [];
+  const isValidTarget = (isHumanTargetSelection || isRetargetChoice) && currentTargetRefs.some(
     (target) => "Object" in target && target.Object === entry.id,
   );
 

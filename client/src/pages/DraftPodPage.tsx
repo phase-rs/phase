@@ -15,6 +15,7 @@ import { useNavigate, useSearchParams } from "react-router";
 import { CardPreview } from "../components/card/CardPreview";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { CubeSetupPanel } from "../components/draft/CubeSetupPanel";
 import { DraftIntro } from "../components/draft/DraftIntro";
 import { DraftPodLobby } from "../components/draft/DraftPodLobby";
 import { DraftProgress } from "../components/draft/DraftProgress";
@@ -55,6 +56,9 @@ function PodSetup() {
   const joinPod = useDraftPodStore((s) => s.joinPod);
   const configError = useDraftPodStore((s) => s.configError);
   const loadingPool = useDraftPodStore((s) => s.loadingPool);
+  const poolMode = useDraftPodStore((s) => s.poolMode);
+  const setPoolMode = useDraftPodStore((s) => s.setPoolMode);
+  const setCubeForm = useDraftPodStore((s) => s.setCubeForm);
   const kindDescription = config.kind === "Premier"
     ? t("podSetup.kindPremierDesc")
     : t("podSetup.kindTraditionalDesc");
@@ -251,16 +255,54 @@ function PodSetup() {
           <p className="text-xs text-white/40">{podSizeDescription}</p>
         </div>
 
-        {/* Set selector — reuse the Quick Draft component */}
-        <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
-          {t("podSetup.setSelectorHint")}
+        {/* Pool source: Set vs Cube tab switch */}
+        <div className="flex gap-2 border-b border-white/10">
+          <button
+            type="button"
+            onClick={() => setPoolMode("set")}
+            className={
+              poolMode === "set"
+                ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
+                : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
+            }
+          >
+            {t("podSetup.tabs.set")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setPoolMode("cube")}
+            className={
+              poolMode === "cube"
+                ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
+                : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
+            }
+          >
+            {t("podSetup.tabs.cube")}
+          </button>
         </div>
-        <SetSelector
-          onStartDraft={(setCode) => {
-            setConfig({ setCode });
-            void createPod();
-          }}
-        />
+
+        {poolMode === "set" ? (
+          <>
+            {/* Set selector — reuse the Quick Draft component */}
+            <div className="rounded-[16px] border border-white/8 bg-white/3 px-4 py-3 text-sm text-white/45">
+              {t("podSetup.setSelectorHint")}
+            </div>
+            <SetSelector
+              onStartDraft={(setCode) => {
+                setConfig({ setCode });
+                void createPod();
+              }}
+            />
+          </>
+        ) : (
+          <CubeSetupPanel
+            onStart={({ cubeName, cubeListText, settings }) => {
+              setCubeForm({ cubeName, cubeListText, settings });
+              void createPod();
+            }}
+            disabled={loadingPool}
+          />
+        )}
 
         {/* Error */}
         {configError && (
@@ -365,8 +407,18 @@ function PairingPhaseView() {
 
 function MatchInProgressView() {
   const { t } = useTranslation("draft");
+  const navigate = useNavigate();
   const matchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
+  const startMatch = useMultiplayerDraftStore((s) => s.startMatch);
   const [showPool, setShowPool] = useState(false);
+  const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
+  const opponentName = matchPairing
+    ? matchPairing.type === "Bot"
+      ? matchPairing.botName
+      : matchPairing.opponentName
+    : null;
+  const isBotMatch = matchPairing?.type === "Bot";
+  const isHost = matchPairing?.type === "HumanHost";
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
@@ -377,13 +429,29 @@ function MatchInProgressView() {
         <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/5 p-4 text-center">
           <div className="text-sm text-white/50">{t("podPhaseView.yourMatch")}</div>
           <div className="text-lg text-white">
-            {t("podPhaseView.versusOpponent", { name: matchPairing.opponentName })}
+            {t("podPhaseView.versusOpponent", { name: opponentName })}
           </div>
-          <div className="mt-1 text-sm text-white/40">
-            {matchPairing.isMatchHost
-              ? t("podPhaseView.youAreHosting")
-              : t("podPhaseView.connectingOpponent")}
-          </div>
+          {!isBotMatch && (
+            <div className="mb-3 mt-1 text-sm text-white/40">
+              {isHost
+                ? t("podPhaseView.youAreHosting")
+                : t("podPhaseView.connectingOpponent")}
+            </div>
+          )}
+          <button
+            onClick={() => {
+              void startMatch().then((gameId) => {
+                if (gameId) navigate(`/game/${gameId}?mode=draft-match`);
+              });
+            }}
+            className={menuButtonClass({
+              tone: "emerald",
+              size: "sm",
+              className: isBotMatch ? "mt-3" : undefined,
+            })}
+          >
+            {t("formatPicker.startMatch")}
+          </button>
         </div>
       ) : (
         <div className="text-center text-white/50">
@@ -399,8 +467,14 @@ function MatchInProgressView() {
         >
           {showPool ? t("podPhaseView.hidePool") : t("podPhaseView.reviewPool")}
         </button>
-        {showPool && <PoolPanel />}
+        {showPool && <PoolPanel onCardHover={setHoveredCard} />}
       </div>
+      <CardPreview
+        cardName={hoveredCard?.name ?? null}
+        sourcePrinting={hoveredCard?.sourcePrinting}
+        mobileLayout="compact"
+        onDismiss={() => setHoveredCard(null)}
+      />
     </div>
   );
 }
@@ -528,6 +602,7 @@ function BetweenGamesView() {
 }
 
 function DraftingPhaseContent() {
+  const { t } = useTranslation("draft");
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
   const [introDismissed, setIntroDismissed] = useState(false);
   const podSize = useDraftPodStore((s) => s.config.podSize);
@@ -536,13 +611,28 @@ function DraftingPhaseContent() {
   const selectCard = useMultiplayerDraftStore((s) => s.selectCard);
   const confirmPick = useMultiplayerDraftStore((s) => s.confirmPick);
   const autoPickCard = useMultiplayerDraftStore((s) => s.autoPickCard);
+  const paused = useMultiplayerDraftStore((s) => s.paused);
+  const pauseReason = useMultiplayerDraftStore((s) => s.pauseReason);
 
   if (!introDismissed) {
     return <DraftIntro mode="pod" podSize={podSize} onContinue={() => setIntroDismissed(true)} />;
   }
 
+  // Wire `pauseReason` is `DraftPauseReason` (PascalCase) — same shape as the
+  // i18n key path, so no boundary conversion. Falls back to a generic key if
+  // the engine ever emits an unknown reason (defensive only).
+  const pauseKey = pauseReason ?? "PausedByHost";
+
   return (
     <>
+      {paused && (
+        <div
+          role="status"
+          className="mb-3 rounded-lg border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
+        >
+          ⚠ {t(`podPhaseView.pauseReason.${pauseKey}`)}
+        </div>
+      )}
       <div className="flex gap-4">
         <div className="flex min-w-0 flex-1 flex-col">
           <SeatStatusRing />
@@ -674,14 +764,6 @@ export function DraftPodPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      void leave(true);
-      resetPod();
-    };
-  }, [leave, resetPod]);
-
   useEffect(() => {
     if (searchParams.get("resume") !== "1") return;
     void resumeHostedPod();
@@ -697,7 +779,7 @@ export function DraftPodPage() {
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
-      <ScreenChrome onBack={showBack ? () => navigate("/") : undefined} />
+      <ScreenChrome onBack={showBack ? handleLeave : undefined} />
 
       <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col px-6 py-16">
         {phaseContent(phase, handleLeave)}

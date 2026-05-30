@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::game_object::GameObject;
 use super::players;
 use crate::game::filter::{matches_target_filter, FilterContext};
-use crate::types::ability::StaticDefinition;
+use crate::types::ability::{StaticDefinition, TargetRef};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -157,7 +157,8 @@ pub enum DamageTarget {
 /// CR 508.4: Place a permanent onto the battlefield attacking.
 /// The creature is not "declared as an attacker" — attack triggers do not fire.
 /// Determines the defending player from: (1) source creature's combat info,
-/// (2) current trigger event context, (3) fallback to opponent.
+/// (2) explicit "that player" event context, (3) this controller's declared
+/// attackers in the current combat, (4) fallback to opponent.
 pub fn enter_attacking(
     state: &mut GameState,
     object_id: ObjectId,
@@ -165,31 +166,8 @@ pub fn enter_attacking(
     controller: PlayerId,
 ) {
     // Determine defending player and attack target before mutable combat borrow.
-    let (defending_player, attack_target) = state
-        .combat
-        .as_ref()
-        .and_then(|c| {
-            c.attackers
-                .iter()
-                .find(|a| a.object_id == source_id)
-                .map(|a| (a.defending_player, a.attack_target))
-        })
-        .or_else(|| {
-            state
-                .current_trigger_event
-                .as_ref()
-                .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
-                .map(|pid| (pid, AttackTarget::Player(pid)))
-        })
-        .unwrap_or_else(|| {
-            // CR 508.4: Fallback to first opponent in seat order (multiplayer-aware).
-            // In 2-player, this returns the sole opponent — identical to the old arithmetic.
-            let pid = players::opponents(state, controller)
-                .first()
-                .copied()
-                .unwrap_or(controller);
-            (pid, AttackTarget::Player(pid))
-        });
+    let (defending_player, attack_target) =
+        defending_player_for_enters_attacking(state, source_id, controller);
 
     if let Some(combat) = state.combat.as_mut() {
         combat.attackers.push(AttackerInfo::new(
@@ -197,7 +175,83 @@ pub fn enter_attacking(
             attack_target,
             defending_player,
         ));
+        // CR 508.4 + CR 506.4 + CR 613.1f: a permanent put onto the battlefield
+        // attacking is an attacking creature; re-evaluate Layer 6
+        // FilterProp::Attacking grants immediately.
+        state.layers_dirty = true;
     }
+}
+
+/// CR 508.4: Resolve which player/planeswalker a permanent that *enters*
+/// attacking should attack. Unlike declared attackers, this path must not use
+/// `extract_player_from_event` wholesale — `AttackersDeclared` and
+/// `PermanentSacrificed` surface the attacking/sacrificing player, which would
+/// make tokens attack their own controller (Caesar #944, Dalkovan Encampment).
+fn defending_player_for_enters_attacking(
+    state: &GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+) -> (PlayerId, AttackTarget) {
+    if let Some(combat) = state.combat.as_ref() {
+        if let Some(a) = combat.attackers.iter().find(|a| a.object_id == source_id) {
+            return (a.defending_player, a.attack_target);
+        }
+    }
+
+    if let Some(event) = state.current_trigger_event.as_ref() {
+        match event {
+            GameEvent::DamageDealt {
+                target: TargetRef::Player(pid),
+                ..
+            }
+            | GameEvent::BecomesTarget {
+                target: TargetRef::Player(pid),
+                ..
+            } => return (*pid, AttackTarget::Player(*pid)),
+            GameEvent::AttackersDeclared { attacks, .. } => {
+                if let Some((_, target)) = attacks.iter().find(|(id, _)| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|obj| obj.controller == controller)
+                }) {
+                    return attack_target_defender(state, *target);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(combat) = state.combat.as_ref() {
+        if let Some(a) = combat.attackers.iter().find(|a| {
+            state
+                .objects
+                .get(&a.object_id)
+                .is_some_and(|obj| obj.controller == controller)
+        }) {
+            return (a.defending_player, a.attack_target);
+        }
+    }
+
+    let pid = players::opponents(state, controller)
+        .first()
+        .copied()
+        .unwrap_or(controller);
+    (pid, AttackTarget::Player(pid))
+}
+
+/// Map an `AttackTarget` to the defending player and the target pair stored on
+/// `AttackerInfo` (planeswalker/battle controllers for blocking purposes).
+fn attack_target_defender(state: &GameState, target: AttackTarget) -> (PlayerId, AttackTarget) {
+    let defending = match target {
+        AttackTarget::Player(pid) => pid,
+        AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => state
+            .objects
+            .get(&id)
+            .map(|obj| obj.controller)
+            .unwrap_or(state.active_player),
+    };
+    (defending, target)
 }
 
 /// CR 702.49c + CR 702.190b: Place an object onto `combat.attackers` alongside
@@ -233,6 +287,10 @@ pub fn place_attacking_alongside(
             attack_target,
             defending_player,
         ));
+        // CR 702.49c + CR 702.190b + CR 506.4 + CR 613.1f: Ninjutsu/Sneak place a
+        // creature already attacking; re-evaluate Layer 6 FilterProp::Attacking
+        // grants.
+        state.layers_dirty = true;
     }
 }
 
@@ -297,12 +355,32 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
                 return Err(format!("{:?} has Defender", id));
             }
         }
+        // CR 508.1 + CR 101.2 + CR 109.5: Intrinsic CantAttack statics live ON the
+        // attacker; remote CantAttack statics (e.g. Angelic Arbiter restricting
+        // opponents' creatures via an `affected` filter) live elsewhere and are
+        // resolved through the shared `check_static_ability` building block, which
+        // matches `def.affected` against this attacker and applies any
+        // per-affected-player gate.
         if super::functioning_abilities::active_static_definitions(state, obj).any(|sd| {
             matches!(
                 sd.mode,
                 StaticMode::CantAttack | StaticMode::CantAttackOrBlock
             )
-        }) {
+        }) || crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::CantAttack,
+            &crate::game::static_abilities::StaticCheckContext {
+                target_id: Some(id),
+                ..Default::default()
+            },
+        ) || crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::CantAttackOrBlock,
+            &crate::game::static_abilities::StaticCheckContext {
+                target_id: Some(id),
+                ..Default::default()
+            },
+        ) {
             return Err(format!("{:?} can't attack", id));
         }
 
@@ -558,6 +636,13 @@ pub fn validate_blockers_for_player(
             }
         }
 
+        if ring_bearer_unblockable_by_greater_power(state, attacker, blocker) {
+            return Err(format!(
+                "{:?} cannot block {:?} (Ring-bearer can't be blocked by greater power)",
+                blocker_id, attacker_id
+            ));
+        }
+
         // CR 702.16f: Protection — an attacking creature with protection can't
         // be blocked by creatures with the stated quality.
         for kw in &attacker.keywords {
@@ -688,35 +773,20 @@ pub fn validate_blockers_for_player(
         }
     }
 
-    // CR 702.111b: Menace — must be blocked by two or more creatures or not at all.
+    // CR 702.111b (Menace) + CR 509.1b ("can't be blocked except by N or more
+    // creatures"): an attacker that is blocked at all must be blocked by at least
+    // its required number of creatures — "or not at all." `blockers_per_attacker`
+    // only holds attackers with >= 1 assigned blocker, so iterating it enforces
+    // the "or not at all" clause for free. `min_blockers_required` is the single
+    // authority that unifies the menace floor (2) with any MinBlockers floor and
+    // is the same value surfaced to the UI via `block_requirements`.
     for (attacker_id, blockers) in &blockers_per_attacker {
-        if let Some(attacker) = state.objects.get(attacker_id) {
-            if attacker.has_keyword(&Keyword::Menace) && blockers.len() < 2 {
-                return Err(format!(
-                    "{:?} has menace and must be blocked by 2+ creatures",
-                    attacker_id
-                ));
-            }
-        }
-    }
-
-    // CR 509.1b: "can't be blocked except by N or more creatures" — a minimum-
-    // blocker count restriction (the generalization of Menace, CR 702.111b).
-    // Independent of the Menace gate above: a creature that is both Menace and
-    // MinBlockers { min } correctly requires >= max(2, min) blockers.
-    for (attacker_id, blockers) in &blockers_per_attacker {
-        for (_src, sd) in block_restriction_statics_against(state, *attacker_id) {
-            if let StaticMode::CantBeBlockedExceptBy {
-                kind: BlockExceptionKind::MinBlockers { min },
-            } = &sd.mode
-            {
-                if (blockers.len() as u32) < *min {
-                    return Err(format!(
-                        "{:?} can't be blocked except by {}+ creatures",
-                        attacker_id, min
-                    ));
-                }
-            }
+        let required = min_blockers_required(state, *attacker_id);
+        if (blockers.len() as u32) < required {
+            return Err(format!(
+                "{:?} must be blocked by {} or more creatures",
+                attacker_id, required
+            ));
         }
     }
 
@@ -1465,6 +1535,12 @@ pub fn declare_attackers(
         .iter()
         .map(|a| a.defending_player)
         .collect();
+    // CR 508.1k + CR 506.4 + CR 613.1f: A chosen creature becomes attacking and
+    // stays attacking until removed from combat or the combat phase ends. Marking
+    // layers dirty forces Layer 6 ability-adding effects (CR 613.1f) with
+    // FilterProp::Attacking (e.g. Crossway Troublemakers) to re-evaluate now, so
+    // the grant is live for the whole combat, not just after damage.
+    state.layers_dirty = true;
     let attacker_count = combat.attackers.len();
 
     // Use the first attacker's defending player for the event
@@ -1657,6 +1733,25 @@ pub fn get_valid_attacker_ids(state: &GameState) -> Vec<ObjectId> {
                         StaticMode::CantAttack | StaticMode::CantAttackOrBlock
                     )
                 })
+                // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics
+                // (Angelic Arbiter restricting opponents' creatures) resolved via
+                // the shared `check_static_ability` building block.
+                && !crate::game::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::CantAttack,
+                    &crate::game::static_abilities::StaticCheckContext {
+                        target_id: Some(*id),
+                        ..Default::default()
+                    },
+                )
+                && !crate::game::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::CantAttackOrBlock,
+                    &crate::game::static_abilities::StaticCheckContext {
+                        target_id: Some(*id),
+                        ..Default::default()
+                    },
+                )
                 // CR 302.6: delegate to the single authority for summoning
                 // sickness — folds in Haste at query time without duplicating
                 // the flag/keyword logic here.
@@ -1701,14 +1796,17 @@ pub fn refresh_combat_declaration_waiting_for(state: &mut GameState) {
             // CR 509.1a: Mirror turns.rs:1394-1396 — player-scoped block targets.
             let valid_block_targets = get_valid_block_targets_for_player(state, player);
             let valid_blocker_ids: Vec<_> = valid_block_targets.keys().copied().collect();
+            let block_requirements = block_requirements_for_player(state, player);
             if let crate::types::game_state::WaitingFor::DeclareBlockers {
                 valid_blocker_ids: ids,
                 valid_block_targets: targets,
+                block_requirements: reqs,
                 ..
             } = &mut state.waiting_for
             {
                 *ids = valid_blocker_ids;
                 *targets = valid_block_targets;
+                *reqs = block_requirements;
             }
         }
         _ => {}
@@ -1738,6 +1836,36 @@ pub fn is_landwalk_unblockable(
             Keyword::Landwalk(q) => Some(q.as_str()),
             _ => None,
         })
+        .collect();
+    if qualifiers.is_empty() {
+        return false;
+    }
+
+    // CR 509.1b + CR 609.4 + CR 702.14c + CR 702.14d: Global
+    // IgnoreLandwalkForBlocking statics cancel the landwalk *restriction* for
+    // the named qualifier. The keyword itself remains on the attacker
+    // (CR 609.4 — "as though" is scoped to this effect). `game_active_statics`
+    // (battlefield + command zone) iterates both controllers' statics; the
+    // static is global (`affected = None`), so a canceller under either
+    // player's control suppresses the qualifier symmetrically.
+    let cancelled: HashSet<&str> = super::functioning_abilities::game_active_statics(state)
+        .filter_map(|(_src, sd)| match &sd.mode {
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: Some(q) } => Some(q.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    #[cfg(debug_assertions)]
+    for q in &cancelled {
+        debug_assert!(
+            !q.is_empty(),
+            "IgnoreLandwalkForBlocking qualifier must match Keyword::Landwalk canonical form"
+        );
+    }
+
+    let qualifiers: Vec<&str> = qualifiers
+        .into_iter()
+        .filter(|q| !cancelled.contains(q))
         .collect();
     if qualifiers.is_empty() {
         return false;
@@ -1839,6 +1967,9 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
             _ => {}
         }
     }
+    if ring_bearer_unblockable_by_greater_power(state, attacker, blocker) {
+        return false;
+    }
     for kw in &attacker.keywords {
         if let Keyword::Protection(target) = kw {
             if crate::game::keywords::source_matches_protection_target(target, attacker, blocker) {
@@ -1887,6 +2018,17 @@ pub fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: Obje
         return false;
     }
     true
+}
+
+fn ring_bearer_unblockable_by_greater_power(
+    state: &GameState,
+    attacker: &GameObject,
+    blocker: &GameObject,
+) -> bool {
+    // CR 701.54c: The Ring emblem says "Your Ring-bearer is legendary and
+    // can't be blocked by creatures with greater power."
+    super::effects::ring::is_current_ring_bearer(state, attacker.controller, attacker.id)
+        && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
 }
 
 /// CR 509.1a + CR 509.1b: Compute the maximum number of attackers a creature can block.
@@ -1949,6 +2091,60 @@ pub fn get_valid_block_targets_for_player(
                 .objects
                 .get(blocker_id)
                 .is_some_and(|blocker| blocker.controller == player)
+        })
+        .collect()
+}
+
+/// CR 702.111b (Menace) + CR 509.1b ("can't be blocked except by N or more
+/// creatures"): the minimum number of creatures that must block this attacker
+/// *if it is blocked at all*. Menace imposes a floor of 2; each applicable
+/// `MinBlockers { min }` static imposes a floor of `min`; a creature with both
+/// requires `max(2, min)`. Returns 1 when no such restriction applies (the
+/// trivial case — blocking is then unconstrained in count).
+///
+/// This is the single authority for the requirement: `validate_blocks` enforces
+/// it and `block_requirements_for_player` surfaces it to the UI, so the count a
+/// player sees can never disagree with the count the engine enforces.
+pub fn min_blockers_required(state: &GameState, attacker_id: ObjectId) -> u32 {
+    let mut min = 1;
+    if state
+        .objects
+        .get(&attacker_id)
+        .is_some_and(|attacker| attacker.has_keyword(&Keyword::Menace))
+    {
+        min = min.max(2);
+    }
+    for (_src, sd) in block_restriction_statics_against(state, attacker_id) {
+        if let StaticMode::CantBeBlockedExceptBy {
+            kind: BlockExceptionKind::MinBlockers { min: n },
+        } = &sd.mode
+        {
+            min = min.max(*n);
+        }
+    }
+    min
+}
+
+/// For one defending player, the per-attacker minimum-blocker requirement for
+/// every attacker attacking them that needs more than one blocker. Attackers
+/// with the trivial requirement of 1 are omitted so the map carries only the
+/// cases the UI needs to surface (menace / "N or more creatures"). Mirrors the
+/// shape of `get_valid_block_targets_for_player` for the `DeclareBlockers` state.
+pub fn block_requirements_for_player(
+    state: &GameState,
+    player: PlayerId,
+) -> HashMap<ObjectId, u32> {
+    let combat = match state.combat.as_ref() {
+        Some(c) => c,
+        None => return HashMap::new(),
+    };
+    combat
+        .attackers
+        .iter()
+        .filter(|a| a.defending_player == player)
+        .filter_map(|a| {
+            let required = min_blockers_required(state, a.object_id);
+            (required > 1).then_some((a.object_id, required))
         })
         .collect()
 }
@@ -2170,6 +2366,24 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
                             )
                         },
                     )
+                    // CR 508.1 + CR 101.2 + CR 109.5: remote CantAttack statics
+                    // (Angelic Arbiter) resolved via `check_static_ability`.
+                    && !crate::game::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CantAttack,
+                        &crate::game::static_abilities::StaticCheckContext {
+                            target_id: Some(*id),
+                            ..Default::default()
+                        },
+                    )
+                    && !crate::game::static_abilities::check_static_ability(
+                        state,
+                        StaticMode::CantAttackOrBlock,
+                        &crate::game::static_abilities::StaticCheckContext {
+                            target_id: Some(*id),
+                            ..Default::default()
+                        },
+                    )
                     && (obj.has_keyword(&Keyword::Haste)
                         || obj.entered_battlefield_turn.is_some_and(|etb| etb < turn))
             })
@@ -2181,7 +2395,11 @@ pub fn has_potential_attackers(state: &GameState) -> bool {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::StaticDefinition;
+    use crate::parser::oracle_static::parse_static_line;
+    use crate::types::ability::{
+        Comparator, ControllerRef, FilterProp, ObjectScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
@@ -2220,6 +2438,67 @@ mod tests {
         let mut state = setup();
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
         assert!(validate_attackers(&state, &[id]).is_ok());
+    }
+
+    /// CR 508.1 + CR 109.5: Angelic Arbiter — "Each opponent who cast a spell this
+    /// turn can't attack with creatures." The remote CantAttack static (with
+    /// `affected = opponents' creatures`) must be enforced in combat, gated on the
+    /// attacking creature's controller having cast a spell THIS turn. This
+    /// discriminates the prior misparse (affected = SelfRef, which never restricted
+    /// opponents' creatures, so the post-cast assertion would fail).
+    #[test]
+    fn angelic_arbiter_attack_lock_only_after_opponent_casts() {
+        let mut state = setup();
+        // Opponent-controlled (PlayerId(1)) Angelic Arbiter clause on battlefield.
+        let arbiter = create_creature(&mut state, PlayerId(1), "Angelic Arbiter", 5, 6);
+        let def = parse_static_line(
+            "Each opponent who cast a spell this turn can't attack with creatures.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::CantAttack);
+        state
+            .objects
+            .get_mut(&arbiter)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        // Player 0 (the Arbiter-controller's opponent, and the active player) has an
+        // attack-ready creature.
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        // Player 0 has NOT cast a spell this turn -> creature is a valid attacker.
+        // On main (SelfRef misparse) this also passes; the discriminator is below.
+        assert!(
+            get_valid_attacker_ids(&state).contains(&attacker),
+            "creature must be a legal attacker before its controller casts a spell"
+        );
+        assert!(validate_attackers(&state, &[attacker]).is_ok());
+
+        // Record a spell cast by player 0 this turn.
+        let spell = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Some Spell".to_string(),
+            crate::types::zones::Zone::Stack,
+        );
+        let spell_obj = state.objects.get(&spell).unwrap().clone();
+        crate::game::restrictions::record_spell_cast(
+            &mut state,
+            PlayerId(0),
+            &spell_obj,
+            crate::types::game_state::CastingVariant::Normal,
+        );
+
+        // Now the remote CantAttack prohibition applies -> creature is excluded and
+        // declaration is illegal. On main this assertion FAILS (SelfRef never
+        // restricts opponents' creatures).
+        assert!(
+            !get_valid_attacker_ids(&state).contains(&attacker),
+            "after its controller casts a spell, the creature can't attack"
+        );
+        assert!(validate_attackers(&state, &[attacker]).is_err());
     }
 
     #[test]
@@ -2623,6 +2902,125 @@ mod tests {
         let _island = create_land(&mut state, PlayerId(1), "Island", &["Island"], &[]);
 
         assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 509.1b + CR 609.4 + CR 702.14c: Ur-Drago's static cancels the swampwalk
+    /// blocking restriction. Attacker with swampwalk + defender controls a Swamp +
+    /// a permanent emitting `IgnoreLandwalkForBlocking(Swamp)` => blockable.
+    #[test]
+    fn swampwalk_cancelled_by_ur_drago_static() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Swampwalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Swamp".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _swamp = create_land(&mut state, PlayerId(1), "Swamp", &["Swamp"], &[]);
+        // Place an Ur-Drago-like permanent on the defender's side emitting the static.
+        let ur_drago = create_creature(&mut state, PlayerId(1), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&ur_drago)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        assert!(can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 702.14d: A swampwalk canceller leaves an unrelated islandwalk intact.
+    #[test]
+    fn islandwalk_unaffected_by_swamp_canceller() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Islandwalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Island".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _island = create_land(&mut state, PlayerId(1), "Island", &["Island"], &[]);
+        let canceller = create_creature(&mut state, PlayerId(1), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&canceller)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 702.14d: Qualifiers cancel independently — an attacker with both
+    /// swampwalk and islandwalk only loses the cancelled qualifier; the other
+    /// landwalk path remains active.
+    #[test]
+    fn multi_qualifier_attacker_preserves_other_landwalks() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Dual Walker", 2, 2);
+        let kws = &mut state.objects.get_mut(&attacker).unwrap().keywords;
+        kws.push(Keyword::Landwalk("Swamp".to_string()));
+        kws.push(Keyword::Landwalk("Island".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _swamp = create_land(&mut state, PlayerId(1), "Swamp", &["Swamp"], &[]);
+        let _island = create_land(&mut state, PlayerId(1), "Island", &["Island"], &[]);
+        let canceller = create_creature(&mut state, PlayerId(1), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&canceller)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        // Islandwalk path still active => attacker is unblockable.
+        assert!(!can_block_pair(&state, blocker, attacker));
+    }
+
+    /// CR 509.1b + CR 609.4: The static is global (`affected = None`); a canceller
+    /// on the ATTACKING player's side still suppresses the restriction.
+    #[test]
+    fn ur_drago_canceller_controller_independence() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Swampwalker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Landwalk("Swamp".to_string()));
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let _swamp = create_land(&mut state, PlayerId(1), "Swamp", &["Swamp"], &[]);
+        // Canceller is on the ATTACKING side, not defender.
+        let canceller = create_creature(&mut state, PlayerId(0), "Ur-Drago", 4, 4);
+        state
+            .objects
+            .get_mut(&canceller)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(
+                StaticMode::IgnoreLandwalkForBlocking {
+                    qualifier: Some("Swamp".to_string()),
+                },
+            ));
+
+        // Cancellation still applies regardless of controller.
+        assert!(can_block_pair(&state, blocker, attacker));
     }
 
     /// CR 702.14a: Legendary landwalk — defender controlling a legendary land makes
@@ -3132,6 +3530,54 @@ mod tests {
         assert!(
             can_block_pair(&state, blue_blocker, granted),
             "blue blocker should be able to block (color differs from chosen)"
+        );
+    }
+
+    #[test]
+    fn source_power_block_restriction_scopes_to_attackers_you_control() {
+        let mut state = setup();
+        let champion = create_creature(&mut state, PlayerId(0), "Champion", 3, 3);
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 1, 1);
+        let other_attacker = create_creature(&mut state, PlayerId(1), "Other Attacker", 1, 1);
+        let small_blocker = create_creature(&mut state, PlayerId(1), "Small Blocker", 2, 2);
+        let large_blocker = create_creature(&mut state, PlayerId(1), "Large Blocker", 4, 4);
+
+        state
+            .objects
+            .get_mut(&champion)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantBeBlockedBy {
+                    filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LT,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::Power {
+                                    scope: ObjectScope::Source,
+                                },
+                            },
+                        },
+                    ])),
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                )),
+            );
+
+        assert!(
+            !can_block_pair(&state, small_blocker, attacker),
+            "blockers with power less than the source's power cannot block creatures its controller controls"
+        );
+        assert!(
+            can_block_pair(&state, large_blocker, attacker),
+            "blockers with power at least the source's power remain legal"
+        );
+        assert!(
+            can_block_pair(&state, small_blocker, other_attacker),
+            "the restriction only protects creatures controlled by the static source controller"
         );
     }
 
@@ -4838,6 +5284,129 @@ mod tests {
                 .any(|t| matches!(t, AttackTarget::Player(id) if *id == PlayerId(1))),
             "protected PlayerId(1) must not be a valid attack target, got {:?}",
             targets
+        );
+    }
+
+    /// Issue #944 — Caesar, Legion's Emperor: reflexive Soldier tokens must
+    /// attack the same defender as the active player's declared attackers, not
+    /// the attacking player surfaced by `AttackersDeclared` /
+    /// `PermanentSacrificed` trigger context.
+    #[test]
+    fn enter_attacking_matches_controller_declared_defender_not_trigger_actor() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let caesar = create_creature(&mut state, PlayerId(0), "Caesar", 4, 4);
+        let token = create_creature(&mut state, PlayerId(0), "Soldier", 1, 1);
+
+        state.combat = Some(CombatState::default());
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attackers
+            .push(AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ));
+
+        state.current_trigger_event = Some(GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player: PlayerId(1),
+            attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+        });
+
+        enter_attacking(&mut state, token, caesar, PlayerId(0));
+
+        let info = state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attackers
+            .iter()
+            .find(|a| a.object_id == token)
+            .expect("token must be an attacking creature");
+        assert_eq!(
+            info.defending_player,
+            PlayerId(1),
+            "enters-attacking token must attack the declared defender, not its controller"
+        );
+        assert_eq!(info.attack_target, AttackTarget::Player(PlayerId(1)));
+    }
+
+    /// CR 508.4 + CR 613.1f: a creature put onto the battlefield attacking must
+    /// dirty layers so Layer 6 FilterProp::Attacking grants re-evaluate. Fails on
+    /// revert of the `enter_attacking` mark.
+    #[test]
+    fn enter_attacking_marks_layers_dirty() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let token = create_creature(&mut state, PlayerId(0), "Soldier", 1, 1);
+
+        state.combat = Some(CombatState::default());
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attackers
+            .push(AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ));
+
+        state.layers_dirty = false;
+        enter_attacking(&mut state, token, attacker, PlayerId(0));
+
+        assert!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .attackers
+                .iter()
+                .any(|a| a.object_id == token),
+            "entered-attacking creature must be in combat.attackers"
+        );
+        assert!(
+            state.layers_dirty,
+            "putting a creature onto the battlefield attacking must mark layers dirty"
+        );
+    }
+
+    /// CR 702.49c + CR 702.190b + CR 613.1f: Ninjutsu/Sneak place a creature
+    /// already attacking; the layers must re-evaluate Layer 6 FilterProp::Attacking
+    /// grants. Fails on revert of the `place_attacking_alongside` mark.
+    #[test]
+    fn place_attacking_alongside_marks_layers_dirty() {
+        let mut state = setup();
+        let ninja = create_creature(&mut state, PlayerId(0), "Ninja", 2, 2);
+
+        state.combat = Some(CombatState::default());
+        state.layers_dirty = false;
+
+        let mut events = Vec::new();
+        place_attacking_alongside(
+            &mut state,
+            ninja,
+            PlayerId(1),
+            AttackTarget::Player(PlayerId(1)),
+            &mut events,
+        );
+
+        assert!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .attackers
+                .iter()
+                .any(|a| a.object_id == ninja),
+            "place_attacking_alongside must add the creature to combat.attackers"
+        );
+        assert!(
+            state.layers_dirty,
+            "placing a creature already attacking must mark layers dirty"
         );
     }
 }

@@ -1,0 +1,336 @@
+{
+  "intro": {
+    "quickTitle": "Szybki draft",
+    "podTitle": "Draft w grupie",
+    "subtitle": "Oto jak to działa",
+    "startDrafting": "Rozpocznij draft",
+    "quick": {
+      "step1": "Otworzysz 3 boostery po 14 kart każdy",
+      "step2": "Wybierz jedną kartę z każdego boostera, a resztę przekaż dalej do botów",
+      "step3": "Boostery zmieniają kierunek w każdej rundzie — w lewo, w prawo, w lewo",
+      "step4": "Po wszystkich wyborach zbuduj talię z 40 kart i rozegraj mecz"
+    },
+    "pod": {
+      "step1": "Draftujesz z {{count}} graczami w grupie",
+      "step2": "Otwórz 3 boostery po 14 kart — wybierz jedną, resztę przekaż dalej",
+      "step3": "Boostery zmieniają kierunek w każdej rundzie — w lewo, w prawo, w lewo",
+      "step4": "Po drafcie zbuduj talię z 40 kart i rozegraj mecze turniejowe"
+    }
+  },
+  "steps": {
+    "navLabel": "Postęp draftu",
+    "chooseSet": "Wybierz dodatek",
+    "draft": "Draft",
+    "buildDeck": "Zbuduj talię",
+    "play": "Graj"
+  },
+  "bracket": {
+    "title": "Drabinka",
+    "versus": "vs",
+    "quarterfinals": "Ćwierćfinały",
+    "semifinals": "Półfinały",
+    "final": "Finał"
+  },
+  "hostControls": {
+    "title": "Sterowanie gospodarza",
+    "resumeDraft": "Wznów draft",
+    "pauseDraft": "Wstrzymaj draft",
+    "startNextRound": "Rozpocznij następną rundę",
+    "overrideResult": "Zmień wynik",
+    "versusPair": "{{a}} v {{b}}",
+    "kickReplace": "Wyrzuć i zastąp",
+    "replaceWithBot": "Zastąp gracza {{name}} botem",
+    "endDraft": "Zakoncz draft",
+    "endDraftConfirm": "Zakonczyc ten draft dla wszystkich? Tej akcji nie mozna cofnac."
+  },
+  "manaCurve": {
+    "title": "Krzywa many"
+  },
+  "pickTimer": {
+    "label": "Czas na wybór",
+    "seconds": "{{count}}s"
+  },
+  "scoreBadge": {
+    "label": "Wynik: {{count}} wygranych"
+  },
+  "seat": {
+    "label": "Miejsce {{number}}",
+    "passingLeft": "→ Przekazywanie w lewo →",
+    "passingRight": "← Przekazywanie w prawo ←",
+    "connected": "Connected",
+    "disconnected": "Disconnected"
+  },
+  "setSelector": {
+    "botDifficulty": "Poziom trudności botów",
+    "chooseSet": "Wybierz dodatek",
+    "noPools": "Brak dostępnych pul do draftu. Najpierw uruchom pipeline danych draftu.",
+    "setIconAlt": "Ikona dodatku {{name}}",
+    "loadFailed": "Nie udało się wczytać dodatków"
+  },
+  "pack": {
+    "confirmPick": "Potwierdź wybór",
+    "waitingNext": "Oczekiwanie na następny booster...",
+    "cardsInPack": "{{count}} kart w boosterze",
+    "picking": "Wybieranie…",
+    "autoPick": "Wybór automatyczny"
+  },
+  "pool": {
+    "cardsDrafted": "{{count}} wybranych kart",
+    "empty": "Nie wybrano jeszcze żadnych kart",
+    "sortColor": "Kolor",
+    "sortType": "Typ",
+    "sortCmc": "CMC"
+  },
+  "standings": {
+    "title": "Klasyfikacja — Runda {{round}}",
+    "rank": "#",
+    "player": "Gracz",
+    "record": "Bilans",
+    "gwp": "GWP",
+    "currentPairings": "Aktualne pary",
+    "versus": "vs"
+  },
+  "limitedDeck": {
+    "poolHeading": "Pula ({{count}})",
+    "allAdded": "Wszystkie karty dodane do talii.",
+    "mainDeck": "Talia główna",
+    "emptyDeckHint": "Klikaj karty z puli, aby dodać je do talii.",
+    "addableCards": "Karty do dodania",
+    "autoLands": "Automatyczne ziemie",
+    "suggestDeck": "Zaproponuj talię",
+    "submitDeck": "Zatwierdź talię",
+    "removeCard": "Usuń {{name}}",
+    "addCard": "Dodaj {{name}}",
+    "cardCount": "/ {{min}} kart",
+    "spellCount_one": "{{count}} czar",
+    "spellCount_other": "{{count}} czarów",
+    "landCount_one": "{{count}} ziemia",
+    "landCount_other": "{{count}} ziem",
+    "readyToSubmit": "gotowe do zatwierdzenia",
+    "moreNeeded": "potrzeba jeszcze {{count}}"
+  },
+  "landing": {
+    "title": "Draft",
+    "startNew": "Rozpocznij nowy",
+    "quickDraft": {
+      "title": "Szybki draft",
+      "description": "Zdraftuj 3 boostery z 7 botami, zbuduj talię z 40 kart, a potem rozegraj mecz Bo1 przeciwko jednemu z nich."
+    },
+    "cubeDraft": {
+      "title": "Draft kostki",
+      "description": "Wklej lub wczytaj listę kostki, dostosuj zasady boosterów i talii, a potem zdraftuj szybko przeciwko botom."
+    },
+    "podDraft": {
+      "title": "Draft w grupie",
+      "description": "Załóż lub dołącz do grupy liczącej do 8 graczy, draftujcie razem na żywo, a potem rozegrajcie turniej szwajcarski lub na wylot."
+    },
+    "podInProgress": "Trwa draft w grupie",
+    "podLabel": "Grupa {{kind}}",
+    "seatCount": "{{count}} miejsc",
+    "roomLabel": "Pokój {{code}}",
+    "cardsPicked": "{{count}} wybranych kart",
+    "resume": "Wznów",
+    "draftInProgress": "Trwa draft",
+    "draftComplete": "Draft zakończony",
+    "resumeMatch": "Wznów mecz",
+    "viewResults": "Zobacz wyniki",
+    "setIconAlt": "Ikona {{code}}"
+  },
+  "podPhase": {
+    "lobby": "Poczekalnia",
+    "drafting": "Draftowanie",
+    "deckbuilding": "Budowanie talii",
+    "pairing": "Dobieranie par",
+    "matchInProgress": "Trwa mecz",
+    "complete": "Zakończono"
+  },
+  "quickPhase": {
+    "drafting": "Draftowanie",
+    "deckbuilding": "Budowanie talii",
+    "matchRecord": "Mecz {{number}} — {{wins}}W-{{losses}}P",
+    "record": "{{wins}}W-{{losses}}P",
+    "runComplete": "Bieg zakończony — {{wins}}W-{{losses}}P"
+  },
+  "relativeTime": {
+    "justNow": "przed chwilą",
+    "minutes": "{{count}} min temu",
+    "hours": "{{count}} godz. temu",
+    "days": "{{count}} dni temu"
+  },
+  "cubeSetup": {
+    "defaultCubeName": "Własna kostka",
+    "fetchError": "Nie udało się pobrać listy kostki",
+    "startError": "Nie udało się rozpocząć draftu kostki",
+    "cubeName": "Nazwa kostki",
+    "seats": "Miejsca",
+    "packs": "Boostery",
+    "packSize": "Rozmiar boostera",
+    "minDeck": "Minimalna talia",
+    "exportUrl": "URL eksportu CubeCobra",
+    "exportUrlPlaceholder": "Wklej surowy URL eksportu lub wklej listę poniżej",
+    "loadUrl": "Wczytaj URL",
+    "deckAddables": "Karty dodawane do talii",
+    "addablesStandardBasics": "Standardowe ziemie podstawowe",
+    "addablesBasicsPlusCustom": "Ziemie podstawowe plus własne",
+    "addablesCustomOnly": "Tylko własne",
+    "customAddableCards": "Własne karty do dodania",
+    "customAddablePlaceholder": "Jedna nazwa karty w wierszu",
+    "startCubeDraft": "Rozpocznij draft kostki"
+  },
+  "formatPicker": {
+    "title": "Twoja talia jest gotowa",
+    "subtitle": "Wybierz, jak chcesz grać.",
+    "startMatch": "Rozpocznij mecz",
+    "single": {
+      "label": "Pojedynczy mecz",
+      "description": "Rozegraj jeden mecz Bo1 swoją zdraftowaną talią."
+    },
+    "bo3": {
+      "label": "Do dwóch wygranych",
+      "description": "Rozegraj mecz Bo3 z wymianą kart bocznych między grami."
+    },
+    "run": {
+      "label": "Pełny bieg",
+      "description": "Graj mecze Bo1, aż osiągniesz 7 wygranych lub 3 porażki."
+    }
+  },
+  "run": {
+    "draftRun": "Bieg draftu",
+    "upNext": "Następny — Mecz {{number}}",
+    "nextMatch": "Następny mecz",
+    "endRun": "Zakończ bieg",
+    "done": "Gotowe",
+    "perfectRun": "Idealny bieg",
+    "runComplete": "Bieg zakończony",
+    "runOver": "Koniec biegu",
+    "finishedFlawless": "Zakończyłeś z bilansem {{wins}}–{{losses}}. Bezbłędnie.",
+    "finishedCongrats": "Zakończyłeś z bilansem {{wins}}–{{losses}}. Gratulacje!",
+    "finishedRecord": "Zakończyłeś z bilansem {{wins}}–{{losses}}.",
+    "wins": "Wygrane",
+    "losses": "Porażki",
+    "drawCount_one": "+ {{count}} remis",
+    "drawCount_other": "+ {{count}} remisów",
+    "matchLog": "Dziennik meczu",
+    "matchResultTitle": "Mecz {{number}}: {{result}}",
+    "result": {
+      "win": "wygrana",
+      "loss": "porażka",
+      "draw": "remis"
+    },
+    "resultShort": {
+      "win": "W",
+      "loss": "P",
+      "draw": "R"
+    }
+  },
+  "page": {
+    "cubeDraftTitle": "Draft kostki",
+    "quickDraftTitle": "Szybki draft",
+    "setDraftTab": "Draft dodatku",
+    "cubeTab": "Kostka"
+  },
+  "podSetup": {
+    "title": "Draft w grupie",
+    "subtitle": "Draftuj ze znajomymi — otwieraj boostery, wybieraj karty i graj mecze turniejowe.",
+    "hostCardTitle": "Załóż grupę",
+    "hostCardDesc": "Utwórz nowy pokój draftu. Wybierasz dodatek, format i rozmiar grupy — a potem udostępnij kod pokoju znajomym. Puste miejsca można wypełnić botami.",
+    "joinCardTitle": "Dołącz do grupy",
+    "joinCardDesc": "Wpisz kod pokoju od gospodarza, aby dołączyć do istniejącego draftu. Zostaniesz posadzony na następnym wolnym miejscu i będziesz draftować razem ze wszystkimi w czasie rzeczywistym.",
+    "howItWorksTitle": "Jak działa draft w grupie",
+    "howItWorks1": "Każdy gracz otwiera 3 boostery po 14 kart — wybierz jedną, resztę przekaż dalej",
+    "howItWorks2": "Boostery zmieniają kierunek w każdej rundzie (w lewo → w prawo → w lewo)",
+    "howItWorks3": "Po drafcie każdy buduje talię z 40 kart ze swojej puli",
+    "howItWorks4": "Następnie rozgrywacie turniej szwajcarski lub na pojedyncze wyeliminowanie",
+    "back": "← Wstecz",
+    "hostTitle": "Załóż grupę",
+    "joinTitle": "Dołącz do grupy",
+    "displayName": "Wyświetlana nazwa",
+    "namePlaceholder": "Wpisz swoją nazwę...",
+    "draftType": "Typ draftu",
+    "kindPremier": "Premier",
+    "kindPremierDesc": "Mecze turniejowe do jednej wygranej po budowaniu talii. Szybsze rundy, bez wymiany kart bocznych między grami.",
+    "kindTraditional": "Tradycyjny",
+    "kindTraditionalDesc": "Mecze turniejowe do dwóch wygranych po budowaniu talii, z wymianą kart bocznych między grami.",
+    "tournamentFormat": "Format turnieju",
+    "tournamentSwiss": "Szwajcarski",
+    "tournamentSwissDesc": "Wszyscy grają przez trzy rundy, nawet po porażce.",
+    "tournamentElimination": "Pojedyncze wyeliminowanie",
+    "tournamentEliminationDesc": "Gracze odpadają po przegranym meczu, aż pozostanie jeden zwycięzca.",
+    "podPolicy": "Zasady grupy",
+    "policyCompetitive": "Wyczynowe",
+    "policyCompetitiveDesc": "Wybory na czas, automatyczne wybory po upływie czasu i automatyczne przechodzenie do kolejnych rund.",
+    "policyCasual": "Swobodne",
+    "policyCasualDesc": "Wybory bez limitu czasu, ręczne przechodzenie do kolejnych rund i narzędzia gospodarza do rozwiązywania problemów.",
+    "podSize": "Rozmiar grupy",
+    "podSizeDesc": "Łącznie {{count}} miejsc. Puste miejsca można wypełnić botami z poczekalni przed rozpoczęciem draftu.",
+    "playerCount": "{{count}} graczy",
+    "setSelectorHint": "Wybierz dodatek do draftu na końcu. Wybór dodatku wczytuje jego pulę kart i tworzy pokój grupy.",
+    "loadingPool": "Wczytywanie danych puli dodatku...",
+    "roomCode": "Kod pokoju",
+    "roomCodePlaceholder": "Wpisz kod pokoju...",
+    "joinPod": "Dołącz do grupy",
+    "tabs": {
+      "set": "Dodatek",
+      "cube": "Cube"
+    }
+  },
+  "podPhaseView": {
+    "tournamentPairings": "Pary turniejowe",
+    "matchesInProgress": "Trwające mecze",
+    "yourMatch": "Twój mecz",
+    "versusOpponent": "vs {{name}}",
+    "youAreHosting": "Jesteś gospodarzem",
+    "connectingOpponent": "Łączenie z przeciwnikiem...",
+    "waitingResults": "Oczekiwanie na wyniki meczu...",
+    "hidePool": "Ukryj pulę",
+    "reviewPool": "Przejrzyj pulę",
+    "roundComplete": "Runda zakończona",
+    "waitingNextRound": "Oczekiwanie, aż gospodarz rozpocznie następną rundę...",
+    "nextRoundShortly": "Następna runda rozpocznie się wkrótce...",
+    "pauseReason": {
+      "PlayerDisconnected": "Draft paused — a player disconnected.",
+      "PausedByHost": "Draft paused by host.",
+      "DisconnectGraceExpired": "A player did not return in time."
+    }
+  },
+  "betweenGames": {
+    "game": "Gra {{number}}",
+    "lostPreviousGame": "Przegrałeś poprzednią grę. Wybierz:",
+    "seconds": "{{count}}s",
+    "secondsRemaining": "pozostało {{count}}s",
+    "playFirst": "Zagraj pierwszy",
+    "drawFirst": "Dobierz pierwszy",
+    "sideboarding": "Wymiana kart bocznych",
+    "waitingSideboard": "Oczekiwanie, aż przeciwnik zatwierdzi karty boczne...",
+    "sideboardGame": "Karty boczne — Gra {{number}}",
+    "sideboardHint": "Wprowadź zmiany w kartach bocznych, a potem zatwierdź. Twoja pula jest dostępna poniżej.",
+    "submitSideboard": "Zatwierdź karty boczne",
+    "preparingNext": "Przygotowywanie następnej gry..."
+  },
+  "podComplete": {
+    "title": "Draft zakończony",
+    "returnToMenu": "Powrót do menu"
+  },
+  "podError": {
+    "kicked": "Zostałeś wyrzucony z grupy",
+    "hostLeft": "Gospodarz opuścił draft",
+    "connection": "Błąd połączenia"
+  },
+  "lobby": {
+    "title": "Poczekalnia grupy draftu",
+    "draftKind": "Draft {{kind}}",
+    "botSeat": "Bot",
+    "waitingSeat": "Oczekiwanie...",
+    "seatNumber": "Miejsce {{number}}",
+    "hostBadge": "GOSPODARZ",
+    "kick": "Wyrzuć",
+    "copyRoomCodeTitle": "Kliknij, aby skopiować kod pokoju",
+    "roomCode": "Kod pokoju",
+    "clickToCopy": "Kliknij, aby skopiować",
+    "seatsFilled": "{{current}} / {{total}} miejsc zajętych",
+    "fillWithBots": "Wypełnij puste miejsca botami",
+    "leave": "Opuść",
+    "startDraft": "Rozpocznij draft",
+    "waitingForHost": "Oczekiwanie, aż gospodarz rozpocznie draft..."
+  }
+}

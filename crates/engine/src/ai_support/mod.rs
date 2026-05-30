@@ -135,6 +135,12 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::ExploreChoice { choosable, .. }, GameAction::ChooseTarget { target }) => {
             !matches_target_choice(target, choosable)
         }
+        // CR 303.4 + CR 303.4g + CR 115.1: Validate the chosen attach target
+        // for a return-as-Aura pick against the engine-computed legal list.
+        (
+            WaitingFor::ReturnAsAuraTarget { legal_targets, .. },
+            GameAction::ChooseTarget { target },
+        ) => !matches_target_choice(target, legal_targets),
         (WaitingFor::TargetSelection { selection, .. }, GameAction::ChooseTarget { target })
         | (
             WaitingFor::TriggerTargetSelection { selection, .. },
@@ -197,24 +203,50 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 up_to,
                 ..
             },
-            GameAction::ChooseOutsideGameCards { sideboard_indices },
+            GameAction::ChooseOutsideGameCards { selections },
         ) => {
+            use crate::types::actions::OutsideGameSelection;
+            use crate::types::game_state::OutsideGameChoiceSource;
             let valid_count = if *up_to {
-                sideboard_indices.len() <= *count
+                selections.len() <= *count
             } else {
-                sideboard_indices.len() == *count
+                selections.len() == *count
             };
-            let mut requested_counts = HashMap::new();
-            for index in sideboard_indices {
-                *requested_counts.entry(*index).or_insert(0usize) += 1;
+            let mut sideboard_counts: HashMap<usize, usize> = HashMap::new();
+            let mut exile_seen: HashSet<ObjectId> = HashSet::new();
+            let mut exile_dup = false;
+            for selection in selections {
+                match selection {
+                    OutsideGameSelection::Sideboard { sideboard_index } => {
+                        *sideboard_counts.entry(*sideboard_index).or_insert(0) += 1;
+                    }
+                    OutsideGameSelection::FaceUpExile { object_id } => {
+                        if !exile_seen.insert(*object_id) {
+                            exile_dup = true;
+                        }
+                    }
+                }
             }
-            !valid_count
-                || requested_counts.iter().any(|(index, requested_count)| {
-                    choices
-                        .iter()
-                        .find(|choice| choice.sideboard_index == *index)
-                        .is_none_or(|choice| *requested_count > choice.entry.count as usize)
-                })
+            let bad_sideboard = sideboard_counts.iter().any(|(idx, count)| {
+                choices
+                    .iter()
+                    .find(|choice| {
+                        matches!(
+                            &choice.source,
+                            OutsideGameChoiceSource::Sideboard { sideboard_index, .. }
+                                if sideboard_index == idx
+                        )
+                    })
+                    .is_none_or(|choice| *count > choice.count as usize)
+            });
+            let bad_exile =
+                exile_seen.iter().any(|object_id| {
+                    !choices.iter().any(|choice| matches!(
+                    &choice.source,
+                    OutsideGameChoiceSource::FaceUpExile { object_id: oid } if oid == object_id
+                ))
+                });
+            !valid_count || exile_dup || bad_sideboard || bad_exile
         }
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
@@ -367,9 +399,9 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             GameAction::SelectCards { cards: chosen },
         )
         | (
-            WaitingFor::ExileFromBattlefieldForManaAbility {
+            WaitingFor::ExileForManaAbility {
                 player: _,
-                permanents: cards,
+                cards,
                 count,
                 ..
             },
@@ -513,6 +545,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player,
                 valid_blocker_ids,
                 valid_block_targets,
+                ..
             },
             GameAction::DeclareBlockers { assignments },
         ) => {
@@ -2052,6 +2085,7 @@ mod tests {
                 affected: Some(affected),
                 modifications: vec![],
                 condition: None,
+                per_player_condition: None,
                 affected_zone: None,
                 effect_zone: None,
                 active_zones: vec![],

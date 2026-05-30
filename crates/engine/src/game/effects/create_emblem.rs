@@ -54,7 +54,8 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ContinuousModification, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
+        BounceSelection, ContinuousModification, ControllerRef, StaticDefinition, TargetFilter,
+        TypedFilter,
     };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -75,6 +76,7 @@ mod tests {
                 ContinuousModification::AddToughness { value: 1 },
             ],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -180,7 +182,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -206,6 +208,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],
             ObjectId(200),

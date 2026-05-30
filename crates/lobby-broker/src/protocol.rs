@@ -75,10 +75,18 @@ pub struct LobbyGame {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftLobbyMetadata {
-    /// Three-letter set code (e.g. "MKM", "OTJ").
+    /// Three-letter set code (e.g. "MKM", "OTJ"). For cube drafts, set to
+    /// `"custom-cube"`; see [`DraftLobbyMetadata::cube_name`] for the
+    /// human-readable cube name.
     pub set_code: String,
     /// Draft kind label: "Quick", "Premier", or "Traditional".
     pub draft_kind: String,
+    /// Human-readable cube name when the pod is a cube draft. Absent for
+    /// set drafts. Backward-compatible: `#[serde(default)]` accepts
+    /// existing serialized records without the field; `skip_serializing_if`
+    /// keeps the wire output byte-identical for set drafts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cube_name: Option<String>,
 }
 
 /// The lobby subset of `server_core::protocol::ClientMessage`. Wire-compatible:

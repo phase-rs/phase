@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_effect/mod.rs
-assertion_line: 31967
 expression: def
 ---
 {
@@ -19,7 +18,6 @@ expression: def
     },
     "owner_library": false,
     "enter_transformed": false,
-    "under_your_control": false,
     "enter_tapped": false,
     "enters_attacking": false
   },
@@ -43,7 +41,6 @@ expression: def
           },
           "owner_library": false,
           "enter_transformed": false,
-          "under_your_control": false,
           "enter_tapped": false,
           "enters_attacking": false
         },

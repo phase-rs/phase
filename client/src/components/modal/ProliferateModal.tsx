@@ -2,11 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
+import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import type { TargetRef, WaitingFor } from "../../adapter/types.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
-import { targetKey, targetLabel } from "./targetRef.ts";
+import { filterTargetsByController, targetKey, targetLabel } from "./targetRef.ts";
 
 type ProliferateChoice = Extract<WaitingFor, { type: "ProliferateChoice" }>;
 type ChooseObjectsSelection = Extract<
@@ -44,6 +46,8 @@ export function ProliferateModal({
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
+  const playerId = usePlayerId();
+  const hoverProps = useInspectHoverProps();
 
   const [selected, setSelected] = useState<TargetRef[]>(data.eligible);
 
@@ -72,6 +76,31 @@ export function ProliferateModal({
       subtitle={t(`proliferate.${VARIANT_KEYS[variant].subtitle}`)}
       footer={<ConfirmButton onClick={handleConfirm} label={t("proliferate.confirm")} />}
     >
+      {data.eligible.length > 1 && (
+        <div className="mb-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setSelected(data.eligible)}
+            className={gameButtonClass({ tone: "neutral", size: "xs" })}
+          >
+            {t("proliferate.selectAll")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelected([])}
+            className={gameButtonClass({ tone: "neutral", size: "xs" })}
+          >
+            {t("proliferate.selectNone")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelected(filterTargetsByController(data.eligible, objects, playerId))}
+            className={gameButtonClass({ tone: "neutral", size: "xs" })}
+          >
+            {t("proliferate.selectMine")}
+          </button>
+        </div>
+      )}
       <div className="mb-4 space-y-2">
         {data.eligible.map((target) => {
           const key = targetKey(target);
@@ -81,6 +110,7 @@ export function ProliferateModal({
               key={key}
               type="button"
               aria-pressed={isSelected}
+              {...("Object" in target ? hoverProps(target.Object) : undefined)}
               onClick={() => handleToggle(target)}
               className={
                 gameButtonClass({

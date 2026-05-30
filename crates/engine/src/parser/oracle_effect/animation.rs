@@ -1,14 +1,14 @@
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{eof, opt, peek, recognize, value};
 use nom::multi::{many0, separated_list1};
 use nom::sequence::{pair, preceded};
 use nom::Parser;
 
-use super::super::oracle_nom::error::{OracleError, OracleResult};
+use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_util::split_around;
@@ -17,7 +17,7 @@ use super::token::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
-use crate::types::ability::QuantityExpr;
+use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
@@ -60,11 +60,23 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         spec.power = Some(power);
         spec.toughness = Some(toughness);
         rest = after_pt;
+    } else if let Some(after_pt) = parse_cost_x_become_pt_prefix(rest) {
+        // CR 107.3 + CR 107.3a: "{X}{G}: ~ becomes an X/X creature" — P/T resolves
+        // to the X paid for the activation cost. Maps Variable("X")/Variable("X") to
+        // CostXPaid so the animate effect reads cost_x_paid at resolution (not Variable
+        // which only resolves while the spell/ability is on the stack).
+        let cost_x = QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        };
+        spec.dynamic_power = Some(cost_x.clone());
+        spec.dynamic_toughness = Some(cost_x);
+        rest = after_pt;
     }
 
-    if let Some((descriptor, power, toughness)) = split_animation_base_pt_clause(rest) {
+    if let Some((descriptor, power, toughness, keywords)) = split_animation_base_pt_clause(rest) {
         spec.power = Some(power);
         spec.toughness = Some(toughness);
+        spec.keywords.extend(keywords);
         rest = descriptor;
     }
 
@@ -75,7 +87,7 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
     }
 
     let (descriptor, keywords) = split_animation_keyword_clause(rest);
-    spec.keywords = keywords;
+    spec.keywords.extend(keywords);
     rest = descriptor;
 
     if let Some((colors, after_colors)) = parse_animation_color_prefix(rest) {
@@ -221,15 +233,76 @@ pub(super) fn parse_fixed_become_pt_prefix(text: &str) -> Option<(i32, i32, &str
     }
 }
 
-fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32)> {
-    const NEEDLE: &str = " with base power and toughness ";
+/// CR 107.3 + CR 107.3a: Recognize "X/X" at the start of a "becomes" descriptor
+/// and map it to the CostXPaid dynamic quantity (the X paid in the activation cost).
+///
+/// Returns the remainder after the "X/X" token when both power and toughness
+/// are `Variable("X")`. Returns `None` for `*/*`, fixed P/T, or asymmetric X
+/// (e.g. "X/1" — not yet supported in this path, falls through to other parsers).
+///
+/// This enables X-cost creature-land animate abilities like "{X}{G}: Until end
+/// of turn, ~ becomes an X/X green Hydra creature" (Lair of the Hydra) to
+/// produce SetPowerDynamic + SetToughnessDynamic modifications keyed to
+/// CostXPaid.
+fn parse_cost_x_become_pt_prefix(text: &str) -> Option<&str> {
+    let (rest, (power, toughness)) = nom_primitives::parse_pt_value.parse(text).ok()?;
+    match (power, toughness) {
+        (PtValue::Variable(ref p), PtValue::Variable(ref t))
+            if p.eq_ignore_ascii_case("x") && t.eq_ignore_ascii_case("x") =>
+        {
+            Some(rest.trim_start())
+        }
+        _ => None,
+    }
+}
+
+/// CR 613.1d/f/g: animation clauses can simultaneously change types, grant
+/// keyword abilities, and set base P/T. Keep those written components together
+/// so later lowering emits Layer 4, Layer 6, and Layer 7 modifications.
+fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32, Vec<Keyword>)> {
     let lower = text.to_lowercase();
-    let (before, _) = split_around(&lower, NEEDLE)?;
-    let pos = before.len();
-    let descriptor = text[..pos].trim_end_matches(',').trim();
-    let pt_text = text[pos + NEEDLE.len()..].trim();
-    let (power, toughness, _) = parse_fixed_become_pt_prefix(pt_text)?;
-    Some((descriptor, power, toughness))
+    let (_, (descriptor_lower, power, toughness, keywords)) =
+        parse_animation_base_pt_clause(&lower).ok()?;
+    let descriptor = text[..descriptor_lower.len()].trim_end_matches(',').trim();
+    Some((descriptor, power, toughness, keywords))
+}
+
+fn parse_animation_base_pt_clause(input: &str) -> OracleResult<'_, (&str, i32, i32, Vec<Keyword>)> {
+    let (rest, descriptor) = take_until(" with base power and toughness ").parse(input)?;
+    let (rest, _) = tag(" with base power and toughness ").parse(rest)?;
+    let (rest, (power, toughness)) = nom_primitives::parse_pt_value.parse(rest)?;
+    let (power, toughness) = match (power, toughness) {
+        (PtValue::Fixed(power), PtValue::Fixed(toughness)) => (power, toughness),
+        _ => return Err(oracle_err(rest)),
+    };
+    let (rest, keywords) = opt(parse_base_pt_trailing_keywords).parse(rest)?;
+    Ok((
+        rest,
+        (descriptor, power, toughness, keywords.unwrap_or_default()),
+    ))
+}
+
+fn parse_base_pt_trailing_keyword_intro(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = multispace0(input)?;
+    let (rest, _) = alt((tag(", and "), tag(", "), tag("and "))).parse(rest)?;
+    let (rest, _) = opt(alt((
+        tag("has "),
+        tag("have "),
+        tag("gains "),
+        tag("gain "),
+    )))
+    .parse(rest)?;
+    Ok((rest, ()))
+}
+
+fn parse_base_pt_trailing_keywords(input: &str) -> OracleResult<'_, Vec<Keyword>> {
+    let (rest, _) = parse_base_pt_trailing_keyword_intro(input)?;
+    let (rest, raw_clause) = take_till(|c| c == '"' || c == '.').parse(rest)?;
+    let keywords = split_token_keyword_list(raw_clause.trim())
+        .into_iter()
+        .filter_map(map_token_keyword)
+        .collect();
+    Ok((rest, keywords))
 }
 
 fn parse_dynamic_pt_clause(input: &str) -> OracleResult<'_, (&str, QuantityExpr)> {
@@ -701,6 +774,42 @@ mod test_den_bugbear {
     }
 
     #[test]
+    fn animation_base_pt_preserves_trailing_bare_keyword() {
+        let spec = parse_animation_spec(
+            "a Halfling Scout with base power and toughness 2/3 and lifelink",
+            &mut ParseContext::default(),
+        )
+        .expect("Frodo-style animation phrase should parse");
+
+        let mods = animation_modifications(&spec);
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::SetPower { value: 2 })
+        );
+        assert!(mods
+            .contains(&crate::types::ability::ContinuousModification::SetToughness { value: 3 }));
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Creature,
+            })
+        );
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::AddSubtype {
+                subtype: "Halfling".to_string(),
+            })
+        );
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::AddSubtype {
+                subtype: "Scout".to_string(),
+            })
+        );
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: Keyword::Lifelink,
+            })
+        );
+    }
+
+    #[test]
     fn animation_and_has_base_pt_equal_to_recipient_mana_value() {
         let spec = parse_animation_spec(
             "a creature in addition to its other types and has base power and base toughness each equal to its mana value",
@@ -889,6 +998,103 @@ mod test_den_bugbear {
         assert_eq!(
             parse_animation_types("demon in addition to its other types", false),
             vec!["Demon"]
+        );
+    }
+
+    /// CR 107.3 + CR 107.3a: "{X}{G}: Until end of turn, ~ becomes an X/X green Hydra creature"
+    /// The X/X P/T in a "becomes" predicate must map to CostXPaid (not Variable("X")),
+    /// so the animate effect reads cost_x_paid at resolution rather than failing to resolve X.
+    /// Covers Lair of the Hydra and future X-cost X/X animation patterns.
+    #[test]
+    fn animation_spec_x_x_becomes_cost_x_paid() {
+        use crate::types::ability::{ContinuousModification, QuantityExpr, QuantityRef};
+        use crate::types::card_type::CoreType;
+
+        let spec =
+            parse_animation_spec("an X/X green Hydra creature", &mut ParseContext::default())
+                .expect("X/X creature-land animate spec must parse");
+
+        // Dynamic P/T must be CostXPaid (not Variable("X")).
+        let expected_qty = QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        };
+        assert_eq!(
+            spec.dynamic_power,
+            Some(expected_qty.clone()),
+            "dynamic_power must be CostXPaid"
+        );
+        assert_eq!(
+            spec.dynamic_toughness,
+            Some(expected_qty),
+            "dynamic_toughness must be CostXPaid"
+        );
+        // Fixed P/T must be None (X/X is dynamic, not fixed).
+        assert_eq!(spec.power, None);
+        assert_eq!(spec.toughness, None);
+
+        // Type list must include Creature and Hydra.
+        assert!(
+            spec.types.contains(&"Creature".to_string()),
+            "must include Creature"
+        );
+        assert!(
+            spec.types.contains(&"Hydra".to_string()),
+            "must include Hydra"
+        );
+
+        // animation_modifications must emit SetPowerDynamic, SetToughnessDynamic, AddType(Creature), AddSubtype(Hydra).
+        let mods = animation_modifications(&spec);
+        assert!(
+            mods.contains(&ContinuousModification::SetPowerDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            }),
+            "must include SetPowerDynamic(CostXPaid)"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::SetToughnessDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            }),
+            "must include SetToughnessDynamic(CostXPaid)"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            }),
+            "must include AddType(Creature)"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Hydra".to_string()
+            }),
+            "must include AddSubtype(Hydra)"
+        );
+    }
+
+    /// CR 107.3a: X/X P/T with no explicit type (bare "X/X creature" with infer_creature=true).
+    #[test]
+    fn animation_spec_bare_x_x_infers_creature() {
+        use crate::types::ability::QuantityRef;
+
+        let spec = parse_animation_spec("an X/X creature", &mut ParseContext::default())
+            .expect("bare X/X creature must parse");
+
+        assert!(spec.dynamic_power.is_some(), "dynamic_power must be set");
+        assert!(
+            spec.dynamic_toughness.is_some(),
+            "dynamic_toughness must be set"
+        );
+        if let Some(crate::types::ability::QuantityExpr::Ref { qty }) = spec.dynamic_power {
+            assert_eq!(qty, QuantityRef::CostXPaid, "must be CostXPaid");
+        } else {
+            panic!("dynamic_power must be Ref(CostXPaid)");
+        }
+        assert!(
+            spec.types.contains(&"Creature".to_string()),
+            "must infer Creature"
         );
     }
 }

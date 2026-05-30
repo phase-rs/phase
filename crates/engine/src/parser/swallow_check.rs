@@ -31,6 +31,13 @@ use crate::types::ability::{
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
+use nom::{
+    branch::alt,
+    bytes::complete::{tag, take_while1},
+    character::complete::digit1,
+    combinator::{opt, value},
+    Parser,
+};
 
 /// Strip parenthesized reminder text. Reminder text is the parser's
 /// responsibility to ignore at the keyword level — keywords themselves are
@@ -464,6 +471,10 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // "you may cast X as though it had flash if you pay Y" —
             // generalized cast-timing/keyword permission, always opt-in.
             | StaticMode::CastWithKeyword { .. }
+            // CR 118.9: "You may pay X rather than pay the mana cost for [filter]
+            // spells you cast" — opt-in alternative-mana-cost permission
+            // (Rooftop Storm, Fist of Suns, Jodah), structurally optional.
+            | StaticMode::CastWithAlternativeCost { .. }
             // CR 602.5e: "You may activate [abilities] any time you could
             // cast an instant" is an activation-timing permission, not an
             // optional effect to execute during resolution.
@@ -472,6 +483,10 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // (Crucible, Ramunap Excavator, etc.) — graveyard-as-zone
             // cast permission, structurally opt-in.
             | StaticMode::GraveyardCastPermission { .. }
+            // CR 601.2a + CR 113.6b: Maralen-class "Once each turn, you
+            // may cast …" exile-cast permission — structurally opt-in by
+            // the same "you may cast" surface as the graveyard sibling.
+            | StaticMode::ExileCastPermission { .. }
             // CR 601.2f: Defiler-style cost reductions encode the optional
             // life payment inside the static cost-modification primitive.
             | StaticMode::DefilerCostReduction { .. }
@@ -860,7 +875,7 @@ fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
         // dragon-reveal kicker, blight, behold, etc.
         || matches!(
             parsed.additional_cost,
-            Some(crate::types::ability::AdditionalCost::Optional(_)
+            Some(crate::types::ability::AdditionalCost::Optional { .. }
                 | crate::types::ability::AdditionalCost::Kicker { .. }
                 | crate::types::ability::AdditionalCost::Choice(_, _))
         )
@@ -1144,6 +1159,11 @@ fn detect_dynamic_qty(
         // permanents you control, add one mana of that color" is captured as
         // a dynamic mana-production carrier, not a QuantityExpr count.
         "DistinctColorsAmongPermanents",
+        // CR 122.1: Bribe Taker class — "for each kind of counter on
+        // permanents you control" is captured as a `DistinctCounterKindsAmong`
+        // iteration-source QuantityRef driving `repeat_for`, not a swallowed
+        // count.
+        "DistinctCounterKindsAmong",
         // CR 702.122: Strive — "this spell costs {N} more for each target
         // beyond the first" is captured on the top-level `Card` as
         // `strive_cost: Some(ManaCost)`, not inside an ability tree.
@@ -1218,6 +1238,18 @@ fn detect_dynamic_qty(
     if cleaned_for_each_is_only_decline_iteration(cleaned) && json_has_any(ast_json, &["\"Not\""]) {
         return;
     }
+    // CR 701.38: Council's-dilemma vote-tally payoffs ("create a number of X
+    // equal to [twice] the number of <choice> votes" — Emissary Green) realize
+    // their dynamic count through the Vote resolver's per-vote fan-out: each
+    // per-choice sub-effect runs once per tallied vote, with the multiplier
+    // folded into a fixed per-vote count. The dynamic quantity is therefore
+    // represented by the `Vote` structure, not a `QuantityExpr` carrier. When
+    // the AST is a Vote and every dynamic marker is tally phrasing, nothing was
+    // swallowed.
+    if cleaned_dynamic_is_only_vote_tally(cleaned) && json_has_any(ast_json, &["\"type\":\"Vote\""])
+    {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "DynamicQty".into(),
         description: truncate(original, 140).into(),
@@ -1225,10 +1257,83 @@ fn detect_dynamic_qty(
     });
 }
 
-/// CR 608.2e: True when every "for each " occurrence in the classified text is
-/// the "for each opponent who doesn't / does not" decline-iteration phrase and
-/// no other dynamic-quantity marker is present. Such text's iteration is
-/// carried by a `player_scope` node, not a `QuantityExpr`.
+/// CR 701.38: True when every dynamic-quantity marker in `cleaned` belongs to a
+/// Council's-dilemma vote tally — "[equal to [twice|N times] ]the number of
+/// <choice> votes". Such tallies are realized by the Vote resolver's per-vote
+/// fan-out, not by a `QuantityExpr` carrier, so when the AST is a `Vote` the
+/// marker is not a swallowed clause. Kept narrow: any non-tally dynamic marker
+/// (a per-choice body's own swallowed "equal to its power", a "for each", a
+/// "half …") keeps the warning.
+fn cleaned_dynamic_is_only_vote_tally(cleaned: &str) -> bool {
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if !cleaned.contains("votes") {
+        return false;
+    }
+    // No non-tally dynamic marker may be present.
+    let has_foreign_marker = [
+        "for each ",
+        "where x is ",
+        "half your ",
+        "half their ",
+        "half its ",
+        "half the ",
+    ]
+    .iter()
+    // allow-noncombinator: swallow detector marker scan on classified text
+    .any(|marker| cleaned.contains(marker));
+    if has_foreign_marker {
+        return false;
+    }
+    // Every "the number of " must read "the number of <word> votes".
+    let all_number_of_are_vote = cleaned
+        // allow-noncombinator: swallow detector marker scan on classified text
+        .match_indices("the number of ")
+        .all(|(idx, _)| vote_tally_count_suffix(&cleaned[idx..]));
+    if !all_number_of_are_vote {
+        return false;
+    }
+    // Every " equal to " must lead (through an optional multiplier) into a tally.
+    cleaned
+        // allow-noncombinator: swallow detector marker scan on classified text
+        .match_indices(" equal to ")
+        .all(|(idx, _)| equal_to_vote_tally_suffix(&cleaned[idx..]))
+}
+
+/// nom: `"the number of <word> votes"`.
+fn vote_tally_count_suffix(input: &str) -> bool {
+    let res: nom::IResult<&str, _, nom::error::Error<&str>> = (
+        tag("the number of "),
+        take_while1(|c: char| c.is_alphanumeric() || c == '\'' || c == '-'),
+        tag(" votes"),
+    )
+        .parse(input);
+    res.is_ok()
+}
+
+/// nom: `" equal to [twice |<n> times ]the number of <word> votes"`.
+fn equal_to_vote_tally_suffix(input: &str) -> bool {
+    let res: nom::IResult<&str, _, nom::error::Error<&str>> = (
+        tag(" equal to "),
+        opt(alt((
+            value((), tag("twice ")),
+            value((), (digit1, tag(" times "))),
+        ))),
+        tag("the number of "),
+        take_while1(|c: char| c.is_alphanumeric() || c == '\'' || c == '-'),
+        tag(" votes"),
+    )
+        .parse(input);
+    res.is_ok()
+}
+
+/// CR 608.2e + CR 608.2c + CR 101.3: True when every "for each " occurrence in
+/// the classified text is the "for each opponent who doesn't / does not /
+/// can't / cannot" decline-iteration phrase and no other dynamic-quantity
+/// marker is present. Such text's iteration is carried by a `player_scope`
+/// node, not a `QuantityExpr`. Covers both the optional-decline shape
+/// (Braids-class, CR 118.12 optional-cost branch) and the mandatory-impossible
+/// shape (Refurbished-Familiar-class, CR 101.3 + CR 118.12 mandatory-cost
+/// branch).
 fn cleaned_for_each_is_only_decline_iteration(cleaned: &str) -> bool {
     // allow-noncombinator: swallow detector marker scan on classified text
     if !cleaned.contains("for each ") {
@@ -1239,8 +1344,7 @@ fn cleaned_for_each_is_only_decline_iteration(cleaned: &str) -> bool {
         .match_indices("for each ") // allow-noncombinator: swallow detector marker scan on classified text
         .all(|(idx, _)| {
             let rest = &cleaned[idx..];
-            rest.starts_with("for each opponent who doesn't") // allow-noncombinator: swallow detector marker scan on classified text
-                || rest.starts_with("for each opponent who does not") // allow-noncombinator: swallow detector marker scan on classified text
+            decline_iteration_prefix(rest)
         });
     if !all_for_each_are_decline {
         return false;
@@ -1258,6 +1362,17 @@ fn cleaned_for_each_is_only_decline_iteration(cleaned: &str) -> bool {
     .iter()
     // allow-noncombinator: swallow detector marker scan on classified text
     .any(|marker| cleaned.contains(marker))
+}
+
+fn decline_iteration_prefix(input: &str) -> bool {
+    alt((
+        tag::<_, _, nom::error::Error<&str>>("for each opponent who doesn't"),
+        tag("for each opponent who does not"),
+        tag("for each opponent who can't"),
+        tag("for each opponent who cannot"),
+    ))
+    .parse(input)
+    .is_ok()
 }
 
 fn cleaned_has_only_counter_multiplier_dynamic(cleaned: &str) -> bool {
@@ -2552,6 +2667,34 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// CR 701.38: Emissary Green's aggregate vote tally ("a number of X equal to
+    /// [twice] the number of <choice> votes") is realized by the Vote per-vote
+    /// fan-out, so the DynamicQty detector must not flag it as swallowed.
+    #[test]
+    fn dynamic_qty_accepts_emissary_green_vote_tally() {
+        let parsed = parse_named(
+            "Whenever Emissary Green attacks, starting with you, each player votes for profit or security. \
+             You create a number of Treasure tokens equal to twice the number of profit votes. \
+             Put a number of +1/+1 counters on each creature you control equal to the number of security votes.",
+            "Emissary Green",
+            &["Creature"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// Guard against over-suppression: a vote card whose per-choice body has its
+    /// own swallowed dynamic ("equal to its power", not a vote tally) must still
+    /// flag DynamicQty.
+    #[test]
+    fn dynamic_qty_keeps_warning_for_non_tally_dynamic_in_vote_body() {
+        assert!(!super::equal_to_vote_tally_suffix(" equal to its power"));
+        assert!(!super::cleaned_dynamic_is_only_vote_tally(
+            "each player votes for a or b. for each a vote, draw cards equal to your life total. \
+             for each b vote, do nothing."
+        ));
     }
 
     #[test]

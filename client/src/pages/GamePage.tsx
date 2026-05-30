@@ -27,6 +27,7 @@ import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
 import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
 import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
+import { BlockRequirementBadges } from "../components/combat/BlockRequirementBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { CardPreview } from "../components/card/CardPreview.tsx";
@@ -44,6 +45,7 @@ import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
+import { RichLabel } from "../components/mana/RichLabel.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingForModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
@@ -63,6 +65,7 @@ import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
+import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
 import { CLICK_THROUGH_WAITING_FOR_TYPES, DialogHost } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -108,6 +111,7 @@ import {
   useMultiplayerStore,
   type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
+import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
@@ -192,18 +196,24 @@ export function GamePage() {
   );
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" =
+  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" =
     rawMode === "p2p-host"
       ? "p2p-host"
       : rawMode === "p2p-join"
         ? "p2p-join"
-        : rawMode === "host" || rawMode === "join"
-          ? "online"
-          : rawMode === "ai"
-            ? "ai"
-            : "local";
+        : rawMode === "draft-match"
+          ? "draft-match"
+          : rawMode === "host" || rawMode === "join"
+            ? "online"
+            : rawMode === "ai"
+              ? "ai"
+              : "local";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
+
+  // cEDH bracket-violation blocking modal: set when the engine rejects a game
+  // init because one or more decks are not declared cEDH at a cEDH table.
+  const [bracketViolationError, setBracketViolationError] = useState<string | null>(null);
 
   // Online multiplayer state
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
@@ -526,8 +536,16 @@ export function GamePage() {
     setWaitingForOpponent(false);
   }, []);
 
-  const handleNoDeck = useCallback((reason?: string) => {
+  const handleNoDeck = useCallback((reason?: string, bracketViolation?: boolean) => {
     if (reason) {
+      // cEDH bracket lock: surface as a blocking modal rather than navigating
+      // away, so the user can read the explanation before going back to setup.
+      // Match by the typed flag from GameProvider — not by string substring —
+      // so a reformatted error message can never silently break this modal.
+      if (bracketViolation) {
+        setBracketViolationError(reason);
+        return;
+      }
       navigate("/setup", { state: { setupError: reason } });
       return;
     }
@@ -594,6 +612,11 @@ export function GamePage() {
         onDismissDisconnectChoice={() => setDisconnectChoice(null)}
         pauseReason={pauseReason}
         isP2PHost={mode === "p2p-host"}
+        bracketViolationError={bracketViolationError}
+        onDismissBracketViolation={() => {
+          setBracketViolationError(null);
+          navigate("/setup");
+        }}
       />
     </GameProvider>
   );
@@ -625,6 +648,10 @@ interface GamePageContentProps {
   onDismissDisconnectChoice: () => void;
   pauseReason: string | null;
   isP2PHost: boolean;
+  /** Set when the engine rejected game init because a deck is not declared cEDH at a cEDH table. */
+  bracketViolationError: string | null;
+  /** Navigate back to setup and clear the bracket-violation modal. */
+  onDismissBracketViolation: () => void;
 }
 
 function GamePageContent({
@@ -649,6 +676,8 @@ function GamePageContent({
   onDismissDisconnectChoice,
   pauseReason,
   isP2PHost,
+  bracketViolationError,
+  onDismissBracketViolation,
 }: GamePageContentProps) {
   const { t } = useTranslation("game");
   const navigate = useNavigate();
@@ -1193,6 +1222,37 @@ function GamePageContent({
         <CardDataMissingModal onContinue={onDismissCardDataMissing} />
       )}
 
+      {/* cEDH bracket-violation blocking modal.
+          Shown when the engine refuses game init because one or more decks
+          are not declared cEDH (bracket 5) at a cEDH table.
+          Covers the entire page — no game state is accessible behind it
+          because the engine never initialised. */}
+      {bracketViolationError && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("gameSetup.bracketViolation.title")}
+          data-testid="bracket-violation-modal"
+        >
+          <div className="mx-4 max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-rose-700/60">
+            <h2 className="mb-2 text-lg font-bold text-rose-400">
+              {t("gameSetup.bracketViolation.title")}
+            </h2>
+            <p className="mb-4 text-sm text-gray-300">{bracketViolationError}</p>
+            <p className="mb-6 text-xs text-gray-500">
+              {t("gameSetup.bracketViolation.body")}
+            </p>
+            <button
+              onClick={onDismissBracketViolation}
+              className="w-full rounded-lg bg-rose-700 py-2 text-sm font-semibold text-white transition hover:bg-rose-600"
+            >
+              {t("gameSetup.bracketViolation.returnToSetup")}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Resume-failed banner */}
       <AnimatePresence>
         {resumeResetReason && (
@@ -1257,6 +1317,10 @@ function GamePageContent({
       {/* Combat SVG overlays: blocker assignments + attack target arrows */}
       <BlockAssignmentLines />
       <AttackTargetLines />
+      {/* Per-attacker "needs N blockers" badges (menace / "blocked by N or more").
+          Self-gates: renders nothing unless the local player is assigning blockers
+          to attackers that carry a minimum-blocker requirement. */}
+      <BlockRequirementBadges />
 
       {/* Card preview overlay */}
       <CardPreview cardName={inspectedCardName} backFaceName={inspectedOtherFaceName} />
@@ -1323,15 +1387,27 @@ function GamePageContent({
             <OptionalEffectModal />
           )}
 
+        {/* CR 401.4: Owner puts permanent on top or bottom of library */}
+        {(waitingFor?.type === "TopOrBottomChoice" || waitingFor?.type === "ClashCardPlacement") &&
+          canActForWaitingState && (
+            <TopOrBottomModal />
+          )}
+
         {waitingFor?.type === "UntapChoice" &&
           canActForWaitingState && (
             <UntapChoiceModal />
           )}
 
+        {/* CR 701.43d: Optional "exert as it attacks" choice (Combat Celebrant). */}
+        {waitingFor?.type === "ExertChoice" &&
+          canActForWaitingState && (
+            <ExertChoiceModal />
+          )}
+
         {/* Unless payment choice ("Counter unless you pay {X}") */}
         {waitingFor?.type === "UnlessPayment" &&
           canActForWaitingState && (
-            <UnlessPaymentModal />
+            <UnlessPaymentPanel />
           )}
 
         {/* CR 118.12a: Disjunctive unless-cost choice (Tergrid's Lantern). */}
@@ -2050,6 +2126,7 @@ function GameOverScreen({
   const source = searchParams.get("source");
   const draftId = searchParams.get("draftId");
   const isDraft = source === "draft" && !!draftId;
+  const isDraftPodMatch = mode === "draft-match";
   const gameId = useGameStore((s) => s.gameId);
 
   const [resultRecorded, setResultRecorded] = useState(false);
@@ -2064,6 +2141,17 @@ function GameOverScreen({
       if (meta?.phase === "complete") setRunOver(true);
     });
   }, [isDraft, gameId, isDraw, isVictory, resultRecorded]);
+
+  useEffect(() => {
+    if (!isDraftPodMatch || resultRecorded) return;
+    void useMultiplayerDraftStore
+      .getState()
+      .reportActiveMatchGameResult(winner)
+      .then(() => setResultRecorded(true))
+      .catch((err) => {
+        console.error("[GameOverScreen] failed to report draft pod match result:", err);
+      });
+  }, [isDraftPodMatch, resultRecorded, winner]);
 
   const handleRematch = () => {
     const newId = crypto.randomUUID();
@@ -2167,6 +2255,19 @@ function GameOverScreen({
                 {runOver
                   ? t("gamePage.gameOver.backToDraft")
                   : t("gamePage.gameOver.continueRun")}
+              </button>
+            ) : isDraftPodMatch ? (
+              <button
+                disabled={!resultRecorded}
+                onClick={() => navigate("/draft-pod")}
+                className={gameButtonClass({
+                  tone: isVictory ? "amber" : "slate",
+                  size: "lg",
+                  disabled: !resultRecorded,
+                  className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                })}
+              >
+                {t("gamePage.gameOver.backToDraft")}
               </button>
             ) : isOnlineMode ? (
               <button
@@ -2326,6 +2427,18 @@ function OptionalEffectModal() {
   return <OptionalEffectModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
 }
 
+// ── Top or Bottom Choice Modal (CR 401.4) ──────────────────────────────
+
+function TopOrBottomModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "TopOrBottomChoice" && waitingFor?.type !== "ClashCardPlacement") return null;
+
+  return <TopOrBottomChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
+}
+
 // ── Untap Choice Modal ─────────────────────────────────────────────────
 
 function UntapChoiceModal() {
@@ -2364,6 +2477,49 @@ function UntapChoiceModal() {
         dispatch({
           type: "ChooseUntap",
           data: { object_id: objectId, untap: id === "untap" },
+        })
+      }
+    />
+  );
+}
+
+// ── Exert Choice Modal (CR 701.43d: exert as it attacks) ────────────────
+
+function ExertChoiceModal() {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "ExertChoice") return null;
+
+  const objectId = waitingFor.data.attacker;
+  const object = objects?.[objectId];
+  const name = object?.name ?? t("gamePage.exert.creatureFallback");
+
+  return (
+    <ChoiceModal
+      title={t("gamePage.exert.title", { name })}
+      subtitle={t("gamePage.exert.subtitle")}
+      previewCardName={object?.name}
+      previewCardTypes={object?.card_types}
+      previewObjectId={objectId}
+      options={[
+        {
+          id: "exert",
+          label: t("gamePage.exert.exert"),
+          description: t("gamePage.exert.exertDescription", { name }),
+        },
+        {
+          id: "decline",
+          label: t("gamePage.exert.decline"),
+          description: t("gamePage.exert.declineDescription", { name }),
+        },
+      ]}
+      onChoose={(id) =>
+        dispatch({
+          type: "ChooseExert",
+          data: { exert: id === "exert" },
         })
       }
     />
@@ -2420,7 +2576,7 @@ function formatUnlessCost(
   }
 }
 
-function UnlessPaymentModal() {
+function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
@@ -2432,16 +2588,45 @@ function UnlessPaymentModal() {
   const effect = description.charAt(0).toUpperCase() + description.slice(1);
 
   return (
-    <ChoiceModal
-      title={t("gamePage.unlessPayment.title", { effect })}
-      options={[
-        { id: "pay", label: t("gamePage.cost.pay", { cost: costDisplay }) },
-        { id: "decline", label: t("gamePage.unlessPayment.dontPay") },
-      ]}
-      onChoose={(id) =>
-        dispatch({ type: "PayUnlessCost", data: { pay: id === "pay" } })
-      }
-    />
+    <AnimatePresence>
+      <motion.div
+        className="fixed inset-x-0 bottom-0 z-40 flex justify-center px-2 pb-4"
+        initial={{ y: 80, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        exit={{ y: 80, opacity: 0 }}
+        transition={{ duration: 0.25 }}
+      >
+        <div className="w-full max-w-md rounded-xl border border-white/10 bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700">
+          <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
+            <RichLabel
+              text={t("gamePage.unlessPayment.title", { effect })}
+              size="sm"
+            />
+          </h3>
+          <div className="flex justify-center gap-3">
+            <button
+              onClick={() =>
+                dispatch({ type: "PayUnlessCost", data: { pay: true } })
+              }
+              className={gameButtonClass({ tone: "emerald", size: "md" })}
+            >
+              <RichLabel
+                text={t("gamePage.cost.pay", { cost: costDisplay })}
+                size="sm"
+              />
+            </button>
+            <button
+              onClick={() =>
+                dispatch({ type: "PayUnlessCost", data: { pay: false } })
+              }
+              className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+            >
+              {t("gamePage.unlessPayment.dontPay")}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </AnimatePresence>
   );
 }
 

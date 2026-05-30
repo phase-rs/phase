@@ -91,7 +91,12 @@ function formatEvent(event: GameEvent, t: TFunction<"game">): string {
     case "BlockersDeclared":
       return t("log.blockersDeclared", { count: event.data.assignments.length });
     case "BecomesTarget":
-      return t("log.becomesTarget", { objectId: event.data.object_id, sourceId: event.data.source_id });
+      return "Player" in event.data.target
+        ? t("log.becomesTargetPlayer", {
+            player: getPlayerDisplayName(event.data.target.Player),
+            sourceId: event.data.source_id,
+          })
+        : t("log.becomesTarget", { objectId: event.data.target.Object, sourceId: event.data.source_id });
     case "ReplacementApplied":
       return t("log.replacementApplied", { eventType: event.data.event_type });
     case "CompanionRevealed":

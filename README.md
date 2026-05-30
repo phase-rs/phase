@@ -72,7 +72,8 @@ Hand this to your LLM:
 ```
 Read https://raw.githubusercontent.com/phase-rs/phase/main/docs/AI-CONTRIBUTOR.md
 and follow it end-to-end to implement {a card I name, or pick one for me}.
-Use medium thinking. Don't stop for my input. Open a PR when done.
+Use the $engine-implementer skill. Use medium thinking. Don't stop for my input.
+Open a PR when done.
 ```
 
 Full procedure, two tracks (developer / non-developer), and copy-paste prompts for LLM UIs without web fetch: [docs/AI-CONTRIBUTOR.md](docs/AI-CONTRIBUTOR.md).
@@ -111,9 +112,11 @@ Open a new terminal after installing so the updated PATH takes effect.
 
 ```bash
 git clone https://github.com/phase-rs/phase && cd phase
-./scripts/setup.sh     # Downloads card data, builds WASM, installs deps
+./scripts/setup.sh     # Fetches data, builds WASM, installs deps
 cd client && pnpm dev  # Start dev server at localhost:5173
 ```
+
+If `tilt` is installed, `setup.sh` skips the eager WASM + card-data build and `tilt up` handles them. Flags: `--agent` (LLM mode — skip Scryfall art; see [docs/AI-CONTRIBUTOR.md](docs/AI-CONTRIBUTOR.md)), `--no-tilt` (force inline build).
 
 ### Manual Steps
 

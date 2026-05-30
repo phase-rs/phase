@@ -54,6 +54,18 @@ pub(crate) fn is_defiler_cost_pattern(lower: &str) -> bool {
         && scan_contains(lower, "life")
 }
 
+/// CR 118.9: Mana-cost-alternative-grant static — "You may [pay X] rather than
+/// pay [the/its/this <object>'s] mana cost for [filter] spells you cast."
+/// Rooftop Storm / Fist of Suns / Jodah class. `scan_contains` is a cheap
+/// structural pre-filter; the lowering (`parse_spells_alternative_cost`)
+/// re-parses with combinators and strict-fails on non-mana / unparsed filters.
+pub(crate) fn is_spells_alternative_cost_pattern(lower: &str) -> bool {
+    lower_starts_with(lower, "you may pay ")
+        && scan_contains(lower, "rather than pay")
+        && scan_contains(lower, "mana cost for")
+        && scan_contains(lower, "spells you cast")
+}
+
 pub(crate) fn is_enters_tapped_cant_untap_compound(lower: &str) -> bool {
     let has_enters_tapped = scan_contains(lower, "enters tapped")
         || scan_contains(lower, "enters the battlefield tapped");
@@ -197,6 +209,11 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't win the game",
     "can't lose the game",
     "don't lose the game",
+    // CR 704.5j: Mirror Gallery / Sakashima of a Thousand Faces class —
+    // "the \"legend rule\" doesn't apply [to <scope> you control]". The leading
+    // quote is required: scan_contains only matches at word starts, and "legend"
+    // is glued to its opening quote ("legend) in the Oracle text.
+    "\"legend rule\" doesn't apply",
     "can block an additional",
     "can block any number",
     "play an additional land",
@@ -217,6 +234,11 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't draw more than",
     "can't draw cards",
     "can cast spells only during",
+    // CR 602.5 + CR 117.1b: City of Solitude class — combined cast+activate
+    // prohibition. The conjunction "and activate abilities" is the
+    // discriminator; we route through the static parser so
+    // `parse_cast_and_activate_only_during` emits the paired statics.
+    "and activate abilities only during",
     "activated abilities can't be activated",
     "to cast spells or activate abilities",
     // CR 602.5 + CR 603.2a: Clarion/Karn-class global filter-scoped activation prohibition.
@@ -225,6 +247,10 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "activated abilities of ",
     // CR 701.23 + CR 609.3: Ashiok-class search prohibition.
     "can't cause their controller to search their library",
+    // CR 701.23 + CR 609.3: Mindlock Orb-class search prohibition.
+    "can't search libraries",
+    "cannot search libraries",
+    "may not search libraries",
     // CR 603.2g + CR 603.6a + CR 700.4: Torpor Orb / Hushbringer trigger suppression.
     "don't cause abilities to trigger",
     "skip your ",
@@ -246,6 +272,17 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // boundary — "is also a " does not subsume "is also an X".
     "is also a ",
     "is also an ",
+    // CR 702.73a + CR 205.3: "[subject] {is|are} every creature type" —
+    // Changeling-class type grant (Mistform Ultimus / Dr. Julius Jumblemorph
+    // self-ref CDA, Maskwood Nexus / Omo filter-subject grant, and the
+    // Aura/Equipment conjunctive form on Arachnoform / Runed Stalactite /
+    // Amorphous Axe). Both articles are listed because subject number
+    // ("creature" vs "creatures") drives copula choice — neither subsumes the
+    // other. The phrase is unique to creature-type grants (no other CR 205.3
+    // construction uses "every creature type"), so the contains-scan cannot
+    // false-positive into other pattern classes.
+    "is every creature type",
+    "are every creature type",
 ];
 
 const STATIC_PREFIX_PATTERNS: &[&str] = &[
@@ -264,6 +301,17 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "spells your opponents cast ",
     "you may look at the top card of your library",
     "once during each of your turns, you may cast",
+    // CR 601.3e: shorter sibling of "once during each of your turns, you may
+    // cast" — Maralen, Fae Ascendant prints "Once each turn, you may cast a
+    // creature spell from exile …". CR 601.3e governs static abilities that
+    // allow casting spells from non-hand zones (Garruk's Horde / Melek
+    // family). Routes the line into the static classifier so the cast-from-
+    // exile-permission handler (follow-up PR) can pick it up. With no
+    // handler implemented yet, `parse_static_line_multi` returns an empty
+    // Vec and dispatch falls through to the next priority, matching pre-
+    // change behavior — no regression today, correct preparatory routing
+    // for the follow-up.
+    "once each turn, you may cast",
     // CR 110.4 + CR 305.1 + CR 601.2a: Muldrotha — combined "play a land or
     // cast a permanent spell of each permanent type from your graveyard"
     // prefix. Routed to `parse_static_line` so the
@@ -272,6 +320,7 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "a deck can have",
     "nonland ",
     "noncreature ",
+    "each noncreature ",
     "nonbasic lands are ",
     "each land is a ",
     "all lands are ",
@@ -512,4 +561,24 @@ pub(crate) fn is_effect_sentence_candidate(lower: &str) -> bool {
         .iter()
         .chain(EFFECT_SUBJECT_PREFIXES.iter())
         .any(|prefix| lower.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CR 118.9: the mana-cost-alternative-grant classifier must recognize the
+    /// Rooftop Storm / Fist of Suns shape and reject flash-permission text.
+    #[test]
+    fn classifies_spells_alternative_cost_pattern() {
+        assert!(is_spells_alternative_cost_pattern(
+            "you may pay {0} rather than pay the mana cost for zombie creature spells you cast."
+        ));
+        assert!(is_spells_alternative_cost_pattern(
+            "you may pay {w}{u}{b}{r}{g} rather than pay the mana cost for spells you cast."
+        ));
+        assert!(!is_spells_alternative_cost_pattern(
+            "you may cast this spell as though it had flash."
+        ));
+    }
 }

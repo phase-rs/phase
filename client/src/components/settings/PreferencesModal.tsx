@@ -15,8 +15,6 @@ import {
   ANIMATION_SPEED_STEP,
   PACING_CATEGORIES,
   PACING_DEFAULT,
-  PACING_DESCRIPTIONS,
-  PACING_LABELS,
   PACING_MAX,
   PACING_MIN,
   PACING_STEP,
@@ -34,6 +32,8 @@ import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
+import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
+import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
 
 export type SettingsHighlight = "board-background";
 
@@ -52,6 +52,7 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
   { value: "de", label: "Deutsch" },
   { value: "it", label: "Italiano" },
   { value: "pt", label: "Português" },
+  { value: "pl", label: "Polski" },
 ];
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
@@ -73,7 +74,6 @@ const SETTINGS_TABS = [
   { id: "audio" },
   { id: "multiplayer" },
   { id: "data" },
-  { id: "experimental" },
 ] as const;
 
 export type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
@@ -286,6 +286,7 @@ export function PreferencesModal({
                       options={CARD_SIZES}
                       value={cardSize}
                       onChange={setCardSize}
+                      renderLabel={(opt) => t(`gameplay.cardSizeOptions.${opt}`)}
                     />
                   </SettingGroup>
 
@@ -294,6 +295,7 @@ export function PreferencesModal({
                       options={LOG_DEFAULTS}
                       value={logDefaultState}
                       onChange={setLogDefaultState}
+                      renderLabel={(opt) => t(`gameplay.logDefaultOptions.${opt}`)}
                     />
                   </SettingGroup>
 
@@ -354,6 +356,7 @@ export function PreferencesModal({
                       options={VFX_QUALITIES}
                       value={vfxQuality}
                       onChange={setVfxQuality}
+                      renderLabel={(opt) => t(`visual.vfxQualityOptions.${opt}`)}
                     />
                   </SettingGroup>
 
@@ -556,9 +559,12 @@ export function PreferencesModal({
                 </SettingsSection>
               )}
 
-              {activeTab === "data" && <DataSection />}
-
-              {activeTab === "experimental" && <ExperimentalSection />}
+              {activeTab === "data" && (
+        <>
+          <CloudSyncSection />
+          <DataSection />
+        </>
+      )}
             </div>
             <ResetAllFooter resetAllPreferences={resetAllPreferences} />
           </div>
@@ -595,32 +601,182 @@ function ResetAllFooter({
   );
 }
 
-function ExperimentalSection() {
-  const { t } = useTranslation("settings");
-  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
-  const setExperimentalFeatures = usePreferencesStore((s) => s.setExperimentalFeatures);
+function SyncSpinner() {
   return (
-    <SettingsSection title={t("experimental.title")}>
-      <p className="text-xs text-slate-400">
-        {t("experimental.description")}
-      </p>
+    <svg
+      className="h-3.5 w-3.5 animate-spin"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle
+        className="opacity-25"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="4"
+      />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z"
+      />
+    </svg>
+  );
+}
 
-      <SettingGroup label={t("experimental.draftExperiments")}>
-        <label className="flex min-h-11 items-center gap-3">
-          <input
-            type="checkbox"
-            checked={experimentalFeatures}
-            onChange={(e) => setExperimentalFeatures(e.target.checked)}
-            className="accent-cyan-500"
-          />
-          <div className="flex flex-col">
-            <span className="text-sm text-slate-200">{t("experimental.enableDraftFeatures")}</span>
-            <span className="text-xs text-slate-500">
-              {t("experimental.draftFeaturesDescription")}
+const SYNC_BUTTON_CLASS =
+  "rounded-[14px] border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50";
+
+function CloudSyncSection() {
+  const { t } = useTranslation("settings");
+  const available = useCloudSyncStore((s) => s.available);
+  const identity = useCloudSyncStore((s) => s.identity);
+  const sessionResolved = useCloudSyncStore((s) => s.sessionResolved);
+  const status = useCloudSyncStore((s) => s.status);
+  const error = useCloudSyncStore((s) => s.error);
+  const lastSyncedAt = useCloudSyncStore((s) => s.lastSyncedAt);
+  const conflict = useCloudSyncStore((s) => s.conflict);
+  const conflictDiff = useCloudSyncStore((s) => s.conflictDiff);
+  const signIn = useCloudSyncStore((s) => s.signIn);
+  const signOut = useCloudSyncStore((s) => s.signOut);
+  const syncNow = useCloudSyncStore((s) => s.syncNow);
+  const resolveConflict = useCloudSyncStore((s) => s.resolveConflict);
+
+  // Hidden entirely on deployments without a configured provider (self-hosters),
+  // who keep file backup as their data-portability path.
+  if (!available) return null;
+
+  const syncing = status === "syncing";
+
+  const statusLine =
+    status === "error" ? (
+      <span className="text-rose-400">
+        {t("sync.statusError")}
+        {error ? `: ${error}` : ""}
+      </span>
+    ) : syncing ? (
+      t("sync.statusSyncing")
+    ) : (
+      t("sync.lastSynced", {
+        time: lastSyncedAt
+          ? new Date(lastSyncedAt).toLocaleString()
+          : t("sync.never"),
+      })
+    );
+
+  return (
+    <SettingsSection title={t("sync.title")}>
+      <p className="text-xs text-slate-400">{t("sync.description")}</p>
+      <p className="text-xs text-slate-500">{t("sync.savesNote")}</p>
+
+      {!sessionResolved ? (
+        // Session restore in flight — withhold the sign-in CTA so a signed-in
+        // user doesn't see the prompt flash before identity adopts.
+        <p className="text-xs text-slate-500">{t("sync.statusSyncing")}</p>
+      ) : !identity ? (
+        <div className="flex flex-wrap gap-2">
+          <button
+            className={SYNC_BUTTON_CLASS}
+            onClick={() => void signIn("discord")}
+          >
+            <span className="flex items-center gap-2">
+              <DiscordIcon className="h-4 w-4" />
+              {t("sync.signInWith", { provider: t("sync.providerDiscord") })}
+            </span>
+          </button>
+          <button
+            className={SYNC_BUTTON_CLASS}
+            onClick={() => void signIn("google")}
+          >
+            <span className="flex items-center gap-2">
+              <GoogleIcon className="h-4 w-4" />
+              {t("sync.signInWith", { provider: t("sync.providerGoogle") })}
+            </span>
+          </button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-2">
+            {identity.avatarUrl && (
+              <img
+                src={identity.avatarUrl}
+                alt=""
+                className="h-6 w-6 rounded-full"
+                referrerPolicy="no-referrer"
+              />
+            )}
+            <span className="text-sm text-slate-200">
+              {t("sync.signedInAs", { name: identity.label })}
             </span>
           </div>
-        </label>
-      </SettingGroup>
+
+          {conflict ? (
+            <div className="flex flex-col gap-2 rounded-[14px] border border-amber-400/30 bg-amber-400/10 p-3">
+              <p className="text-sm font-medium text-amber-200">
+                {t("sync.conflictTitle")}
+              </p>
+              <p className="text-xs text-amber-100/80">
+                {t("sync.conflictBody")}
+              </p>
+              {conflictDiff && (
+                <ul className="space-y-0.5 text-xs text-amber-100/70">
+                  {(conflictDiff.decksAdded > 0 ||
+                    conflictDiff.decksModified > 0 ||
+                    conflictDiff.decksRemoved > 0) && (
+                    <li>
+                      {t("sync.diffDecks", {
+                        added: conflictDiff.decksAdded,
+                        modified: conflictDiff.decksModified,
+                        removed: conflictDiff.decksRemoved,
+                      })}
+                    </li>
+                  )}
+                  {conflictDiff.prefsChanged && <li>{t("sync.diffPrefs")}</li>}
+                  {conflictDiff.feedsChanged && <li>{t("sync.diffFeeds")}</li>}
+                  {conflictDiff.otherChanged && <li>{t("sync.diffOther")}</li>}
+                </ul>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  className={SYNC_BUTTON_CLASS}
+                  onClick={() => void resolveConflict("cloud")}
+                >
+                  {t("sync.keepCloud")}
+                </button>
+                <button
+                  className={SYNC_BUTTON_CLASS}
+                  onClick={() => void resolveConflict("local")}
+                >
+                  {t("sync.keepLocal")}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                className={SYNC_BUTTON_CLASS}
+                disabled={syncing}
+                onClick={() => void syncNow()}
+              >
+                <span className="flex items-center gap-2">
+                  {syncing && <SyncSpinner />}
+                  {t("sync.syncNow")}
+                </span>
+              </button>
+              <button
+                className={SYNC_BUTTON_CLASS}
+                onClick={() => void signOut()}
+              >
+                {t("sync.signOut")}
+              </button>
+            </div>
+          )}
+
+          <p className="text-xs text-slate-500">{statusLine}</p>
+        </div>
+      )}
     </SettingsSection>
   );
 }
@@ -874,8 +1030,8 @@ function PacingSection({
         {PACING_CATEGORIES.map((category) => (
           <MultiplierSlider
             key={category}
-            label={PACING_LABELS[category]}
-            description={PACING_DESCRIPTIONS[category]}
+            label={t(`pacing.labels.${category}`)}
+            description={t(`pacing.descriptions.${category}`)}
             value={PACING_MAX - pacingMultipliers[category]}
             defaultValue={PACING_MAX - PACING_DEFAULT}
             min={PACING_MIN}
@@ -1098,10 +1254,13 @@ function SegmentedControl<T extends string>({
   options,
   value,
   onChange,
+  renderLabel,
 }: {
   options: T[];
   value: T;
   onChange: (v: T) => void;
+  /** Maps a raw option value to its translated, display-ready label. */
+  renderLabel: (opt: T) => string;
 }) {
   return (
     <div className="flex min-h-11 flex-wrap rounded-[16px] border border-white/10 bg-black/18 p-1">
@@ -1109,13 +1268,13 @@ function SegmentedControl<T extends string>({
         <button
           key={opt}
           onClick={() => onChange(opt)}
-          className={`min-h-9 flex-1 rounded-[12px] px-3 py-2 text-xs font-semibold capitalize transition-colors ${
+          className={`min-h-9 flex-1 rounded-[12px] px-3 py-2 text-xs font-semibold transition-colors ${
             value === opt
               ? "bg-sky-500/80 text-white"
               : "text-slate-400 hover:text-slate-200"
           }`}
         >
-          {opt}
+          {renderLabel(opt)}
         </button>
       ))}
     </div>

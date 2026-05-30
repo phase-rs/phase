@@ -67,7 +67,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // Mana abilities
     "TapCreaturesForManaAbility",
     "DiscardForManaAbility",
-    "ExileFromBattlefieldForManaAbility",
+    "ExileForManaAbility",
     "SacrificeForManaAbility",
     "PayManaAbilityMana",
     "ChooseManaColor",
@@ -107,6 +107,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ChooseObjectsSelection",
     "CategoryChoice",
     "DistributeAmong",
+    "MoveCountersDistribution",
     "RetargetChoice",
     "CopyRetarget",
     "DamageSourceChoice",
@@ -138,6 +139,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "BattleProtectorChoice",
     "NamedChoice",
     "UntapChoice",
+    "ExertChoice",
     "CompanionReveal",
     // Game lifecycle
     "GameOver",

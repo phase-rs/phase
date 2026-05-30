@@ -57,3 +57,9 @@ Namespaces: `common` (default), `menu`, `game`, `deck-builder`, `draft`,
   use `usePreferencesStore.getState().setLanguage(lng)`.
 - English (`en`) is the typing oracle: add a key to `en/<ns>.json` **before**
   referencing it, or it won't type-check. Other locales fall back to English.
+- Encoding: catalogs are **UTF-8 with literal accented characters** (write
+  `"Wähle"` directly — never `\u`-escape sequences) so translations stay
+  human-readable in diffs. Save files as UTF-8 with no BOM.
+- Every other locale must carry the **exact same keys** as `en` — no missing
+  translations, no orphans. `resources.test.ts` enforces both key parity and
+  UTF-8 encoding across all catalogs (runs in CI + Tilt `test-frontend`).

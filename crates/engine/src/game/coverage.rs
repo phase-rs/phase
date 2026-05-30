@@ -1,8 +1,8 @@
 use crate::database::legality::LegalityFormat;
 use crate::database::CardDatabase;
 use crate::game::game_object::GameObject;
-use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler};
-use crate::game::triggers::build_trigger_registry;
+use crate::game::static_abilities::{build_static_registry, static_registry, StaticAbilityHandler};
+use crate::game::triggers::{build_trigger_registry, trigger_registry};
 use crate::parser::oracle::is_commander_permission_sentence;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
@@ -10,12 +10,12 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
     ContinuousModification, ControllerRef, CountScope, CounterSourceRider, DelayedTriggerCondition,
-    DoublePTMode, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    SharedQuality, SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal, FilterProp,
+    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -53,7 +53,15 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::GraveyardCastPermission { .. }
             | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::CastFromHandFree { .. }
+            // CR 601.2a + CR 113.6b: ExileCastPermission carries frequency,
+            // play_mode, and the `without_paying_mana_cost` flag. Runtime
+            // enforcement is in casting.rs::exile_objects_castable_by_permission
+            // and casting_costs.rs.
+            | StaticMode::ExileCastPermission { .. }
             | StaticMode::CastWithKeyword { .. }
+            // CR 118.9: CastWithAlternativeCost carries a `ManaCost` — runtime
+            // data, not registry-keyable (Rooftop Storm, Fist of Suns, Jodah).
+            | StaticMode::CastWithAlternativeCost { .. }
             // CR 702.16: PlayerProtection carries a `ProtectionTarget` (Strings) —
             // open value space, consumed by direct match in `player_protection_from`.
             | StaticMode::PlayerProtection { .. }
@@ -65,12 +73,19 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedExceptBy { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
+            // CR 602.5 + CR 117.1b: CantActivateDuring carries `who`, `when`, and `exemption`.
+            // Runtime enforcement is in casting.rs::is_blocked_by_cant_activate_during().
+            | StaticMode::CantActivateDuring { .. }
             // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
             | StaticMode::CantSearchLibrary { .. }
             // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
             | StaticMode::SuppressTriggers { .. }
             // CR 603.2d: DoubleTriggers carries the `TriggerCause` predicate.
             | StaticMode::DoubleTriggers { .. }
+            // CR 508.1c + CR 509.1b: Combat declaration caps carry the maximum
+            // count and are enforced by combat.rs declaration validation.
+            | StaticMode::MaxAttackersEachCombat { .. }
+            | StaticMode::MaxBlockersEachCombat { .. }
             // CR 107.4f: PayLifeAsColoredMana carries the `ManaColor` axis
             // (K'rrik = Black; future printings any other color).
             | StaticMode::PayLifeAsColoredMana { .. }
@@ -383,6 +398,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::AttackingController => parts.push("attacking you".into()),
             FilterProp::Blocking => parts.push("blocking".into()),
             FilterProp::BlockingSource => parts.push("blocking source".into()),
+            FilterProp::CombatRelation { .. } => parts.push("combat related".into()),
             FilterProp::Unblocked => parts.push("unblocked".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
@@ -486,6 +502,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 let stat_str = match stat {
                     PtStat::Power => "power",
                     PtStat::Toughness => "toughness",
+                    PtStat::TotalPowerToughness => "total power and toughness",
                 };
                 let scope_str = match scope {
                     PtValueScope::Current => "",
@@ -542,6 +559,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("non-{}", format!("{value}").to_lowercase()));
             }
             FilterProp::Suspected => parts.push("suspected".into()),
+            FilterProp::Renowned => parts.push("renowned".into()),
             // CR 700.9
             FilterProp::Modified => parts.push("modified".into()),
             // CR 700.6
@@ -994,6 +1012,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::DistinctColorsAmongPermanents { filter } => {
             format!("# of colors among {}", fmt_target(filter))
         }
+        QuantityRef::DistinctCounterKindsAmong { filter } => {
+            format!("# of counter kinds among {}", fmt_target(filter))
+        }
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
@@ -1091,6 +1112,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::TargetZoneCardCount { .. } => "target zone card count".into(),
         QuantityRef::CostXPaid => "X paid for this spell".into(),
         QuantityRef::KickerCount => "kicker payments for this spell".into(),
+        QuantityRef::AdditionalCostPaymentCount => "additional cost payments for this spell".into(),
         QuantityRef::ConvokedCreatureCount => "creatures that convoked this spell".into(),
         QuantityRef::ManaSpentToCast { scope, metric } => {
             format!("mana spent to cast ({scope:?}, {metric:?})")
@@ -1124,11 +1146,22 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::PartySize { player } => {
             format!("party size ({})", fmt_player_scope(player))
         }
+        QuantityRef::ControlledByEachPlayer { filter, aggregate } => {
+            let func = match aggregate {
+                AggregateFunction::Max => "most",
+                AggregateFunction::Min => "fewest",
+                AggregateFunction::Sum => "total",
+            };
+            format!(
+                "# of {} controlled by player with {func}",
+                fmt_target(filter)
+            )
+        }
     }
 }
 
 fn fmt_player_filter(pf: &PlayerFilter) -> String {
-    use crate::types::ability::{ControlPresence, PlayerRelation};
+    use crate::types::ability::PlayerRelation;
     match pf {
         PlayerFilter::Controller => "you",
         PlayerFilter::Opponent => "each opponent",
@@ -1147,20 +1180,35 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OpponentOtherThanTriggering => "each other opponent",
         PlayerFilter::VotedFor { .. } => "each player who voted for this option",
         PlayerFilter::ParentObjectTargetController => "the parent target's controller",
-        // CR 109.4 + CR 700.1: "each [player class] who [doesn't] control [filter]"
-        PlayerFilter::ControlsPermanent {
-            relation, presence, ..
+        // CR 109.4 + CR 109.5: "each [player class] who controls [comparator]
+        // [count] matching permanents"
+        PlayerFilter::ControlsCount {
+            relation,
+            comparator,
+            count,
+            ..
         } => {
             let who = match relation {
                 PlayerRelation::Controller => "you",
                 PlayerRelation::Opponent => "each opponent",
                 PlayerRelation::All => "each player",
             };
-            let verb = match presence {
-                ControlPresence::Controls => "who controls",
-                ControlPresence::ControlsNone => "who doesn't control",
+            return format!("{who} who controls {comparator:?} {count:?} matching permanents");
+        }
+        // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class] whose [scalar
+        // attr] [comparator] [value]"
+        PlayerFilter::PlayerAttribute {
+            relation,
+            attr,
+            comparator,
+            value,
+        } => {
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
             };
-            return format!("{who} {verb} a matching permanent");
+            return format!("{who} whose {attr:?} {comparator:?} {value:?}");
         }
     }
     .into()
@@ -1509,6 +1557,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::UnattachAll { target, .. }
         | Effect::Fight { target, .. }
         | Effect::CopySpell { target, .. }
+        | Effect::CastCopyOfCard { target, .. }
         | Effect::BecomeCopy { target, .. }
         | Effect::Suspect { target }
         | Effect::Connive { target, .. }
@@ -1717,6 +1766,17 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::LoseLife { amount, .. } => {
             d.push(("amount".into(), fmt_quantity(amount)));
         }
+        Effect::ExchangeLifeWithStat { player, stat } => {
+            d.push(("player".into(), fmt_target(player)));
+            d.push((
+                "stat".into(),
+                match stat {
+                    PtStat::Power => "power".into(),
+                    PtStat::Toughness => "toughness".into(),
+                    PtStat::TotalPowerToughness => "total power and toughness".into(),
+                },
+            ));
+        }
         Effect::ChangeZone {
             origin,
             destination,
@@ -1770,6 +1830,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Bounce {
             target,
             destination,
+            ..
         } => {
             d.push(("target".into(), fmt_target(target)));
             if let Some(dest) = destination {
@@ -1918,10 +1979,21 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("free cast".into(), "yes".into()));
             }
         }
-        Effect::RollDie { sides, results } => {
+        Effect::RollDie {
+            sides,
+            results,
+            modifier,
+        } => {
             d.push(("sides".into(), sides.to_string()));
             if !results.is_empty() {
                 d.push(("branches".into(), results.len().to_string()));
+            }
+            if let Some(m) = modifier {
+                let label = match m {
+                    DieRollModifier::Add { .. } => "add",
+                    DieRollModifier::Subtract { .. } => "subtract",
+                };
+                d.push(("modifier".into(), label.into()));
             }
         }
         Effect::FlipCoin {
@@ -1956,6 +2028,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             counter_type,
             count,
             mode,
+            selection: _,
             target,
         } => {
             d.push(("source".into(), fmt_target(source)));
@@ -2113,6 +2186,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::Monstrosity { count } => {
+            d.push(("counters".into(), fmt_quantity(count)));
+        }
+        Effect::Renown { count } => {
             d.push(("counters".into(), fmt_quantity(count)));
         }
         Effect::Adapt { count } => {
@@ -2290,7 +2366,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Conjure { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
-        | Effect::ChooseOneOf { .. } => {}
+        | Effect::ChooseOneOf { .. }
+        | Effect::ReturnAsAura { .. } => {}
     }
     d
 }
@@ -2809,7 +2886,7 @@ fn build_cost_item(cost: &AbilityCost, items: &mut Vec<ParsedItem>) {
 fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec<ParsedItem>) {
     if additional_cost_has_unimplemented(additional_cost) {
         match additional_cost {
-            AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+            AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
                 build_cost_item(cost, items);
             }
             AdditionalCost::Kicker { costs, .. } => {
@@ -2826,7 +2903,12 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
     }
 
     let label = match additional_cost {
-        AdditionalCost::Optional(_) => "AdditionalCost:Optional",
+        AdditionalCost::Optional {
+            repeatable: true, ..
+        } => "AdditionalCost:Repeatable",
+        AdditionalCost::Optional {
+            repeatable: false, ..
+        } => "AdditionalCost:Optional",
         AdditionalCost::Kicker { repeatable, .. } => {
             if *repeatable {
                 "AdditionalCost:Multikicker"
@@ -2850,7 +2932,7 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
 /// Returns true if any leaf `AbilityCost` in the tree is `Unimplemented`.
 fn additional_cost_has_unimplemented(additional_cost: &AdditionalCost) -> bool {
     match additional_cost {
-        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
             ability_cost_has_unimplemented(cost)
         }
         AdditionalCost::Kicker { costs, .. } => costs.iter().any(ability_cost_has_unimplemented),
@@ -3184,7 +3266,9 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
 
     // 3. Check trigger modes against trigger registry
     // CR 603.8: StateCondition triggers use the priority pipeline, not the event registry.
-    let trigger_registry = build_trigger_registry();
+    // Cached accessor: this runs per battlefield object on every `apply()` via
+    // display derivation, so the registry must not be rebuilt per call.
+    let trigger_registry = trigger_registry();
     // Classification scan: iterate every printed trigger/static regardless
     // of functioning state — we're computing coverage, not game behavior.
     for trig in obj.trigger_definitions.iter_all() {
@@ -3197,7 +3281,8 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     }
 
     // 4. Check static ability modes against static registry
-    let static_registry = build_static_registry();
+    // Cached accessor (see trigger registry note above) — hot per-object path.
+    let static_registry = static_registry();
     for stat in obj.static_definitions.iter_all() {
         if !static_registry.contains_key(&stat.mode) && !is_data_carrying_static(&stat.mode) {
             missing.push(format!("Static: {}", stat.mode));
@@ -4053,7 +4138,7 @@ fn ability_definition_has_unimplemented_parts(def: &AbilityDefinition) -> bool {
 
 fn additional_cost_has_unimplemented_parts(additional_cost: &AdditionalCost) -> bool {
     match additional_cost {
-        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
             ability_cost_has_unimplemented_parts(cost)
         }
         AdditionalCost::Kicker { costs, .. } => {
@@ -4104,7 +4189,7 @@ fn collect_additional_cost_missing_parts(
     missing: &mut Vec<String>,
 ) {
     match additional_cost {
-        AdditionalCost::Optional(cost) | AdditionalCost::Required(cost) => {
+        AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => {
             collect_ability_cost_missing_parts(cost, missing);
         }
         AdditionalCost::Kicker { costs, .. } => {
@@ -4976,14 +5061,21 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // (crates/engine/src/game/effects/mod.rs).
         AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
-        AbilityCondition::IfYouDo => ("IfYouDo", Handled),
+        AbilityCondition::EffectOutcome { signal } => match signal {
+            EffectOutcomeSignal::OptionalEffectPerformed => {
+                ("EffectOutcomeOptionalPerformed", Handled)
+            }
+            EffectOutcomeSignal::CurrentScopeSucceeded => {
+                ("EffectOutcomeCurrentScopeSucceeded", Handled)
+            }
+        },
+        AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
         AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
-        AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
         AbilityCondition::QuantityCheck { .. } => ("QuantityCheck", Handled),
         AbilityCondition::PreviousEffectAmount { .. } => ("PreviousEffectAmount", Handled),
         AbilityCondition::CastDuringPhase { .. } => ("CastDuringPhase", Handled),
@@ -5116,6 +5208,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DistinctColorsAmongPermanents { .. } => {
             ("DistinctColorsAmongPermanents", Handled)
         }
+        QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
@@ -5144,9 +5237,10 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TokensCreatedThisTurn { .. } => ("TokensCreatedThisTurn", Handled),
         QuantityRef::PlayerActionsThisTurn { .. } => ("PlayerActionsThisTurn", Handled),
         QuantityRef::DungeonsCompleted => ("DungeonsCompleted", Unhandled),
-        QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Unhandled),
+        QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Handled),
         QuantityRef::CostXPaid => ("CostXPaid", Handled),
         QuantityRef::KickerCount => ("KickerCount", Handled),
+        QuantityRef::AdditionalCostPaymentCount => ("AdditionalCostPaymentCount", Handled),
         QuantityRef::ConvokedCreatureCount => ("ConvokedCreatureCount", Handled),
         QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),
@@ -5159,6 +5253,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
         QuantityRef::PartySize { .. } => ("PartySize", Handled),
+        QuantityRef::ControlledByEachPlayer { .. } => ("ControlledByEachPlayer", Handled),
     }
 }
 
@@ -5183,7 +5278,8 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OpponentOtherThanTriggering => ("OpponentOtherThanTriggering", Handled),
         PlayerFilter::VotedFor { .. } => ("VotedFor", Handled),
         PlayerFilter::ParentObjectTargetController => ("ParentObjectTargetController", Handled),
-        PlayerFilter::ControlsPermanent { .. } => ("ControlsPermanent", Handled),
+        PlayerFilter::ControlsCount { .. } => ("ControlsCount", Handled),
+        PlayerFilter::PlayerAttribute { .. } => ("PlayerAttribute", Handled),
     }
 }
 
@@ -5202,6 +5298,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::ChosenLabelIs { .. } => ("ChosenLabelIs", Handled),
         StaticCondition::HasCounters { .. } => ("HasCounters", Handled),
         StaticCondition::RecipientHasCounters { .. } => ("RecipientHasCounters", Handled),
+        StaticCondition::RecipientMatchesFilter { .. } => ("RecipientMatchesFilter", Handled),
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
         StaticCondition::DuringYourTurn => ("DuringYourTurn", Handled),
         StaticCondition::DayNightIs { .. } => ("DayNightIs", Handled),
@@ -5312,6 +5409,11 @@ fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) 
                     return true;
                 }
             }
+        }
+        Effect::ChooseOneOf { branches, .. }
+            if branches.iter().any(|branch| ability_tree_any(branch, pred)) =>
+        {
+            return true;
         }
         Effect::CreateDelayedTrigger { effect, .. } if ability_tree_any(effect, pred) => {
             return true;
@@ -6099,6 +6201,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         if let Some(else_ab) = &def.else_ability {
             push_ability_tree(else_ab, out);
         }
+        if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
+            for branch in branches {
+                push_ability_tree(branch, out);
+            }
+        }
     }
     for a in face.abilities.iter() {
         push_ability_tree(a, &mut elements);
@@ -6350,9 +6457,21 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::TopOfLibraryCastPermission { .. } => {
                 effective_lower.contains("you may cast") || effective_lower.contains("you may play")
             }
+            // CR 601.2a + CR 113.6b: Maralen-class exile-cast permission. The
+            // discriminator phrase ("from among cards exiled with") is
+            // already enforced by the parser; coverage just needs a phrase
+            // the static description will contain.
+            StaticMode::ExileCastPermission { .. } => {
+                effective_lower.contains("you may cast") || effective_lower.contains("you may play")
+            }
             StaticMode::CantCastDuring { .. } => {
                 effective_lower.contains("can't cast spells during")
                     || effective_lower.contains("can cast spells only during")
+            }
+            // CR 602.5 + CR 117.1b: City of Solitude class — "activate abilities
+            // only during" covers both bare and "and activate abilities" phrasings.
+            StaticMode::CantActivateDuring { .. } => {
+                effective_lower.contains("activate abilities only during")
             }
             StaticMode::PerTurnCastLimit { .. } => {
                 effective_lower.contains("can't cast more than")
@@ -6400,6 +6519,10 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     || effective_lower.contains("can't lose the game")
             }
             StaticMode::CantWinTheGame => effective_lower.contains("can't win the game"),
+            // CR 704.5j: Mirror Gallery / Sakashima class — legend-rule exemption.
+            StaticMode::LegendRuleDoesntApply => {
+                effective_lower.contains("legend rule") && effective_lower.contains("doesn't apply")
+            }
             StaticMode::NoMaximumHandSize => effective_lower.contains("no maximum hand size"),
             StaticMode::MaximumHandSize { .. } => effective_lower.contains("maximum hand size is"),
             StaticMode::CantUntap => {
@@ -6454,6 +6577,17 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }
+            // CR 509.1b + CR 609.4 + CR 702.14c: qualifier-aware coverage for
+            // Ur-Drago's "creatures with <X>walk can be blocked as though they
+            // didn't have <X>walk." Anchor on the per-qualifier keyword token
+            // so unrelated landwalk lines don't false-match.
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: Some(q) } => {
+                let kw = format!("{}walk", q.to_ascii_lowercase());
+                effective_lower.contains(&format!("creatures with {kw}"))
+                    && effective_lower.contains("as though they didn't have")
+                    && effective_lower.contains(&kw)
+            }
+            StaticMode::IgnoreLandwalkForBlocking { qualifier: None } => false,
             StaticMode::CanActivateAbilitiesAsThoughHaste => {
                 effective_lower.contains("as though those creatures had haste")
                     || effective_lower.contains("as though that creature had haste")
@@ -6481,6 +6615,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     StaticMode::CanAttackWithDefender => {
                         effective_lower.contains("as though it didn't have defender")
                     }
+                    // CR 509.1b + CR 609.4 + CR 702.14c: mirror predicate for
+                    // statics nested under a GenericEffect.
+                    StaticMode::IgnoreLandwalkForBlocking { qualifier: Some(q) } => {
+                        let kw = format!("{}walk", q.to_ascii_lowercase());
+                        effective_lower.contains(&format!("creatures with {kw}"))
+                            && effective_lower.contains("as though they didn't have")
+                            && effective_lower.contains(&kw)
+                    }
+                    StaticMode::IgnoreLandwalkForBlocking { qualifier: None } => false,
                     _ => false,
                 })
             } else {
@@ -6569,6 +6712,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     // (including "enter tapped as a copy of")
                     // Parsed as CopySpell without a description string.
                     effective_lower.contains("as a copy of")
+                }
+                Effect::CastCopyOfCard { .. } => {
+                    effective_lower.contains("copy") && effective_lower.contains("cast the copy")
                 }
                 Effect::Untap { .. } => {
                     // "Untap this creature during each other player's untap step" and similar
@@ -8181,6 +8327,7 @@ mod tests {
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
+            cleave_variant: None,
             color_override: None,
             color_identity: vec![],
             scryfall_oracle_id: None,
@@ -8233,9 +8380,12 @@ mod tests {
     #[test]
     fn card_face_with_unimplemented_additional_cost_is_detected() {
         let mut face = make_face();
-        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Unimplemented {
-            description: "mystery cost".to_string(),
-        }));
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::Unimplemented {
+                description: "mystery cost".to_string(),
+            },
+            repeatable: false,
+        });
 
         assert!(card_face_has_unimplemented_parts(&face));
     }
@@ -8664,6 +8814,7 @@ mod tests {
                         mode: StaticMode::MustBeBlocked,
                     }],
                     condition: None,
+                    per_player_condition: None,
                     affected_zone: None,
                     effect_zone: None,
                     active_zones: vec![],
@@ -8706,6 +8857,7 @@ mod tests {
                         },
                     ],
                     condition: None,
+                    per_player_condition: None,
                     affected_zone: None,
                     effect_zone: None,
                     active_zones: vec![],
@@ -8755,6 +8907,20 @@ mod tests {
         assert_eq!(
             features.get("quantity_ref:Speed"),
             Some(&FeatureSupport::Handled)
+        );
+    }
+
+    #[test]
+    fn target_zone_card_count_quantity_feature_is_marked_handled() {
+        let (name, support) = quantity_ref_feature(&QuantityRef::TargetZoneCardCount {
+            zone: ZoneRef::Library,
+        });
+
+        assert_eq!(name, "TargetZoneCardCount");
+        assert_eq!(
+            support,
+            FeatureSupport::Handled,
+            "TargetZoneCardCount is resolved by game::quantity and should not block coverage",
         );
     }
 
@@ -8953,6 +9119,7 @@ mod tests {
                     counter_type: Some(CounterType::Plus1Plus1),
                     count: Some(QuantityExpr::Fixed { value: 1 }),
                     mode: CounterTransferMode::Move,
+                    selection: crate::types::ability::CounterMoveSelection::StackTarget,
                     target: TargetFilter::Any,
                 },
             )
@@ -9064,6 +9231,91 @@ mod tests {
                 |f| matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "counter")
             ),
             "Should accept counters folded into token enter_with_counters: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_counter_parameter_accepts_choose_one_of_counter_branches() {
+        let mut face = make_face();
+        let oracle =
+            "Put your choice of a +1/+1 counter or two charge counters on up to one other target artifact.";
+        face.oracle_text = Some(oracle.to_string());
+
+        let plus_one_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            },
+        );
+        let charge_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Generic("charge".to_string()),
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+            },
+        );
+
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![plus_one_branch, charge_branch],
+            },
+        ));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings.iter().any(
+                |f| matches!(f, SemanticFinding::WrongParameter { field, .. } if field == "counter")
+            ),
+            "ChooseOneOf counter branches should satisfy counter parameter audit: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_per_line_matches_choose_one_of_branch_descriptions() {
+        let mut face = make_face();
+        let oracle = "Destroy target creature.\nReturn target creature to its owner's hand.";
+        face.oracle_text = Some(oracle.to_string());
+
+        let destroy_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+        )
+        .description("Destroy target creature.".to_string());
+
+        let bounce_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Bounce {
+                target: TargetFilter::Any,
+                destination: Some(Zone::Hand),
+                selection: crate::types::ability::BounceSelection::Targeted,
+            },
+        )
+        .description("Return target creature to its owner's hand.".to_string());
+
+        face.abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![destroy_branch, bounce_branch],
+            },
+        ));
+
+        let findings = audit_card_lines(oracle, &face);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| matches!(f, SemanticFinding::SilentDrop { .. })),
+            "ChooseOneOf branch descriptions should be reachable in per-line audit: {findings:?}"
         );
     }
 
@@ -9456,6 +9708,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9485,6 +9738,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9514,6 +9768,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9581,6 +9836,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9618,6 +9874,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9646,6 +9903,7 @@ mod tests {
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![],
             condition: None,
+            per_player_condition: None,
             affected_zone: None,
             effect_zone: None,
             active_zones: vec![],
@@ -9682,6 +9940,7 @@ mod tests {
                 affected: Some(TargetFilter::SelfRef),
                 modifications: vec![],
                 condition: None,
+                per_player_condition: None,
                 affected_zone: None,
                 effect_zone: None,
                 active_zones: vec![],
@@ -9694,6 +9953,34 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "CantBeBlockedExceptBy variants should be fully supported, but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 508.1c + CR 509.1b: declaration-cap statics carry the maximum
+    /// creature count and are enforced by combat declaration validation rather
+    /// than exact registry-key lookup. Silent Arbiter is the canonical paired
+    /// attacker/blocker cap card.
+    #[test]
+    fn max_combat_creature_statics_have_no_coverage_gap() {
+        let mut face = make_face();
+        face.oracle_text = Some(
+            "No more than one creature can attack each combat.\nNo more than one creature can block each combat."
+                .to_string(),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MaxAttackersEachCombat { max: 1 })
+                .description("No more than one creature can attack each combat.".to_string()),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MaxBlockersEachCombat { max: 1 })
+                .description("No more than one creature can block each combat.".to_string()),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "Max combat creature statics should be fully supported, but got gaps: {:?}",
             gaps
         );
     }

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/scryfall-fetch.sh"
+
 DATA_DIR="data/scryfall"
 CARDS_FILE="$DATA_DIR/default-cards.json"
 OUTPUT="client/public/scryfall-token-images.json"
@@ -10,9 +13,7 @@ echo "=== Scryfall Token Image Generation ==="
 if [ ! -f "$CARDS_FILE" ]; then
   echo "Downloading Scryfall default-cards bulk data..."
   mkdir -p "$DATA_DIR"
-  DOWNLOAD_URI=$(curl -s "https://api.scryfall.com/bulk-data" \
-    | jq -r '.data[] | select(.type == "default_cards") | .download_uri')
-  curl -L -o "$CARDS_FILE" "$DOWNLOAD_URI"
+  scryfall_fetch_bulk default_cards "$CARDS_FILE"
   echo "Downloaded $CARDS_FILE."
 fi
 
@@ -24,7 +25,7 @@ fi
 echo "Generating $OUTPUT..."
 mkdir -p "$(dirname "$OUTPUT")"
 
-jq -c '
+jq -c "$SCRYFALL_JQ_PRELUDE"'
   [.[] |
     select(.layout == "token" or .layout == "double_faced_token") |
     select(.id != null) |
@@ -33,9 +34,9 @@ jq -c '
       scryfall_id: $card.id,
       oracle_id: $card.oracle_id,
       face_names: (if $card.card_faces then
-        [$card.card_faces[] | .name | ascii_downcase]
+        [$card.card_faces[] | .name | js_downcase]
       else
-        [$card.name | ascii_downcase]
+        [$card.name | js_downcase]
       end),
       faces: (if $card.card_faces then
         [$card.card_faces[] | {

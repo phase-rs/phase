@@ -291,6 +291,25 @@ mod tests {
     use crate::types::identifiers::{CardId, TrackedSetId};
     use crate::types::zones::Zone;
 
+    /// Regression: `ChooseFromZoneConstraint` must serialize internally tagged
+    /// (`{ "type": "DistinctCardTypes", ... }`) so the frontend `CardChoiceModal`
+    /// confirm gate — which discriminates on `constraint.type` — can recognize the
+    /// constraint. The default external representation left `type` undefined and
+    /// permanently disabled the confirm button (e.g. Atraxa, Grand Unifier).
+    #[test]
+    fn distinct_card_types_constraint_is_internally_tagged() {
+        let constraint = ChooseFromZoneConstraint::DistinctCardTypes {
+            categories: vec![CoreType::Creature, CoreType::Land],
+        };
+        let value = serde_json::to_value(&constraint).unwrap();
+        assert_eq!(value["type"], "DistinctCardTypes");
+        assert_eq!(value["categories"][0], "Creature");
+        assert_eq!(value["categories"][1], "Land");
+        // Round-trips back to an equal value.
+        let back: ChooseFromZoneConstraint = serde_json::from_value(value).unwrap();
+        assert_eq!(back, constraint);
+    }
+
     #[test]
     fn resolve_with_controller_chooser() {
         let mut state = GameState::new_two_player(42);

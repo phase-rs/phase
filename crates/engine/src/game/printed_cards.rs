@@ -70,6 +70,9 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.trigger_definitions = card_face.triggers.clone().into();
     obj.replacement_definitions = card_face.replacements.clone().into();
     obj.static_definitions = card_face.static_abilities.clone().into();
+    // CR 702.148a-b: Carry the cleave-cost ability set onto the object so the
+    // casting flow can swap it in when the spell is cast for its cleave cost.
+    obj.cleave_variant = card_face.cleave_variant.clone();
     obj.color = color.clone();
     obj.base_power = power;
     obj.base_toughness = toughness;
@@ -617,6 +620,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::CounterAll { .. }
         | Effect::GainLife { .. }
         | Effect::LoseLife { .. }
+        | Effect::ExchangeLifeWithStat { .. }
         | Effect::Tap { .. }
         | Effect::Untap { .. }
         | Effect::TapAll { .. }
@@ -653,6 +657,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Clash
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
         | Effect::BecomeCopy { .. }
@@ -737,6 +742,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
         | Effect::Monstrosity { .. }
+        | Effect::Renown { .. }
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
         | Effect::Learn
@@ -750,6 +756,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::CreateDamageReplacement { .. }
+        // CR 614.12 + CR 303.4: ReturnAsAura.grants carry typed
+        // ContinuousModifications, never conjured card names.
+        | Effect::ReturnAsAura { .. }
         | Effect::Unimplemented { .. } => {}
     }
 }
@@ -1151,6 +1160,7 @@ mod tests {
             triggers: Vec::<TriggerDefinition>::new(),
             static_abilities: Vec::<StaticDefinition>::new(),
             replacements: Vec::<ReplacementDefinition>::new(),
+            cleave_variant: None,
             color_override: None,
             color_identity: vec![],
             scryfall_oracle_id: Some(oracle_id.to_string()),
@@ -1798,6 +1808,7 @@ mod tests {
                 max: 6,
                 effect: Box::new(conjure_ability("roll", Zone::Hand)),
             }],
+            modifier: None,
         };
         walk_effect(&roll, &mut names);
 

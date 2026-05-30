@@ -8,8 +8,11 @@
 // compiled to WASM and loaded into the DO, delete this file.
 
 /** MUST equal `PROTOCOL_VERSION` in crates/server-core/src/protocol.rs.
- *  The client hard-rejects the handshake on any mismatch. */
-export const PROTOCOL_VERSION = 6;
+ *  The client gate accepts [PROTOCOL_VERSION - 1, PROTOCOL_VERSION] so a
+ *  deprecation window of one minor exists, but the broker must still report
+ *  the current version so up-to-date clients are not stranded on a stale
+ *  server. */
+export const PROTOCOL_VERSION = 7;
 
 /** Wire shape of a lobby row (snake_case — protocol.rs has no rename_all on
  *  `LobbyGame`). Only the fields the lobby listing needs are populated. */

@@ -86,25 +86,16 @@ pub fn resolve(
         _ => (1, ability.controller),
     };
 
-    let proposed = ProposedEvent::Draw {
-        player_id: drawing_player,
-        count: num_cards,
-        applied: HashSet::new(),
-    };
-
     // CR 614.1a: Route draw through replacement pipeline (e.g. Dredge, Abundance).
-    match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => {
-            apply_draw_after_replacement(state, event, events);
-        }
-        ReplacementResult::Prevented => {
-            // Draw was prevented, skip
-        }
-        ReplacementResult::NeedsChoice(player) => {
-            state.waiting_for =
-                crate::game::replacement::replacement_choice_waiting_for(player, state);
-            return Ok(());
-        }
+    match draw_through_replacement(
+        state,
+        drawing_player,
+        num_cards,
+        events,
+        apply_draw_after_replacement,
+    ) {
+        ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(_) => return Ok(()),
     }
 
     events.push(GameEvent::EffectResolved {
@@ -113,6 +104,57 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 614.6 + CR 614.11 + CR 704.3: Single authority for the
+/// "propose Draw → replace → apply → drain post-replacement continuation"
+/// sequence. Every site that proposes a `ProposedEvent::Draw` MUST call this
+/// helper — otherwise a substituted mandatory-post-effect (Jace WinTheGame,
+/// Abundance reveal-until) leaks past the resolution step and drains against
+/// the wrong player on a later priority pass.
+///
+/// `apply_executed` is invoked on the `Execute` arm with the (possibly
+/// pre-zeroed by `apply_single_replacement`) replaced event, so callers can
+/// layer their own bookkeeping — miracle tracking (`effects/draw.rs`,
+/// `effects/connive.rs`, `effects/gift_delivery.rs`), draw-step
+/// `has_drawn_this_turn` flag (`turns.rs`), or the chain's discard step
+/// (connive). The continuation drain runs immediately after `apply_executed`
+/// returns, inside the same resolution step so SBAs (CR 704.5b
+/// draw-from-empty-library loss) and priority never fall between the
+/// (possibly pre-zeroed) draw and its substitute.
+///
+/// On `NeedsChoice`, sets `state.waiting_for` to the replacement-choice
+/// prompt before returning so callers only need to bail. On `Prevented`,
+/// `apply_executed` is not called.
+pub(crate) fn draw_through_replacement(
+    state: &mut GameState,
+    player_id: crate::types::player::PlayerId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+    apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
+) -> replacement::ReplacementResult {
+    let proposed = ProposedEvent::Draw {
+        player_id,
+        count,
+        applied: HashSet::new(),
+    };
+    let result = replacement::replace_event(state, proposed, events);
+    match &result {
+        ReplacementResult::Execute(event) => {
+            apply_executed(state, event.clone(), events);
+            if state.post_replacement_continuation.is_some() {
+                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                    state, None, None, None, events,
+                );
+            }
+        }
+        ReplacementResult::Prevented => {}
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(*player, state);
+        }
+    }
+    result
 }
 
 /// CR 121.1: Apply a post-replacement `ProposedEvent::Draw` to the game state.
