@@ -11131,7 +11131,22 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
         .parse(lower)
         .is_ok();
 
-    battlefield_recall || hand_recall || copy_token_recall
+    // CR 400.7i + CR 603.7: Play-from-exile grant — "[you may] play/cast {that
+    // card, that spell, it, those cards, them} for as long as {it,that card,...}
+    // remains exiled". The "that card" anaphor refers to the card the preceding
+    // exile published into the tracked set. Gated on the "remains exiled"
+    // duration phrase (the impulse-grant fingerprint) plus a play/cast verb so
+    // it never matches an unrelated "that card" mention. This caller is itself
+    // only consulted when the previous clause is an exile that publishes a
+    // tracked set, so the gate is doubly scoped (Gonti, Canny Acquisitor).
+    let play_from_exile_grant = (scan_contains_phrase(lower, "remains exiled")
+        || scan_contains_phrase(lower, "remain exiled"))
+        && (scan_contains_phrase(lower, "may play")
+            || scan_contains_phrase(lower, "may cast")
+            || tag::<_, _, OracleError<'_>>("play ").parse(lower).is_ok()
+            || tag::<_, _, OracleError<'_>>("cast ").parse(lower).is_ok());
+
+    battlefield_recall || hand_recall || copy_token_recall || play_from_exile_grant
 }
 
 fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
@@ -11242,6 +11257,22 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
                     rewrite_filter_parent_to_tracked_set(affected);
                 }
             }
+        }
+        // CR 603.7 + CR 400.7i: "You may play that card for as long as it
+        // remains exiled" — the "that card" anaphor refers to the card the
+        // preceding exile published into the tracked set. A bare
+        // play-from-exile grant parses with `target: Any` (or `ParentTarget`),
+        // which `grant_permission::resolve` would otherwise bind to the source
+        // object rather than the exiled card. Re-target it to the tracked set so
+        // the permission attaches to the just-exiled card (Gonti, Canny
+        // Acquisitor). Scoped to `PlayFromExile` so non-impulse grants are
+        // untouched.
+        Effect::GrantCastingPermission {
+            target,
+            permission: CastingPermission::PlayFromExile { .. },
+            ..
+        } if matches!(target, TargetFilter::Any | TargetFilter::ParentTarget) => {
+            *target = tracked_set_filter();
         }
         _ => {}
     }
@@ -17253,7 +17284,17 @@ fn try_parse_damage_with_remainder<'a>(
             .parse(amount_lower.as_str())
             .ok()?;
         let qty_text = amount_text[..before_to.len()].trim();
+        // CR 120.1: The amount of a "deals damage equal to <qty>" clause may be a
+        // dynamic count ("the number of creatures you control" — Ajani, Nacatl
+        // Avenger). Mirror the sibling "damage to <target> equal to <amount>"
+        // branch: try the event-context refs first, then fall back to the general
+        // CDA quantity parser (`the number of … you control`, `your life total`,
+        // …). Without this fallback the phrase degrades to a raw `Variable`, which
+        // resolves to 0 at runtime — the damage silently no-ops.
         let qty = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
+            .or_else(|| {
+                crate::parser::oracle_quantity::parse_cda_quantity_with_context(qty_text, ctx)
+            })
             .unwrap_or_else(|| QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
                     name: qty_text.to_string(),
@@ -20688,6 +20729,36 @@ mod tests {
                 }
             ),
             "expected source-power DealDamage, got: {:?}",
+            clause.effect
+        );
+    }
+
+    /// CR 120.1: "deals damage equal to <count> to <target>" must resolve the
+    /// dynamic count via the CDA quantity parser, not degrade to a raw
+    /// `Variable` (which resolves to 0 — a silent no-op). Ajani, Nacatl
+    /// Avenger's reflexive trigger ("he deals damage equal to the number of
+    /// creatures you control to any target") is the repro; the "<count> to
+    /// <target>" word order previously skipped the CDA fallback that the
+    /// "<target> equal to <count>" word order already had.
+    #[test]
+    fn damage_equal_to_object_count_resolves_to_object_count_not_variable() {
+        let clause = parse_effect_clause(
+            "~ deals damage equal to the number of creatures you control to any target",
+            &mut ParseContext::default(),
+        );
+
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. },
+                    },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                }
+            ),
+            "expected ObjectCount-amount DealDamage to Any, got: {:?}",
             clause.effect
         );
     }
@@ -25888,6 +25959,79 @@ mod tests {
             ),
             "Expected ExileTop(Player, 1, face_down=false), got {:?}",
             effect
+        );
+    }
+
+    /// CR 406.3 + CR 701.16a: "look at the top card of <player>'s library, then
+    /// exile it face down" is the Gonti, Canny Acquisitor impulse idiom. The
+    /// private `Dig` look step (CR 701.16a) only inspects the top card; the
+    /// "then exile it face down" clause must rewrite it into a face-down
+    /// `Effect::ExileTop` so the card actually leaves the library (issue #1316).
+    /// Building-block coverage independent of any trigger context — a bare chain
+    /// resolves "that player's library" to `ParentTarget`.
+    #[test]
+    fn look_at_top_then_exile_it_face_down_rewrites_dig_to_exile_top() {
+        let def = parse_effect_chain(
+            "Look at the top card of that player's library, then exile it face down.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::ParentTarget,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: true,
+                }
+            ),
+            "Expected the look-then-exile idiom to lower to a face-down ExileTop, got {:?}",
+            def.effect
+        );
+    }
+
+    /// CR 400.7i + CR 603.7: The Gonti impulse-play grant ("You may play that
+    /// card for as long as it remains exiled, and mana of any type can be spent
+    /// to cast that spell") must bind to the card the preceding face-down
+    /// `ExileTop` published into the tracked set — without it the grant would
+    /// attach `PlayFromExile` to the source object and the exiled card would
+    /// stay unplayable (issue #1316).
+    #[test]
+    fn exile_then_play_from_exile_grant_binds_to_tracked_set() {
+        let def = parse_effect_chain(
+            "Look at the top card of that player's library, then exile it face down. You may play that card for as long as it remains exiled, and mana of any type can be spent to cast that spell.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    face_down: true,
+                    ..
+                }
+            ),
+            "Expected a face-down ExileTop head, got {:?}",
+            def.effect
+        );
+        let grant = def
+            .sub_ability
+            .as_ref()
+            .expect("the impulse-play grant must chain after the exile");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                        ..
+                    },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    ..
+                }
+            ),
+            "Expected PlayFromExile grant bound to the tracked exiled card, got {:?}",
+            grant.effect
         );
     }
 

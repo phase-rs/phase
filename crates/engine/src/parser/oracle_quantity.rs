@@ -17,6 +17,8 @@ use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::oracle_ir::context::ParseContext;
+use super::oracle_nom::condition::inject_controller_you;
+use super::oracle_nom::duration::parse_cast_snapshot_suffix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
@@ -42,6 +44,33 @@ use crate::types::zones::Zone;
 pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
     let mut ctx = ParseContext::default();
     parse_quantity_ref_with_context(text, &mut ctx)
+}
+
+/// CR 119.1 + CR 102.1: "the {highest|lowest} life total among {all players|
+/// players|your opponents}" → LifeTotal{ AllPlayers|Opponent { aggregate } }.
+/// Two independent nom axes (aggregate × population) — not full-string tags.
+/// Life is CR 119 → routes to LifeTotal/PlayerScope, never the CR 208/202
+/// object-property Aggregate (hence placed before that block).
+fn parse_cross_player_life_extremum(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the ").parse(input)?;
+    let (rest, aggregate) = alt((
+        value(AggregateFunction::Max, tag("highest")),
+        value(AggregateFunction::Min, tag("lowest")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" life total among ").parse(rest)?;
+    let (rest, player) = alt((
+        value(
+            PlayerScope::AllPlayers {
+                aggregate,
+                exclude: None,
+            },
+            alt((tag("all players"), tag("players"))),
+        ),
+        value(PlayerScope::Opponent { aggregate }, tag("your opponents")),
+    ))
+    .parse(rest)?;
+    Ok((rest, QuantityRef::LifeTotal { player }))
 }
 
 pub(crate) fn parse_quantity_ref_with_context(
@@ -179,6 +208,16 @@ pub(crate) fn parse_quantity_ref_with_context(
         }
     }
 
+    // CR 119.1 + CR 102.1: cross-player life extremum ("the highest/lowest life
+    // total among …"). Life is CR 119 → must route to LifeTotal/PlayerScope, not
+    // the CR 208/202 object-property Aggregate below — wired first so the
+    // aggregate block can't claim it.
+    if let Ok((rest, qty)) = parse_cross_player_life_extremum(trimmed) {
+        if rest.is_empty() {
+            return Some(qty);
+        }
+    }
+
     // Aggregate patterns: "the greatest X among" / "the total power of"
     if let Ok((rest, (func, prop))) = alt((
         value(
@@ -215,15 +254,53 @@ pub(crate) fn parse_quantity_ref_with_context(
     .parse(trimmed)
     {
         let (filter, remainder) = parse_type_phrase_with_ctx(rest, ctx);
-        if remainder.trim().is_empty()
-            && !matches!(filter, TargetFilter::Any)
-            && !is_empty_typed_filter(&filter)
-        {
+        // CR 608.2h: present-tense aggregate. Accept a bare empty remainder
+        // (existing no-snapshot behavior) or a trailing cast/activation-time
+        // snapshot suffix ("as you cast this spell") — the suffix is a pure
+        // timing marker that the resolver honors, so it must not block the
+        // filter check.
+        let snapshot_ok = remainder.trim().is_empty()
+            || parse_cast_snapshot_suffix(remainder)
+                .map(|(r, _)| r.trim().is_empty())
+                .unwrap_or(false);
+        if snapshot_ok && !matches!(filter, TargetFilter::Any) && !is_empty_typed_filter(&filter) {
             return Some(QuantityRef::Aggregate {
                 function: func,
                 property: prop,
                 filter,
             });
+        }
+
+        // CR 608.2i: past-tense "you controlled" look-back. tag("you control") in
+        // parse_zone_controller has no word boundary and would prefix-match
+        // "you controlled", corrupting the remainder to "led …". Isolate the bare
+        // head via take_until(" you controlled ") BEFORE parse_type_phrase, then
+        // re-inject ControllerRef::You. Reuses the inject_controller_you building
+        // block; same strip-controller-before-type-phrase ordering as
+        // parse_controller_controlled_as_cast_condition
+        // (oracle_effect/conditions.rs:1444).
+        if let Ok((after_head_tag, head_text)) =
+            take_until::<_, _, OracleError<'_>>(" you controlled ").parse(rest)
+        {
+            let (head_filter, head_rem) = parse_type_phrase(head_text);
+            if head_rem.trim().is_empty()
+                && !matches!(head_filter, TargetFilter::Any)
+                && !is_empty_typed_filter(&head_filter)
+            {
+                if let Ok((after_ctrl, _)) =
+                    tag::<_, _, OracleError<'_>>(" you controlled ").parse(after_head_tag)
+                {
+                    if let Ok((rest2, _)) = parse_cast_snapshot_suffix(after_ctrl) {
+                        if rest2.trim().is_empty() {
+                            return Some(QuantityRef::Aggregate {
+                                function: func,
+                                property: prop,
+                                filter: inject_controller_you(head_filter),
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -369,6 +446,22 @@ pub(crate) fn parse_cda_quantity_with_context(
     ctx: &mut ParseContext,
 ) -> Option<QuantityExpr> {
     let text = text.trim().trim_end_matches('.');
+
+    // CR 107.1a: "half/third/tenth <inner>, rounded up/down" fractional
+    // quantities delivered via a "where X is …" binding or a CDA route through
+    // here (Chainer's Torment, Endless Ranks of the Dead, Ghoulcaller's Harvest,
+    // Imskir Iron-Eater). Delegate to the shared `parse_fraction_rounded`
+    // combinator so every inner the general quantity grammar recognizes
+    // (life totals, "the number of <type> you control", "<type> cards in your
+    // graveyard", possessive refs, …) composes — without this arm the phrase
+    // falls through to `Variable { name: "<whole phrase>" }`, which resolves to 0
+    // at runtime (a silent no-op). Tried first so the leading "half " is consumed
+    // before the single-ref / binary-arithmetic arms below.
+    if let Ok((rest, expr)) = nom_quantity::parse_fraction_rounded(text) {
+        if rest.is_empty() {
+            return Some(expr);
+        }
+    }
 
     // "twice [inner]" or "three times [inner]" → Multiply { factor, inner }
     if let Ok((rest, factor)) = alt((
@@ -541,6 +634,52 @@ pub(crate) fn parse_cda_quantity_with_context(
                     filter,
                 },
             });
+        }
+    }
+
+    // CR 107.x: Binary arithmetic over two dynamic quantities, e.g. "the number
+    // of Caves you control plus the number of Cave cards in your graveyard"
+    // (Calamitous Cave-In) or "the number of cards in their hand minus 4"
+    // (Bant Charm class). Composes the existing Sum/Multiply/Offset variants
+    // over recursively-parsed operands so the whole arithmetic class types
+    // instead of falling through to an unresolved `Variable` (which resolves to
+    // 0 at runtime — a silent no-op). Mirrors the leading-number "N plus inner"
+    // arm above for the reversed operand order. Placed after the specific arms
+    // and before the single-ref delegate; it only fires when the LEFT operand is
+    // itself a dynamic quantity, so single refs and unparseable tails fall
+    // through untouched. The runtime clamps a negative total to 0 (CR 107.1b),
+    // matching the existing "N minus inner" handling.
+    for (separator, negate) in [(" plus ", false), (" minus ", true)] {
+        let Ok((_, (left_text, right_text))) = nom_primitives::split_once_on(text, separator)
+        else {
+            continue;
+        };
+        let Some(left) = parse_cda_quantity_with_context(left_text, ctx) else {
+            continue;
+        };
+        // Right operand is either another dynamic quantity (→ Sum) or a bare
+        // integer offset (→ Offset).
+        if let Some(right) = parse_cda_quantity_with_context(right_text, ctx) {
+            let right = if negate {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(right),
+                }
+            } else {
+                right
+            };
+            return Some(QuantityExpr::Sum {
+                exprs: vec![left, right],
+            });
+        }
+        if let Ok((rest, n)) = nom_primitives::parse_number(right_text.trim()) {
+            if rest.trim().is_empty() {
+                let offset = if negate { -(n as i32) } else { n as i32 };
+                return Some(QuantityExpr::Offset {
+                    inner: Box::new(left),
+                    offset,
+                });
+            }
         }
     }
 
@@ -1732,8 +1871,8 @@ fn with_target_player_controller(filter: TargetFilter) -> Option<TargetFilter> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope, TypeFilter,
-        TypedFilter,
+        CardTypeSetSource, Comparator, ControllerRef, FilterProp, PtStat, PtValueScope,
+        RoundingMode, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -1796,6 +1935,61 @@ mod tests {
                     && matches!(**right, QuantityExpr::Ref { qty: QuantityRef::Power { scope: ObjectScope::Recipient } })
             ),
             "reversed ordering should still parse to a Difference, got {expr:?}"
+        );
+    }
+
+    /// CR 107.1a: a "where X is half …, rounded …" binding routes through
+    /// `parse_cda_quantity`; before the fractional arm it fell through to
+    /// `Variable { name: "<whole phrase>" }` (resolves to 0). These assert the
+    /// fractional wrapper composes over the general quantity grammar's inner for
+    /// every supported class — life total, "the number of <type> you control",
+    /// and "<type> cards in your graveyard".
+    #[test]
+    fn cda_half_life_total_rounded_up() {
+        // Chainer's Torment: "half your life total, rounded up"
+        assert_eq!(
+            parse_cda_quantity("half your life total, rounded up"),
+            Some(QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                }),
+                divisor: 2,
+                rounding: RoundingMode::Up,
+            }),
+        );
+    }
+
+    #[test]
+    fn cda_half_number_of_artifacts_you_control_rounded_down() {
+        // Imskir Iron-Eater: "half the number of artifacts you control, rounded down"
+        let expr = parse_cda_quantity("half the number of artifacts you control, rounded down");
+        assert!(
+            matches!(
+                expr,
+                Some(QuantityExpr::DivideRounded { ref inner, divisor: 2, rounding: RoundingMode::Down })
+                    if matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ObjectCount { .. } })
+            ),
+            "expected DivideRounded{{ Ref(ObjectCount), 2, Down }}, got {expr:?}"
+        );
+    }
+
+    #[test]
+    fn cda_half_creature_cards_in_graveyard_rounded_up() {
+        // Ghoulcaller's Harvest: "half the number of creature cards in your graveyard, rounded up"
+        let expr =
+            parse_cda_quantity("half the number of creature cards in your graveyard, rounded up");
+        assert!(
+            matches!(
+                expr,
+                Some(QuantityExpr::DivideRounded {
+                    divisor: 2,
+                    rounding: RoundingMode::Up,
+                    ..
+                })
+            ),
+            "expected DivideRounded with Up rounding, got {expr:?}"
         );
     }
 
@@ -3646,6 +3840,201 @@ mod tests {
             gained,
             QuantityRef::PlayerCount {
                 filter: PlayerFilter::OpponentGainedLife,
+            }
+        );
+    }
+
+    /// Extract the `controller` of an `Aggregate` filter for snapshot tests.
+    fn aggregate_filter_controller(qty: &QuantityExpr) -> Option<ControllerRef> {
+        match qty {
+            QuantityExpr::Ref {
+                qty:
+                    QuantityRef::Aggregate {
+                        filter: TargetFilter::Typed(tf),
+                        ..
+                    },
+            } => tf.controller.clone(),
+            _ => None,
+        }
+    }
+
+    /// CR 608.2h: present-tense snapshot — "the greatest power among creatures
+    /// you control as you cast this spell" (Monstrous Onslaught). The trailing
+    /// snapshot suffix must not block the Aggregate match, and the filter must
+    /// still carry `ControllerRef::You`.
+    #[test]
+    fn cda_quantity_greatest_power_snapshot_cast_present() {
+        let qty = parse_cda_quantity(
+            "the greatest power among creatures you control as you cast this spell",
+        )
+        .unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(
+            aggregate_filter_controller(&qty),
+            Some(ControllerRef::You),
+            "present-tense snapshot must preserve controller You"
+        );
+    }
+
+    /// CR 608.2h: "as you activate this ability" snapshot variant (Lukka, Bound
+    /// to Ruin).
+    #[test]
+    fn cda_quantity_greatest_power_snapshot_activate_ability() {
+        let qty = parse_cda_quantity(
+            "the greatest power among creatures you control as you activate this ability",
+        )
+        .unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(aggregate_filter_controller(&qty), Some(ControllerRef::You));
+    }
+
+    /// CR 608.2i: past-tense look-back — "the greatest power among creatures you
+    /// controlled as you cast this spell" (Lifestream's Blessing). The
+    /// discriminating ordering test: `take_until(" you controlled ")` must run
+    /// BEFORE parse_type_phrase so the controller is still resolved to You and
+    /// the head filter is "creatures" (not corrupted by "you control"
+    /// prefix-matching "you controlled").
+    #[test]
+    fn cda_quantity_greatest_power_snapshot_past_tense() {
+        let qty = parse_cda_quantity(
+            "the greatest power among creatures you controlled as you cast this spell",
+        )
+        .unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(
+            aggregate_filter_controller(&qty),
+            Some(ControllerRef::You),
+            "past-tense look-back must re-inject controller You via inject_controller_you"
+        );
+    }
+
+    /// Regression: the existing no-snapshot present-tense aggregate must still
+    /// parse unchanged after the snapshot relaxation.
+    #[test]
+    fn cda_quantity_greatest_power_no_snapshot_regression() {
+        let qty = parse_cda_quantity("the greatest power among creatures you control").unwrap();
+        assert!(matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(aggregate_filter_controller(&qty), Some(ControllerRef::You));
+    }
+
+    /// CR 119.1 + CR 102.1: cross-player life extremum → LifeTotal/PlayerScope.
+    /// "highest … among all players" → AllPlayers{Max} (Sorin, Grim Nemesis;
+    /// Arbiter of Knollridge; Scourge inner).
+    #[test]
+    fn cda_quantity_highest_life_total_among_all_players() {
+        let qty = parse_cda_quantity("the highest life total among all players").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Max,
+                        exclude: None,
+                    },
+                },
+            }
+        );
+    }
+
+    /// "lowest … among all players" → AllPlayers{Min} (Repay in Kind).
+    #[test]
+    fn cda_quantity_lowest_life_total_among_all_players() {
+        let qty = parse_cda_quantity("the lowest life total among all players").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Min,
+                        exclude: None,
+                    },
+                },
+            }
+        );
+    }
+
+    /// "highest … among your opponents" → Opponent{Max}.
+    #[test]
+    fn cda_quantity_highest_life_total_among_opponents() {
+        let qty = parse_cda_quantity("the highest life total among your opponents").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Max,
+                    },
+                },
+            }
+        );
+    }
+
+    /// "lowest … among your opponents" → Opponent{Min} (Mortal Flesh Is Weak).
+    #[test]
+    fn cda_quantity_lowest_life_total_among_opponents() {
+        let qty = parse_cda_quantity("the lowest life total among your opponents").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Opponent {
+                        aggregate: AggregateFunction::Min,
+                    },
+                },
+            }
+        );
+    }
+
+    /// Bare "the highest life total among players" (no "all") → AllPlayers{Max}.
+    /// Confirms the longest-first "all players" / "players" alt ordering.
+    #[test]
+    fn cda_quantity_highest_life_total_among_players_bare() {
+        let qty = parse_cda_quantity("the highest life total among players").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Max,
+                        exclude: None,
+                    },
+                },
             }
         );
     }

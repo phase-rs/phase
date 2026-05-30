@@ -7814,8 +7814,11 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
 
     let is_rest_lower = is_rest_lower.trim_end_matches('.');
 
-    // Check for "in addition to its other types" suffix
-    let (type_part, _is_additive) =
+    // Check for "in addition to its other types" suffix.
+    // CR 205.1b: "in addition to its other types" retains all prior card types
+    // (additive). Its absence means CR 205.1a applies: the new card type(s)
+    // replace the existing ones.
+    let (type_part, is_additive) =
         if let Some(before) = is_rest_lower.strip_suffix(" in addition to its other types") {
             (before.trim(), true)
         } else {
@@ -7981,22 +7984,42 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
                 .any(|m| matches!(m, LossMember::CardTypes));
         }
 
+        // CR 205.1a + CR 613.1d (Layer 4): Two independent conditions each require
+        // SetCardTypes (replacing) rather than AddType (additive):
+        //   (A) loss_replaces_card_types: trailing clause explicitly says "loses
+        //       all other card types" (Darksteel Mutation path — already working).
+        //   (B) !is_additive: "in addition to its other types" is absent, so "is a
+        //       [type]" replaces existing card types (Frogify, Lignify, etc.).
+        // These are documented separately and combined into a single bool to avoid
+        // emitting two SetCardTypes pushes.
+        let needs_set_card_types = loss_replaces_card_types || !is_additive;
+
         // --- Assemble modifications in written (mod_index) order ---
-        // 1. Core types: replacement (SetCardTypes) if the clause says "loses
-        //    all other card types", else additive AddType.
-        if loss_replaces_card_types {
+        // 1. Core types: replacement (SetCardTypes) when CR 205.1a applies (no
+        //    "in addition" suffix) or the clause says "loses all other card
+        //    types"; else additive AddType (CR 205.1b "in addition").
+        if needs_set_card_types {
             modifications.push(ContinuousModification::SetCardTypes {
-                core_types: granted_core_types,
+                core_types: granted_core_types.clone(),
             });
         } else {
-            for ct in granted_core_types {
-                modifications.push(ContinuousModification::AddType { core_type: ct });
+            for ct in &granted_core_types {
+                modifications.push(ContinuousModification::AddType { core_type: *ct });
             }
         }
 
         // 2. Color
+        // CR 105.3 + CR 613.1e (Layer 5): a new color replaces all previous
+        // colors unless the effect is "in addition"; additive "in addition to
+        // its other types" appends via AddColor.
         if let Some(color) = opt_color {
-            modifications.push(ContinuousModification::AddColor { color });
+            if is_additive {
+                modifications.push(ContinuousModification::AddColor { color });
+            } else {
+                modifications.push(ContinuousModification::SetColor {
+                    colors: vec![color],
+                });
+            }
         } else if is_colorless {
             modifications.push(ContinuousModification::SetColor { colors: vec![] });
         }
@@ -8005,6 +8028,24 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
         if let Some((p, t)) = base_pt.or(inline_pt) {
             modifications.push(ContinuousModification::SetPower { value: p });
             modifications.push(ContinuousModification::SetToughness { value: t });
+        }
+
+        // CR 205.1a + CR 613.1d (Layer 4): Non-additive "is a [subtype] creature"
+        // sets a new creature subtype, which replaces existing creature subtypes.
+        // Auto-inject RemoveAllSubtypes{Creature} unless the trailing clause
+        // already provides it (Darksteel Mutation explicitly says "loses all
+        // other creature types" and its clause_mods contains the wipe).
+        if !is_additive
+            && granted_core_types.contains(&CoreType::Creature)
+            && !granted_subtypes.is_empty()
+            && !modifications
+                .iter()
+                .chain(clause_mods.iter())
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. }))
+        {
+            modifications.push(ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            });
         }
 
         // 4. Trailing-clause mods (AddKeyword, RemoveAllAbilities,
@@ -19860,10 +19901,13 @@ mod tests {
         assert!(def
             .modifications
             .contains(&ContinuousModification::RemoveAllAbilities));
+        // NOTE: This was previously asserting AddType{Land} (broken behavior).
+        // After the !is_additive fix, non-additive "is a colorless land"
+        // correctly emits SetCardTypes (CR 205.1a replacement).
         assert!(def
             .modifications
-            .contains(&ContinuousModification::AddType {
-                core_type: crate::types::card_type::CoreType::Land,
+            .contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Land],
             }));
         assert!(def
             .modifications
@@ -19872,21 +19916,120 @@ mod tests {
 
     #[test]
     fn enchanted_creature_loses_abilities_becomes_insect() {
-        // CR 613.1d: Darksteel Mutation pattern
+        // CR 613.1d: Darksteel Mutation pattern — non-additive, so SetCardTypes/SetColor/RemoveAllSubtypes.
         let def = parse_static_line(
             "Enchanted creature loses all abilities and is a 0/1 green Insect creature.",
         )
         .unwrap();
         assert_eq!(def.mode, StaticMode::Continuous);
-        assert!(def
-            .modifications
-            .contains(&ContinuousModification::RemoveAllAbilities));
-        assert!(def
-            .modifications
-            .contains(&ContinuousModification::SetPower { value: 0 }));
-        assert!(def
-            .modifications
-            .contains(&ContinuousModification::SetToughness { value: 1 }));
+        let mods = &def.modifications;
+        assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 0 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+        // CR 205.1a + CR 613.1d: non-additive → SetCardTypes, not AddType.
+        assert!(
+            mods.contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+            }),
+            "expected SetCardTypes[Creature]: {mods:?}"
+        );
+        // CR 613.1e: non-additive → SetColor, not AddColor.
+        assert!(
+            mods.contains(&ContinuousModification::SetColor {
+                colors: vec![crate::types::mana::ManaColor::Green],
+            }),
+            "expected SetColor[Green]: {mods:?}"
+        );
+        // CR 205.1a: non-additive creature subtype auto-wipe.
+        assert!(
+            mods.contains(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            }),
+            "expected RemoveAllSubtypes{{Creature}}: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Insect".to_string(),
+            }),
+            "expected AddSubtype(Insect): {mods:?}"
+        );
+        // Written-order: wipe before grant.
+        let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
+        assert!(
+            pos(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            }) < pos(&ContinuousModification::AddSubtype {
+                subtype: "Insect".to_string(),
+            }),
+            "RemoveAllSubtypes must precede AddSubtype(Insect): {mods:?}"
+        );
+    }
+
+    #[test]
+    fn enchanted_creature_is_blue_frog() {
+        // Frogify — CR 613.1d: non-additive → SetCardTypes; CR 613.1e: SetColor; CR 205.1a: RemoveAllSubtypes
+        let def = parse_static_line(
+            "Enchanted creature loses all abilities and is a 1/1 blue Frog creature.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        let mods = &def.modifications;
+        assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+        assert!(
+            mods.contains(&ContinuousModification::SetCardTypes {
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+            }),
+            "non-additive must use SetCardTypes: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::SetColor {
+                colors: vec![crate::types::mana::ManaColor::Blue],
+            }),
+            "non-additive must use SetColor: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            }),
+            "must auto-inject RemoveAllSubtypes{{Creature}}: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Frog".to_string(),
+            }),
+            "must emit AddSubtype(Frog): {mods:?}"
+        );
+        assert!(mods.contains(&ContinuousModification::SetPower { value: 1 }));
+        assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+        // CR 613.7 written-order: RemoveAllSubtypes must precede AddSubtype(Frog)
+        let pos = |m: &ContinuousModification| mods.iter().position(|x| x == m).unwrap();
+        assert!(
+            pos(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            }) < pos(&ContinuousModification::AddSubtype {
+                subtype: "Frog".to_string(),
+            }),
+            "RemoveAllSubtypes must precede AddSubtype(Frog): {mods:?}"
+        );
+    }
+
+    #[test]
+    fn enchanted_creature_is_blue_creature_no_subtype() {
+        // CR 205.1a: no new creature subtype granted → no Oracle instruction to wipe existing subtypes.
+        let def = parse_static_line("Enchanted creature is a blue creature.").unwrap();
+        let mods = &def.modifications;
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "no RemoveAllSubtypes when no new subtype granted: {mods:?}"
+        );
+        assert!(mods.contains(&ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Creature],
+        }));
+        assert!(mods.contains(&ContinuousModification::SetColor {
+            colors: vec![crate::types::mana::ManaColor::Blue],
+        }));
     }
 
     // --- CantBeCast (blanket casting prohibition) tests ---

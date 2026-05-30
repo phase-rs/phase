@@ -1754,6 +1754,36 @@ pub fn parse_type_phrase_with_ctx<'a>(
         );
     }
 
+    // CR 700.9 (modified) + CR 109.4 (control): "<typed filter> other than ~"
+    // excludes the ability source from the population. FilterProp::Another
+    // (filter.rs:2206) matches every object except the source, so the count
+    // omits the source permanent (Thundering Raiju: "modified creatures you
+    // control other than this creature" — normalized to "~"). The trailing
+    // self-reference is recognized via `nom_target::parse_self_reference`
+    // ("~"/"it"/"this creature"/…) plus an explicit "itself" alternative, which
+    // `parse_self_reference` does not cover.
+    {
+        let remaining_other_than = lower[pos..].trim_start();
+        let other_than_offset = lower[pos..].len() - remaining_other_than.len();
+        if let Ok((rest, _)) = (
+            tag::<_, _, OracleError<'_>>("other than "),
+            alt((
+                nom_target::parse_self_reference,
+                value(
+                    TargetFilter::SelfRef,
+                    tag::<_, _, OracleError<'_>>("itself"),
+                ),
+            )),
+        )
+            .parse(remaining_other_than)
+        {
+            if !properties.contains(&FilterProp::Another) {
+                properties.push(FilterProp::Another);
+            }
+            pos += other_than_offset + (remaining_other_than.len() - rest.len());
+        }
+    }
+
     // CR 205.3 + CR 205.4b: "that isn't a <Subtype>" relative-clause negation.
     // Checked before `parse_that_clause_suffix` so the subtype exclusion short-circuits
     // the generic that-clause branch (which does not recognize subtype negation).
@@ -8897,6 +8927,68 @@ mod tests {
         } else {
             panic!("Expected Typed filter, got {filter:?}");
         }
+    }
+
+    /// CR 700.9 + CR 109.4: "modified creatures you control other than ~"
+    /// (Thundering Raiju). The "modified" adjective adds `FilterProp::Modified`
+    /// and the trailing "other than ~" adds `FilterProp::Another` so the count
+    /// omits the source permanent.
+    #[test]
+    fn parse_type_phrase_modified_creatures_other_than_self() {
+        let (filter, rest) = parse_type_phrase("modified creatures you control other than ~");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.contains(&FilterProp::Modified),
+            "missing Modified in {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "missing Another in {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 109.4: "other than this creature" (the un-normalized form) also adds
+    /// `FilterProp::Another` via the "other than <self-ref>" suffix.
+    #[test]
+    fn parse_type_phrase_other_than_this_creature() {
+        let (filter, rest) = parse_type_phrase("creatures you control other than this creature");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "missing Another in {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 700.9 + CR 109.4: end-to-end quantity ref for Thundering Raiju —
+    /// "the number of modified creatures you control other than ~" →
+    /// `ObjectCount { Typed(Creature, You, [Modified, Another]) }`.
+    #[test]
+    fn parse_quantity_ref_modified_creatures_other_than_self() {
+        let q = crate::parser::oracle_quantity::parse_quantity_ref(
+            "the number of modified creatures you control other than ~",
+        )
+        .expect("should parse");
+        let QuantityRef::ObjectCount { filter } = q else {
+            panic!("Expected ObjectCount, got {q:?}");
+        };
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::Modified));
+        assert!(tf.properties.contains(&FilterProp::Another));
     }
 
     #[test]

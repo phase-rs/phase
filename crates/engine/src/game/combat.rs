@@ -175,6 +175,10 @@ pub fn enter_attacking(
             attack_target,
             defending_player,
         ));
+        // CR 508.4 + CR 506.4 + CR 613.1f: a permanent put onto the battlefield
+        // attacking is an attacking creature; re-evaluate Layer 6
+        // FilterProp::Attacking grants immediately.
+        state.layers_dirty = true;
     }
 }
 
@@ -283,6 +287,10 @@ pub fn place_attacking_alongside(
             attack_target,
             defending_player,
         ));
+        // CR 702.49c + CR 702.190b + CR 506.4 + CR 613.1f: Ninjutsu/Sneak place a
+        // creature already attacking; re-evaluate Layer 6 FilterProp::Attacking
+        // grants.
+        state.layers_dirty = true;
     }
 }
 
@@ -1527,6 +1535,12 @@ pub fn declare_attackers(
         .iter()
         .map(|a| a.defending_player)
         .collect();
+    // CR 508.1k + CR 506.4 + CR 613.1f: A chosen creature becomes attacking and
+    // stays attacking until removed from combat or the combat phase ends. Marking
+    // layers dirty forces Layer 6 ability-adding effects (CR 613.1f) with
+    // FilterProp::Attacking (e.g. Crossway Troublemakers) to re-evaluate now, so
+    // the grant is live for the whole combat, not just after damage.
+    state.layers_dirty = true;
     let attacker_count = combat.attackers.len();
 
     // Use the first attacker's defending player for the event
@@ -5318,5 +5332,81 @@ mod tests {
             "enters-attacking token must attack the declared defender, not its controller"
         );
         assert_eq!(info.attack_target, AttackTarget::Player(PlayerId(1)));
+    }
+
+    /// CR 508.4 + CR 613.1f: a creature put onto the battlefield attacking must
+    /// dirty layers so Layer 6 FilterProp::Attacking grants re-evaluate. Fails on
+    /// revert of the `enter_attacking` mark.
+    #[test]
+    fn enter_attacking_marks_layers_dirty() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let token = create_creature(&mut state, PlayerId(0), "Soldier", 1, 1);
+
+        state.combat = Some(CombatState::default());
+        state
+            .combat
+            .as_mut()
+            .unwrap()
+            .attackers
+            .push(AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ));
+
+        state.layers_dirty = false;
+        enter_attacking(&mut state, token, attacker, PlayerId(0));
+
+        assert!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .attackers
+                .iter()
+                .any(|a| a.object_id == token),
+            "entered-attacking creature must be in combat.attackers"
+        );
+        assert!(
+            state.layers_dirty,
+            "putting a creature onto the battlefield attacking must mark layers dirty"
+        );
+    }
+
+    /// CR 702.49c + CR 702.190b + CR 613.1f: Ninjutsu/Sneak place a creature
+    /// already attacking; the layers must re-evaluate Layer 6 FilterProp::Attacking
+    /// grants. Fails on revert of the `place_attacking_alongside` mark.
+    #[test]
+    fn place_attacking_alongside_marks_layers_dirty() {
+        let mut state = setup();
+        let ninja = create_creature(&mut state, PlayerId(0), "Ninja", 2, 2);
+
+        state.combat = Some(CombatState::default());
+        state.layers_dirty = false;
+
+        let mut events = Vec::new();
+        place_attacking_alongside(
+            &mut state,
+            ninja,
+            PlayerId(1),
+            AttackTarget::Player(PlayerId(1)),
+            &mut events,
+        );
+
+        assert!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .attackers
+                .iter()
+                .any(|a| a.object_id == ninja),
+            "place_attacking_alongside must add the creature to combat.attackers"
+        );
+        assert!(
+            state.layers_dirty,
+            "placing a creature already attacking must mark layers dirty"
+        );
     }
 }
