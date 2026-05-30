@@ -112,7 +112,9 @@ pub fn prepare_snapshot(
         legal_actions_for_viewer(raw_state, viewer);
     let mut state = filter_state_for_viewer(raw_state, viewer);
     derive_display_state(&mut state);
-    let derived = derive_views(&state);
+    // CR 604.1: scope viewer-derived projections (e.g. web-slinging costs) to the
+    // requesting player's own hand — this snapshot is already viewer-filtered.
+    let derived = derive_views(&state, Some(viewer));
 
     Ok(PreparedManabrewSnapshot {
         game_id: game_id.into(),
