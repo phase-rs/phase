@@ -1431,6 +1431,9 @@ pub enum AlternativeCastKeyword {
     Overload,
     /// CR 702.103a: Spell becomes an Aura with enchant creature (CR 702.103b).
     Bestow,
+    /// CR 702.148a-b + CR 612: Paying the cleave cost removes every
+    /// square-bracketed span from the spell's text (a text-changing effect).
+    Cleave,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -3475,6 +3478,17 @@ pub enum CastingVariant {
     /// battlefield, the type-changing effect ends — it remains as an
     /// enchantment creature (overrides CR 704.5m for bestow Auras).
     Bestow,
+    /// CR 702.148a-b + CR 612: Cast from hand via Cleave's alternative cost
+    /// (CR 118.9). The printed mana cost is replaced by `Keyword::Cleave(cost)`
+    /// at cast preparation (mirrors `Evoke`/`Overload`). Per CR 702.148a, paying
+    /// the cleave cost is a text-changing effect (CR 612) that removes every
+    /// square-bracketed span from the spell's rules text. The bracket-removed
+    /// ability set is parsed at build time into `CardFace::cleave_variant` and
+    /// swapped onto the stack object before preparation (mirroring the Bestow
+    /// object-mutation-before-prepare seam). Resolution routing matches a normal
+    /// spell — there is no on-resolve special behavior, so the spell goes to its
+    /// owner's graveyard like any instant/sorcery.
+    Cleave,
 }
 
 impl CastingVariant {

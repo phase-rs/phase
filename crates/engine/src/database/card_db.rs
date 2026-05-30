@@ -436,6 +436,7 @@ mod tests {
             triggers: Vec::<TriggerDefinition>::new(),
             static_abilities: Vec::<StaticDefinition>::new(),
             replacements: Vec::<ReplacementDefinition>::new(),
+            cleave_variant: None,
             color_override: None,
             color_identity: vec![],
             scryfall_oracle_id: None,

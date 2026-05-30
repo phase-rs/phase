@@ -19,7 +19,7 @@ use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{anychar, multispace0, multispace1};
 use nom::combinator::{all_consuming, eof, map, not, opt, recognize, rest, value};
 use nom::multi::{many1, separated_list1};
-use nom::sequence::{delimited, preceded, terminated};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_nom::bridge::nom_on_lower;
@@ -10737,7 +10737,10 @@ fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (Tar
 }
 
 /// Split a post-"choose" clause into the card-description phrase and any trailing
-/// cleave-style bracket suffix after `"from it"` (e.g. `[with mana value 2 or less]`).
+/// restriction suffix after `"from it"` (e.g. `"with mana value 2 or less"`).
+/// CR 702.148a: cleave brackets are removed at build time, so the suffix here is
+/// plain text — `combine_choose_filter_parts` merges it and relies on
+/// `parse_search_filter`'s self-bounding terminator to drop any trailing sentence.
 fn choose_filter_parts(text: &str) -> (&str, &str) {
     if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from among those")
     {
@@ -10761,15 +10764,6 @@ fn parse_choose_filter_leading_body(input: &str) -> &str {
         .unwrap_or(input.trim())
 }
 
-fn parse_cleave_bracket_suffix_body(input: &str) -> &str {
-    type E<'a> = OracleError<'a>;
-    nom_primitives::scan_preceded(input.trim(), |i| {
-        delimited(tag("["), take_until::<_, _, E>("]"), tag("]")).parse(i)
-    })
-    .map(|(_, inner, _)| inner.trim())
-    .unwrap_or("")
-}
-
 fn trailing_bare_article_only(input: &str) -> bool {
     type E<'a> = OracleError<'a>;
     opt(alt((
@@ -10780,10 +10774,19 @@ fn trailing_bare_article_only(input: &str) -> bool {
     .is_ok()
 }
 
-/// Merge the pre-`from it` card phrase with an optional bracketed restriction suffix.
+/// Merge the pre-`from it` card phrase with the plain trailing restriction
+/// suffix that follows `"card from it"` (e.g. `"with mana value 2 or less"`).
+///
+/// CR 702.148a: Cleave's bracketed text is removed at build time before this
+/// parse runs (the base parse sees the bracket *content* without the bracket
+/// characters; the cleave-cost parse sees it removed entirely). So the suffix
+/// here is plain text, not a bracketed span. The merged string is handed to
+/// `parse_search_filter`, whose `search_filter_region` self-bounds at the first
+/// `". "`/`"."`, so any trailing sentence (Dread Fugue's "That player discards
+/// that card.") is naturally dropped without bracket-specific extraction.
 fn combine_choose_filter_parts(filter_part: &str, suffix_part: &str) -> String {
     let filter_part = parse_choose_filter_leading_body(filter_part);
-    let suffix = parse_cleave_bracket_suffix_body(suffix_part);
+    let suffix = suffix_part.trim();
     if suffix.is_empty() {
         filter_part.to_string()
     } else if filter_part.is_empty() {
@@ -29500,8 +29503,14 @@ mod tests {
 
     #[test]
     fn dread_fugue_choose_from_revealed_hand_includes_cmc_leq_2() {
+        // CR 702.148a: Cleave's bracketed text is removed at build time, so the
+        // parser receives the bracket-stripped (KeepContent) base text — the
+        // brackets are gone, their inner restriction kept. This test exercises
+        // the base-mode retarget: the plain trailing "with mana value 2 or less"
+        // suffix after "card from it" must merge into the reveal-choice filter,
+        // with `parse_search_filter` self-bounding at the next sentence.
         let def = parse_effect_chain(
-            "Target player reveals their hand. You choose a nonland card from it [with mana value 2 or less]. That player discards that card.",
+            "Target player reveals their hand. You choose a nonland card from it with mana value 2 or less. That player discards that card.",
             AbilityKind::Spell,
         );
 
@@ -31010,10 +31019,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_choose_filter_merges_cleave_bracket_cmc_suffix() {
+    fn parse_choose_filter_merges_trailing_cmc_suffix() {
+        // CR 702.148a: Dread Fugue's base-mode (KeepContent) text — brackets
+        // removed at build time, inner restriction kept. The plain "with mana
+        // value 2 or less" suffix after "card from it" must merge into the
+        // filter, with the trailing "That player discards that card." sentence
+        // dropped by `parse_search_filter`'s self-bounding terminator.
         let mut ctx = ParseContext::default();
         let lower =
-            "you choose a nonland card from it [with mana value 2 or less]. that player discards that card.";
+            "you choose a nonland card from it with mana value 2 or less. that player discards that card.";
         let filter = parse_choose_filter(lower, &mut ctx);
         assert!(
             matches!(

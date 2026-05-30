@@ -72,6 +72,14 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.bestowSubtitle", { name: cardName }),
       };
+    case "Cleave":
+      return {
+        eyebrow: t("alternativeCost.cleaveEyebrow"),
+        normalLabel: t("alternativeCost.cleaveNormalLabel"),
+        altLabel: t("alternativeCost.cleaveAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.cleaveSubtitle", { name: cardName }),
+      };
   }
 }
 
@@ -105,8 +113,8 @@ function describeAdditionalCost(
 /**
  * CR 118.9: Unified prompt for keyword-granted alternative casting costs
  * (Warp custom, Evoke per CR 702.74a, Overload per CR 702.96a, Bestow per
- * CR 702.103a). All four share the same player-decision shape; the engine's
- * `keyword` axis selects display copy only.
+ * CR 702.103a, Cleave per CR 702.148a). All share the same player-decision
+ * shape; the engine's `keyword` axis selects display copy only.
  */
 export function AlternativeCostModal() {
   const canActForWaitingState = useCanActForWaitingState();

@@ -3,6 +3,7 @@ use std::str::FromStr;
 use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
+use crate::parser::oracle_util::{apply_bracket_mode, BracketMode};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
     AdditionalCostPaymentSource, AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType,
@@ -652,99 +653,6 @@ pub fn synthesize_changeling_cda(face: &mut CardFace) {
 /// If the card has Kicker and no additional_cost was already parsed from Oracle text
 /// (blight takes precedence since it's parsed from the "as an additional cost" line),
 /// set `additional_cost = Some(AdditionalCost::Kicker { ... })`.
-// CR 702.148a: Cleave — paying the cleave cost removes bracketed restrictions from
-// the spell's text while it is on the stack. Parser emits the full restriction on
-// the base spell ability; synthesis attaches an `AdditionalCostPaidInstead` branch
-// with CMC (and other bracket-only) properties stripped from the reveal-hand choice.
-pub fn synthesize_cleave(face: &mut CardFace) {
-    if !face
-        .keywords
-        .iter()
-        .any(|kw| matches!(kw, Keyword::Cleave(_)))
-    {
-        return;
-    }
-    for ability in &mut face.abilities {
-        wrap_cleave_reveal_hand_branch(ability);
-    }
-}
-
-fn reveal_hand_filter_has_cmc(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(tf) => tf
-            .properties
-            .iter()
-            .any(|prop| matches!(prop, FilterProp::Cmc { .. })),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(reveal_hand_filter_has_cmc)
-        }
-        TargetFilter::Not { filter } => reveal_hand_filter_has_cmc(filter),
-        _ => false,
-    }
-}
-
-fn reveal_hand_chain_has_cmc_filter(def: &AbilityDefinition) -> bool {
-    match def.effect.as_ref() {
-        Effect::RevealHand { card_filter, .. } if reveal_hand_filter_has_cmc(card_filter) => true,
-        _ => def
-            .sub_ability
-            .as_deref()
-            .is_some_and(reveal_hand_chain_has_cmc_filter),
-    }
-}
-
-fn strip_cmc_from_reveal_hand_filter(filter: TargetFilter) -> TargetFilter {
-    match filter {
-        TargetFilter::Typed(mut tf) => {
-            tf.properties
-                .retain(|prop| !matches!(prop, FilterProp::Cmc { .. }));
-            TargetFilter::Typed(tf)
-        }
-        TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters
-                .into_iter()
-                .map(strip_cmc_from_reveal_hand_filter)
-                .collect(),
-        },
-        TargetFilter::And { filters } => TargetFilter::And {
-            filters: filters
-                .into_iter()
-                .map(strip_cmc_from_reveal_hand_filter)
-                .collect(),
-        },
-        TargetFilter::Not { filter } => TargetFilter::Not {
-            filter: Box::new(strip_cmc_from_reveal_hand_filter(*filter)),
-        },
-        other => other,
-    }
-}
-
-fn strip_cmc_from_reveal_hand_chain(mut def: AbilityDefinition) -> AbilityDefinition {
-    if let Effect::RevealHand {
-        ref mut card_filter,
-        ..
-    } = def.effect.as_mut()
-    {
-        *card_filter = strip_cmc_from_reveal_hand_filter(card_filter.clone());
-    }
-    if let Some(sub) = def.sub_ability.take() {
-        def.sub_ability = Some(Box::new(strip_cmc_from_reveal_hand_chain(*sub)));
-    }
-    def
-}
-
-fn wrap_cleave_reveal_hand_branch(def: &mut AbilityDefinition) {
-    if def.condition == Some(AbilityCondition::AdditionalCostPaidInstead) {
-        return;
-    }
-    if !reveal_hand_chain_has_cmc_filter(def) {
-        return;
-    }
-    let mut paid = strip_cmc_from_reveal_hand_chain(def.clone());
-    paid.condition = Some(AbilityCondition::AdditionalCostPaidInstead);
-    def.sub_ability = Some(Box::new(paid));
-}
-
 pub fn synthesize_kicker(face: &mut CardFace) {
     if face.additional_cost.is_some() {
         return;
@@ -3983,7 +3891,6 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_ninjutsu_family(face);
     synthesize_changeling_cda(face);
     synthesize_kicker(face);
-    synthesize_cleave(face);
     synthesize_buyback(face);
     synthesize_bargain(face);
     synthesize_gift(face);
@@ -4322,19 +4229,65 @@ fn build_oracle_face_inner(
             .unwrap_or_default()
     };
 
-    let oracle_text = mtgjson.text.as_deref().unwrap_or("");
+    let raw_oracle_text = mtgjson.text.as_deref().unwrap_or("");
     let face_name = mtgjson.face_name.as_deref().unwrap_or(&mtgjson.name);
 
     let types: Vec<String> = mtgjson.types.clone();
     let subtypes: Vec<String> = mtgjson.subtypes.clone();
 
+    // CR 702.148a-b + CR 612: Cleave's second ability is a text-changing effect
+    // that removes every square-bracketed span from the spell's rules text. The
+    // brackets mark the cleave-removable clause within the shared Oracle text.
+    //
+    // The bracket strip is GATED on the face having Cleave — 362 planeswalkers
+    // use `[+N]`/`[−N]`/`[0]` loyalty brackets and an unconditional strip would
+    // corrupt them. MTGJSON reports the `Cleave` keyword for every cleave card,
+    // so the lowercased keyword-name check is a reliable pre-parse gate.
+    let has_cleave = mtgjson_keyword_names.iter().any(|n| n == "cleave");
+
+    // CR 702.148a base text: keep the bracketed clause but drop the bracket
+    // characters so the printed-cost parse is correct (Fierce Retribution's
+    // `[attacking]`, Path of Peril's `[mv≤2]`, Winged Portent's `[with flying]`,
+    // Dig Up's `[basic land]`/`[reveal it,]`). For non-cleave faces this is a
+    // no-op (the text never enters the strip), preserving every other parse.
+    let base_oracle_text = if has_cleave {
+        apply_bracket_mode(raw_oracle_text, BracketMode::KeepContent)
+    } else {
+        raw_oracle_text.to_string()
+    };
+
     let parsed = parse_oracle_text(
-        oracle_text,
+        &base_oracle_text,
         face_name,
         &parser_keyword_names,
         &types,
         &subtypes,
     );
+
+    // CR 702.148a-b: When the face has Cleave, run a SECOND parse over the
+    // bracket-removed (cleave-cost) text and stash the resulting ability set in
+    // `cleave_variant`. The casting flow swaps this onto the stack object when
+    // the spell is cast for its cleave cost. This is a leaf parse — the variant
+    // is stored on the face, never re-projected through `synthesize_all`, so
+    // there is no cleave recursion.
+    let cleave_variant = if has_cleave {
+        let cleave_text = apply_bracket_mode(raw_oracle_text, BracketMode::RemoveSpan);
+        let cleave_parsed = parse_oracle_text(
+            &cleave_text,
+            face_name,
+            &parser_keyword_names,
+            &types,
+            &subtypes,
+        );
+        Some(crate::types::card::CleaveVariant {
+            abilities: cleave_parsed.abilities,
+            triggers: cleave_parsed.triggers,
+            static_abilities: cleave_parsed.statics,
+            replacements: cleave_parsed.replacements,
+        })
+    } else {
+        None
+    };
 
     // Merge keywords extracted from Oracle text with MTGJSON keywords.
     // When the Oracle parser extracts a parameterized keyword (e.g., Morph({2}{B}{G}{U})),
@@ -4355,7 +4308,7 @@ fn build_oracle_face_inner(
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
     // Partner(Generic) via FromStr. Scan Oracle text for the actual partner name.
     if mtgjson_keyword_names.contains(&"partner with".to_string()) {
-        let lower_oracle = oracle_text.to_lowercase();
+        let lower_oracle = raw_oracle_text.to_lowercase();
         if let Some(line) = lower_oracle
             .lines()
             .find(|l| l.starts_with("partner with "))
@@ -4449,6 +4402,7 @@ fn build_oracle_face_inner(
         triggers: parsed.triggers,
         static_abilities: parsed.statics,
         replacements: parsed.replacements,
+        cleave_variant,
         color_override,
         color_identity: mtgjson
             .color_identity
@@ -4479,51 +4433,6 @@ fn build_oracle_face_inner(
 mod kicker_synthesis_tests {
     use super::*;
     use crate::types::mana::ManaCostShard;
-
-    #[test]
-    fn synthesize_cleave_splits_reveal_hand_cmc_branch() {
-        let mut face = CardFace {
-            keywords: vec![Keyword::Cleave(ManaCost::Cost {
-                generic: 2,
-                shards: vec![ManaCostShard::Black],
-            })],
-            abilities: vec![AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::RevealHand {
-                    target: TargetFilter::Player,
-                    card_filter: TargetFilter::Typed(
-                        TypedFilter::card()
-                            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
-                            .properties(vec![FilterProp::Cmc {
-                                comparator: Comparator::LE,
-                                value: QuantityExpr::Fixed { value: 2 },
-                            }]),
-                    ),
-                    count: None,
-                    random: false,
-                    choice_optional: false,
-                },
-            )],
-            ..CardFace::default()
-        };
-
-        synthesize_cleave(&mut face);
-
-        let base = &face.abilities[0];
-        assert!(
-            reveal_hand_chain_has_cmc_filter(base),
-            "base branch should keep CMC restriction"
-        );
-        let paid = base.sub_ability.as_deref().expect("cleave paid branch");
-        assert_eq!(
-            paid.condition,
-            Some(AbilityCondition::AdditionalCostPaidInstead)
-        );
-        assert!(
-            !reveal_hand_chain_has_cmc_filter(paid),
-            "cleave-paid branch should drop CMC restriction"
-        );
-    }
 
     #[test]
     fn synthesize_kicker_sets_typed_kicker_additional_cost() {

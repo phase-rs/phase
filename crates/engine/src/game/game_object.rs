@@ -297,6 +297,14 @@ pub struct GameObject {
     pub trigger_definitions: Definitions<TriggerDefinition>,
     pub replacement_definitions: Definitions<ReplacementDefinition>,
     pub static_definitions: Definitions<StaticDefinition>,
+    /// CR 702.148a-b + CR 612: When this object is a cleave spell, the alternate
+    /// ability set produced by removing every square-bracketed span from its
+    /// rules text. Projected from `CardFace::cleave_variant`. The casting flow
+    /// swaps this onto `abilities`/`trigger_definitions`/etc. before preparing
+    /// the spell when it is cast for its cleave cost. `None` for every other
+    /// object, keeping serialized state byte-identical for the rest of the corpus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleave_variant: Option<crate::types::card::CleaveVariant>,
     pub color: Vec<ManaColor>,
     pub printed_ref: Option<PrintedCardRef>,
     /// Exact token-art lookup metadata, populated only when the engine can
@@ -828,6 +836,7 @@ impl GameObject {
             additional_cost_payment_count: 0,
             convoked_creatures: Vec::new(),
             bestow_form: None,
+            cleave_variant: None,
             unimplemented_mechanics: Vec::new(),
             has_summoning_sickness: false,
             has_mana_ability: false,

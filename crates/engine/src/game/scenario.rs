@@ -13,6 +13,7 @@ use crate::game::game_object::GameObject;
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
+use crate::parser::oracle_util::{apply_bracket_mode, BracketMode};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AdditionalCost, Effect, PtValue, QuantityExpr,
     ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition,
@@ -82,13 +83,43 @@ fn build_face_from_oracle(
         keyword_names
     };
 
+    // CR 702.148a-b + CR 612: mirror `build_oracle_face_inner`'s cleave bracket
+    // prep so test fixtures exercise the real cleave flow. Gated on the keyword
+    // hints containing "cleave" (the inline-Oracle analog of MTGJSON reporting
+    // the keyword) so loyalty/other bracket usage is never stripped.
+    let has_cleave = effective_kw_names.iter().any(|n| n == "cleave");
+    let base_oracle_text = if has_cleave {
+        apply_bracket_mode(oracle_text, BracketMode::KeepContent)
+    } else {
+        oracle_text.to_string()
+    };
+
     let parsed = parse_oracle_text(
-        oracle_text,
+        &base_oracle_text,
         &obj.name,
         effective_kw_names,
         &type_strings,
         &subtype_strings,
     );
+
+    let cleave_variant = if has_cleave {
+        let cleave_text = apply_bracket_mode(oracle_text, BracketMode::RemoveSpan);
+        let cleave_parsed = parse_oracle_text(
+            &cleave_text,
+            &obj.name,
+            effective_kw_names,
+            &type_strings,
+            &subtype_strings,
+        );
+        Some(crate::types::card::CleaveVariant {
+            abilities: cleave_parsed.abilities,
+            triggers: cleave_parsed.triggers,
+            static_abilities: cleave_parsed.statics,
+            replacements: cleave_parsed.replacements,
+        })
+    } else {
+        None
+    };
 
     // Merge keywords: parse keyword names into Keyword values (mirroring how
     // build_oracle_face merges MTGJSON keywords with extracted_keywords).
@@ -124,6 +155,7 @@ fn build_face_from_oracle(
         triggers: parsed.triggers,
         static_abilities: parsed.statics,
         replacements: parsed.replacements,
+        cleave_variant,
         modal: parsed.modal,
         additional_cost: parsed.additional_cost,
         casting_restrictions: parsed.casting_restrictions,
@@ -1262,6 +1294,9 @@ impl GameRunner {
                 }
                 crate::types::game_state::AlternativeCastKeyword::Bestow => {
                     "AlternativeCastChoice(Bestow)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Cleave => {
+                    "AlternativeCastChoice(Cleave)"
                 }
             },
             WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",

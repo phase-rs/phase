@@ -1560,10 +1560,10 @@ fn apply_action(
         // CR 118.9: Player chooses between the printed mana cost and the
         // keyword-granted alternative cost. The `keyword` axis on the waiting
         // state drives dispatch to the per-keyword post-payment handler
-        // (CR 702.74a Evoke, CR 702.96a Overload, CR 702.103a Bestow, custom
-        // Warp). Each keyword retains its own resolver because post-payment
-        // semantics genuinely diverge — the unification is purely at the
-        // player-decision layer.
+        // (CR 702.74a Evoke, CR 702.96a Overload, CR 702.103a Bestow,
+        // CR 702.148a Cleave, custom Warp). Each keyword retains its own
+        // resolver because post-payment semantics genuinely diverge — the
+        // unification is purely at the player-decision layer.
         (
             WaitingFor::AlternativeCastChoice {
                 player,
@@ -1610,6 +1610,17 @@ fn apply_action(
                 }
                 AlternativeCastKeyword::Bestow => {
                     casting::handle_bestow_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
+                AlternativeCastKeyword::Cleave => {
+                    casting::handle_cleave_cost_choice_with_payment_mode(
                         state,
                         *player,
                         *object_id,
