@@ -215,6 +215,17 @@ fn parse_remove_counter_quantity_and_kind(
     {
         return Some((u32::MAX, counter_type));
     }
+    // CR 107.1c: "any number of" — variable removal, semantically equivalent to
+    // "all" (the player chooses how many to remove; u32::MAX lets the runtime
+    // clamp to the actual count via saturating subtraction).
+    if let Ok((_, counter_type)) = all_consuming(preceded(
+        tag::<_, _, E<'_>>("any number of "),
+        parse_remove_counter_kind,
+    ))
+    .parse(input)
+    {
+        return Some((u32::MAX, counter_type));
+    }
     if let Ok((_, (count, counter_type))) = all_consuming(pair(
         terminated(nom_primitives::parse_number, tag::<_, _, E<'_>>(" ")),
         parse_remove_counter_kind,
@@ -1730,6 +1741,34 @@ mod tests {
             AbilityCost::RemoveCounter {
                 count: 1,
                 counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Plus1Plus1),
+                target: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_remove_any_number_of_storage_counters_from_self() {
+        assert_eq!(
+            parse_oracle_cost("Remove any number of storage counters from ~"),
+            AbilityCost::RemoveCounter {
+                count: u32::MAX,
+                counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
+                    "storage".to_string()
+                ),),
+                target: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_remove_any_number_of_charge_counters_from_self() {
+        assert_eq!(
+            parse_oracle_cost("Remove any number of charge counters from ~"),
+            AbilityCost::RemoveCounter {
+                count: u32::MAX,
+                counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
+                    "charge".to_string()
+                ),),
                 target: None,
             }
         );
