@@ -2645,6 +2645,19 @@ fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
         .parse(i)
     })?;
 
+    // CR 603.2d: `parse_type_phrase` models a single type clause, so a
+    // disjunctive source ("a Shaman or another Wizard you control",
+    // Harmonic Prodigy) parses to only the first disjunct — silently dropping
+    // the remaining disjuncts AND the "you control" scope, yielding a
+    // controller-less `Subtype(Shaman)` that would wrongly double an opponent's
+    // Shaman's triggers. Until `parse_type_phrase` models top-level
+    // disjunctions, bail to `None` on a disjunctive source so the doubler keeps
+    // its controller-scoped "all your triggers" fallback (the pre-existing
+    // behavior) rather than mis-scoping to a single uncontrolled subtype.
+    if nom_primitives::scan_contains(source_phrase, "or ") {
+        return None;
+    }
+
     let (filter, _) = parse_type_phrase(source_phrase);
     let TargetFilter::Typed(tf) = &filter else {
         return None;
@@ -25003,6 +25016,35 @@ mod snapshot_tests {
             }
             other => panic!("expected Typed filter, got {other:?}"),
         }
+    }
+
+    /// CR 603.2d: A disjunctive source ("a Shaman or another Wizard you
+    /// control", Harmonic Prodigy) exceeds `parse_type_phrase`'s single-clause
+    /// model. Parsing only the first disjunct would drop "or Wizard" AND the
+    /// "you control" scope, yielding a controller-less `Subtype(Shaman)` that
+    /// doubles an *opponent's* Shaman's triggers. The parser must instead leave
+    /// `affected` unset, falling back to the controller-scoped "all your
+    /// triggers" default (the pre-restriction behavior) rather than mis-scoping.
+    /// Discriminating: without the disjunction guard this parses to
+    /// `affected == Some(Typed { Subtype(Shaman), controller: None })` and fails.
+    #[test]
+    fn harmonic_prodigy_disjunctive_source_falls_back_to_no_filter() {
+        let def = parse_static_line(
+            "If a triggered ability of a Shaman or another Wizard you control triggers, that ability triggers an additional time.",
+        )
+        .expect("expected DoubleTriggers static for Harmonic Prodigy");
+        assert_eq!(
+            def.mode,
+            StaticMode::DoubleTriggers {
+                cause: TriggerCause::Any
+            }
+        );
+        assert!(
+            def.affected.is_none(),
+            "disjunctive source must not produce a single-disjunct `affected` \
+             filter (would mis-scope to an uncontrolled Shaman); got {:?}",
+            def.affected
+        );
     }
 
     /// CR 603.6a: Panharmonicon's source is the unrestricted "a permanent you
