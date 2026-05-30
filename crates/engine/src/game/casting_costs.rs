@@ -897,6 +897,15 @@ pub(crate) fn handle_return_to_hand_for_cost(
         }
     }
 
+    // CR 603.10a co-departed sibling (confirmed-excluded, mirrors the Ward
+    // GAP comment): permanents returned to hand as a cost leave the battlefield
+    // together, so a co-departing leaves-the-battlefield observer among them
+    // would under-observe — the same gap `handle_sacrifice_for_cost` closes with
+    // a `mark_simultaneous_departures` stamp. Not stamped here because
+    // return-to-hand-as-cost is effectively always a single permanent (Daze,
+    // Karoo lands, Cavern Harpy): `count` is almost always 1, so the stamp's
+    // `len() < 2` guard would no-op. If a >=2-permanent return-to-hand cost ever
+    // ships, mirror the A1 stamp from `handle_sacrifice_for_cost` here.
     for &id in chosen {
         super::zones::move_to_zone(state, id, Zone::Hand, events);
     }

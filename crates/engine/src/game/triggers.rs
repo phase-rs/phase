@@ -15439,7 +15439,7 @@ pub mod tests {
         );
     }
 
-    /// CR 603.10a + CR 614.12b (DEFERRED cross-pause residual): when a mass
+    /// CR 603.10a (DEFERRED cross-pause residual): when a mass
     /// `ChangeZone` battlefield→hand batch pauses mid-batch on a per-permanent
     /// `MayCost { Moved }` replacement choice, the pre-pause-moved members and
     /// the post-pause-moved members are stamped as separate co-departed groups
