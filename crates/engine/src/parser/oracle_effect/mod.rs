@@ -5557,12 +5557,15 @@ enum EqualizeVerb {
 fn balance_clause_effect(verb: EqualizeVerb, filter: TargetFilter) -> Effect {
     match verb {
         // CR 701.21a: battlefield clause — "lands they control" / "creatures
-        // they control". `filter` carries `controller: You`, rebound to the
-        // iterating player by the `player_scope` driver.
+        // they control". `filter` carries `controller: You`. The sacrifice
+        // `target` and the RIGHT `ControlledByEachPlayer` Min keep `You`; the
+        // LEFT per-player count is re-scoped to `ScopedPlayer` so it reads the
+        // iterating player at the `resolve_ref` seam (CR 109.5) rather than the
+        // caster. See `balance_filter_scoped_player`.
         EqualizeVerb::Sacrifice => {
             let left = QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
-                    filter: filter.clone(),
+                    filter: balance_filter_scoped_player(&filter),
                 },
             };
             let right = QuantityExpr::Ref {
@@ -5624,6 +5627,30 @@ fn balance_filter_you_control(filter: TargetFilter) -> TargetFilter {
             ..tf
         }),
         other => other,
+    }
+}
+
+/// CR 109.5 + CR 608.2c: Re-scope a Balance battlefield filter's controller to
+/// `ScopedPlayer` for the per-player LEFT count operand. "Lands/creatures they
+/// control" names the iterating player, but a quantity sub-expression is read
+/// against the *printed* controller at the `resolve_ref` seam (CR 109.5) — so a
+/// `controller: You` LEFT operand counts the caster's permanents, not the
+/// iterating player's. `ScopedPlayer` resolves via `scoped_player_or_controller`
+/// (reads `ability.scoped_player`, bound per-iteration by the `player_scope`
+/// driver) and is immune to that seam, mirroring the hand clause's already-
+/// correct `HandSize { ScopedPlayer }`. Only the LEFT operand is re-scoped: the
+/// sacrifice `target` keeps `You` (its scope follows `ability.controller`, which
+/// the driver rebinds per player) and the RIGHT `ControlledByEachPlayer` Min
+/// operand keeps `You` (it builds its own per-player context and gates on
+/// `obj.controller == p.id` — `ScopedPlayer` there would collapse to the
+/// iterating player and zero the minimum).
+fn balance_filter_scoped_player(filter: &TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf) => TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::ScopedPlayer),
+            ..tf.clone()
+        }),
+        other => other.clone(),
     }
 }
 
@@ -41300,21 +41327,37 @@ mod snapshot_tests {
         let QuantityExpr::Difference { left, right } = count else {
             panic!("sacrifice count must be a Difference, got {count:?}");
         };
-        assert!(matches!(
-            &**left,
-            QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCount { .. }
-            }
-        ));
-        assert!(matches!(
-            &**right,
-            QuantityExpr::Ref {
-                qty: QuantityRef::ControlledByEachPlayer {
-                    aggregate: AggregateFunction::Min,
-                    ..
-                }
-            }
-        ));
+        // CR 109.5: the LEFT per-player count is re-scoped to `ScopedPlayer` so
+        // it reads the iterating player at the `resolve_ref` seam, not the
+        // caster. A `You` LEFT operand is the regression: every player would cut
+        // to the caster's count − min instead of their own.
+        assert!(
+            matches!(
+                &**left,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf)
+                    }
+                } if tf.controller == Some(ControllerRef::ScopedPlayer)
+            ),
+            "LEFT count operand must be ObjectCount scoped to ScopedPlayer, got {left:?}"
+        );
+        // CR 107.1 + CR 608.2e: the RIGHT minimum keeps `You` — it builds its own
+        // per-player context (`from_ability_with_controller(a, p.id)` + the
+        // `obj.controller == p.id` gate). `ScopedPlayer` here would collapse to
+        // the iterating player and zero the cross-player minimum.
+        assert!(
+            matches!(
+                &**right,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ControlledByEachPlayer {
+                        aggregate: AggregateFunction::Min,
+                        filter: TargetFilter::Typed(tf),
+                    }
+                } if tf.controller == Some(ControllerRef::You)
+            ),
+            "RIGHT minimum operand must be ControlledByEachPlayer(Min) scoped to You, got {right:?}"
+        );
     }
 
     /// Assert a `Difference { HandSize(ScopedPlayer), HandSize(AllPlayers Min) }`
