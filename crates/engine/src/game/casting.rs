@@ -7826,7 +7826,9 @@ pub(crate) fn find_eligible_remove_counter_for_cost_targets(
             state.objects.get(&id).is_some_and(|obj| {
                 obj.controller == player
                     && super::filter::matches_target_filter(state, id, target, &ctx)
-                    && removable_counter_count(obj, counter_type) >= count
+                    // CR 107.2: u32::MAX encodes "any number of" — always eligible.
+                    && (count == u32::MAX
+                        || removable_counter_count(obj, counter_type) >= count)
             })
         })
         .collect()

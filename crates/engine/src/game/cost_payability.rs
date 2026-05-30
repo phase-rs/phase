@@ -193,23 +193,31 @@ impl AbilityCost {
             // CR 601.2b: RemoveCounter requires counters on the implied target.
             // If `target` is None, the source must have the required counters.
             // Otherwise, at least one matching permanent must carry N counters.
+            // CR 107.2: `u32::MAX` encodes "any number of" — the player chooses
+            // how many counters to remove (including zero), so the cost is always
+            // payable regardless of the current counter count.
             AbilityCost::RemoveCounter {
                 count,
                 counter_type,
                 target,
-            } => match target {
-                None => counter_on_object(state, source, counter_type) >= *count,
-                Some(tf) => {
-                    let ctx = FilterContext::from_source(state, source);
-                    state.battlefield.iter().any(|&id| {
-                        state.objects.get(&id).is_some_and(|o| {
-                            o.controller == player
-                                && matches_target_filter(state, id, tf, &ctx)
-                                && counter_on_object(state, id, counter_type) >= *count
-                        })
-                    })
+            } => {
+                if *count == u32::MAX {
+                    return true;
                 }
-            },
+                match target {
+                    None => counter_on_object(state, source, counter_type) >= *count,
+                    Some(tf) => {
+                        let ctx = FilterContext::from_source(state, source);
+                        state.battlefield.iter().any(|&id| {
+                            state.objects.get(&id).is_some_and(|o| {
+                                o.controller == player
+                                    && matches_target_filter(state, id, tf, &ctx)
+                                    && counter_on_object(state, id, counter_type) >= *count
+                            })
+                        })
+                    }
+                }
+            }
             // CR 107.14: A player can pay {E} only if they have enough energy.
             // CR 107.3c: Resolve the `QuantityExpr` so dynamic amounts read game
             // state. `Variable("X")` resolves to 0 — always payable, which
@@ -673,6 +681,39 @@ mod tests {
         assert!(
             !cost.is_payable(&scenario.state, P0, src),
             "untyped 'remove a counter' must be unpayable when no counters of any kind are present",
+        );
+    }
+
+    /// CR 107.2: "Remove any number of" counters is always payable — the
+    /// player may choose zero, so no minimum counter count is required.
+    #[test]
+    fn remove_counter_any_number_always_payable() {
+        use crate::types::counter::CounterType;
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Mage-Ring Network", 0, 0).id();
+        let cost = AbilityCost::RemoveCounter {
+            count: u32::MAX,
+            counter_type: crate::types::counter::CounterMatch::OfType(CounterType::Generic(
+                "storage".to_string(),
+            )),
+            target: None,
+        };
+        // Payable even with zero counters.
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "'remove any number of' must be payable even with zero counters",
+        );
+        // Still payable with some counters.
+        scenario
+            .state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("storage".to_string()), 3);
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "'remove any number of' must be payable with counters present",
         );
     }
 }

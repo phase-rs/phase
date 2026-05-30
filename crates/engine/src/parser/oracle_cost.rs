@@ -215,9 +215,9 @@ fn parse_remove_counter_quantity_and_kind(
     {
         return Some((u32::MAX, counter_type));
     }
-    // CR 107.1c: "any number of" — variable removal, semantically equivalent to
-    // "all" (the player chooses how many to remove; u32::MAX lets the runtime
-    // clamp to the actual count via saturating subtraction).
+    // CR 107.2: "any number of" — variable removal; the player chooses how
+    // many counters to remove (including zero). u32::MAX lets the runtime
+    // clamp to the actual count via saturating subtraction.
     if let Ok((_, counter_type)) = all_consuming(preceded(
         tag::<_, _, E<'_>>("any number of "),
         parse_remove_counter_kind,
@@ -1769,6 +1769,18 @@ mod tests {
                 counter_type: CounterMatch::OfType(crate::types::counter::CounterType::Generic(
                     "charge".to_string()
                 ),),
+                target: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_remove_any_number_of_counters_from_self() {
+        assert_eq!(
+            parse_oracle_cost("Remove any number of counters from ~"),
+            AbilityCost::RemoveCounter {
+                count: u32::MAX,
+                counter_type: CounterMatch::Any,
                 target: None,
             }
         );
