@@ -843,6 +843,22 @@ pub(crate) fn handle_sacrifice_for_cost(
             .map_err(|e| EngineError::InvalidAction(format!("{e}")))?;
     }
 
+    // CR 603.10a + CR 701.21a + CR 601.2h + CR 118.8: permanents sacrificed to pay
+    // one cost component leave the battlefield together; a co-departing observer
+    // among them observes the rest (look-back-in-time). Single authority — identical
+    // wiring to `effects::sacrifice::resolve`. `departed_subset` drops any permanent
+    // that did not actually leave (CantBeSacrificed, replacement).
+    // NOTE: this stamp is read only when the cast lands in the SAME action
+    // (`run_post_action_pipeline` scans `events`). If the cast pauses on a later
+    // kicker/target/modal choice before Priority, the cast lands in a future action
+    // with a fresh `events` vector and this stamp is unreadable — that kicker-paused
+    // sub-case shares the cross-action seam gap tracked by
+    // `cost_paid_multi_sacrifice_kicker_paused_under_observes`.
+    crate::game::zones::mark_simultaneous_departures(
+        events,
+        &crate::game::zones::departed_subset(state, chosen),
+    );
+
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -4822,28 +4838,154 @@ mod tests {
         }
     }
 
-    // DEFERRED: cost-paid co-departure is a separate seam — the cost-payment flow
-    // has multiple non-Priority intermediate returns (target/mode/kicker selection)
-    // before the cast lands, so wiring co-departed observation here is more than a
-    // stamp. Non-regressive (under-triggers today regardless). When a spell's
-    // additional cost sacrifices ≥2 permanents simultaneously (e.g. Casualty-style
-    // multi-sacrifice paying for a Blood Artist-class observer that is itself among
-    // the sacrificed group), each co-departed permanent should be observed once.
-    // `handle_sacrifice_for_cost` (this file, ~841) and `handle_return_to_hand_for_cost`
-    // (~884) are CONFIRMED-EXCLUDED from STEP-wiring; closing this requires routing
-    // the cost-payment events through the co-departed stamping seam after the cast
-    // resolves, not a one-line stamp at the cost site. CR 603.10a + CR 601.2b.
+    /// CR 603.10a + CR 701.21a + CR 601.2h: when a spell's additional cost
+    /// sacrifices ≥2 permanents simultaneously, a co-departing
+    /// leaves-the-battlefield / "whenever you sacrifice" observer among the
+    /// sacrificed group observes every co-sacrificed permanent (itself + the
+    /// rest) via last-known information. This drives the FULL `apply_action`
+    /// cast pipeline (not a `process_triggers` shape test): the `SelectCards`
+    /// action runs `handle_sacrifice_for_cost` → `finish_pending_cost_or_cast`
+    /// → `pay_and_push` → `WaitingFor::Priority` → `run_post_action_pipeline` →
+    /// `process_triggers` over the same `events` vector that still carries the
+    /// cost-sacrifice `ZoneChanged` records. The spell has NO kicker and NO
+    /// deferred targets, so the cast lands in the SAME action — the only path
+    /// where the producer stamp is readable (the kicker/target-paused sub-case
+    /// is the deferred cross-action seam; see
+    /// `cost_paid_multi_sacrifice_kicker_paused_under_observes`). Without the
+    /// stamp at `handle_sacrifice_for_cost` the observer fires once (its own
+    /// departure only); with it, twice.
     #[test]
-    #[ignore = "DEFERRED: cost-paid co-departure is a separate seam (CR 603.10a) — see comment"]
     fn cost_paid_multi_sacrifice_blood_artist_co_departed() {
-        // Intentionally minimal: this documents the desired behavior for the
-        // deferred cost-payment co-departure seam. It is not wired, so the assertion
-        // is left as a placeholder that records the expectation.
-        let observed_per_co_sacrificed = 1;
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{GainLifePlayer, TargetFilter, TriggerDefinition};
+        use crate::types::phase::Phase;
+        use crate::types::triggers::TriggerMode;
+        use crate::types::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.players[0].life = 20;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // The spell being cast: a no-target, no-kicker effect (Scry) so the cast
+        // lands directly via `pay_and_push` to `Priority` in the same action.
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sacrificial Scry".to_string(),
+            Zone::Hand,
+        );
+
+        // Blood-Artist-class observer: ChangesZone origin Battlefield, valid_card
+        // = any creature, executes GainLife 1 on its controller — detectable as a
+        // +1 life delta per co-departed creature once the triggers resolve.
+        let observer = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Blood Artist Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .origin(Zone::Battlefield)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Creature),
+                ))
+                .execute(crate::types::ability::AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: GainLifePlayer::Controller,
+                    },
+                ));
+            obj.trigger_definitions.push(trig.clone());
+            Arc::make_mut(&mut obj.base_trigger_definitions).push(trig);
+        }
+
+        // A plain creature co-sacrificed alongside the observer.
+        let plain = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&plain).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+
+        // Build the pending spell cast (NOT an activated ability: index None so
+        // `finish_pending_cost_or_cast` routes to `pay_and_push`).
+        let mut pending = make_pending(spell);
+        pending.activation_ability_index = None;
+        pending.card_id = CardId(1);
+        pending.origin_zone = Zone::Hand;
+
+        // CR 601.2a/601.2i: the spell was announced onto the stack before cost
+        // payment; `pay_and_push` finalizes that existing entry rather than
+        // pushing a new one. Mirror the announcement entry the real cast flow
+        // leaves on the stack while costs are paid.
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        // Park at the cost-sacrifice prompt for two creatures, then drive the
+        // real `apply_action` resolution by selecting both.
+        state.waiting_for = WaitingFor::SacrificeForCost {
+            player: PlayerId(0),
+            count: 2,
+            permanents: vec![observer, plain],
+            pending_cast: Box::new(pending),
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![observer, plain],
+            },
+        )
+        .expect("select both creatures to sacrifice as the spell's additional cost");
+
+        // The two co-departed observer triggers (same controller) require an
+        // explicit ordering; drain the prompt with identity order, then resolve
+        // the stack (observer triggers + the spell itself).
+        crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+        for _ in 0..30 {
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) || state.stack.is_empty() {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::PassPriority).expect("pass priority");
+        }
+
+        // The observer's ChangesZone trigger fired once per co-sacrificed creature
+        // (itself + the plain bear), so life is 20 + 2 = 22. Without the producer
+        // stamp at `handle_sacrifice_for_cost`, the `co_departed` group on each
+        // ZoneChanged record is empty and the observer fires once (life 21).
         assert_eq!(
-            observed_per_co_sacrificed, 1,
-            "each co-sacrificed permanent should be observed once by a co-departing \
-             leaves-the-battlefield observer paid as part of the same cost"
+            state.players[0].life, 22,
+            "co-departing LTB observer must fire once per permanent sacrificed to \
+             pay one additional cost (20 + 2 = 22)"
         );
     }
 
