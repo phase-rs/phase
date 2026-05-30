@@ -6,6 +6,7 @@ use engine::database::CardDatabase;
 use engine::game::deck_loading::PlayerDeckPayload;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
+use engine::types::player::PlayerId;
 use std::collections::HashMap;
 use serde::Serialize;
 use engine::game::derived::derive_display_state;
@@ -146,7 +147,8 @@ pub fn get_game_state(
     // Return the wire envelope `{ state, derived }` — same shape produced
     // by the engine-wasm getter, so the frontend adapter unwraps identically
     // regardless of platform.
-    let derived = engine::game::derived_views::derive_views(game);
+    // Tauri single-player desktop: the human is always PlayerId(0).
+    let derived = engine::game::derived_views::derive_views(game, Some(PlayerId(0)));
     Ok(engine::game::derived_views::ClientGameState {
         state: game.clone(),
         derived,

@@ -2322,6 +2322,9 @@ function AbilityChoiceModal() {
     pending ? s.gameState?.objects[pending.objectId] : undefined,
   );
   const objects = useGameStore((s) => s.gameState?.objects);
+  const webSlingingCosts = useGameStore(
+    (s) => s.gameState?.derived?.web_slinging_costs,
+  );
 
   if (!pending || !obj) return null;
 
@@ -2365,6 +2368,7 @@ function AbilityChoiceModal() {
           action,
           obj,
           objects,
+          webSlingingCosts,
         );
         return { id: String(i), label, description };
       })}

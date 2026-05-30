@@ -85,13 +85,20 @@ pub fn effective_sneak_cost(state: &GameState, object_id: ObjectId) -> Option<Ma
     }
 }
 
-/// CR 702.188a: Effective Web-slinging alt-cost for an object.
-pub fn effective_web_slinging_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
-    let obj = state.objects.get(&object_id)?;
-    obj.keywords.iter().find_map(|keyword| match keyword {
-        Keyword::WebSlinging(cost) => Some(resolve_keyword_mana_cost(state, object_id, cost)),
-        _ => None,
-    })
+/// CR 702.188a + CR 604.1: honor web-slinging GRANTED by a CastWithKeyword static
+/// (Amazing Spider-Man), not only printed keywords. effective_spell_keywords merges
+/// printed obj.keywords with statically-granted keywords for `caster`.
+pub fn effective_web_slinging_cost(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) -> Option<ManaCost> {
+    super::casting::effective_spell_keywords(state, caster, object_id)
+        .into_iter()
+        .find_map(|k| match k {
+            Keyword::WebSlinging(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+            _ => None,
+        })
 }
 
 fn effective_keyword_for_object(

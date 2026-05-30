@@ -3916,6 +3916,28 @@ fn parse_color_relative_clause_suffix(
         }
     }
 
+    // CR 105.2: "that's exactly N colors" → ColorCount{EQ, N}. (Threefold Signal.)
+    if let Ok((after_n, _)) = tag::<_, _, OracleError<'_>>("exactly ").parse(after_intro) {
+        if let Ok((rest, n)) = nom_primitives::parse_number(after_n) {
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" colors").parse(rest) {
+                let next_char_is_boundary = rest
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+                if let (true, Ok(count)) = (next_char_is_boundary, u8::try_from(n)) {
+                    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+                    return Some((
+                        vec![FilterProp::ColorCount {
+                            comparator: Comparator::EQ,
+                            count,
+                        }],
+                        consumed,
+                    ));
+                }
+            }
+        }
+    }
+
     let (rest, colors) = parse_color_disjunction(after_intro).ok()?;
     let next_char_is_boundary = rest
         .chars()
@@ -8592,6 +8614,36 @@ mod tests {
             "must require colored permanents, got {:?}",
             tf.properties
         );
+    }
+
+    #[test]
+    fn that_clause_suffix_exactly_three_colors() {
+        // CR 105.2: "that's exactly three colors" → ColorCount{EQ,3}.
+        let (props, consumed) =
+            parse_that_clause_suffix("that's exactly three colors").expect("must parse");
+        assert_eq!(
+            props,
+            vec![FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 3,
+            }]
+        );
+        assert_eq!(consumed, "that's exactly three colors".len());
+    }
+
+    #[test]
+    fn that_clause_suffix_one_or_more_colors() {
+        // CR 105.2: "that's one or more colors" → ColorCount{GE,1}.
+        let (props, consumed) =
+            parse_that_clause_suffix("that's one or more colors").expect("must parse");
+        assert_eq!(
+            props,
+            vec![FilterProp::ColorCount {
+                comparator: Comparator::GE,
+                count: 1,
+            }]
+        );
+        assert_eq!(consumed, "that's one or more colors".len());
     }
 
     #[test]
