@@ -52,9 +52,31 @@ impl AbilityCost {
                     &excluded_sources,
                 )
             }
-            AbilityCost::Composite { costs } => costs
-                .iter()
-                .all(|c| c.is_payable_for_mana_ability(state, player, source)),
+            // Same {T}+TapCreatures source-exclusion logic as `is_payable`'s
+            // Composite arm, but Mana sub-costs use the mana-specific check.
+            AbilityCost::Composite { costs } => {
+                let has_tap = costs.iter().any(|c| matches!(c, AbilityCost::Tap));
+                costs.iter().all(|c| match c {
+                    AbilityCost::TapCreatures { count, filter } if has_tap => {
+                        let ctx = FilterContext::from_source(state, source);
+                        state
+                            .battlefield
+                            .iter()
+                            .copied()
+                            .filter(|&id| {
+                                id != source
+                                    && state.objects.get(&id).is_some_and(|o| {
+                                        o.controller == player
+                                            && !o.tapped
+                                            && matches_target_filter(state, id, filter, &ctx)
+                                    })
+                            })
+                            .count()
+                            >= *count as usize
+                    }
+                    other => other.is_payable_for_mana_ability(state, player, source),
+                })
+            }
             // Every other kind has no mana-pool component — defer to the
             // generic 601.2b gate, which already handles it correctly.
             other => other.is_payable(state, player, source),
@@ -170,7 +192,10 @@ impl AbilityCost {
                 super::effects::collect_evidence::can_collect_evidence(state, player, *amount)
             }
             // CR 601.2b: Tapping N creatures requires N untapped creatures
-            // matching the filter (excluding the source).
+            // matching the filter. The source is excluded only when a {T} cost
+            // is also present (handled by the Composite arm); otherwise the
+            // source is a valid choice (e.g. Morcant's "Tap three untapped
+            // Elves" has no {T}, so Morcant herself is eligible).
             AbilityCost::TapCreatures { count, filter } => {
                 let ctx = FilterContext::from_source(state, source);
                 state
@@ -178,9 +203,6 @@ impl AbilityCost {
                     .iter()
                     .copied()
                     .filter(|&id| {
-                        if id == source {
-                            return false;
-                        }
                         state.objects.get(&id).is_some_and(|o| {
                             o.controller == player
                                 && !o.tapped
@@ -299,9 +321,32 @@ impl AbilityCost {
                 super::casting_costs::eligible_behold_choices(state, player, source, filter).len()
                     >= *count as usize
             }
-            // CR 601.2b: Every sub-cost must be payable.
+            // CR 601.2b: Every sub-cost must be payable. When the composite
+            // includes {T}, the source is committed to the tap cost and must be
+            // excluded from any TapCreatures eligibility count — it will be
+            // tapped before TapCreatures is paid.
             AbilityCost::Composite { costs } => {
-                costs.iter().all(|c| c.is_payable(state, player, source))
+                let has_tap = costs.iter().any(|c| matches!(c, AbilityCost::Tap));
+                costs.iter().all(|c| match c {
+                    AbilityCost::TapCreatures { count, filter } if has_tap => {
+                        let ctx = FilterContext::from_source(state, source);
+                        state
+                            .battlefield
+                            .iter()
+                            .copied()
+                            .filter(|&id| {
+                                id != source
+                                    && state.objects.get(&id).is_some_and(|o| {
+                                        o.controller == player
+                                            && !o.tapped
+                                            && matches_target_filter(state, id, filter, &ctx)
+                                    })
+                            })
+                            .count()
+                            >= *count as usize
+                    }
+                    other => other.is_payable(state, player, source),
+                })
             }
             // CR 118.12a: Disjunctive — payable if **any** sub-cost is
             // payable. The interactive choice is surfaced at resolution via
@@ -522,6 +567,130 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 4 }
         }
         .is_payable(&state, P0, ObjectId(0)));
+    }
+
+    /// CR 601.2b: Standalone TapCreatures (no {T}) includes the source itself
+    /// in the eligible count. Morcant shape: "Tap three untapped Elves you control"
+    /// — the card itself counts as one of the three.
+    #[test]
+    fn tap_creatures_standalone_includes_source() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+        let mut scenario = GameScenario::new();
+        let elf_filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .with_type(crate::types::ability::TypeFilter::Subtype(
+                    "Elf".to_string(),
+                ))
+                .controller(ControllerRef::You),
+        );
+        let cost = AbilityCost::TapCreatures {
+            count: 3,
+            filter: elf_filter,
+        };
+        // Place exactly 3 Elves controlled by P0 — including the source.
+        let src = scenario.add_creature(P0, "Morcant", 4, 4).id();
+        scenario
+            .state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Elf".to_string());
+        let elf_a = scenario.add_creature(P0, "Elf A", 1, 1).id();
+        scenario
+            .state
+            .objects
+            .get_mut(&elf_a)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Elf".to_string());
+        let elf_b = scenario.add_creature(P0, "Elf B", 1, 1).id();
+        scenario
+            .state
+            .objects
+            .get_mut(&elf_b)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Elf".to_string());
+        // 3 Elves total including source → payable.
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "source counts among the 3 Elves"
+        );
+        // With 2 OTHER Elves + source, must still be payable (source is the 3rd).
+        // Remove elf_b — now only source + elf_a = 2 Elves → unpayable.
+        scenario.state.battlefield.retain(|id| *id != elf_b);
+        scenario.state.objects.remove(&elf_b);
+        assert!(
+            !cost.is_payable(&scenario.state, P0, src),
+            "only 2 Elves (source + elf_a) < 3"
+        );
+    }
+
+    /// CR 601.2b: Composite({T}, TapCreatures) still excludes the source from
+    /// TapCreatures eligibility — source is committed to {T}.
+    #[test]
+    fn tap_creatures_composite_with_tap_excludes_source() {
+        use crate::types::ability::{ControllerRef, TypedFilter};
+        let mut scenario = GameScenario::new();
+        let elf_filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .with_type(crate::types::ability::TypeFilter::Subtype(
+                    "Elf".to_string(),
+                ))
+                .controller(ControllerRef::You),
+        );
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::TapCreatures {
+                    count: 2,
+                    filter: elf_filter,
+                },
+            ],
+        };
+        let src = scenario.add_creature(P0, "Lathril", 2, 2).id();
+        scenario
+            .state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Elf".to_string());
+        let elf_a = scenario.add_creature(P0, "Elf A", 1, 1).id();
+        scenario
+            .state
+            .objects
+            .get_mut(&elf_a)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Elf".to_string());
+        let elf_b = scenario.add_creature(P0, "Elf B", 1, 1).id();
+        scenario
+            .state
+            .objects
+            .get_mut(&elf_b)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Elf".to_string());
+        // Source committed to {T} — 2 OTHER Elves available → payable.
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "2 other Elves satisfy TapCreatures(2)"
+        );
+        // Remove elf_b — only 1 other Elf → unpayable.
+        scenario.state.battlefield.retain(|id| *id != elf_b);
+        scenario.state.objects.remove(&elf_b);
+        assert!(
+            !cost.is_payable(&scenario.state, P0, src),
+            "only 1 other Elf < 2"
+        );
     }
 
     #[test]

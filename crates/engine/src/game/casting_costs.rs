@@ -2492,6 +2492,9 @@ fn pay_additional_cost(
         }
         AbilityCost::TapCreatures { count, ref filter } => {
             // CR 702.34a: Tap untapped creatures matching filter as a cost.
+            // The source is eligible unless a {T} cost is also present in the
+            // activation cost (in which case the source was already tapped, so
+            // !obj.tapped naturally excludes it).
             let eligible: Vec<ObjectId> = state
                 .battlefield
                 .iter()
@@ -2500,7 +2503,6 @@ fn pay_additional_cost(
                     state.objects.get(id).is_some_and(|obj| {
                         obj.controller == player
                             && !obj.tapped
-                            && obj.id != pending.object_id
                             && super::filter::matches_target_filter(
                                 state,
                                 obj.id,
