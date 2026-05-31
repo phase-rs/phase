@@ -43,7 +43,7 @@ pub fn commander_casts_from_command_zone(state: &GameState, player: PlayerId) ->
         .sum()
 }
 
-/// Resolve which player owns a recorded command-zone cast for aggregation.
+/// CR 903.8: Resolve which player owns a recorded command-zone cast for aggregation.
 fn cast_owner_for_command_zone_count(
     state: &GameState,
     commander_id: ObjectId,
