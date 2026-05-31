@@ -322,7 +322,7 @@ fn manual_payment_flow_resolves_kci_sacrifice_to_pay_spell_cost() {
             kind: PayCostKind::Sacrifice,
             count,
             choices: permanents,
-            resume: CostResume::ManaAbility(_),
+            resume: CostResume::ManaAbility { .. },
             ..
         } => {
             assert_eq!(*player, P0);
