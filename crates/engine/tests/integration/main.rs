@@ -75,6 +75,7 @@ mod master_of_ceremonies;
 mod militant_angel_attacked_opponents;
 mod mycoloth_upkeep_trigger;
 mod mystic_forge_regression;
+mod obliterate_regression;
 mod old_growth_troll_return_as_aura;
 mod oracle_parser;
 mod oversimplify_per_player_fractal;
