@@ -9,7 +9,7 @@
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    GainLifePlayer, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    FilterProp, GainLifePlayer, LibraryPosition, ManaProduction, ManaSpendRestriction,
     ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
     QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
     TargetFilter, TriggerDefinition, TypedFilter,
@@ -2847,6 +2847,28 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             up_to: false,
             enter_with_counters: vec![],
         },
+
+        // CR 701.13a + CR 400.3: "Exile target player's graveyard" moves the
+        // cards in that player's graveyard to exile; graveyard membership is
+        // owner-scoped, not controller-scoped.
+        Action::ExilePlayersGraveyard(player) => {
+            let ctrl = filter_mod::player_to_controller(player)?;
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(
+                    engine::types::ability::TypedFilter::default()
+                        .properties(vec![FilterProp::Owned { controller: ctrl }]),
+                ),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            }
+        }
 
         // CR 701.18: Return to owner's hand (Bounce).
         Action::ReturnAnyNumberOfPermanentsToTheirOwnersHands(filter) => Effect::Bounce {
@@ -6556,8 +6578,8 @@ mod tests {
         TokenFlag, PT,
     };
     use engine::types::ability::{
-        AbilityKind, Comparator, Effect, FilterProp, QuantityRef, TargetFilter, TypeFilter,
-        TypedFilter,
+        AbilityKind, Comparator, ControllerRef, Effect, FilterProp, QuantityRef, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use engine::types::mana::ManaColor;
 
@@ -7182,6 +7204,29 @@ mod tests {
                 EngineCounterType::Plus1Plus1,
                 QuantityExpr::Fixed { value: 2 }
             )]
+        );
+    }
+
+    #[test]
+    fn exile_players_graveyard_targets_owned_graveyard_cards() {
+        let effect = convert(&Action::ExilePlayersGraveyard(Box::new(Player::You))).unwrap();
+
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } = effect
+        else {
+            panic!("expected ChangeZone, got {effect:?}");
+        };
+        assert_eq!(origin, Some(Zone::Graveyard));
+        assert_eq!(destination, Zone::Exile);
+        assert_eq!(
+            target,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You,
+            }]))
         );
     }
 
