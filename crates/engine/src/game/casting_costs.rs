@@ -669,6 +669,7 @@ fn begin_deferred_target_selection(
         player,
         pending_cast: Box::new(pending),
         target_slots,
+        mode_labels: Vec::new(),
         selection,
     })
 }
@@ -1320,6 +1321,7 @@ pub(super) fn push_activated_ability_to_stack(
             player,
             pending_cast: Box::new(pending_act),
             target_slots,
+            mode_labels: Vec::new(),
             selection,
         });
     }

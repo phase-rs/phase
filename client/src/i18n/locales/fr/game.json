@@ -6,7 +6,8 @@
     "faceDownName": "Carte face cachée",
     "loading": "Chargement de {{name}}",
     "unimplemented": "Non implémenté : {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Engagé"
   },
   "preview": {
     "holdCtrlBack": "Maintenez Ctrl pour la face arrière",
@@ -214,6 +215,9 @@
     "radAriaLabel_one": "{{count}} marqueur rad",
     "radAriaLabel_other": "{{count}} marqueurs rad",
     "radTooltip": "Marqueurs rad : {{count}}",
+    "experienceAriaLabel_one": "{{count}} marqueur d'expérience",
+    "experienceAriaLabel_other": "{{count}} marqueurs d'expérience",
+    "experienceTooltip": "Marqueurs d'expérience : {{count}}",
     "speedAriaLabel": "Vitesse {{value}}",
     "speedTooltip": "Vitesse : {{value}}",
     "companion": "Compagnon"
@@ -388,6 +392,7 @@
     "chooseTargetOf": "Choisissez la cible {{current}} sur {{total}}",
     "chooseTarget": "Choisissez une cible",
     "noLegalTargets": "Aucune cible légale disponible",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "jusqu'à un(e) {{target}}",
     "one": "un(e) {{target}}",
     "nounPlayer": "joueur",
@@ -1279,7 +1284,9 @@
     "searchSubtitle": "Tapez pour rechercher dans toutes les cartes",
     "searchPlaceholder": "Rechercher par nom...",
     "noCardsFound": "Aucune carte trouvée",
-    "buttonSubtitle": "Sélectionnez une option"
+    "buttonSubtitle": "Sélectionnez une option",
+    "filterPlaceholder": "Filtrer les options...",
+    "noOptionsMatch": "Aucune option ne correspond"
   },
   "nonFatalPanic": {
     "heading": "Avertissement du moteur (non fatal)",

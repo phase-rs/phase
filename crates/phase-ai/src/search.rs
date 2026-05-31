@@ -682,22 +682,54 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets.map(|new_targets| GameAction::RetargetSpell { new_targets })
         }
 
-        // Assign combat damage: all damage to first blocker or zero.
+        // Assign combat damage: greedy lethal-to-each, mirroring the engine's
+        // ai_support::candidates AssignCombatDamage arm so the fallback stays
+        // rules-legal for trample (CR 702.19b) and trample-over-PW (CR 702.19c).
         WaitingFor::AssignCombatDamage {
             total_damage,
             blockers,
+            trample,
+            pw_loyalty,
+            attack_target,
             ..
         } => {
-            let assignments: Vec<_> = blockers
-                .iter()
-                .enumerate()
-                .map(|(i, slot)| (slot.blocker_id, if i == 0 { *total_damage } else { 0 }))
-                .collect();
+            let mut remaining = *total_damage;
+            let mut assignments = Vec::new();
+            // CR 702.19b: Assign lethal to each blocker in order.
+            for slot in blockers {
+                let assign = remaining.min(slot.lethal_minimum);
+                assignments.push((slot.blocker_id, assign));
+                remaining = remaining.saturating_sub(assign);
+            }
+            // CR 510.1c: Non-trample — the leftover must land on a blocker (no player
+            // spillover), so dump it on the last blocker to keep the total == power.
+            if trample.is_none() && remaining > 0 {
+                if let Some(last) = assignments.last_mut() {
+                    last.1 += remaining;
+                    remaining = 0;
+                }
+            }
+            // CR 702.19c: Trample-over-PW attacking a PW splits excess into
+            // loyalty-worth to the PW and the remainder to the PW's controller.
+            let (trample_damage, controller_damage) = if *trample
+                == Some(engine::game::combat::TrampleKind::OverPlaneswalkers)
+                && matches!(
+                    attack_target,
+                    engine::game::combat::AttackTarget::Planeswalker(_)
+                ) {
+                let loyalty = pw_loyalty.unwrap_or(0);
+                let to_pw = remaining.min(loyalty);
+                let to_ctrl = remaining.saturating_sub(to_pw);
+                (to_pw, to_ctrl)
+            } else {
+                // CR 702.19b: Standard trample — all excess to the attack target.
+                (if trample.is_some() { remaining } else { 0 }, 0)
+            };
             Some(GameAction::AssignCombatDamage {
                 mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
                 assignments,
-                trample_damage: 0,
-                controller_damage: 0,
+                trample_damage,
+                controller_damage,
             })
         }
 
@@ -2191,6 +2223,7 @@ mod tests {
             waiting_for: WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
                 target_slots: Vec::new(),
+                mode_labels: Vec::new(),
                 target_constraints: Vec::new(),
                 selection: Default::default(),
                 source_id: None,
@@ -2252,6 +2285,7 @@ mod tests {
                 ],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: engine::types::game_state::TargetSelectionProgress {
                 current_slot: 0,
@@ -2286,6 +2320,7 @@ mod tests {
                 legal_targets: Vec::new(),
                 optional: true,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: Default::default(),
             source_id: None,
@@ -2778,5 +2813,79 @@ mod tests {
             GameAction::DecideOptionalCost { pay: true },
             "AI must pay a multikick when it has mana to spare"
         );
+    }
+
+    /// Build a single-blocker AssignCombatDamage prompt and run the AI fallback.
+    fn assign_combat_damage_fallback(
+        total_damage: u32,
+        lethal_minimum: u32,
+        trample: Option<engine::game::combat::TrampleKind>,
+    ) -> GameAction {
+        let mut state = make_state();
+        let attacker = add_creature(&mut state, PlayerId(0), total_damage as i32, 1);
+        let blocker = add_creature(&mut state, PlayerId(1), 1, lethal_minimum as i32);
+        state.waiting_for = WaitingFor::AssignCombatDamage {
+            player: PlayerId(0),
+            attacker_id: attacker,
+            total_damage,
+            blockers: vec![engine::types::game_state::DamageSlot {
+                blocker_id: blocker,
+                lethal_minimum,
+            }],
+            assignment_modes: vec![engine::types::game_state::CombatDamageAssignmentMode::Normal],
+            trample,
+            defending_player: PlayerId(1),
+            attack_target: engine::game::combat::AttackTarget::Player(PlayerId(1)),
+            pw_loyalty: None,
+            pw_controller: None,
+        };
+        fallback_action(&state).expect("AssignCombatDamage fallback must produce an action")
+    }
+
+    /// CR 702.19b: single-blocker trample attacker — the AI fallback keeps lethal
+    /// on the blocker and tramples the excess through to the defending player.
+    #[test]
+    fn fallback_single_blocker_trample_tramples_excess() {
+        let action =
+            assign_combat_damage_fallback(5, 2, Some(engine::game::combat::TrampleKind::Standard));
+        match action {
+            GameAction::AssignCombatDamage {
+                mode,
+                assignments,
+                trample_damage,
+                controller_damage,
+            } => {
+                assert_eq!(
+                    mode,
+                    engine::types::game_state::CombatDamageAssignmentMode::Normal
+                );
+                assert_eq!(assignments.len(), 1);
+                assert_eq!(assignments[0].1, 2, "lethal (2) assigned to blocker");
+                assert_eq!(trample_damage, 3, "excess (3) tramples through");
+                assert_eq!(controller_damage, 0);
+            }
+            other => panic!("expected AssignCombatDamage, got {other:?}"),
+        }
+    }
+
+    /// CR 510.1c: single-blocker non-trample attacker — the AI fallback assigns
+    /// all damage to the blocker (no spillover to the player is legal).
+    #[test]
+    fn fallback_single_blocker_no_trample_all_to_blocker() {
+        let action = assign_combat_damage_fallback(5, 2, None);
+        match action {
+            GameAction::AssignCombatDamage {
+                assignments,
+                trample_damage,
+                controller_damage,
+                ..
+            } => {
+                assert_eq!(assignments.len(), 1);
+                assert_eq!(assignments[0].1, 5, "all 5 to the single blocker");
+                assert_eq!(trample_damage, 0, "no trample without trample keyword");
+                assert_eq!(controller_damage, 0);
+            }
+            other => panic!("expected AssignCombatDamage, got {other:?}"),
+        }
     }
 }

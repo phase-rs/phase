@@ -1049,6 +1049,10 @@ impl SessionManager {
         // be enumerated as candidate actions — apply() validates the submitted
         // selection structurally instead (see handle_resolution_choice). The
         // engine owns this classification via accepts_freeform_card_selection.
+        // Combat-damage assignment (CR 510.1c/d, CR 702.19b) likewise has too many
+        // legal divisions to enumerate (candidates.rs lists only the greedy
+        // trample-through split) — apply() validates conservation and the
+        // lethal-before-excess precondition, so the gate is bypassed here too.
         let skip_legality = action.is_mana_ability()
             || matches!(action, GameAction::SetAutoPass { .. })
             || (matches!(action, GameAction::SelectCards { .. })
@@ -1057,7 +1061,12 @@ impl SessionManager {
                 && session
                     .state
                     .waiting_for
-                    .accepts_freeform_counter_move_distribution());
+                    .accepts_freeform_counter_move_distribution())
+            || (matches!(action, GameAction::AssignCombatDamage { .. })
+                && session
+                    .state
+                    .waiting_for
+                    .accepts_freeform_combat_damage_assignment());
         if !skip_legality {
             let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
             if !legal_actions.contains(&action) {
@@ -1964,5 +1973,130 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(&library[..3], &[c, a, b]);
+    }
+
+    /// CR 702.19b: a single-blocker trample attacker's controller may keep all
+    /// damage on the blocker (trample_damage:0) instead of trampling the excess
+    /// through. `candidates.rs` enumerates only the greedy trample-through split,
+    /// so before the freeform-skip change the multiplayer gate rejected the
+    /// keep-on-blocker division as "Illegal action". The server must now bypass
+    /// the candidate gate for `AssignCombatDamage` and let `apply()` validate the
+    /// submitted division (CR 510.1c/d), accepting every legal one. An illegal
+    /// division (wrong total) must still be rejected — by `apply()`, not the gate.
+    #[test]
+    fn keep_on_blocker_combat_damage_is_accepted_and_wrong_total_rejected() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+        use engine::game::zones::create_object;
+        use engine::types::game_state::{CombatDamageAssignmentMode, DamageSlot};
+        use engine::types::identifiers::CardId;
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        // The attacker's controller assigns combat damage. Make that the
+        // active player; route the action through whichever token owns them.
+        let assigning_player = session.state.active_player;
+        let defending_player = PlayerId(if assigning_player == PlayerId(0) {
+            1
+        } else {
+            0
+        });
+        let token = if assigning_player == PlayerId(0) {
+            token0.clone()
+        } else {
+            token1.clone()
+        };
+
+        // A 5/5 trample attacker blocked by a single 2/2.
+        let attacker = create_object(
+            &mut session.state,
+            CardId(3000),
+            assigning_player,
+            "Fatty".to_string(),
+            Zone::Battlefield,
+        );
+        let blocker = create_object(
+            &mut session.state,
+            CardId(3001),
+            defending_player,
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, defending_player)],
+            ..Default::default()
+        };
+        combat.attackers[0].blocked = true;
+        combat
+            .blocker_to_attacker
+            .entry(blocker)
+            .or_default()
+            .push(attacker);
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        session.state.combat = Some(combat);
+
+        // CR 702.19b: single-blocker trample-with-excess interactive prompt.
+        session.state.waiting_for = WaitingFor::AssignCombatDamage {
+            player: assigning_player,
+            attacker_id: attacker,
+            total_damage: 5,
+            blockers: vec![DamageSlot {
+                blocker_id: blocker,
+                lethal_minimum: 2,
+            }],
+            assignment_modes: vec![CombatDamageAssignmentMode::Normal],
+            trample: Some(engine::game::combat::TrampleKind::Standard),
+            defending_player,
+            attack_target: engine::game::combat::AttackTarget::Player(defending_player),
+            pw_loyalty: None,
+            pw_controller: None,
+        };
+
+        // Illegal division first: wrong total (4 != 5). The gate is bypassed, so
+        // this reaches apply() and is rejected there as an engine error — proving
+        // we did NOT weaken validation, only skipped candidate enumeration.
+        let illegal = mgr.handle_action(
+            &code,
+            &token,
+            GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(blocker, 4)],
+                trample_damage: 0,
+                controller_damage: 0,
+            },
+        );
+        match illegal {
+            Err(e) => assert!(
+                e.starts_with("Engine error:"),
+                "wrong-total division must be rejected by apply(), not the gate, got: {e}"
+            ),
+            Ok(_) => panic!("wrong-total combat damage division must be rejected"),
+        }
+
+        // Legal-but-non-enumerated division: keep all 5 on the blocker, trample
+        // nothing through (CR 702.19b). Pre-fix this was rejected as illegal.
+        let legal = mgr.handle_action(
+            &code,
+            &token,
+            GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(blocker, 5)],
+                trample_damage: 0,
+                controller_damage: 0,
+            },
+        );
+        assert!(
+            legal.is_ok(),
+            "keep-on-blocker combat damage division (CR 702.19b) should be accepted, got: {legal:?}"
+        );
+
+        // The defending player took no trample damage — proof the controller's
+        // declined-excess division resolved as submitted (life unchanged at 20).
+        let session = mgr.sessions.get(&code).unwrap();
+        assert_eq!(session.state.players[defending_player.0 as usize].life, 20);
     }
 }

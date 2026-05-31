@@ -194,6 +194,7 @@ pub fn handle_activate_loyalty(
             player,
             pending_cast: Box::new(pending),
             target_slots,
+            mode_labels: Vec::new(),
             selection,
         });
     }

@@ -48,6 +48,11 @@ interface CardPreviewProps {
   position?: { x: number; y: number };
   scryfallId?: string;
   sourcePrinting?: SourcePrinting;
+  /** When true, the desktop preview docks to the screen edge (the default
+   *  top-right rail position) instead of following the cursor — keeps it from
+   *  covering the board. Drives the "side" card-preview preference. Ignored
+   *  when an explicit `position` is given or on mobile. */
+  dockSide?: boolean;
   /** Overrides the mobile-overlay dismiss handler. Contexts that drive the
    *  preview via their own state (e.g. the deck builder's hoveredCard) pass
    *  this so a tap-to-dismiss clears THAT state; defaults to the in-game
@@ -68,6 +73,7 @@ export function CardPreview({
   position,
   scryfallId,
   sourcePrinting,
+  dockSide,
   onDismiss,
   mobileLayout = "modal",
 }: CardPreviewProps) {
@@ -81,6 +87,7 @@ export function CardPreview({
       position={position}
       scryfallId={scryfallId}
       sourcePrinting={sourcePrinting}
+      dockSide={dockSide}
       onDismiss={onDismiss}
       mobileLayout={mobileLayout}
     />
@@ -94,6 +101,7 @@ function CardPreviewInner({
   position,
   scryfallId,
   sourcePrinting,
+  dockSide,
   onDismiss,
   mobileLayout,
 }: {
@@ -103,6 +111,7 @@ function CardPreviewInner({
   position?: { x: number; y: number };
   scryfallId?: string;
   sourcePrinting?: SourcePrinting;
+  dockSide?: boolean;
   onDismiss?: () => void;
   mobileLayout?: "modal" | "compact";
 }) {
@@ -227,7 +236,9 @@ function CardPreviewInner({
   };
 
   useEffect(() => {
-    if (typeof window === "undefined" || position || isMobile) return undefined;
+    // `dockSide` keeps the preview pinned to `defaultDesktopStyle` (the
+    // top-right rail) by skipping the cursor-follow positioning entirely.
+    if (typeof window === "undefined" || position || isMobile || dockSide) return undefined;
 
     pointerRef.current = lastPointerPosition;
 
@@ -291,6 +302,7 @@ function CardPreviewInner({
     };
   }, [
     altHeld,
+    dockSide,
     gap,
     isMobile,
     margin,

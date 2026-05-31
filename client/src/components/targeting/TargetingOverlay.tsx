@@ -209,6 +209,7 @@ type TargetingPromptParams = {
     type: "TargetSelection" | "TriggerTargetSelection" | "ExploreChoice" | "CopyTargetChoice" | "TapCreaturesForManaAbility" | "TapCreaturesForSpellCost";
     data: {
       target_slots?: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean }[];
+      mode_labels?: (string | null)[];
       selection?: { current_slot: number };
       player?: number;
     };
@@ -233,6 +234,9 @@ function buildInferredTargetPrompt({
   if (!selection) return null;
 
   if (!activeSlot) return null;
+  // Skip mode-context wrapping on the no-legal-targets branch (CR 700.2c): the
+  // engine does not surface a target for this slot, so there is no mode prompt
+  // to qualify.
   if (activeSlot.legal_targets.length === 0) {
     return t("targeting.noLegalTargets");
   }
@@ -240,15 +244,25 @@ function buildInferredTargetPrompt({
   const targetWord = inferTargetNoun(activeSlot.legal_targets, objects, t);
   const useUpToOne = selection && targetSlots.length === 1 && activeSlot.optional;
 
+  let prompt: string;
   if (waitingFor.type === "TriggerTargetSelection") {
-    return useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
+    prompt = useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
+  } else if (targetSlots.length <= 1) {
+    prompt = useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
+  } else {
+    prompt = t("targeting.chooseTargetOf", { current: Math.min(selection.current_slot + 1, targetSlots.length), total: targetSlots.length });
   }
 
-  if (targetSlots.length <= 1) {
-    return useUpToOne ? t("targeting.upToOne", { target: targetWord }) : t("targeting.one", { target: targetWord });
+  // CR 700.2 / CR 601.2b: For a modal spell/ability, the engine attaches a
+  // per-slot mode label so the player knows which chosen mode the current
+  // target belongs to. Wrap the computed prompt once with the active slot's
+  // label when present. `mode = ` interpolates the raw engine label (Oracle
+  // mode text, not localized); `prompt` is the already-localized base.
+  const modeLabel = waitingFor.data.mode_labels?.[selection.current_slot];
+  if (modeLabel) {
+    return t("targeting.modeContext", { mode: modeLabel, prompt });
   }
-
-  return t("targeting.chooseTargetOf", { current: Math.min(selection.current_slot + 1, targetSlots.length), total: targetSlots.length });
+  return prompt;
 }
 
 function inferTargetNoun(
