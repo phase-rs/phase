@@ -5,7 +5,8 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::combinator::value;
+use nom::combinator::{opt, value};
+use nom::sequence::preceded;
 use nom::Parser;
 
 use super::condition::parse_inner_condition;
@@ -49,6 +50,27 @@ pub fn parse_optional_duration(input: &str) -> OracleResult<'_, Option<Duration>
         Ok((rest, d)) => Ok((rest, Some(d))),
         Err(_) => Ok((input, None)),
     }
+}
+
+/// CR 608.2h + CR 608.2i: the cast/activation-time value-snapshot suffix.
+/// CR 608.2h fixes a computed value once when the effect is applied; CR 608.2i
+/// is the past-tense ("you controlled") look-back exception sharing this
+/// grammar. The suffix is a pure timing marker — it does not change the object
+/// filter — so callers strip it before the empty-remainder filter check and let
+/// the resolver perform the snapshot.
+pub fn parse_cast_snapshot_suffix(input: &str) -> OracleResult<'_, ()> {
+    preceded(
+        opt(tag(" ")),
+        value(
+            (),
+            alt((
+                tag("as you cast this spell"),
+                tag("as you cast it"),
+                tag("as you activate this ability"),
+            )),
+        ),
+    )
+    .parse(input)
 }
 
 #[cfg(test)]
@@ -118,5 +140,52 @@ mod tests {
     #[test]
     fn test_parse_duration_failure() {
         assert!(parse_duration("permanently").is_err());
+    }
+
+    #[test]
+    fn test_cast_snapshot_suffix_cast_this_spell_leading_space() {
+        assert_eq!(
+            parse_cast_snapshot_suffix(" as you cast this spell"),
+            Ok(("", ()))
+        );
+    }
+
+    #[test]
+    fn test_cast_snapshot_suffix_cast_it_leading_space() {
+        assert_eq!(parse_cast_snapshot_suffix(" as you cast it"), Ok(("", ())));
+    }
+
+    #[test]
+    fn test_cast_snapshot_suffix_activate_ability_leading_space() {
+        assert_eq!(
+            parse_cast_snapshot_suffix(" as you activate this ability"),
+            Ok(("", ()))
+        );
+    }
+
+    #[test]
+    fn test_cast_snapshot_suffix_no_leading_space() {
+        assert_eq!(
+            parse_cast_snapshot_suffix("as you cast this spell"),
+            Ok(("", ()))
+        );
+    }
+
+    #[test]
+    fn test_cast_snapshot_suffix_rejects_duration() {
+        assert!(parse_cast_snapshot_suffix(" until end of turn").is_err());
+    }
+
+    #[test]
+    fn test_cast_snapshot_suffix_rejects_empty() {
+        assert!(parse_cast_snapshot_suffix("").is_err());
+    }
+
+    #[test]
+    fn test_cast_snapshot_suffix_trailing_period() {
+        assert_eq!(
+            parse_cast_snapshot_suffix(" as you cast this spell."),
+            Ok((".", ()))
+        );
     }
 }

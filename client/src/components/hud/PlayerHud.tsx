@@ -21,6 +21,7 @@ export function PlayerHud() {
   const speed = useGameStore((s) => s.gameState?.players[playerId]?.speed ?? 0);
   const poisonCounters = useGameStore((s) => s.gameState?.players[playerId]?.poison_counters ?? 0);
   const radCounters = useGameStore((s) => s.gameState?.players[playerId]?.player_counters?.Rad ?? 0);
+  const experienceCounters = useGameStore((s) => s.gameState?.players[playerId]?.player_counters?.Experience ?? 0);
   const designations = usePlayerDesignations(playerId);
   const isPhasedOut = useGameStore(
     (s) => s.gameState?.players[playerId]?.status?.type === "PhasedOut",
@@ -102,6 +103,7 @@ export function PlayerHud() {
             {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
             {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
             {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
+            {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
             {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
           </>
         }

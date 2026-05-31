@@ -319,6 +319,20 @@ pub(crate) enum ContinuationAst {
     /// and Destroy the Evidence where "those cards" refers to all cards revealed
     /// during the RevealUntil resolution, not only the non-matching ones.
     RevealUntilAllToZone { destination: Zone },
+    /// CR 406.3 + CR 701.16a: "[then] exile it/them [face down]" after a private
+    /// `Dig` (the "look at the top N cards of <player>'s library" look step).
+    /// Rewrites the preceding `Dig` into an `Effect::ExileTop` so the looked-at
+    /// card(s) actually leave the library — the Gonti, Canny Acquisitor impulse
+    /// idiom ("look at the top card of that player's library, then exile it face
+    /// down. You may play that card ..."). `player`/`count` are lifted from the
+    /// `Dig` (with `ParentTarget` re-bound to the triggering player via
+    /// `that_player_library_filter`); `face_down` reflects the explicit
+    /// hidden-information suffix.
+    ExileLookedAtCard {
+        player: TargetFilter,
+        count: QuantityExpr,
+        face_down: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -648,6 +662,8 @@ pub(crate) enum TargetedImperativeAst {
         enters_under: Option<ControllerRef>,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
+        /// CR 508.4: "tapped and attacking" — enters attacking.
+        enters_attacking: bool,
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
         /// enters the battlefield.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
@@ -909,7 +925,7 @@ pub(crate) enum PutImperativeAst {
         /// CR 107.1c + CR 608.2c: Cardinality for non-targeted zone-change
         /// choices made during resolution, e.g. "put any number of creature
         /// cards from your hand onto the battlefield."
-        choice_count: Option<MultiTargetSpec>,
+        choice_count: Option<Box<MultiTargetSpec>>,
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.

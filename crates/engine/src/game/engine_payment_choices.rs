@@ -931,6 +931,13 @@ pub(super) fn handle_ward_sacrifice_choice(
         ));
     }
 
+    // CR 603.10a + CR 118.8: NOTE — sequential Ward multi-sacrifice is a separate
+    // co-departed gap. Each Ward sacrifice is taken in its own action's `events`
+    // (one permanent per round-trip, re-prompting for `remaining - 1`), so the
+    // permanents paying one Ward cost are never stamped as a simultaneous departure
+    // group; the `handle_sacrifice_for_cost` co-departed stamp does not apply here.
+    // A co-departing observer therefore under-observes. Closing this would batch all
+    // Ward sacrifices into one action (like `handle_sacrifice_for_cost`) — out of scope.
     crate::game::sacrifice::sacrifice_permanent(state, chosen[0], player, events)?;
 
     // If more sacrifices remain, re-prompt with updated eligible permanents

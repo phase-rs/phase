@@ -86,7 +86,22 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
       }
     }
 
-    if (gameState?.lands_tapped_for_mana?.[localPlayerId]) {
+    // The undo (UntapLandForMana) is legal only in the three WaitingFor states
+    // whose `apply` match arms accept it: Priority (engine.rs:1345), ManaPayment
+    // (engine.rs:2705 — un-tap a land mid-cost-payment to change the mana mix),
+    // and UnlessPayment (engine.rs:2359 — same, during a "pay unless" choice).
+    // Note UnlessPaymentChooseCost is NOT accepted, so it stays excluded. When a
+    // mana ability instead pauses mid-resolution for a mandatory choice (e.g.
+    // ChooseManaColor for an AnyOneColor land), the source is already in
+    // `lands_tapped_for_mana` but the engine is in none of those states —
+    // surfacing the undo affordance there produces a rejected dispatch when the
+    // tapped land is clicked. Gate the affordance on these states so it matches
+    // engine legality exactly.
+    const undoLegal =
+      waitingFor?.type === "Priority"
+      || waitingFor?.type === "ManaPayment"
+      || waitingFor?.type === "UnlessPayment";
+    if (undoLegal && gameState?.lands_tapped_for_mana?.[localPlayerId]) {
       for (const objectId of gameState.lands_tapped_for_mana[localPlayerId]) {
         undoableTapObjectIds.add(objectId);
       }

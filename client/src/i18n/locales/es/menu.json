@@ -39,7 +39,7 @@
     },
     "draft": {
       "title": "Draft",
-      "description": "Quick Draft contra la IA, draft de cube o aloja un pod draft."
+      "description": "Draft Rápido contra la IA, draft de cube o aloja un pod draft."
     },
     "decks": {
       "title": "Mazos",
@@ -49,8 +49,8 @@
       "sponsor": "Patrocinar"
     },
     "preview": {
-      "cta": "Probar la vista previa",
-      "tooltip": "Juega la última versión de vista previa — las cartas y correcciones más recientes llegan aquí antes de cada lanzamiento."
+      "cta": "Probar versión de desarrollo",
+      "tooltip": "Ejecuta la última versión de desarrollo — las cartas y correcciones más recientes llegan aquí antes de cada lanzamiento."
     },
     "coverage": {
       "title": "Abrir el panel de cobertura",

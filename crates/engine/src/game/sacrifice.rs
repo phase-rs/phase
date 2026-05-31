@@ -92,7 +92,7 @@ pub(crate) fn apply_sacrifice_after_replacement(
         } => {
             restrictions::record_sacrifice(state, oid, pid);
             zones::move_to_zone(state, oid, Zone::Graveyard, events);
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
             events.push(GameEvent::PermanentSacrificed {
                 object_id: oid,
                 player_id: pid,
@@ -103,7 +103,7 @@ pub(crate) fn apply_sacrifice_after_replacement(
         } => {
             // Replacement redirected (e.g., exile instead of graveyard)
             zones::move_to_zone(state, oid, to, events);
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
         _ => {}
     }
