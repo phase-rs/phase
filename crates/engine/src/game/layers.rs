@@ -2552,6 +2552,23 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
         return true;
     }
 
+    // If b modifies power/toughness and a's filter compares P/T (CR 613.8a).
+    let b_changes_pt = matches!(
+        &b.modification,
+        ContinuousModification::AddPower { .. }
+            | ContinuousModification::AddToughness { .. }
+            | ContinuousModification::AddDynamicPower { .. }
+            | ContinuousModification::AddDynamicToughness { .. }
+            | ContinuousModification::SetPower { .. }
+            | ContinuousModification::SetToughness { .. }
+            | ContinuousModification::SetPowerDynamic { .. }
+            | ContinuousModification::SetToughnessDynamic { .. }
+    );
+
+    if b_changes_pt && filter_references_pt_stat(&a.affected_filter) {
+        return true;
+    }
+
     false
 }
 
@@ -2584,6 +2601,20 @@ fn filter_references_ability(filter: &TargetFilter) -> bool {
             filters.iter().any(filter_references_ability)
         }
         TargetFilter::Not { filter } => filter_references_ability(filter),
+        _ => false,
+    }
+}
+
+/// Check if a `TargetFilter` compares power or toughness (CR 613.8a dependency axis).
+fn filter_references_pt_stat(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
+            .iter()
+            .any(|p| matches!(p, crate::types::ability::FilterProp::PtComparison { .. })),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_references_pt_stat)
+        }
+        TargetFilter::Not { filter } => filter_references_pt_stat(filter),
         _ => false,
     }
 }
@@ -3607,9 +3638,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, CommanderOwnership,
-        ContinuousModification, ControllerRef, CountScope, Duration, Effect, FilterProp,
-        GainLifePlayer, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+        Comparator, ContinuousModification, ControllerRef, CountScope, Duration, Effect,
+        FilterProp, GainLifePlayer, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{StaticSourceIndex, TransientContinuousEffect};
@@ -3953,6 +3985,19 @@ mod tests {
         TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
     }
 
+    fn creatures_you_ctrl_with_power_ge(threshold: i32) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: threshold },
+                }]),
+        )
+    }
+
     fn add_lord_static(
         state: &mut GameState,
         lord_id: ObjectId,
@@ -4184,6 +4229,148 @@ mod tests {
         // ModifyPT (layer 7c) gives it +2/+2
         assert_eq!(art_obj.power, Some(2));
         assert_eq!(art_obj.toughness, Some(2));
+    }
+
+    #[test]
+    fn set_pt_layer_orders_unconditional_setters_before_pt_threshold_filters() {
+        let mut state = setup();
+        let _bear = make_creature(&mut state, "Bear", 4, 4, PlayerId(0));
+
+        let shrink = make_creature(&mut state, "Shrink", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&shrink).unwrap();
+            obj.timestamp = 5;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creatures_you_ctrl_with_power_ge(5))
+                // One modification: re-filtering after SetPower would drop power
+                // below the threshold before a second clause could run (CR 613.7a).
+                .modifications(vec![ContinuousModification::SetPower { value: 1 }]);
+            state
+                .objects
+                .get_mut(&shrink)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        let setter = make_creature(&mut state, "Setter", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&setter).unwrap();
+            obj.timestamp = 10;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creature_you_ctrl())
+                .modifications(vec![ContinuousModification::SetPower { value: 6 }]);
+            state
+                .objects
+                .get_mut(&setter)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        let set_pt_effects: Vec<ActiveContinuousEffect> = collect_shared_active_continuous_effects(&state)
+            .into_iter()
+            .filter(|e| e.layer == Layer::SetPT)
+            .collect();
+        let ordered =
+            order_active_continuous_effects(Layer::SetPT, &set_pt_effects, &state);
+
+        let shrink_set_power = ordered.iter().position(|e| {
+            e.source_id == shrink && matches!(e.modification, ContinuousModification::SetPower { value: 1 })
+        });
+        let setter_set_power = ordered.iter().position(|e| {
+            e.source_id == setter && matches!(e.modification, ContinuousModification::SetPower { value: 6 })
+        });
+        assert!(shrink_set_power.is_some() && setter_set_power.is_some());
+        assert!(
+            setter_set_power.unwrap() < shrink_set_power.unwrap(),
+            "unconditional setter must apply before threshold shrink: {ordered:?}"
+        );
+    }
+
+    /// CR 613.8a: A `SetPT` effect with a power threshold must apply after P/T
+    /// setters that change which creatures meet that threshold.
+    #[test]
+    fn pt_modification_dependency_overrides_timestamp_in_set_pt_layer() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 4, 4, PlayerId(0));
+
+        let shrink = make_creature(&mut state, "Shrink", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&shrink).unwrap();
+            obj.timestamp = 5;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creatures_you_ctrl_with_power_ge(5))
+                .modifications(vec![ContinuousModification::SetPower { value: 1 }]);
+            state
+                .objects
+                .get_mut(&shrink)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        let setter = make_creature(&mut state, "Setter", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&setter).unwrap();
+            obj.timestamp = 10;
+        }
+        {
+            let def = StaticDefinition::continuous()
+                .affected(creature_you_ctrl())
+                .modifications(vec![ContinuousModification::SetPower { value: 6 }]);
+            state
+                .objects
+                .get_mut(&setter)
+                .unwrap()
+                .static_definitions
+                .push(def);
+        }
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(bear_obj.power, Some(1));
+    }
+
+    /// CR 613.8a: A conditional `ModifyPT` lord must apply after unconditional
+    /// lords that raise creatures above the threshold.
+    #[test]
+    fn pt_modification_dependency_overrides_timestamp_in_modify_pt_layer() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 3, 3, PlayerId(0));
+
+        let conditional = make_creature(&mut state, "Conditional Lord", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&conditional).unwrap();
+            obj.timestamp = 5;
+        }
+        add_lord_static(
+            &mut state,
+            conditional,
+            creatures_you_ctrl_with_power_ge(4),
+            2,
+            0,
+        );
+
+        let unconditional = make_creature(&mut state, "Unconditional Lord", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&unconditional).unwrap();
+            obj.timestamp = 10;
+        }
+        add_lord_static(&mut state, unconditional, creature_you_ctrl(), 2, 0);
+
+        evaluate_layers(&mut state);
+
+        let bear_obj = state.objects.get(&bear).unwrap();
+        assert_eq!(bear_obj.power, Some(7));
+        assert_eq!(bear_obj.toughness, Some(3));
     }
 
     #[test]
