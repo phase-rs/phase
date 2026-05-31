@@ -7554,6 +7554,82 @@ mod tests {
         ));
     }
 
+    fn assert_shared_creature_type_max(expr: &QuantityExpr) {
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCountBySharedQuality {
+                    filter:
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            controller,
+                            properties,
+                        }),
+                    quality,
+                    aggregate,
+                },
+        } = expr
+        else {
+            panic!("expected ObjectCountBySharedQuality quantity, got {expr:?}");
+        };
+        assert_eq!(type_filters.as_slice(), &[TypeFilter::Creature]);
+        assert_eq!(controller, &Some(ControllerRef::You));
+        assert!(properties.is_empty());
+        assert_eq!(quality, &SharedQuality::CreatureType);
+        assert_eq!(aggregate, &AggregateFunction::Max);
+    }
+
+    #[test]
+    fn skemfar_shadowsage_gain_mode_parses_shared_creature_type_count() {
+        let r = parse(
+            "You gain X life, where X is the greatest number of creatures you control that have a creature type in common.",
+            "Skemfar Shadowsage",
+            &[],
+            &["Creature"],
+            &["Elf", "Cleric"],
+        );
+        let Effect::GainLife { amount, .. } = &*r.abilities[0].effect else {
+            panic!("expected GainLife, got {:?}", r.abilities[0].effect);
+        };
+        assert_shared_creature_type_max(amount);
+    }
+
+    #[test]
+    fn basalt_ravager_damage_parses_shared_creature_type_count() {
+        let r = parse(
+            "Basalt Ravager deals X damage to any target, where X is the greatest number of creatures you control that have a creature type in common.",
+            "Basalt Ravager",
+            &[],
+            &["Creature"],
+            &["Giant", "Wizard"],
+        );
+        let Effect::DealDamage { amount, .. } = &*r.abilities[0].effect else {
+            panic!("expected DealDamage, got {:?}", r.abilities[0].effect);
+        };
+        assert_shared_creature_type_max(amount);
+    }
+
+    #[test]
+    fn white_lotus_tile_mana_parses_shared_creature_type_count() {
+        let r = parse(
+            "{T}: Add X mana of any one color, where X is the greatest number of creatures you control that have a creature type in common.",
+            "White Lotus Tile",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        let Effect::Mana {
+            produced: ManaProduction::AnyOneColor { count, .. },
+            ..
+        } = &*r.abilities[0].effect
+        else {
+            panic!(
+                "expected AnyOneColor mana ability, got {:?}",
+                r.abilities[0].effect
+            );
+        };
+        assert_shared_creature_type_max(count);
+    }
+
     #[test]
     fn conditional_modal_max_reuses_static_condition_parser() {
         let r = parse(

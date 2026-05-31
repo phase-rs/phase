@@ -477,9 +477,12 @@ mod tests {
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, QuantityExpr, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
+        AggregateFunction, ControllerRef, GainLifePlayer, QuantityExpr, QuantityRef, SharedQuality,
+        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
@@ -524,6 +527,79 @@ mod tests {
         resolve_gain(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.players[0].life, 25);
+    }
+
+    #[test]
+    fn skemfar_shadowsage_gain_life_mode_uses_shared_creature_type_count() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec![
+            "Elf".to_string(),
+            "Warrior".to_string(),
+            "Druid".to_string(),
+            "Human".to_string(),
+        ];
+        let source = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Skemfar Shadowsage".to_string(),
+            Zone::Battlefield,
+        );
+        for (name, subtypes) in [
+            ("Elf Warrior", vec!["Elf", "Warrior"]),
+            ("Elf Druid", vec!["Elf", "Druid"]),
+            ("Human Warrior", vec!["Human", "Warrior"]),
+        ] {
+            let id = create_object(
+                &mut state,
+                CardId(902),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = subtypes
+                .into_iter()
+                .map(|subtype| subtype.to_string())
+                .collect();
+        }
+        let changeling = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Masked Vandal".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&changeling).unwrap();
+        obj.card_types.core_types = vec![CoreType::Creature];
+        obj.card_types.subtypes = vec!["Shapeshifter".to_string()];
+        obj.keywords.push(Keyword::Changeling);
+
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCountBySharedQuality {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::You),
+                            properties: Vec::new(),
+                        }),
+                        quality: SharedQuality::CreatureType,
+                        aggregate: AggregateFunction::Max,
+                    },
+                },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_gain(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, 23);
     }
 
     #[test]

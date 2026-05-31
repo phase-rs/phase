@@ -2109,6 +2109,20 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
                 qualities: qualities.clone(),
             },
         },
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCountBySharedQuality {
+                    filter,
+                    quality,
+                    aggregate,
+                },
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountBySharedQuality {
+                filter: substitute_another_in_filter(filter),
+                quality: quality.clone(),
+                aggregate: *aggregate,
+            },
+        },
         // CR 603.4 + CR 109.3: Aggregate populations are also "object
         // populations" in the same sense as ObjectCount — when an
         // intervening-if references an aggregate over "each other <type>",
@@ -10217,7 +10231,7 @@ mod tests {
         CastingPermission, Comparator, ContinuousModification, ControllerRef, CountScope,
         DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp,
         ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        QuantityExpr, QuantityRef, SharedQuality, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -22621,6 +22635,34 @@ mod tests {
              clause-level condition, got {:?}",
             execute.condition,
         );
+    }
+
+    #[test]
+    fn substitute_another_rewrites_shared_quality_count_filter() {
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountBySharedQuality {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::Another],
+                }),
+                quality: SharedQuality::CreatureType,
+                aggregate: AggregateFunction::Max,
+            },
+        };
+
+        let rewritten = substitute_another_in_expr(&expr);
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountBySharedQuality { filter, .. },
+        } = rewritten
+        else {
+            panic!("expected ObjectCountBySharedQuality, got {rewritten:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.properties.contains(&FilterProp::OtherThanTriggerObject));
+        assert!(!tf.properties.contains(&FilterProp::Another));
     }
 
     /// Issue #444 — Odric, Lunarch Marshal. The full trigger parses to a

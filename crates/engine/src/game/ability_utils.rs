@@ -1879,6 +1879,7 @@ fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
         }
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::EnteredThisTurn { filter }

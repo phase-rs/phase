@@ -873,6 +873,22 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             };
             format!("# of {} {}", quality_str, fmt_target(filter))
         }
+        QuantityRef::ObjectCountBySharedQuality {
+            filter,
+            quality,
+            aggregate,
+        } => {
+            let func = match aggregate {
+                AggregateFunction::Max => "greatest",
+                AggregateFunction::Min => "fewest",
+                AggregateFunction::Sum => "total",
+            };
+            format!(
+                "{func} shared {:?} count among {}",
+                quality,
+                fmt_target(filter)
+            )
+        }
         QuantityRef::PlayerCount { filter } => format!("# of {}", fmt_player_filter(filter)),
         QuantityRef::CountersOn {
             scope,
@@ -5155,6 +5171,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::Speed { .. } => ("Speed", Handled),
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
         QuantityRef::ObjectCountDistinct { .. } => ("ObjectCountDistinct", Handled),
+        QuantityRef::ObjectCountBySharedQuality { .. } => ("ObjectCountBySharedQuality", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
         QuantityRef::CountersOn { .. } => ("CountersOn", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),

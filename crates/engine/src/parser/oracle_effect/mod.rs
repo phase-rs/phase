@@ -11788,55 +11788,58 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
 /// hand, then sacrifices half the permanents they control") picks up the
 /// rewrite uniformly. Only reached when the top-level `def.player_scope` is
 /// set, so non-scoped abilities keep the target-scoped resolution path.
-fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
-    fn rewrite_filter_controller_to_scoped(filter: &mut TargetFilter) {
-        match filter {
-            TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You) => {
-                typed.controller = Some(ControllerRef::ScopedPlayer);
+fn rewrite_filter_controller_to_scoped(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You) => {
+            typed.controller = Some(ControllerRef::ScopedPlayer);
+        }
+        TargetFilter::Not { filter } => rewrite_filter_controller_to_scoped(filter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for filter in filters {
+                rewrite_filter_controller_to_scoped(filter);
             }
-            TargetFilter::Not { filter } => rewrite_filter_controller_to_scoped(filter),
-            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-                for filter in filters {
-                    rewrite_filter_controller_to_scoped(filter);
-                }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::LifeTotal { player }
+            | QuantityRef::HandSize { player }
+            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeGainedThisTurn { player }
+            | QuantityRef::PartySize { player }
+                if *player == PlayerScope::Controller =>
+            {
+                *player = PlayerScope::ScopedPlayer;
+            }
+            QuantityRef::ObjectCount { filter }
+            | QuantityRef::ObjectCountBySharedQuality { filter, .. } => {
+                rewrite_filter_controller_to_scoped(filter)
             }
             _ => {}
-        }
-    }
-
-    fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
-        match expr {
-            QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::LifeTotal { player }
-                | QuantityRef::HandSize { player }
-                | QuantityRef::LifeLostThisTurn { player }
-                | QuantityRef::LifeGainedThisTurn { player }
-                | QuantityRef::PartySize { player }
-                    if *player == PlayerScope::Controller =>
-                {
-                    *player = PlayerScope::ScopedPlayer;
-                }
-                QuantityRef::ObjectCount { filter } => rewrite_filter_controller_to_scoped(filter),
-                _ => {}
-            },
-            QuantityExpr::DivideRounded { inner, .. }
-            | QuantityExpr::Multiply { inner, .. }
-            | QuantityExpr::Offset { inner, .. } => rewrite_condition_quantity_expr(inner),
-            QuantityExpr::Sum { exprs } => {
-                for inner in exprs {
-                    rewrite_condition_quantity_expr(inner);
-                }
+        },
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::Offset { inner, .. } => rewrite_condition_quantity_expr(inner),
+        QuantityExpr::Sum { exprs } => {
+            for inner in exprs {
+                rewrite_condition_quantity_expr(inner);
             }
-            QuantityExpr::UpTo { max } => rewrite_condition_quantity_expr(max),
-            QuantityExpr::Power { exponent, .. } => rewrite_condition_quantity_expr(exponent),
-            QuantityExpr::Difference { left, right } => {
-                rewrite_condition_quantity_expr(left);
-                rewrite_condition_quantity_expr(right);
-            }
-            QuantityExpr::Fixed { .. } => {}
         }
+        QuantityExpr::UpTo { max } => rewrite_condition_quantity_expr(max),
+        QuantityExpr::Power { exponent, .. } => rewrite_condition_quantity_expr(exponent),
+        QuantityExpr::Difference { left, right } => {
+            rewrite_condition_quantity_expr(left);
+            rewrite_condition_quantity_expr(right);
+        }
+        QuantityExpr::Fixed { .. } => {}
     }
+}
 
+fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     fn rewrite_condition(condition: &mut AbilityCondition) {
         match condition {
             AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
@@ -19960,8 +19963,8 @@ mod tests {
         ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode, Duration, FilterProp,
         GainLifePlayer, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
         ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValueScope,
-        QuantityExpr, QuantityRef, SearchSelectionConstraint, TargetChoiceTiming, TypeFilter,
-        TypedFilter, ZoneRef,
+        QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming,
+        TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::keywords::Keyword;
@@ -19980,6 +19983,36 @@ mod tests {
             TargetFilter::Not { filter } => target_filter_contains_nonland(filter),
             _ => false,
         }
+    }
+
+    #[test]
+    fn rewrite_condition_quantity_expr_scopes_shared_quality_count_filter() {
+        let mut expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountBySharedQuality {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+                quality: SharedQuality::CreatureType,
+                aggregate: AggregateFunction::Max,
+            },
+        };
+
+        rewrite_condition_quantity_expr(&mut expr);
+
+        assert!(matches!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCountBySharedQuality {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::ScopedPlayer),
+                        ..
+                    }),
+                    ..
+                }
+            }
+        ));
     }
 
     /// Build a typed Cat trigger subject ("one or more other Cats you

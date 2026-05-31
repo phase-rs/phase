@@ -3637,7 +3637,9 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
     Some(KeywordMatch::Concrete(keyword))
 }
 
-fn parse_shared_quality(input: &str) -> nom::IResult<&str, SharedQuality, OracleError<'_>> {
+pub(crate) fn parse_shared_quality(
+    input: &str,
+) -> nom::IResult<&str, SharedQuality, OracleError<'_>> {
     alt((
         value(
             SharedQuality::TotalPowerToughness,
