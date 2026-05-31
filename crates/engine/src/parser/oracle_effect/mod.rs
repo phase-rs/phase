@@ -18791,12 +18791,16 @@ pub(crate) fn parse_counter_suffix_body_combinator(
     ))
 }
 
-/// CR 122.1 + CR 202.3: "a number of <type> counter(s) on it equal to
+/// CR 122.1 + CR 614.1c: "a number of <type> counter(s) on it equal to
 /// <quantity>" — dynamic counter count for "enters with counters" clauses
 /// (e.g. The Eleventh Doctor: "with a number of time counters on it equal to
-/// its mana value"). Delegates the quantity to the shared `parse_quantity_ref`
-/// building block so any "with a number of X counters equal to …" card parses.
-fn parse_dynamic_counter_suffix_body(
+/// its mana value") AND for the post-token "create a … token and put[s] a
+/// number of <type> counters on it equal to <quantity>" form (Oversimplify,
+/// Fractal Anomaly class). Delegates the quantity to the shared
+/// `parse_quantity_ref` building block so any "<verb> a number of X
+/// counters … equal to …" card parses through the same combinator. CR 614.1c
+/// is the authorizing rule for "enters with counters" replacement effects.
+pub(crate) fn parse_dynamic_counter_suffix_body(
     input: &str,
 ) -> nom::IResult<&str, (CounterType, QuantityExpr), OracleError<'_>> {
     let (rest, _) = tag("a number of ").parse(input)?;

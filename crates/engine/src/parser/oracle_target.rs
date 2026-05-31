@@ -1889,19 +1889,25 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
-    // CR 406.6: "exiled with [source]" linkage suffix on a typed reference.
-    // Singular targeted form ("target creature card exiled with ~") composes
-    // with the typed filter via `TargetFilter::And { [Typed, ExiledBySource] }`,
+    // CR 406.6 + CR 607.2a: "exiled with [source]" / "exiled this way" linkage
+    // suffix on a typed reference. Singular targeted forms compose with the
+    // typed filter via `TargetFilter::And { [Typed, ExiledBySource] }`,
     // mirroring the `exclude_chosen_type` wrapping pattern below. The plural
     // and "each card" forms are handled at the top of `parse_target` since
     // they bypass type-phrase parsing entirely.
+    //
+    // Two grammars share the same lowering:
+    //   * `exiled with this <type>` / `exiled with ~` — explicit-source linkage
+    //     (CR 406.6). The trailing type word is informational and consumed as
+    //     a single non-space run via `take_till1` so it doesn't leak.
+    //   * `that were exiled this way` / `that was exiled this way` — relative-
+    //     clause linkage (CR 607.2a). "This way" refers back to the preceding
+    //     exile instruction within the same effect; the resolver maps it to
+    //     the same `ExiledBySource` predicate, since the link is established
+    //     by the linked-exile bookkeeping at exile time.
     let mut exiled_by_source = false;
     let remaining_exiled = lower[pos..].trim_start();
     let exiled_offset = lower[pos..].len() - remaining_exiled.len();
-    // Try "exiled with this <type>" first (longest-match-first); the trailing
-    // type word identifies the source object's card type and is informational
-    // here — consume it as a single non-space run via take_till1 so it doesn't
-    // leak into the remainder.
     if let Ok((rest, _)) = (
         tag::<_, _, OracleError<'_>>("exiled with this "),
         nom::bytes::complete::take_till1::<_, _, OracleError<'_>>(|c: char| c.is_whitespace()),
@@ -1912,6 +1918,14 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += exiled_offset + (remaining_exiled.len() - rest.len());
     } else if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>("exiled with ~").parse(remaining_exiled)
+    {
+        exiled_by_source = true;
+        pos += exiled_offset + (remaining_exiled.len() - rest.len());
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("that were exiled this way"),
+        tag::<_, _, OracleError<'_>>("that was exiled this way"),
+    ))
+    .parse(remaining_exiled)
     {
         exiled_by_source = true;
         pos += exiled_offset + (remaining_exiled.len() - rest.len());
@@ -2445,6 +2459,69 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
 
+    // CR 608.2i + CR 608.2h: Past-tense controller predicates inside look-back
+    // aggregates over non-battlefield objects (Oversimplify class: "creatures
+    // they controlled that were exiled this way"). These MUST be tried before
+    // the present-tense delegate below because `tag("you control")` would
+    // match "you controlled" as a prefix and leave "led" stranded —
+    // longest-match-first ordering is load-bearing here. Adding a new
+    // past-tense form means extending the `alt()`, not the function shape.
+    if let Ok((rest, ctrl)) = alt((
+        value(
+            ControllerRef::You,
+            tag::<_, _, OracleError<'_>>("you controlled"),
+        ),
+        value(
+            ControllerRef::Opponent,
+            tag::<_, _, OracleError<'_>>("an opponent controlled"),
+        ),
+        value(
+            ControllerRef::Opponent,
+            tag::<_, _, OracleError<'_>>("your opponents controlled"),
+        ),
+    ))
+    .parse(trimmed)
+    {
+        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
+    }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they controlled").parse(trimmed) {
+        // CR 608.2i + CR 109.5: "They" inside an each-player iteration body
+        // binds to the iterating player. `ScopedPlayer` is the typed scope for
+        // that iteration; without an explicit `relative_player_scope`, fall
+        // back to `ScopedPlayer` (NOT `You`) — at runtime `ScopedPlayer`
+        // gracefully degrades to the source controller when no iteration is
+        // active (`scoped_player_or_controller`), giving the same behavior as
+        // `You` for solo casts while staying correct for per-player loops.
+        // Intentionally distinct from the present-tense "they control" arm
+        // below: past-tense forms appear only inside look-back aggregates,
+        // where each-player iteration is the dominant context.
+        let ctrl = ctx
+            .relative_player_scope
+            .clone()
+            .unwrap_or(ControllerRef::ScopedPlayer);
+        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
+    }
+    // CR 608.2i + CR 109.4: Past-tense sibling of the present-tense
+    // "target player controls" / "that player controls" arms below. Same
+    // anaphor semantics — the chosen target player or the
+    // relative-player-scope anaphor — applied to a look-back filter. Kept
+    // here rather than folded into the alt() above because both arms route
+    // through `ctx.relative_player_scope`, while the alt() arms emit fixed
+    // ControllerRef variants.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("target player controlled").parse(trimmed) {
+        return Some((
+            ControllerRef::TargetPlayer,
+            leading_ws + trimmed.len() - rest.len(),
+        ));
+    }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that player controlled").parse(trimmed) {
+        let ctrl = ctx
+            .relative_player_scope
+            .clone()
+            .unwrap_or(ControllerRef::ScopedPlayer);
+        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
+    }
+
     // Delegate to nom_filter::parse_zone_controller which handles common patterns,
     // then fall through to additional nom-based patterns.
     if let Ok((rest, ctrl)) = nom_filter::parse_zone_controller(trimmed) {
@@ -2489,7 +2566,6 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
             .unwrap_or(ControllerRef::You);
         return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
-
     None
 }
 
