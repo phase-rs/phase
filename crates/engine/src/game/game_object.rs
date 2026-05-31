@@ -944,6 +944,7 @@ impl GameObject {
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
             colors: self.color.clone(),
+            chosen_attributes: self.chosen_attributes.clone(),
             counters: self.counters.clone(),
         }
     }

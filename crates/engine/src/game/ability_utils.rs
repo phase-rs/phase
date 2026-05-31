@@ -2238,20 +2238,26 @@ fn collect_per_opponent_target_fanout_slots(
     };
 
     for opponent in per_opponent_fanout_players(state, ability.controller) {
+        let legal_targets =
+            targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id);
+        if legal_targets.is_empty() {
+            if ability.targeting_is_optional() {
+                // CR 115.1 + CR 603.3d: "Up to one" per-opponent fanout — an
+                // opponent with no legal targets contributes no slots. Omitting
+                // both the player slot and the creature slot avoids presenting
+                // the player with an empty selection step they cannot act on.
+                continue;
+            }
+            return Err(EngineError::ActionNotAllowed(
+                "No legal targets available".to_string(),
+            ));
+        }
         let player_targets =
             per_opponent_fanout_constraint_targets(state, ability.controller, opponent);
         acc.push(TargetSelectionSlot {
             legal_targets: player_targets,
             optional: false,
         });
-
-        let legal_targets =
-            targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id);
-        if legal_targets.is_empty() && !ability.targeting_is_optional() {
-            return Err(EngineError::ActionNotAllowed(
-                "No legal targets available".to_string(),
-            ));
-        }
         acc.push(TargetSelectionSlot {
             legal_targets,
             optional: ability.targeting_is_optional(),
@@ -2271,6 +2277,15 @@ fn collect_per_opponent_target_fanout_specs(
     };
 
     for opponent in per_opponent_fanout_players(state, ability.controller) {
+        // CR 115.1 + CR 603.3d: Mirror the slot-builder: skip opponents whose
+        // creature pool is empty when targeting is optional so specs and slots
+        // stay in lockstep.
+        if ability.targeting_is_optional()
+            && targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id)
+                .is_empty()
+        {
+            continue;
+        }
         specs.push(TargetSlotSpec {
             filter: TargetFilter::SpecificPlayer { id: opponent },
             optional: false,
@@ -5688,9 +5703,14 @@ mod tests {
     }
 
     #[test]
-    fn per_opponent_gain_control_auto_select_defers_when_optional_skip_needs_slot_position() {
+    fn per_opponent_fanout_optional_skips_opponent_with_no_legal_targets() {
+        // Regression: Haytham Kenway crash — "for each opponent, exile up to
+        // one target creature that player controls." When one opponent has no
+        // creatures the slot-builder must skip that opponent entirely so the
+        // player is never shown an empty selection step.
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
-        create_creature(&mut state, PlayerId(2), CardId(1), "Opp Two");
+        // Player 1 has no creatures. Player 2 has one.
+        let opp_two_creature = create_creature(&mut state, PlayerId(2), CardId(1), "Opp Two");
         let mut ability = per_opponent_gain_control_ability();
         ability.multi_target = Some(MultiTargetSpec::bounded(
             0,
@@ -5702,16 +5722,51 @@ mod tests {
         ));
         let slots = build_target_slots(&state, &ability).expect("target slots should build");
 
-        assert_eq!(slots.len(), 4);
-        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
-        assert!(slots[1].legal_targets.is_empty());
+        // Player 1's slots are omitted — only Player 2's pair is present.
+        assert_eq!(slots.len(), 2, "Player 1 (no creatures) must be skipped");
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(2))]);
+        assert!(!slots[0].optional);
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(opp_two_creature)]
+        );
         assert!(slots[1].optional);
-        assert_eq!(slots[2].legal_targets, vec![TargetRef::Player(PlayerId(2))]);
 
+        // Multiple valid assignments (skip or take opp-two creature) — no
+        // single forced choice, so auto_select defers to the player.
         assert_eq!(
             auto_select_targets_for_ability(&state, &ability, &slots, &[])
-                .expect("legal skip-plus-target assignment should not be rejected"),
+                .expect("legal assignment exists"),
             None
+        );
+        assert!(has_legal_target_assignment_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn per_opponent_fanout_optional_all_opponents_no_creatures_yields_empty_slots() {
+        // Regression: 2-player game, Haytham Kenway enters, opponent has no
+        // creatures. Slot list must be empty so the trigger auto-pushes with
+        // no targets and resolves doing nothing — no UI crash, no spurious
+        // cost_payment_failed_flag.
+        let state = GameState::new_two_player(42);
+        let mut ability = per_opponent_gain_control_ability();
+        ability.multi_target = Some(MultiTargetSpec::bounded(
+            0,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ));
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert!(
+            slots.is_empty(),
+            "no legal creature targets for any opponent → slots must be empty"
         );
         assert!(has_legal_target_assignment_for_ability(
             &state,

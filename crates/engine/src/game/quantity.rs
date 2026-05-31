@@ -7723,6 +7723,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
             },
         );
@@ -7782,6 +7783,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![ManaColor::Green],
+                chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
             },
         });
@@ -7926,6 +7928,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
             },
         });
@@ -7988,6 +7991,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
             },
         });
@@ -8048,6 +8052,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
             },
         };
@@ -8105,6 +8110,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
             },
         });
@@ -8155,6 +8161,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
             },
         };
@@ -8216,6 +8223,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
             },
         };
@@ -8254,6 +8262,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: HashMap::new(),
             },
         );
@@ -8854,6 +8863,7 @@ mod tests {
                     keywords: vec![],
                     colors: vec![],
                     counters: Default::default(),
+                    chosen_attributes: vec![],
                 },
             );
             state.exile_links.push(ExileLink {

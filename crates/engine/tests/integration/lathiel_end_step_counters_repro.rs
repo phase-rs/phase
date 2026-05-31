@@ -1,5 +1,5 @@
-//! Issue #1610: Lathiel, the Bounteous Dawn end-step distributed +1/+1 counters
-//! from life gained this turn.
+//! Issues #1610 / #1660: Lathiel, the Bounteous Dawn end-step distributed +1/+1
+//! counters from life gained this turn.
 //!
 //! Oracle: "Lifelink. At the beginning of each end step, if you gained life this
 //! turn, distribute up to that many +1/+1 counters among any number of other
@@ -100,5 +100,36 @@ fn lathiel_end_step_distributes_counters_from_lifelink_gain() {
         p1p1_counters(&runner, receiver),
         2,
         "Lathiel must distribute exactly 2 +1/+1 counters (= life gained via lifelink)"
+    );
+}
+
+#[test]
+fn lathiel_target_selection_capped_to_life_gained_not_creature_count() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let lathiel = scenario
+        .add_creature_from_oracle(P0, "Lathiel, the Bounteous Dawn", 2, 2, LATHIEL_ORACLE)
+        .id();
+    scenario.add_creature(P0, "Receiver A", 1, 1);
+    scenario.add_creature(P0, "Receiver B", 1, 1);
+    scenario.add_creature(P0, "Receiver C", 1, 1);
+    scenario.add_creature(P1, "Blocker", 3, 3);
+
+    let mut runner = scenario.build();
+    run_combat(&mut runner, vec![lathiel], vec![]);
+
+    assert_eq!(runner.state().players[0].life_gained_this_turn, 2);
+
+    advance_to_end_step_trigger(&mut runner);
+
+    let slot_count = match &runner.state().waiting_for {
+        WaitingFor::TriggerTargetSelection { target_slots, .. }
+        | WaitingFor::TargetSelection { target_slots, .. } => target_slots.len(),
+        other => panic!("expected target selection at end step, got {other:?}"),
+    };
+    assert_eq!(
+        slot_count, 2,
+        "must not offer more target slots than life gained (issue #1660 softlock)"
     );
 }

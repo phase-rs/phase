@@ -3105,6 +3105,19 @@ fn parse_leading_command_return_destination(input: &str) -> OracleResult<'_, Ret
     ))
 }
 
+/// CR 601.2d: Cap "any number of" target selection to the distribution pool.
+/// Without this, the controller can select more permanents than counters or
+/// damage and the assign step deadlocks (each target must receive at least one).
+fn multi_target_for_distribute_among(distribution_amount: &QuantityExpr) -> MultiTargetSpec {
+    let (inner, is_up_to) = distribution_amount.peel_up_to();
+    let min = if is_up_to {
+        QuantityExpr::Fixed { value: 0 }
+    } else {
+        QuantityExpr::Fixed { value: 1 }
+    };
+    MultiTargetSpec::bounded_expr(min, inner.clone())
+}
+
 /// CR 601.2d: Parse "deal N damage divided as you choose among [targets]" and
 /// "deal N damage distributed among [targets]" → Effect::DealDamage with distribute flag.
 ///
@@ -3174,8 +3187,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
         let skip = target_lower.len() - rest.len();
         (
             &target_text[skip..],
-            // CR 601.2d: min: 1 because each target must receive at least 1.
-            Some(MultiTargetSpec::unlimited(1)),
+            Some(multi_target_for_distribute_among(&amount)),
         )
     } else {
         (target_text, None)
@@ -3251,8 +3263,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         let skip = target_text_lower.len() - rest.len();
         (
             &target_text[skip..],
-            // CR 601.2d: min: 1 because each target must receive at least 1.
-            Some(MultiTargetSpec::unlimited(1)),
+            Some(multi_target_for_distribute_among(&count_expr)),
         )
     } else {
         strip_optional_target_prefix(target_text)
@@ -3483,6 +3494,15 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                         },
                         "",
                     ));
+                } else if parse_source_chosen_player_damage_target(target_phrase) {
+                    return Some((
+                        Effect::DealDamage {
+                            amount: qty,
+                            target: TargetFilter::SourceChosenPlayer,
+                            damage_source: None,
+                        },
+                        "",
+                    ));
                 } else if let Some((target, ecr_rem)) =
                     parse_event_context_ref_with_ctx(target_phrase, ctx)
                 {
@@ -3650,6 +3670,19 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         ));
     }
 
+    // CR 607.2d: Resolve source-linked persisted "the chosen player" before
+    // generic target parsing, where that phrase has different meanings.
+    if parse_source_chosen_player_damage_target(after_to) {
+        return Some((
+            Effect::DealDamage {
+                amount: amount.clone(),
+                target: TargetFilter::SourceChosenPlayer,
+                damage_source: None,
+            },
+            "",
+        ));
+    }
+
     // CR 608.2k: Check for event-context references before standard target parsing.
     if let Some((target, ecr_rem)) = parse_event_context_ref_with_ctx(after_to, ctx) {
         let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
@@ -3687,6 +3720,21 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         },
         rem,
     ))
+}
+
+/// CR 607.2d + CR 608.2c + CR 120.1: In damage-recipient grammar, singular
+/// "the chosen player" refers to the source object's linked persisted choice
+/// (Stuffy Doll class). Kept local to damage parsing so generic target parsing
+/// preserves selected-set and resolution-scoped chosen-player meanings.
+fn parse_source_chosen_player_damage_target(input: &str) -> bool {
+    let lower = input.trim().trim_end_matches('.').to_lowercase();
+    let parsed = nom::combinator::all_consuming(value(
+        (),
+        tag::<_, _, OracleError<'_>>("the chosen player"),
+    ))
+    .parse(lower.as_str())
+    .is_ok();
+    parsed
 }
 
 /// CR 115.1: `parse_target_with_ctx` consumes "another " but leaves the bare

@@ -212,6 +212,7 @@ fn lki_fallback_resolves_source_power_after_zone_change() {
             supertypes: vec![],
             keywords: vec![],
             colors: vec![],
+            chosen_attributes: Vec::new(),
             counters: HashMap::new(),
         },
     );

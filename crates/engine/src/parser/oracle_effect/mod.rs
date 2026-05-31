@@ -12333,6 +12333,12 @@ pub(crate) fn rewrite_gained_life_that_many_distribution_refs(def: &mut AbilityD
     }
 
     each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    if let Some(spec) = def.multi_target.as_mut() {
+        rewrite_qty(&mut spec.min);
+        if let Some(max) = spec.max.as_mut() {
+            rewrite_qty(max);
+        }
+    }
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_gained_life_that_many_distribution_refs(sub);
     }
@@ -22733,6 +22739,26 @@ mod tests {
             ),
             "Expected targeted PutCounter with multi_target, got {:?}",
             clause.effect
+        );
+    }
+
+    #[test]
+    fn distribute_counters_among_any_number_caps_targets_to_pool() {
+        let clause = parse_effect_clause(
+            "distribute up to two +1/+1 counters among any number of other target creatures",
+            &mut ParseContext::default(),
+        );
+
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::bounded_expr(
+                QuantityExpr::Fixed { value: 0 },
+                QuantityExpr::Fixed { value: 2 },
+            ))
+        );
+        assert_eq!(
+            clause.distribute,
+            Some(DistributionUnit::Counters("P1P1".to_string()))
         );
     }
 

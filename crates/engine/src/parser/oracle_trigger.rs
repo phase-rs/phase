@@ -14,6 +14,7 @@ use super::oracle_effect::{
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
+use super::oracle_nom::condition::parse_source_has_counters;
 use super::oracle_nom::error::{oracle_err, OracleResult};
 use super::oracle_nom::filter::{parse_enters_origin_zone, parse_with_property};
 use super::oracle_nom::primitives::{
@@ -6719,7 +6720,52 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         }
     }
 
+    // CR 603.8: "when ~ has no [type] counters on it" — state trigger that fires
+    // when the source permanent has zero counters of the specified type.
+    // Handles: Dark Depths ("has no ice counters"), Afiya Grove ("has no +1/+1
+    // counters"), and bare "has no counters on it" (any type).
+    if let Some(result) = try_parse_has_no_counters_state_trigger(lower) {
+        return Some(result);
+    }
+
     None
+}
+
+/// CR 603.8: Parse "when ~ has no [type] counters on it" as a state trigger.
+///
+/// Delegates the subject × quantity × counter-type × "on it" grammar to the
+/// shared `parse_source_has_counters` combinator and bridges its
+/// `StaticCondition::HasCounters` to a `TriggerCondition` via
+/// `static_condition_to_trigger_condition` — the same path intervening-if
+/// counter conditions already use. Only the zero/depletion form (Dark Depths,
+/// Afiya Grove, vanishing-style "has no … counters") is accepted: a state
+/// trigger re-checks every SBA cycle and re-fires once off the stack, so a
+/// non-zero threshold would loop for any effect that doesn't itself remove the
+/// counters.
+fn try_parse_has_no_counters_state_trigger(
+    lower: &str,
+) -> Option<(TriggerMode, TriggerDefinition)> {
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when ")))
+        .parse(lower)
+        .ok()?;
+    let (_, static_cond) = parse_source_has_counters(rest).ok()?;
+    // CR 603.8: restrict to the self-limiting "has no … counters" depletion form.
+    if !matches!(
+        static_cond,
+        StaticCondition::HasCounters {
+            minimum: 0,
+            maximum: Some(0),
+            ..
+        }
+    ) {
+        return None;
+    }
+    let condition = static_condition_to_trigger_condition(&static_cond)?;
+    let mut def = make_base();
+    def.mode = TriggerMode::StateCondition;
+    def.condition = Some(condition);
+    def.valid_card = Some(TargetFilter::SelfRef);
+    Some((TriggerMode::StateCondition, def))
 }
 
 /// CR 303.4 + CR 301.5: Detect a trailing "that are enchanted/equipped by an
@@ -20984,6 +21030,81 @@ mod tests {
             }
         } else {
             panic!("expected ControlsNone condition, got {:?}", def.condition);
+        }
+    }
+
+    #[test]
+    fn state_trigger_has_no_ice_counters() {
+        // Dark Depths: "When Dark Depths has no ice counters on it, sacrifice it."
+        let def = parse_trigger_line(
+            "When Dark Depths has no ice counters on it, sacrifice it.",
+            "Dark Depths",
+        );
+        assert_eq!(def.mode, TriggerMode::StateCondition);
+        if let Some(TriggerCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        }) = &def.condition
+        {
+            assert_eq!(
+                *counters,
+                CounterMatch::OfType(CounterType::Generic("ice".to_string()))
+            );
+            assert_eq!(*minimum, 0);
+            assert_eq!(*maximum, Some(0));
+        } else {
+            panic!("expected HasCounters condition, got {:?}", def.condition);
+        }
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(*execute.effect, Effect::Sacrifice { .. }),
+            "expected Sacrifice, got {:?}",
+            execute.effect,
+        );
+    }
+
+    #[test]
+    fn state_trigger_has_no_plus1_counters() {
+        // Afiya Grove: "When Afiya Grove has no +1/+1 counters on it, sacrifice it."
+        let def = parse_trigger_line(
+            "When Afiya Grove has no +1/+1 counters on it, sacrifice it.",
+            "Afiya Grove",
+        );
+        assert_eq!(def.mode, TriggerMode::StateCondition);
+        if let Some(TriggerCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        }) = &def.condition
+        {
+            assert_eq!(*counters, CounterMatch::OfType(CounterType::Plus1Plus1));
+            assert_eq!(*minimum, 0);
+            assert_eq!(*maximum, Some(0));
+        } else {
+            panic!("expected HasCounters condition, got {:?}", def.condition);
+        }
+    }
+
+    #[test]
+    fn state_trigger_has_no_counters_bare() {
+        // Hypothetical: "When ~ has no counters on it, sacrifice it."
+        let def = parse_trigger_line(
+            "When TestCard has no counters on it, sacrifice it.",
+            "TestCard",
+        );
+        assert_eq!(def.mode, TriggerMode::StateCondition);
+        if let Some(TriggerCondition::HasCounters {
+            counters,
+            minimum,
+            maximum,
+        }) = &def.condition
+        {
+            assert_eq!(*counters, CounterMatch::Any);
+            assert_eq!(*minimum, 0);
+            assert_eq!(*maximum, Some(0));
+        } else {
+            panic!("expected HasCounters condition, got {:?}", def.condition);
         }
     }
 

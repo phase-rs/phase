@@ -80,6 +80,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
@@ -257,6 +258,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
@@ -953,6 +955,8 @@ fn filter_inner_for_object(
         TargetFilter::Controller => false, // Controller is a player, not an object
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
+        // CR 607.2d + CR 608.2c: SourceChosenPlayer is a player reference, not an object.
+        TargetFilter::SourceChosenPlayer => false,
         TargetFilter::ScopedPlayer => false, // ScopedPlayer is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
         TargetFilter::SourceOrPaired => state
@@ -1269,6 +1273,8 @@ fn zone_change_filter_inner(
         TargetFilter::Controller => false,
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
+        // CR 607.2d + CR 608.2c: SourceChosenPlayer is a player reference, not an object.
+        TargetFilter::SourceChosenPlayer => false,
         TargetFilter::ScopedPlayer => false,
         TargetFilter::SelfRef => record.object_id == source_id,
         TargetFilter::SourceOrPaired => false,
@@ -1636,6 +1642,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
@@ -1868,6 +1875,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
@@ -6849,6 +6857,7 @@ mod tests {
             supertypes: vec![],
             keywords: vec![],
             colors: vec![],
+            chosen_attributes: Vec::new(),
             counters: Default::default(),
         };
         let filter =
@@ -6890,6 +6899,7 @@ mod tests {
             supertypes: vec![],
             keywords: vec![],
             colors: vec![],
+            chosen_attributes: Vec::new(),
             counters: Default::default(),
         };
         let filter =
@@ -7718,6 +7728,7 @@ mod tests {
             supertypes: vec![],
             keywords: vec![],
             colors: vec![],
+            chosen_attributes: Vec::new(),
             counters: HashMap::new(),
         };
         let land_lki = LKISnapshot {
@@ -7734,6 +7745,7 @@ mod tests {
             supertypes: vec![],
             keywords: vec![],
             colors: vec![],
+            chosen_attributes: Vec::new(),
             counters: HashMap::new(),
         };
 
@@ -7876,6 +7888,7 @@ mod tests {
                 keywords: vec![],
                 colors: vec![],
                 counters: Default::default(),
+                chosen_attributes: vec![],
             },
         );
 
@@ -7942,6 +7955,7 @@ mod tests {
                 keywords: vec![],
                 colors: vec![],
                 counters: Default::default(),
+                chosen_attributes: vec![],
             },
         );
 

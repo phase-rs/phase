@@ -1627,15 +1627,8 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     }
 
     // --- "~ is the chosen type in addition to its other types" ---
-    // Distinguish creature type (Metallic Mimic) vs basic land type (Multiversal Passage)
-    if nom_primitives::scan_contains(tp.lower, "is the chosen type") {
-        let kind = if nom_tag_tp(&tp, "this creature").is_some()
-            || nom_primitives::scan_contains(tp.lower, "creature is the chosen")
-        {
-            ChosenSubtypeKind::CreatureType
-        } else {
-            ChosenSubtypeKind::BasicLandType
-        };
+    // Distinguish creature type (Metallic Mimic / Roaming Throne) vs land-type forms.
+    if let Ok((_, kind)) = parse_self_chosen_type_static(tp.lower) {
         let modification = ContinuousModification::AddChosenSubtype { kind };
         return Some(
             StaticDefinition::continuous()
@@ -2697,6 +2690,26 @@ fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
         .parse(rest)
         .ok()?;
     Some(mode)
+}
+
+/// CR 607.2d: Parse a self-chosen type static ability line.
+fn parse_self_chosen_type_static(input: &str) -> OracleResult<'_, ChosenSubtypeKind> {
+    let (input, kind) = alt((
+        value(ChosenSubtypeKind::BasicLandType, tag("~ is")),
+        value(ChosenSubtypeKind::CreatureType, tag("this creature is")),
+        value(ChosenSubtypeKind::BasicLandType, tag("this land is")),
+        value(ChosenSubtypeKind::BasicLandType, tag("this permanent is")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" the chosen type").parse(input)?;
+    let (input, _) = opt(preceded(
+        tag(" in addition to "),
+        terminated(alt((tag("its"), tag("their"))), tag(" other types")),
+    ))
+    .parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof.parse(input)?;
+    Ok((input, kind))
 }
 
 fn parse_arcane_adaptation_chosen_type_static(
@@ -6761,11 +6774,27 @@ fn lower_rule_static(
                 .affected(affected)
                 .description(description.to_string())
         }
-        RuleStaticPredicate::Shroud => StaticDefinition::new(StaticMode::Shroud)
+        RuleStaticPredicate::Shroud if rule_static_affected_is_player_scope(&affected) => {
+            StaticDefinition::new(StaticMode::Shroud)
+                .affected(affected)
+                .description(description.to_string())
+        }
+        RuleStaticPredicate::Shroud => StaticDefinition::continuous()
             .affected(affected)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Shroud,
+            }])
             .description(description.to_string()),
-        RuleStaticPredicate::Hexproof => StaticDefinition::new(StaticMode::Hexproof)
+        RuleStaticPredicate::Hexproof if rule_static_affected_is_player_scope(&affected) => {
+            StaticDefinition::new(StaticMode::Hexproof)
+                .affected(affected)
+                .description(description.to_string())
+        }
+        RuleStaticPredicate::Hexproof => StaticDefinition::continuous()
             .affected(affected)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof,
+            }])
             .description(description.to_string()),
         RuleStaticPredicate::MayLookAtTopOfLibrary => {
             StaticDefinition::new(StaticMode::MayLookAtTopOfLibrary)
@@ -6787,6 +6816,32 @@ fn lower_rule_static(
                 .description(description.to_string())
         }
     }
+}
+
+fn rule_static_affected_is_player_scope(affected: &TargetFilter) -> bool {
+    matches!(
+        affected,
+        TargetFilter::Player
+            | TargetFilter::AllPlayers
+            | TargetFilter::Controller
+            | TargetFilter::OriginalController
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::DefendingPlayer
+    ) || matches!(
+        affected,
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: Some(_),
+            properties,
+        }) if type_filters.is_empty() && properties.is_empty()
+    )
 }
 
 /// CR 704.5j: Parse a "the \"legend rule\" doesn't apply [to <scope> you control]"

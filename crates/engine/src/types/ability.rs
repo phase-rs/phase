@@ -2565,6 +2565,11 @@ pub enum TargetFilter {
     /// Distinct from `Owner` (which always reads the source object's owner) and
     /// `ParentTargetController` (which returns the controller per CR 109.4).
     ParentTargetOwner,
+    /// CR 607.2d + CR 608.2c: Resolves to the player chosen for the source by
+    /// a linked persisted choice ("the chosen player"). This is not a target
+    /// slot and is distinct from `ControllerRef::ChosenPlayer`, which is
+    /// resolution-scoped to the current ability chain.
+    SourceChosenPlayer,
     /// CR 109.5 + CR 608.2c: Resolves to the ability's *original* controller — the
     /// player who put the spell or ability on the stack — even when a surrounding
     /// `player_scope` iteration has rebound `ResolvedAbility::controller` to a
@@ -7356,6 +7361,7 @@ impl TargetFilter {
                 | TargetFilter::ParentTargetSlot { .. }
                 | TargetFilter::ParentTargetController
                 | TargetFilter::ParentTargetOwner
+                | TargetFilter::SourceChosenPlayer
                 | TargetFilter::PostReplacementSourceController
                 | TargetFilter::PostReplacementDamageTarget
                 | TargetFilter::TrackedSet { .. }
@@ -10691,6 +10697,10 @@ pub enum DamageTargetPlayerScope {
     /// The controller of the replacement source. Used by Worship: "damage
     /// that would reduce *your* life total to less than 1".
     Controller,
+    /// CR 607.2d + CR 614.1a: Damage recipient is the player chosen for the
+    /// replacement source by a linked persisted choice, or a permanent that
+    /// player controls for `PlayerOrPermanentsControlledBy`.
+    SourceChosenPlayer,
     Specific(PlayerId),
 }
 
