@@ -4142,6 +4142,7 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
             },
             count: QuantityExpr::Fixed { value: 1 },
             reveal: true,
+            source_zones: vec![Zone::Library],
             // CR 702.124j: the target player searches their own library.
             target_player: Some(TargetFilter::Player),
             selection_constraint: SearchSelectionConstraint::None,
@@ -12164,6 +12165,7 @@ mod living_weapon_synthesis_tests {
                         },
                         count: QuantityExpr::Fixed { value: 1 },
                         reveal: true,
+                        source_zones: vec![Zone::Library],
                         target_player: Some(TargetFilter::Player),
                         selection_constraint: SearchSelectionConstraint::None,
                         split: None,
