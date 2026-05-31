@@ -3184,22 +3184,27 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
     // Runic Armasaur, Ceaseless Searblades.
     fn parse_ability_object(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
         let (rest, _) = (tag("an "), opt(tag("activated ")), tag("ability")).parse(input)?;
-        // CR 602.1a: Optional source-object filter narrows the trigger to
-        // abilities whose source matches a type filter ("of an artifact or
-        // creature", "of a creature or land", "of a permanent").
+        // CR 602.1a + CR 113.7: Optional source-object filter narrows the
+        // trigger to abilities whose source matches a type filter ("of an
+        // artifact or creature", "of a creature or land", "of a permanent").
         opt(preceded(
             tag(" of "),
             preceded(alt((tag("a "), tag("an "))), parse_source_type_disjunction),
         ))
-        .map(|filter| {
-            filter.map(|types| {
-                TargetFilter::Typed(TypedFilter {
-                    type_filters: types,
-                    ..TypedFilter::default()
-                })
-            })
-        })
+        .map(|filter| filter.map(source_object_filter))
         .parse(rest)
+    }
+
+    fn source_object_filter(type_filters: Vec<TypeFilter>) -> TargetFilter {
+        // CR 109.2: A card type/subtype description without "card", "spell",
+        // "source", or a zone means a permanent of that type on the battlefield.
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }],
+            ..TypedFilter::default()
+        })
     }
 
     /// CR 602.1a: Parse a disjunction of card types for the source-object
@@ -3226,8 +3231,15 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
             value(TypeFilter::Enchantment, tag("enchantment")),
             value(TypeFilter::Planeswalker, tag("planeswalker")),
             value(TypeFilter::Permanent, tag("permanent")),
+            parse_source_subtype,
         ))
         .parse(input)
+    }
+
+    fn parse_source_subtype(input: &str) -> OracleResult<'_, TypeFilter> {
+        parse_subtype(input)
+            .map(|(subtype, consumed)| (&input[consumed..], TypeFilter::Subtype(subtype)))
+            .ok_or_else(|| oracle_err(input))
     }
 
     fn parse_qualifier(input: &str) -> OracleResult<'_, Option<TriggerCondition>> {
@@ -23142,6 +23154,30 @@ mod snapshot_tests {
                     TypeFilter::Artifact,
                     TypeFilter::Creature,
                 ])],
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }],
+                ..TypedFilter::default()
+            }))
+        );
+    }
+
+    /// CR 109.2: "an ability of an Elemental" describes an Elemental permanent
+    /// source on the battlefield, not an Elemental card in another zone.
+    #[test]
+    fn trigger_activate_ability_of_subtype_source() {
+        let def = parse_trigger_line(
+            "Whenever you activate an ability of an Elemental, ~ gets +1/+0 until end of turn.",
+            "Ceaseless Searblades",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Elemental".to_string())],
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }],
                 ..TypedFilter::default()
             }))
         );
