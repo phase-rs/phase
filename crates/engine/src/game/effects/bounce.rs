@@ -431,6 +431,7 @@ pub fn resolve_all(
         }
     }
 
+    let mut bounced_ids = Vec::new();
     for &obj_id in &matching {
         // CR 400.3 + CR 400.7: Move each matching permanent to the
         // destination zone. The single-bounce resolver runs the same
@@ -440,8 +441,14 @@ pub fn resolve_all(
         let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
         if current_zone == Some(Zone::Battlefield) {
             zones::move_to_zone(state, obj_id, destination, events);
+            bounced_ids.push(obj_id);
         }
     }
+
+    // CR 603.10a + CR 608.2f: Every permanent in this mass bounce left the
+    // battlefield as part of the same resolution event, so leaves-the-battlefield
+    // observers among the bounced group observe each other via last-known info.
+    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &bounced_ids));
 
     state.last_effect_count = Some(matching.len() as i32);
     events.push(GameEvent::EffectResolved {

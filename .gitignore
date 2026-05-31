@@ -10,6 +10,9 @@ node_modules/
 # Local TODO notes (per-item follow-up specs, not shared via git)
 docs/todo/
 
+# Superpowers plans
+docs/superpowers/
+
 # MTG Comprehensive Rules — © Wizards of the Coast, not redistributed here.
 # Run ./scripts/fetch-comp-rules.sh to download a local copy for dev reference.
 docs/MagicCompRules.txt

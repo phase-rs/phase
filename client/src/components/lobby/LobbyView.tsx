@@ -94,6 +94,7 @@ export function LobbyView({
     (s) => s.ensureSubscriptionSocket,
   );
   const setFormatConfig = useMultiplayerStore((s) => s.setFormatConfig);
+  const hostGameCode = useMultiplayerStore((s) => s.hostGameCode);
 
   // If the user is browsing a specific format and clicks Host, seed the
   // host-setup form with that format — they were clearly looking for that
@@ -378,6 +379,7 @@ export function LobbyView({
                   game={game}
                   onJoin={handleJoinFromList}
                   compatible={isLobbyEntryCompatible(game.host_build_commit)}
+                  hostGameCode={hostGameCode}
                 />
               ))}
             </div>

@@ -233,6 +233,15 @@ pub fn record_attackers_declared(
         .attacking_creatures_this_turn
         .entry(state.active_player)
         .or_insert(0) += attacker_count as u32;
+
+    // CR 508.6 + CR 508.5: record the defending players attacked this declaration.
+    // `players_attacked_this_step` already holds this declaration's defenders.
+    let active = state.active_player;
+    state
+        .attacked_defenders_this_turn
+        .entry(active)
+        .or_default()
+        .extend(state.players_attacked_this_step.iter().copied());
 }
 
 pub fn record_discard(state: &mut crate::types::game_state::GameState, player: PlayerId) {
@@ -1320,9 +1329,7 @@ pub(crate) fn target_dependent_flash_permission_feasible(
     // granted types/keywords are visible — mirror `spell_has_legal_targets`
     // (casting.rs). `find_legal_targets` does not evaluate layers itself.
     let mut simulated = state.clone();
-    if simulated.layers_dirty {
-        super::layers::evaluate_layers(&mut simulated);
-    }
+    super::layers::flush_layers(&mut simulated);
     let Some(obj) = simulated.objects.get(&object_id) else {
         return true;
     };

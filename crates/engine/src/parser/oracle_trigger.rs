@@ -15,7 +15,7 @@ use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::{oracle_err, OracleResult};
-use super::oracle_nom::filter::parse_enters_origin_zone;
+use super::oracle_nom::filter::{parse_enters_origin_zone, parse_with_property};
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
@@ -861,6 +861,17 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         (None, Some(c)) => Some(c),
         (None, None) => None,
     };
+
+    // CR 603.4: Intervening-if life-gain triggers check the gained-life
+    // condition when they trigger and resolve, so "that many" distribution
+    // references bind to the same turn-scoped life-gain quantity.
+    if def.condition.as_ref().is_some_and(
+        crate::parser::oracle_effect::trigger_condition_references_controller_life_gained,
+    ) {
+        if let Some(ability) = def.execute.as_deref_mut() {
+            crate::parser::oracle_effect::rewrite_gained_life_that_many_distribution_refs(ability);
+        }
+    }
 
     // CR 109.4 + CR 603.7c: Surface TargetFilter::Player when execute
     // references ControllerRef::TargetPlayer.
@@ -2402,7 +2413,32 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         if !after.starts_with(" from") {
             return (
                 strip_condition_clause(text, pos, "if you cast it".len()),
-                Some(TriggerCondition::WasCast),
+                Some(TriggerCondition::WasCast { zone: None }),
+            );
+        }
+    }
+
+    // CR 603.4 + CR 601.2 + CR 603.2c: "if it/they entered or w(as|ere) cast from a graveyard"
+    // allow-noncombinator: structural if-clause excision, not parse dispatch
+    for pattern in &[
+        "if they entered or were cast from a graveyard",
+        "if it entered or was cast from a graveyard",
+    ] {
+        if let Some(pos) = tp.find(pattern) {
+            return (
+                strip_condition_clause(text, pos, pattern.len()),
+                Some(TriggerCondition::Or {
+                    conditions: vec![
+                        TriggerCondition::ZoneChangeObjectMatchesFilter {
+                            origin: Some(Zone::Graveyard),
+                            destination: Zone::Battlefield,
+                            filter: TargetFilter::Any,
+                        },
+                        TriggerCondition::WasCast {
+                            zone: Some(Zone::Graveyard),
+                        },
+                    ],
+                }),
             );
         }
     }
@@ -2417,7 +2453,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             Some(TriggerCondition::Or {
                 conditions: vec![
                     TriggerCondition::Not {
-                        condition: Box::new(TriggerCondition::WasCast),
+                        condition: Box::new(TriggerCondition::WasCast { zone: None }),
                     },
                     TriggerCondition::ManaSpentCondition {
                         text: "no mana was spent to cast them".to_string(),
@@ -2439,14 +2475,14 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // which is not cast — does not re-trigger the ability infinitely. The
     // literal "if it was cast" is not a substring of "if it wasn't cast"
     // (the latter has "wasn't", not "was cast"), so the two arms are disjoint.
-    // NOTE: if a zone-specific "if it was cast from <zone>" trigger arm is ever
-    // added, it must be ordered BEFORE this one — "if it was cast" is a prefix
-    // of "if it was cast from your hand" and would shadow it here.
+    // NOTE: a zone-specific "if it was cast from <zone>" arm must be ordered
+    // BEFORE this one — "if it was cast" is a prefix of "if it was cast from
+    // your hand" and would shadow it here.
     let was_cast_pos = tp.find("if it was cast"); // allow-noncombinator: anchor for strip_condition_clause — structural if-clause excision, not parse dispatch
     if let Some(pos) = was_cast_pos {
         return (
             strip_condition_clause(text, pos, "if it was cast".len()),
-            Some(TriggerCondition::WasCast),
+            Some(TriggerCondition::WasCast { zone: None }),
         );
     }
 
@@ -2455,7 +2491,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return (
             strip_condition_clause(text, pos, "if it wasn't cast".len()),
             Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasCast),
+                condition: Box::new(TriggerCondition::WasCast { zone: None }),
             }),
         );
     }
@@ -3870,6 +3906,9 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_phrase("become the target of a spell or ability"),
         parse_event_phrase("becomes the target of an aura spell"),
         parse_event_phrase("becomes the target of a spell"),
+        // CR 702.26c: "phases in" / "phase in" — phasing trigger verb.
+        parse_event_phrase("phases in"),
+        parse_event_phrase("phase in"),
     ));
     let player_actions = alt((
         passive_player_actions,
@@ -5513,6 +5552,8 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
+        /// CR 702.26c: Permanent phases in from phased-out state.
+        PhasesIn,
         /// CR 701.3d: Equipment/Aura becomes unattached from a permanent.
         BecomesUnattached(Option<TargetFilter>),
         // CR 701.3a: Equipment/Aura becomes attached to a permanent.
@@ -5624,6 +5665,11 @@ fn try_parse_event(
             // CR 702.171c: Actor-side saddle trigger (reserved — no cards today without
             // the compound, but the arm is ready for future printings).
             value(SimpleEvent::Saddles, tag("saddles a mount")),
+        )))
+        .or(alt((
+            // CR 702.26c: "phases in" / "phase in" — phasing trigger.
+            value(SimpleEvent::PhasesIn, tag("phases in")),
+            value(SimpleEvent::PhasesIn, tag("phase in")),
             // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
             parse_becomes_unattached,
             // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
@@ -5757,6 +5803,11 @@ fn try_parse_event(
                 // CR 702.122 + CR 702.171c: Compound actor-side trigger. Fires on
                 // either saddling a Mount or crewing a Vehicle.
                 def.mode = TriggerMode::SaddlesOrCrews;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::PhasesIn => {
+                // CR 702.26c: Permanent phases in from phased-out state.
+                def.mode = TriggerMode::PhaseIn;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::BecomesUnattached(host_filter) => {
@@ -7097,7 +7148,25 @@ fn try_parse_one_or_more_combat_damage_to_player(
             // CR 205.3m: Handle "ninja or rogue creatures you control" compound subtypes
             or_filter
         } else {
-            continue;
+            // Try to parse "with [property]" qualifiers appended after the type phrase.
+            // Covers cards like Primo, the Unbounded: "creatures you control with base power 0".
+            let mut rem = remainder.trim();
+            let mut extra_props = Vec::new();
+            while let Ok((next_rem, prop)) = parse_with_property(rem) {
+                extra_props.push(prop);
+                rem = next_rem.trim();
+            }
+            if !extra_props.is_empty() && rem.is_empty() {
+                match filter {
+                    TargetFilter::Typed(mut tf) => {
+                        tf.properties.extend(extra_props);
+                        TargetFilter::Typed(tf)
+                    }
+                    other => other,
+                }
+            } else {
+                continue;
+            }
         };
 
         let mut def = make_base();
@@ -10116,6 +10185,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_phases_in_trigger_as_phase_in_mode() {
+        let def = parse_trigger_line(
+            "Whenever Warping Wurm phases in, put a +1/+1 counter on it.",
+            "Warping Wurm",
+        );
+
+        assert_eq!(def.mode, TriggerMode::PhaseIn);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
     fn static_condition_to_trigger_condition_source_in_battlefield() {
         // SUB-FIX B regression: the existing SourceInZone mapper must pass
         // Zone::Battlefield through unchanged so the new battlefield condition
@@ -10876,6 +10956,91 @@ mod tests {
     }
 
     #[test]
+    fn primo_the_unbounded_combat_damage_trigger() {
+        // Primo, the Unbounded (#1361): the triggering creatures' base power is 0,
+        // and the Fractal token enters with +1/+1 counters equal to the combat
+        // damage dealt (EventContextAmount). Verifies the full trigger:
+        //   - DamageDoneOnceByController mode
+        //   - valid_source carries a base-power-0 check (CR 208.4b)
+        //   - the token-creation body has no Unimplemented effects
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control with base power 0 deal combat damage to a player, create a 0/0 green and blue Fractal creature token. Put a number of +1/+1 counters on it equal to the damage dealt.",
+            "Primo, the Unbounded",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+        // CR 208.4b: source filter must include a base-power-0 comparison.
+        let TargetFilter::Typed(tf) = def
+            .valid_source
+            .as_ref()
+            .expect("valid_source should be present")
+        else {
+            panic!(
+                "valid_source should be a typed filter, got {:?}",
+                def.valid_source
+            );
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Base,
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Fixed { value: 0 },
+                }
+            )),
+            "expected base-power-0 PtComparison in source filter, got: {:?}",
+            tf.properties
+        );
+
+        // No Unimplemented effects anywhere in the trigger body.
+        let execute: &AbilityDefinition =
+            def.execute.as_deref().expect("trigger should have execute");
+        let mut current: Option<&AbilityDefinition> = Some(execute);
+        while let Some(ability) = current {
+            assert!(
+                !matches!(*ability.effect, Effect::Unimplemented { .. }),
+                "trigger body must not contain Unimplemented, got: {:?}",
+                ability.effect
+            );
+            current = ability.sub_ability.as_deref();
+        }
+
+        // The Fractal token must enter with +1/+1 counters equal to the combat
+        // damage dealt (EventContextAmount), not a fixed count. Walk the
+        // sub-ability chain to find the Token effect and verify its
+        // enter_with_counters payload.
+        let mut current: Option<&AbilityDefinition> = Some(execute);
+        let mut enter_with_counters: Option<&Vec<(CounterType, QuantityExpr)>> = None;
+        while let Some(ability) = current {
+            if let Effect::Token {
+                enter_with_counters: counters,
+                ..
+            } = &*ability.effect
+            {
+                enter_with_counters = Some(counters);
+                break;
+            }
+            current = ability.sub_ability.as_deref();
+        }
+        let counters = enter_with_counters.expect("trigger body should contain a Token effect");
+        let expected: Vec<(CounterType, QuantityExpr)> = vec![(
+            CounterType::Plus1Plus1,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        )];
+        assert_eq!(
+            counters, &expected,
+            "Fractal token must enter with +1/+1 counters equal to damage dealt, got: {:?}",
+            counters
+        );
+    }
+
+    #[test]
     fn trigger_combat_damage_create_treasure_and_manifest_that_players_library() {
         let def = parse_trigger_line(
             "Whenever one or more creatures you control deal combat damage to a player, create a Treasure token and manifest the top card of that player's library.",
@@ -10900,6 +11065,61 @@ mod tests {
             ),
             "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
             sub.effect
+        );
+    }
+
+    /// CR 406.3 + CR 701.16a + CR 400.7i: Gonti, Canny Acquisitor. "look at the
+    /// top card of that player's library, then exile it face down" must rewrite
+    /// the private `Dig` look step into a face-down `ExileTop` (issue #1316: the
+    /// card was looked at but never left the library), and the follow-on "You may
+    /// play that card for as long as it remains exiled, and mana of any type can
+    /// be spent" grant must bind to the exiled card via the tracked set.
+    #[test]
+    fn trigger_combat_damage_look_then_exile_face_down_grants_impulse_play() {
+        use crate::types::identifiers::TrackedSetId;
+
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control deal combat damage to a player, look at the top card of that player's library, then exile it face down. You may play that card for as long as it remains exiled, and mana of any type can be spent to cast that spell.",
+            "Gonti, Canny Acquisitor",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::TriggeringPlayer,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: true,
+                }
+            ),
+            "expected face-down ExileTop from the triggering player's library, got: {:?}",
+            execute.effect
+        );
+
+        let grant = execute
+            .sub_ability
+            .as_ref()
+            .expect("the impulse-play grant must chain after the exile");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        duration: Duration::Permanent,
+                        mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                        ..
+                    },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    ..
+                }
+            ),
+            "expected PlayFromExile grant bound to the tracked exiled card, got: {:?}",
+            grant.effect
         );
     }
 
@@ -18644,7 +18864,7 @@ mod tests {
 
         let bound_qty = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage,
+                filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
             },
         };
 
@@ -20659,7 +20879,7 @@ mod tests {
                 assert_eq!(
                     conditions[0],
                     TriggerCondition::Not {
-                        condition: Box::new(TriggerCondition::WasCast),
+                        condition: Box::new(TriggerCondition::WasCast { zone: None }),
                     }
                 );
                 assert!(
@@ -20689,7 +20909,7 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasCast),
+                condition: Box::new(TriggerCondition::WasCast { zone: None }),
             })
         );
     }
@@ -22852,5 +23072,67 @@ mod snapshot_tests {
                 .map(|ability| ability.effect.as_ref()),
             Some(Effect::CopySpell { .. })
         ));
+    }
+
+    #[test]
+    fn twilight_diviner_second_trigger_has_graveyard_origin_condition() {
+        let def = parse_trigger_line(
+            "Whenever one or more other creatures you control enter, if they entered or were cast from a graveyard, create a token that's a copy of one of them. This ability triggers only once each turn.",
+            "Twilight Diviner",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert!(def.batched, "should be batched");
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+        match &def.condition {
+            Some(TriggerCondition::Or { conditions }) => {
+                assert_eq!(conditions.len(), 2);
+                assert!(
+                    matches!(
+                        &conditions[0],
+                        TriggerCondition::ZoneChangeObjectMatchesFilter {
+                            origin: Some(Zone::Graveyard),
+                            destination: Zone::Battlefield,
+                            ..
+                        }
+                    ),
+                    "first disjunct should be ZoneChangeObjectMatchesFilter(Graveyard→Battlefield)"
+                );
+                assert_eq!(
+                    conditions[1],
+                    TriggerCondition::WasCast {
+                        zone: Some(Zone::Graveyard)
+                    }
+                );
+            }
+            other => panic!("expected Or condition, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entered_or_cast_from_graveyard_singular_form() {
+        let def = parse_trigger_line(
+            "Whenever another creature enters under your control, if it entered or was cast from a graveyard, draw a card.",
+            "Test Card",
+        );
+        match &def.condition {
+            Some(TriggerCondition::Or { conditions }) => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(
+                    &conditions[0],
+                    TriggerCondition::ZoneChangeObjectMatchesFilter {
+                        origin: Some(Zone::Graveyard),
+                        destination: Zone::Battlefield,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    conditions[1],
+                    TriggerCondition::WasCast {
+                        zone: Some(Zone::Graveyard)
+                    }
+                );
+            }
+            other => panic!("expected Or condition, got: {other:?}"),
+        }
     }
 }
