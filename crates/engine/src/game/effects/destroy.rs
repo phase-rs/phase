@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetRef, TypedFilter,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -43,7 +43,7 @@ pub fn apply_destroy_after_replacement(
                     } = zone_event
                     {
                         zones::move_to_zone(state, oid, to, events);
-                        state.layers_dirty = true;
+                        crate::game::layers::mark_layers_full(state);
                     }
                 }
                 ReplacementResult::Prevented => {}
@@ -58,7 +58,7 @@ pub fn apply_destroy_after_replacement(
         ProposedEvent::ZoneChange { object_id, to, .. } => {
             // Destroy replacement redirected directly to a zone change.
             zones::move_to_zone(state, object_id, to, events);
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
             true
         }
         _ => true,
@@ -157,6 +157,25 @@ pub fn resolve(
             ..
         }
     );
+    let self_ref_target = matches!(
+        &ability.effect,
+        Effect::Destroy {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    );
+    if self_ref_target && ability.targets.is_empty() {
+        match destroy_single_object(
+            state,
+            ability.source_id,
+            ability.source_id,
+            cant_regenerate,
+            events,
+        ) {
+            DestroyOutcome::Completed | DestroyOutcome::Skipped => {}
+            DestroyOutcome::NeedsChoice => return Ok(()),
+        }
+    }
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
             match destroy_single_object(state, *obj_id, ability.source_id, cant_regenerate, events)
@@ -220,7 +239,7 @@ pub fn resolve_all(
         .copied()
         .collect();
 
-    for obj_id in matching {
+    for &obj_id in &matching {
         let proposed = ProposedEvent::Destroy {
             object_id: obj_id,
             source: Some(ability.source_id),
@@ -241,6 +260,17 @@ pub fn resolve_all(
             }
         }
     }
+
+    // CR 603.10a + CR 704.3: every creature destroyed by this effect left the
+    // battlefield simultaneously, so co-departing leaves-the-battlefield/dies
+    // observers (Blood Artist, Zulaport Cutthroat) must observe each other.
+    // CR 701.19a/b: a regenerated member (and any other Prevented destruction)
+    // stays on the battlefield, so `departed_subset` excludes it from every
+    // survivor's co-departed group.
+    crate::game::zones::mark_simultaneous_departures(
+        events,
+        &crate::game::zones::departed_subset(state, &matching),
+    );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -276,6 +306,33 @@ mod tests {
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!state.battlefield.contains(&obj_id));
+        assert!(state.players[0].graveyard.contains(&obj_id));
+    }
+
+    #[test]
+    fn destroy_self_ref_moves_source_to_graveyard() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Experimental Frenzy".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::SelfRef,
+                cant_regenerate: false,
+            },
+            Vec::new(),
+            obj_id,
             PlayerId(0),
         );
         let mut events = Vec::new();

@@ -104,9 +104,7 @@ pub(crate) fn handle_select_modes(
     }
 
     // Check for targeting on the combined ability
-    if state.layers_dirty {
-        super::layers::evaluate_layers(state);
-    }
+    super::layers::flush_layers(state);
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {

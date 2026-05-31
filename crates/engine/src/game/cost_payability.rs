@@ -16,8 +16,6 @@
 //! the enumerations.
 
 use crate::types::ability::{AbilityCost, TargetFilter};
-#[cfg(test)]
-use crate::types::ability::{FilterProp, TypedFilter};
 use crate::types::card_type::CoreType;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -102,8 +100,10 @@ impl AbilityCost {
                             state, player, source,
                         );
                 }
-                super::casting::find_eligible_sacrifice_targets(state, player, source, target).len()
-                    >= *count as usize
+                let eligible =
+                    super::casting::find_eligible_sacrifice_targets(state, player, source, target);
+                let (min_count, _) = super::casting::sacrifice_cost_bounds(*count, eligible.len());
+                eligible.len() >= min_count
             }
             // CR 119.4 + CR 119.8 + CR 903.4: Life cost is payable iff life >= amount
             // and "can't lose life" locks do not apply. `amount` is a QuantityExpr
@@ -193,23 +193,31 @@ impl AbilityCost {
             // CR 601.2b: RemoveCounter requires counters on the implied target.
             // If `target` is None, the source must have the required counters.
             // Otherwise, at least one matching permanent must carry N counters.
+            // CR 107.2: `u32::MAX` encodes "any number of" — the player chooses
+            // how many counters to remove (including zero), so the cost is always
+            // payable regardless of the current counter count.
             AbilityCost::RemoveCounter {
                 count,
                 counter_type,
                 target,
-            } => match target {
-                None => counter_on_object(state, source, counter_type) >= *count,
-                Some(tf) => {
-                    let ctx = FilterContext::from_source(state, source);
-                    state.battlefield.iter().any(|&id| {
-                        state.objects.get(&id).is_some_and(|o| {
-                            o.controller == player
-                                && matches_target_filter(state, id, tf, &ctx)
-                                && counter_on_object(state, id, counter_type) >= *count
-                        })
-                    })
+            } => {
+                if *count == u32::MAX {
+                    return true;
                 }
-            },
+                match target {
+                    None => counter_on_object(state, source, counter_type) >= *count,
+                    Some(tf) => {
+                        let ctx = FilterContext::from_source(state, source);
+                        state.battlefield.iter().any(|&id| {
+                            state.objects.get(&id).is_some_and(|o| {
+                                o.controller == player
+                                    && matches_target_filter(state, id, tf, &ctx)
+                                    && counter_on_object(state, id, counter_type) >= *count
+                            })
+                        })
+                    }
+                }
+            }
             // CR 107.14: A player can pay {E} only if they have enough energy.
             // CR 107.3c: Resolve the `QuantityExpr` so dynamic amounts read game
             // state. `Variable("X")` resolves to 0 — always payable, which
@@ -471,7 +479,7 @@ fn counter_on_object(
 mod tests {
     use super::*;
     use crate::game::scenario::GameScenario;
-    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::ability::{FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter};
     use crate::types::mana::ManaCost;
 
     const P0: PlayerId = PlayerId(0);
@@ -589,6 +597,29 @@ mod tests {
     }
 
     #[test]
+    fn variable_sacrifice_cost_is_payable_with_zero_or_more_matches() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Chatterfang", 3, 3).id();
+        let cost = AbilityCost::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype("Squirrel".into()))),
+            count: u32::MAX,
+        };
+
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "X sacrifice costs should be payable at X=0 even with no eligible permanents"
+        );
+
+        scenario
+            .add_creature(P0, "Squirrel Token", 1, 1)
+            .with_subtypes(vec!["Squirrel"]);
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "X sacrifice costs should stay payable once eligible permanents exist"
+        );
+    }
+
+    #[test]
     fn loyalty_positive_is_always_payable() {
         let state = new_state();
         assert!(AbilityCost::Loyalty { amount: 1 }.is_payable(&state, P0, ObjectId(0)));
@@ -673,6 +704,39 @@ mod tests {
         assert!(
             !cost.is_payable(&scenario.state, P0, src),
             "untyped 'remove a counter' must be unpayable when no counters of any kind are present",
+        );
+    }
+
+    /// CR 107.2: "Remove any number of" counters is always payable — the
+    /// player may choose zero, so no minimum counter count is required.
+    #[test]
+    fn remove_counter_any_number_always_payable() {
+        use crate::types::counter::CounterType;
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Mage-Ring Network", 0, 0).id();
+        let cost = AbilityCost::RemoveCounter {
+            count: u32::MAX,
+            counter_type: crate::types::counter::CounterMatch::OfType(CounterType::Generic(
+                "storage".to_string(),
+            )),
+            target: None,
+        };
+        // Payable even with zero counters.
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "'remove any number of' must be payable even with zero counters",
+        );
+        // Still payable with some counters.
+        scenario
+            .state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("storage".to_string()), 3);
+        assert!(
+            cost.is_payable(&scenario.state, P0, src),
+            "'remove any number of' must be payable with counters present",
         );
     }
 }

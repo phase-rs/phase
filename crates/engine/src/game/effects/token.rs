@@ -18,7 +18,7 @@ use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
-use crate::types::identifiers::CardId;
+use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -674,7 +674,11 @@ pub fn apply_create_token_after_replacement(
 
         // CR 111.10a–v: Inject predefined abilities for known token subtypes.
         inject_predefined_token_abilities(state, obj_id);
-        state.layers_dirty = true;
+        // Battlefield entry: request an incremental layer re-derive for just this
+        // token. `flush_layers` escalates to a full pass if the token sources a
+        // continuous effect / carries counters / etc., or if any active effect
+        // reads board population.
+        crate::game::layers::mark_layers_entered(state, obj_id);
         crate::game::restrictions::record_battlefield_entry(state, obj_id);
         crate::game::restrictions::record_token_created(state, obj_id);
 
@@ -778,24 +782,58 @@ pub(crate) fn spec_emits_only_etb_pair(spec: &TokenSpec) -> bool {
         && spec.attach_to.is_none() // no host attachment mutation (CR 303.4)
 }
 
-/// CR 603.2 + CR 603.6a: The §2.3a produced-token-non-observer gate. A produced
-/// token that itself observes ETB / `TokenCreated` events would see its
-/// in-batch siblings — which one-by-one resolution (CR 603.3 topmost-on-stack)
-/// would NOT. Reuse the EXACT classifier the index uses (`keys_from_trigger_def`)
-/// so the gate can never drift from the live registration logic. Conservatively
-/// reject if any trigger is catch-all/dynamic (routed to unclassified) OR
-/// registers under any `EnterBattlefield`/`TokenCreated` key.
-pub(crate) fn produced_token_is_non_observer(triggers: &[TriggerDefinition]) -> bool {
+/// CR 603.6a + CR 111.10: The set of event keys a single produced token EMITS as
+/// it enters the battlefield, given its core types. Mirrors the event-side
+/// deriver exactly (`keys_from_event`, trigger_index.rs:462-468 for the ETB pair
+/// and :529-531 for `TokenCreated`): a token entering emits the broad
+/// `EnterBattlefield(None)`, one narrow `EnterBattlefield(Some(ct))` per core
+/// type, and `TokenCreated`. Kept in lockstep with the deriver so the §2.3a gate
+/// reasons about exactly the events siblings would observe.
+fn produced_token_emitted_keys(
+    produced_core_types: &[CoreType],
+) -> Vec<crate::types::triggers::TriggerEventKey> {
+    use crate::types::triggers::TriggerEventKey;
+    // CR 603.6a: broad ETB key, emitted for every entering permanent, plus one
+    // narrow key per core type of the entering object.
+    let mut keys = vec![TriggerEventKey::EnterBattlefield(None)];
+    keys.extend(
+        produced_core_types
+            .iter()
+            .map(|ct| TriggerEventKey::EnterBattlefield(Some(*ct))),
+    );
+    // CR 111.10: a token's creation also emits `TokenCreated`.
+    keys.push(TriggerEventKey::TokenCreated);
+    keys
+}
+
+/// CR 603.2 + CR 603.6a + CR 603.3: The §2.3a produced-token-non-observer gate,
+/// parameterized by what the produced token actually EMITS on entry. A produced
+/// token whose own triggers OBSERVE its in-batch siblings would fire on them —
+/// which one-by-one resolution (CR 603.3 topmost-on-stack) lets it do, but a
+/// single batched application would not — so such a token cannot batch.
+///
+/// The gate intersects each trigger's REGISTERED keys (`keys_from_trigger_def`,
+/// the EXACT classifier the live index uses, so the observer-key derivation can
+/// never drift from registration) with the set of keys the produced token EMITS
+/// on entry (`produced_token_emitted_keys`, mirroring CR 603.6a's broad+narrow
+/// emission for `produced_core_types`). A landfall trigger registered under
+/// `EnterBattlefield(Some(Land))` carried by a Creature copy (which emits only
+/// `{None, Some(Creature), TokenCreated}`) does NOT intersect → it cannot
+/// observe its creature siblings → batch-safe. A "whenever a creature enters"
+/// trigger (`EnterBattlefield(Some(Creature))`) or a broad permanent-ETB trigger
+/// (`EnterBattlefield(None)`) DOES intersect a creature copy's emission →
+/// refused.
+///
+/// Conservatively rejects any trigger routed to unclassified (catch-all/dynamic
+/// modes fire on everything, so they always observe siblings).
+pub(crate) fn produced_token_is_non_observer(
+    triggers: &[TriggerDefinition],
+    produced_core_types: &[CoreType],
+) -> bool {
+    let emitted = produced_token_emitted_keys(produced_core_types);
     triggers.iter().all(|def| {
         let (keys, route_unclassified) = crate::game::trigger_index::keys_from_trigger_def(def);
-        !route_unclassified
-            && !keys.iter().any(|k| {
-                matches!(
-                    k,
-                    crate::types::triggers::TriggerEventKey::EnterBattlefield(_)
-                        | crate::types::triggers::TriggerEventKey::TokenCreated
-                )
-            })
+        !route_unclassified && !keys.iter().any(|k| emitted.contains(k))
     })
 }
 
@@ -925,23 +963,71 @@ fn condition_invariant_for_token(
     }
 }
 
+/// CR 111.2 + CR 109.4: a base token's controller and characteristics are
+/// fixed at creation; the creating source's identity is not a characteristic,
+/// so triggers from distinct sources resolve identically. Returns `true` iff
+/// `ability.effect` is a base `Effect::Token` whose resolution reads nothing
+/// from the source object: the token's owner is the controller (the default
+/// `TargetFilter::Controller`), its `count` is a literal `Fixed` (no
+/// source-relative quantity), it does not enter attacking (combat reads the
+/// source), and it is not attached to a host (attachment reads the source's
+/// target). The remaining fields are pure characteristics (name / P/T / types /
+/// colors / keywords / supertypes / static abilities / ETB counters) which are
+/// baked into the spec and identical across sources — bound but unconstrained.
+///
+/// EXHAUSTIVE destructure (no `..`): every field of `Effect::Token` is
+/// consciously dispositioned, mirroring `resolve_token_spec`. A future field
+/// addition forces a compile error here so its source-independence is decided
+/// deliberately rather than silently assumed.
+pub(crate) fn token_effect_is_source_independent(ability: &ResolvedAbility) -> bool {
+    let Effect::Token {
+        name: _,
+        power: _,
+        toughness: _,
+        types: _,
+        colors: _,
+        keywords: _,
+        tapped: _,
+        count,
+        owner,
+        attach_to,
+        enters_attacking,
+        supertypes: _,
+        static_abilities: _,
+        enter_with_counters: _,
+    } = &ability.effect
+    else {
+        return false;
+    };
+    matches!(owner, TargetFilter::Controller)
+        && matches!(count, QuantityExpr::Fixed { .. })
+        && !*enters_attacking
+        && attach_to.is_none()
+}
+
 /// CR 608.2 + CR 608.2c: Layer B — the Token-handler purity gate. Returns a
 /// `BatchPlan` iff resolving this `Effect::Token` `run_len` times one-by-one
 /// would produce the identical per-resolution decision and token spec as one
 /// batched application of the base `Token` effect.
 ///
-/// v1 batches ONLY the base `Effect::Token` (untargeted, `Fixed` count,
-/// emitting exactly the ETB pair, with no produced-token observer and no
-/// interactive replacement). A `CopyTokenOf`-instead sub-ability whose
-/// condition is currently met (the copy branch) is conservatively NOT batched
-/// — the copy path produces no `TokenSpec` and would re-derive the predicate,
-/// so it falls back to sequential. A `ConditionInstead` sub-ability that is
-/// currently NOT met is accepted only when its condition is provably invariant
-/// across the run (so all N resolutions take the base branch).
+/// v1 batches the base `Effect::Token` (untargeted, `Fixed` count, emitting
+/// exactly the ETB pair, with no produced-token observer and no interactive
+/// replacement). A `CopyTokenOf`-instead sub-ability whose condition is
+/// currently met (the copy branch) is batched along a CONTIGUOUS PREFIX of the
+/// run whose copy sources share identical copiable values (CR 707.2) — the
+/// prefix length may be shorter than `run_len`, with the remaining entries
+/// resolved in a later step. A `ConditionInstead` sub-ability that is currently
+/// NOT met is accepted only when its condition is provably invariant across the
+/// run (so all N resolutions take the base branch).
+///
+/// `run_source_ids` are the per-entry source object ids of the contiguous run
+/// (resolution order, top-down), needed only by the met-copy prefix path to
+/// gather each entry's `SelfRef` copy source. The base-token path ignores them.
 pub(crate) fn try_resolve_batch(
     state: &GameState,
     ability: &ResolvedAbility,
     run_len: u32,
+    run_source_ids: &[ObjectId],
 ) -> Option<super::BatchPlan> {
     // The effect must be a bare `Effect::Token` with a literal `Fixed` count.
     let Effect::Token { count, .. } = &ability.effect else {
@@ -958,19 +1044,21 @@ pub(crate) fn try_resolve_batch(
     // invariance proof below directly.
     let (spec, owner, enter_tapped, resolved_count) = resolve_token_spec(state, ability)?;
 
-    // CR 608.2c: A sub-ability changes the resolved effect. Only a
-    // `ConditionInstead`-gated sub that is currently NOT met (so the base
-    // `Token` resolves) AND is provably invariant across the run is acceptable.
-    // Any met instead-swap (the copy branch), or any other sub shape, conserves.
+    // CR 608.2c: A sub-ability changes the resolved effect. Two acceptable
+    // shapes: a `ConditionInstead`-gated sub currently NOT met (the base
+    // `Token` resolves, provably invariant across the run), or a met
+    // `ConditionInstead` copy-instead swap which is batched along a value-equal
+    // prefix (CR 707.2). Any other sub shape conserves.
     if let Some(sub) = &ability.sub_ability {
         match &sub.condition {
             Some(crate::types::ability::AbilityCondition::ConditionInstead { inner }) => {
-                // If the swap currently fires, the resolved effect is the sub's
-                // (e.g. CopyTokenOf) — not batchable in v1.
                 if super::evaluate_condition(inner, state, ability) {
-                    return None;
+                    // The swap currently fires: the resolved effect is the
+                    // sub's (e.g. CopyTokenOf). Attempt copy-prefix batching.
+                    return try_resolve_copy_batch(state, ability, sub, inner, run_source_ids);
                 }
-                // Token core types feed the disjointness invariance proof.
+                // NOT met: base `Token` resolves. Token core types feed the
+                // disjointness invariance proof.
                 if !condition_invariant_for_token(inner, &spec.characteristics.core_types) {
                     return None;
                 }
@@ -993,8 +1081,13 @@ pub(crate) fn try_resolve_batch(
         return None;
     }
 
-    // §2.3a: the produced token must not itself observe ETB/TokenCreated.
-    if !produced_token_is_non_observer(&base_token_trigger_defs(&spec)) {
+    // §2.3a: the produced token must not itself observe the ETB/TokenCreated
+    // events its in-batch siblings emit. The produced token's emission is
+    // derived from its own core types (the spec's characteristics).
+    if !produced_token_is_non_observer(
+        &base_token_trigger_defs(&spec),
+        &spec.characteristics.core_types,
+    ) {
         return None;
     }
 
@@ -1005,6 +1098,140 @@ pub(crate) fn try_resolve_batch(
     }
 
     Some(super::BatchPlan::token(spec, run_len))
+}
+
+/// CR 608.2c + CR 707.2: A met `ConditionInstead` whose swapped effect is a
+/// bare `CopyTokenOf { target: SelfRef, … }` copies the run's own source object
+/// per entry. When a contiguous prefix of the run's copy sources share
+/// identical copiable values (CR 707.2 fingerprints), those N self-copies are
+/// equivalent to one batched spec, so the prefix collapses into a single
+/// `CopyToken` batch. The prefix may be shorter than `run_len`; the remainder
+/// resolves in a later step (which re-enters this path).
+///
+/// `sub` is the override sub-ability (its effect is the swapped `CopyTokenOf`);
+/// `inner` is the already-fired `ConditionInstead` condition. `run_source_ids`
+/// are the per-entry source ids (top-down resolution order).
+fn try_resolve_copy_batch(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    sub: &ResolvedAbility,
+    inner: &crate::types::ability::AbilityCondition,
+    run_source_ids: &[ObjectId],
+) -> Option<super::BatchPlan> {
+    // 1. SHAPE GATE FIRST (cheapest): the swapped effect must be a bare
+    //    self-copy with the default single-token shape and no exceptions.
+    let Effect::CopyTokenOf {
+        target: TargetFilter::SelfRef,
+        owner: TargetFilter::Controller,
+        source_filter: None,
+        enters_attacking: false,
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        extra_keywords,
+        additional_modifications,
+    } = &sub.effect
+    else {
+        return None;
+    };
+    if !extra_keywords.is_empty() || !additional_modifications.is_empty() {
+        return None;
+    }
+
+    // 2. LAZY-GATHER the run's copy sources (only now, after the shape gate).
+    //    Each entry's `target: SelfRef` copy source is that entry's own source
+    //    object — exactly `run_source_ids` (top-down resolution order).
+    if run_source_ids.len() < 2 {
+        // A prefix of fewer than 2 cannot collapse; fall back to sequential.
+        return None;
+    }
+
+    // 3. Compute the value-equal contiguous prefix (CR 707.2).
+    let (prefix_values, prefix_len) =
+        super::token_copy::compute_copy_batch_prefix(state, run_source_ids)?;
+    if prefix_len < 2 {
+        return None;
+    }
+
+    // 4. H1 INVARIANCE GATE (AFTER prefix): the condition must be invariant over
+    //    the COPY's core types (what enters), not the placeholder spec's. A copy
+    //    creating Lands gated on a Land count would diverge per resolution.
+    if !condition_invariant_for_token(inner, &prefix_values.card_types.core_types) {
+        return None;
+    }
+
+    // 5. Build the probe spec from the prefix's shared copiable values so the
+    //    §2.2a emits-only-ETB-pair gate holds and Layer C's
+    //    `zone_change_record_from_spec` reflects the true produced token.
+    let probe_spec = copy_probe_spec(ability, &prefix_values);
+    if !spec_emits_only_etb_pair(&probe_spec) {
+        return None;
+    }
+    // §2.3a: a copy token inherits the copied permanent's full trigger set
+    // (CR 707.2 + CR 707.5 — the copy's ETB triggers fire), so the non-observer
+    // gate reads the prefix's copiable trigger definitions — NOT
+    // `base_token_trigger_defs` (which only surfaces a base token's Role-subtype
+    // triggers). The produced token's emission is derived from the COPY's core
+    // types (what enters), so a Scute-shape landfall trigger keyed
+    // `EnterBattlefield(Some(Land))` on a Creature copy does NOT intersect the
+    // copy's `{None, Some(Creature), TokenCreated}` emission and stays batch-safe.
+    if !produced_token_is_non_observer(
+        &prefix_values.trigger_definitions,
+        &prefix_values.card_types.core_types,
+    ) {
+        return None;
+    }
+    let owner = resolve_token_owner(state, ability, &TargetFilter::Controller);
+    if token_creation_needs_choice(
+        state,
+        &probe_spec,
+        owner,
+        crate::types::proposed_event::EtbTapState::from_seeded_tapped(false),
+        1,
+    ) {
+        return None;
+    }
+
+    // 6. Perform the instead-swap ONCE (CR 608.2c) so the batched executor
+    //    resolves the swapped `CopyTokenOf` effect.
+    let swapped = crate::game::ability_utils::apply_instead_swap(ability, sub);
+
+    // 7. Hand back the copy-prefix batch.
+    Some(super::BatchPlan::copy_token(
+        swapped, probe_spec, prefix_len,
+    ))
+}
+
+/// CR 707.2 + CR 603.6a: Build the Layer C / §2.2a probe `TokenSpec` for a
+/// copy-prefix batch from the prefix's shared copiable values. The probe needs
+/// only the copiable values (CR 707.2): token art comes from the live source at
+/// resolution time (`token_copy::resolve`), so no `PrintedCardRef` is threaded
+/// through the probe.
+fn copy_probe_spec(
+    ability: &ResolvedAbility,
+    values: &crate::types::ability::CopiableValues,
+) -> TokenSpec {
+    use crate::types::proposed_event::TokenCharacteristics;
+    TokenSpec {
+        characteristics: TokenCharacteristics {
+            display_name: values.name.clone(),
+            power: values.power,
+            toughness: values.toughness,
+            core_types: values.card_types.core_types.clone(),
+            subtypes: values.card_types.subtypes.clone(),
+            supertypes: values.card_types.supertypes.clone(),
+            colors: values.color.clone(),
+            keywords: values.keywords.clone(),
+        },
+        script_name: values.name.clone(),
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+        tapped: false,
+        enters_attacking: false,
+        sacrifice_at: ability.duration.clone(),
+        source_id: ability.source_id,
+        controller: ability.controller,
+        attach_to: None,
+    }
 }
 
 /// CR 111.10: Enumerate the trigger definitions a BASE `Token` spec injects on

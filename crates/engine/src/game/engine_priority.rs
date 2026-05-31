@@ -90,9 +90,7 @@ pub(super) fn run_post_action_pipeline(
         ));
     }
 
-    if state.layers_dirty {
-        super::layers::evaluate_layers(state);
-    }
+    super::layers::flush_layers(state);
 
     Ok(flush_pending_miracle_offer(state, default_wf.clone()))
 }

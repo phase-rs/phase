@@ -1306,6 +1306,7 @@ pub(super) fn parse_targeted_action_ast(
                         enter_transformed: d.transformed,
                         enters_under: d.enters_under,
                         enter_tapped: d.enter_tapped,
+                        enters_attacking: d.enters_attacking,
                         enter_with_counters: d.enter_with_counters,
                     })
                 }
@@ -1495,6 +1496,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_transformed,
             enters_under,
             enter_tapped,
+            enters_attacking,
             enter_with_counters,
         } => Effect::ChangeZone {
             origin,
@@ -1504,7 +1506,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_transformed,
             enters_under,
             enter_tapped,
-            enters_attacking: false,
+            enters_attacking,
             up_to: false,
             enter_with_counters,
         },
@@ -4442,7 +4444,7 @@ pub(super) fn parse_exile_ast(
     })
 }
 
-fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
+pub(super) fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
         return TargetFilter::ScopedPlayer;
     }

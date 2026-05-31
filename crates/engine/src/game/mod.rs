@@ -64,6 +64,7 @@ pub mod scenario_db;
 pub mod speed;
 pub mod stack;
 pub mod static_abilities;
+pub mod static_source_index;
 pub mod targeting;
 pub mod token_presets;
 pub mod transform;

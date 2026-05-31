@@ -14,7 +14,7 @@
 //! 2. **Thornbow Archer** — "each opponent who doesn't control an Elf loses 1
 //!    life" silently dropped the "who doesn't control an Elf" qualifier, so
 //!    the effect over-applied to every opponent. After the fix the trigger
-//!    carries `PlayerFilter::ControlsPermanent { ControlsNone, <Elf> }`.
+//!    carries `PlayerFilter::ControlsCount { <Elf>, EQ, Fixed(0) }`.
 //!
 //! Both tests drive the full pipeline through `apply` — no synthetic events.
 

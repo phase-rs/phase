@@ -1,4 +1,7 @@
 {
+  "resolutionProgress": {
+    "label": "Résolution {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Carte face cachée",
     "loading": "Chargement de {{name}}",
@@ -1105,6 +1108,14 @@
     "bestowNormalLabel": "Lancer comme créature",
     "bestowAltLabel": "Lancer avec Don",
     "bestowSubtitle": "Lancez {{name}} normalement comme créature, ou payez son coût de Don pour le lancer comme aura.",
+    "awakenEyebrow": "Éveil",
+    "awakenNormalLabel": "Lancer normalement",
+    "awakenAltLabel": "Lancer avec Éveil",
+    "awakenSubtitle": "Lancez {{name}} normalement, ou payez son coût d'Éveil pour mettre aussi des marqueurs +1/+1 sur un terrain que vous contrôlez et en faire une créature 0/0 Élémental avec la célérité.",
+    "cleaveEyebrow": "Tranchage",
+    "cleaveNormalLabel": "Lancer normalement",
+    "cleaveAltLabel": "Lancer avec Tranchage",
+    "cleaveSubtitle": "Lancez {{name}} normalement, ou payez son coût de Tranchage pour retirer les mots entre crochets.",
     "additionalExile": "+ Exiler une carte",
     "additionalSacrifice": "+ Sacrifier un permanent",
     "additionalPayLife": "+ Payer des points de vie",

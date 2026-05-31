@@ -54,7 +54,18 @@ function isDialogVisibleFor(waitingFor: WaitingFor | null | undefined): boolean 
 
 function isClickThroughDialog(waitingFor: WaitingFor | null | undefined): boolean {
   if (!waitingFor) return false;
-  return CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type);
+  if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
+  // CR 702.51a (Convoke) / CR 701.67a (Waterbend) / CR 702.126a (Improvise):
+  // these tap-payment modes let the caster tap creatures/artifacts on the
+  // battlefield to pay generic/colored mana while the `ManaPaymentUI` panel
+  // (a self-anchored `fixed inset-x-0 bottom-0` strip) is open. The host must
+  // stay click-through for them so those board taps reach the cards —
+  // otherwise the `fixed inset-0 z-40` wrapper swallows the clicks and the
+  // player cannot tap creatures to pay (the creatures still get the mana-tap
+  // ring, but clicking them does nothing). Plain/hybrid/Phyrexian payment needs
+  // no board interaction (the panel's Pay button passes priority), so it stays
+  // wrapped — `convoke_mode` is the engine's signal that board taps are live.
+  return waitingFor.type === "ManaPayment" && waitingFor.data.convoke_mode != null;
 }
 
 export function DialogHost({ children }: { children: ReactNode }) {

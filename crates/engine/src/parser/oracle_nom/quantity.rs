@@ -679,13 +679,27 @@ fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, Quantity
 
 /// Parse "[type(s)] you control" after "the number of".
 fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, tf) = parse_type_filter_word(input)?;
+    let (rest, head) = parse_type_filter_word(input)?;
     let (rest, _) = tag(" you control").parse(rest)?;
+    // CR 205.2b: "<head> you control that are <t1> and/or <t2>" restricts the
+    // controlled population to objects that have any of the listed card types.
+    // CR 205.2b makes a multi-type object satisfy any of its types, so a
+    // permanent that is both a creature and a Vehicle is counted once via the
+    // `AnyOf` disjunction (Collision Course). When the relative clause names a
+    // single type, that type alone replaces the head. A non-type "that are"
+    // clause (e.g. "that are tapped") leaves the suffix unconsumed so a later
+    // arm can handle it rather than mis-parsing it here.
+    let (rest, type_filters) =
+        match opt(preceded(tag(" that are "), parse_type_filter_list)).parse(rest)? {
+            (r, Some(list)) if list.len() > 1 => (r, vec![TypeFilter::AnyOf(list)]),
+            (r, Some(list)) => (r, list),
+            (r, None) => (r, vec![head]),
+        };
     Ok((
         rest,
         QuantityRef::ObjectCount {
             filter: TargetFilter::Typed(TypedFilter {
-                type_filters: vec![tf],
+                type_filters,
                 controller: Some(ControllerRef::You),
                 properties: Vec::new(),
             }),
@@ -1490,6 +1504,11 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         value(QuantityRef::EventContextAmount, tag("that much")),
         value(QuantityRef::EventContextAmount, tag("that many")),
         value(QuantityRef::EventContextAmount, tag("that damage")),
+        // CR 120.1 + CR 603.7c: "the damage dealt" bare form in a triggered
+        // ability body — refers to the total from the triggering combat-damage
+        // event. Distinct from "that damage" (different article+verb) and
+        // "damage dealt this way" (PreviousEffectAmount).
+        value(QuantityRef::EventContextAmount, tag("the damage dealt")),
         value(
             QuantityRef::Power {
                 scope: ObjectScope::CostPaidObject,
@@ -2513,8 +2532,11 @@ pub fn parse_the_number_of_player_counters(input: &str) -> OracleResult<'_, Quan
 }
 
 /// CR 122.1: Typed alt over named player-counter kinds. Each arm emits the
-/// `PlayerCounterKind` variant directly (no intermediate string).
-fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind> {
+/// `PlayerCounterKind` variant directly (no intermediate string). `pub(crate)`
+/// so the `PlayerCounter` player-attribute predicate parser
+/// (`oracle_quantity::parse_player_attribute_predicate`) shares this single
+/// kind grammar rather than re-enumerating counter tags.
+pub(crate) fn parse_player_counter_kind(input: &str) -> OracleResult<'_, PlayerCounterKind> {
     alt((
         value(PlayerCounterKind::Experience, tag("experience")),
         value(PlayerCounterKind::Poison, tag("poison")),
@@ -3759,6 +3781,11 @@ mod tests {
         assert_eq!(q, QuantityRef::EventContextAmount);
         assert_eq!(rest, "");
 
+        // CR 603.7c: bare "the damage dealt" form maps to EventContextAmount.
+        let (rest, q) = parse_quantity_ref("the damage dealt").unwrap();
+        assert_eq!(q, QuantityRef::EventContextAmount);
+        assert_eq!(rest, "");
+
         let (rest2, q2) = parse_quantity_ref("that creature's power").unwrap();
         assert_eq!(
             q2,
@@ -4798,5 +4825,114 @@ mod tests {
                 "phrase {phrase:?} must yield ObjectManaValue{{CostPaidObject}}"
             );
         }
+    }
+
+    /// CR 700.12: "the number of outlaws you control" counts every permanent
+    /// with an outlaw creature type (Assassin/Mercenary/Pirate/Rogue/Warlock).
+    /// Laughing Jasper Flint. Routes through `parse_number_of_controlled_type`
+    /// once `parse_type_filter_word` recognizes the "outlaws" head noun.
+    #[test]
+    fn parse_quantity_ref_the_number_of_outlaws_you_control() {
+        let outlaws = TypeFilter::AnyOf(
+            ["Assassin", "Mercenary", "Pirate", "Rogue", "Warlock"]
+                .iter()
+                .map(|s| TypeFilter::Subtype((*s).to_string()))
+                .collect(),
+        );
+        let (rest, q) = parse_quantity_ref("the number of outlaws you control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![outlaws],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// CR 205.2b: "permanents you control that are creatures and/or Vehicles"
+    /// restricts the controlled population to the listed types, merged into an
+    /// `AnyOf` disjunction so a creature-Vehicle is counted once. Collision
+    /// Course.
+    #[test]
+    fn parse_quantity_ref_controlled_type_disjunction_clause() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of permanents you control that are creatures and/or vehicles",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::AnyOf(vec![
+                        TypeFilter::Creature,
+                        TypeFilter::Subtype("Vehicle".to_string()),
+                    ])],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// Regression: a plain controlled-type count without a "that are" clause
+    /// keeps the single head type.
+    #[test]
+    fn parse_quantity_ref_controlled_type_no_clause_keeps_head() {
+        let (rest, q) = parse_quantity_ref("the number of creatures you control").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// A single-type "that are" clause replaces the head with that one type
+    /// (no `AnyOf` wrapper).
+    #[test]
+    fn parse_quantity_ref_controlled_type_single_clause() {
+        let (rest, q) =
+            parse_quantity_ref("the number of permanents you control that are artifacts").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
+    }
+
+    /// A non-type "that are" clause (e.g. "that are tapped") must NOT be
+    /// consumed by the optional type-list clause — the `opt` returns `None` and
+    /// the count keeps the head type, leaving the clause for a later parser.
+    #[test]
+    fn parse_quantity_ref_controlled_type_non_type_clause_falls_through() {
+        let (rest, q) =
+            parse_number_of_controlled_type("creatures you control that are tapped").unwrap();
+        assert_eq!(rest, " that are tapped");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
     }
 }

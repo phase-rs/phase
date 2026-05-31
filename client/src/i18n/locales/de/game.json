@@ -1,4 +1,7 @@
 {
+  "resolutionProgress": {
+    "label": "Auflösen {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Verdeckte Karte",
     "loading": "{{name}} wird geladen",
@@ -1105,6 +1108,14 @@
     "bestowNormalLabel": "Als Kreatur wirken",
     "bestowAltLabel": "Mit Verleihen wirken",
     "bestowSubtitle": "Wirke {{name}} normal als Kreatur oder zahle seine Verleihen-Kosten, um es als Aura zu wirken.",
+    "awakenEyebrow": "Erwecken",
+    "awakenNormalLabel": "Normal wirken",
+    "awakenAltLabel": "Mit Erwecken wirken",
+    "awakenSubtitle": "Wirke {{name}} normal oder zahle seine Erwecken-Kosten, um außerdem +1/+1-Marken auf ein Land deiner Wahl zu legen und es in eine 0/0 Elementarwesen-Kreatur mit Eile zu verwandeln.",
+    "cleaveEyebrow": "Abspalten",
+    "cleaveNormalLabel": "Normal wirken",
+    "cleaveAltLabel": "Mit Abspalten wirken",
+    "cleaveSubtitle": "Wirke {{name}} normal oder zahle seine Abspaltungskosten, um den Text in eckigen Klammern zu entfernen.",
     "additionalExile": "+ Eine Karte ins Exil schicken",
     "additionalSacrifice": "+ Eine bleibende Karte opfern",
     "additionalPayLife": "+ Leben bezahlen",

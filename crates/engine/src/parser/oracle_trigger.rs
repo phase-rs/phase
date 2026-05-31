@@ -15,7 +15,7 @@ use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::{oracle_err, OracleResult};
-use super::oracle_nom::filter::parse_enters_origin_zone;
+use super::oracle_nom::filter::{parse_enters_origin_zone, parse_with_property};
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
@@ -7122,7 +7122,25 @@ fn try_parse_one_or_more_combat_damage_to_player(
             // CR 205.3m: Handle "ninja or rogue creatures you control" compound subtypes
             or_filter
         } else {
-            continue;
+            // Try to parse "with [property]" qualifiers appended after the type phrase.
+            // Covers cards like Primo, the Unbounded: "creatures you control with base power 0".
+            let mut rem = remainder.trim();
+            let mut extra_props = Vec::new();
+            while let Ok((next_rem, prop)) = parse_with_property(rem) {
+                extra_props.push(prop);
+                rem = next_rem.trim();
+            }
+            if !extra_props.is_empty() && rem.is_empty() {
+                match filter {
+                    TargetFilter::Typed(mut tf) => {
+                        tf.properties.extend(extra_props);
+                        TargetFilter::Typed(tf)
+                    }
+                    other => other,
+                }
+            } else {
+                continue;
+            }
         };
 
         let mut def = make_base();
@@ -10901,6 +10919,91 @@ mod tests {
     }
 
     #[test]
+    fn primo_the_unbounded_combat_damage_trigger() {
+        // Primo, the Unbounded (#1361): the triggering creatures' base power is 0,
+        // and the Fractal token enters with +1/+1 counters equal to the combat
+        // damage dealt (EventContextAmount). Verifies the full trigger:
+        //   - DamageDoneOnceByController mode
+        //   - valid_source carries a base-power-0 check (CR 208.4b)
+        //   - the token-creation body has no Unimplemented effects
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control with base power 0 deal combat damage to a player, create a 0/0 green and blue Fractal creature token. Put a number of +1/+1 counters on it equal to the damage dealt.",
+            "Primo, the Unbounded",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+        // CR 208.4b: source filter must include a base-power-0 comparison.
+        let TargetFilter::Typed(tf) = def
+            .valid_source
+            .as_ref()
+            .expect("valid_source should be present")
+        else {
+            panic!(
+                "valid_source should be a typed filter, got {:?}",
+                def.valid_source
+            );
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Base,
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Fixed { value: 0 },
+                }
+            )),
+            "expected base-power-0 PtComparison in source filter, got: {:?}",
+            tf.properties
+        );
+
+        // No Unimplemented effects anywhere in the trigger body.
+        let execute: &AbilityDefinition =
+            def.execute.as_deref().expect("trigger should have execute");
+        let mut current: Option<&AbilityDefinition> = Some(execute);
+        while let Some(ability) = current {
+            assert!(
+                !matches!(*ability.effect, Effect::Unimplemented { .. }),
+                "trigger body must not contain Unimplemented, got: {:?}",
+                ability.effect
+            );
+            current = ability.sub_ability.as_deref();
+        }
+
+        // The Fractal token must enter with +1/+1 counters equal to the combat
+        // damage dealt (EventContextAmount), not a fixed count. Walk the
+        // sub-ability chain to find the Token effect and verify its
+        // enter_with_counters payload.
+        let mut current: Option<&AbilityDefinition> = Some(execute);
+        let mut enter_with_counters: Option<&Vec<(CounterType, QuantityExpr)>> = None;
+        while let Some(ability) = current {
+            if let Effect::Token {
+                enter_with_counters: counters,
+                ..
+            } = &*ability.effect
+            {
+                enter_with_counters = Some(counters);
+                break;
+            }
+            current = ability.sub_ability.as_deref();
+        }
+        let counters = enter_with_counters.expect("trigger body should contain a Token effect");
+        let expected: Vec<(CounterType, QuantityExpr)> = vec![(
+            CounterType::Plus1Plus1,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        )];
+        assert_eq!(
+            counters, &expected,
+            "Fractal token must enter with +1/+1 counters equal to damage dealt, got: {:?}",
+            counters
+        );
+    }
+
+    #[test]
     fn trigger_combat_damage_create_treasure_and_manifest_that_players_library() {
         let def = parse_trigger_line(
             "Whenever one or more creatures you control deal combat damage to a player, create a Treasure token and manifest the top card of that player's library.",
@@ -10925,6 +11028,61 @@ mod tests {
             ),
             "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
             sub.effect
+        );
+    }
+
+    /// CR 406.3 + CR 701.16a + CR 400.7i: Gonti, Canny Acquisitor. "look at the
+    /// top card of that player's library, then exile it face down" must rewrite
+    /// the private `Dig` look step into a face-down `ExileTop` (issue #1316: the
+    /// card was looked at but never left the library), and the follow-on "You may
+    /// play that card for as long as it remains exiled, and mana of any type can
+    /// be spent" grant must bind to the exiled card via the tracked set.
+    #[test]
+    fn trigger_combat_damage_look_then_exile_face_down_grants_impulse_play() {
+        use crate::types::identifiers::TrackedSetId;
+
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control deal combat damage to a player, look at the top card of that player's library, then exile it face down. You may play that card for as long as it remains exiled, and mana of any type can be spent to cast that spell.",
+            "Gonti, Canny Acquisitor",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::TriggeringPlayer,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    face_down: true,
+                }
+            ),
+            "expected face-down ExileTop from the triggering player's library, got: {:?}",
+            execute.effect
+        );
+
+        let grant = execute
+            .sub_ability
+            .as_ref()
+            .expect("the impulse-play grant must chain after the exile");
+        assert!(
+            matches!(
+                &*grant.effect,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        duration: Duration::Permanent,
+                        mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                        ..
+                    },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    ..
+                }
+            ),
+            "expected PlayFromExile grant bound to the tracked exiled card, got: {:?}",
+            grant.effect
         );
     }
 
@@ -18669,7 +18827,7 @@ mod tests {
 
         let bound_qty = QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentDealtCombatDamage,
+                filter: PlayerFilter::OpponentDealtCombatDamage { source: None },
             },
         };
 
