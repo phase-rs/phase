@@ -60,6 +60,10 @@ pub struct DraftWeights {
     pub static_ability_each: f64,
     /// Cap on the total static-ability bonus.
     pub static_ability_cap: f64,
+    /// Flat bonus for a nonbasic fixing land (taps for 2+ colors). A dual/tri
+    /// land is playable in any deck running those colors, so it carries real
+    /// pick value — but below spells/removal, since fixing is a support piece.
+    pub fixing_land: f64,
 }
 
 impl Default for DraftWeights {
@@ -79,6 +83,9 @@ impl Default for DraftWeights {
             search: 0.5,
             static_ability_each: 0.75,
             static_ability_cap: 2.0,
+            // ~card-draw value: above a filler creature, below a 2/2 (~3.5),
+            // removal (4), and a bomb — bots take fixing mid-pack, not over playables.
+            fixing_land: 2.0,
         }
     }
 }
@@ -104,11 +111,19 @@ pub fn evaluate_draft_card(face: &CardFace, w: &DraftWeights) -> f64 {
     let is_creature = core.contains(&CoreType::Creature);
     let is_planeswalker = core.contains(&CoreType::Planeswalker);
 
-    // A land with no nonland type carries no spell value. Checked *after* the
-    // creature/planeswalker tests so Land Creatures (Dryad Arbor) and creature/PW
-    // manlands are scored on their bodies, not zeroed as bare lands.
+    // A pure land carries no spell value, but a fixing land (taps for 2+ colors)
+    // is a real pick — duals/tri-lands slot into any deck running those colors.
+    // Mono-color nonbasics, colorless utility lands, and basics stay at 0 (not
+    // worth a pick over a spell). Checked *after* the creature/planeswalker tests
+    // so Land Creatures (Dryad Arbor) and creature/PW manlands score on their
+    // bodies. Deck-color matching ("in their colors") is a deck-context concern
+    // handled at the call sites, not here — this is the context-free quality.
     if !is_creature && !is_planeswalker && core.contains(&CoreType::Land) {
-        return 0.0;
+        return if produced_color_count(face) >= 2 {
+            w.fixing_land
+        } else {
+            0.0
+        };
     }
 
     // ── Effect-chain value ──────────────────────────────────────────────
@@ -168,6 +183,14 @@ pub fn evaluate_draft_card_default(face: &CardFace) -> f64 {
     evaluate_draft_card(face, &DraftWeights::default())
 }
 
+/// Count of distinct colors this face can produce — unioning intrinsic mana from
+/// its basic land subtypes and its activated `Effect::Mana` abilities. `>= 2`
+/// marks a fixing land. Delegates to the shared [`crate::mana_colors`] core so
+/// draft pick value and the deck-builder manabase agree on what "fixing" means.
+pub fn produced_color_count(face: &CardFace) -> usize {
+    crate::mana_colors::land_produced_color_types(&face.card_type.subtypes, &face.abilities).len()
+}
+
 /// Extract a fixed power/toughness value, ignoring `*` / variable / derived stats.
 fn fixed_pt(pt: &Option<PtValue>) -> Option<i32> {
     match pt {
@@ -180,11 +203,12 @@ fn fixed_pt(pt: &Option<PtValue>) -> Option<i32> {
 mod tests {
     use super::*;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, TargetFilter, TriggerDefinition,
+        AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction, QuantityExpr,
+        TargetFilter, TriggerDefinition,
     };
     use engine::types::card_type::CardType;
     use engine::types::keywords::Keyword;
-    use engine::types::mana::ManaCost;
+    use engine::types::mana::{ManaColor, ManaCost};
     use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
 
@@ -291,5 +315,80 @@ mod tests {
         let mut dryad_arbor = vanilla_creature(1, 1, 0);
         dryad_arbor.card_type.core_types = vec![CoreType::Land, CoreType::Creature];
         assert!(evaluate_draft_card_default(&dryad_arbor) > 0.0);
+    }
+
+    fn land_with_subtypes(subtypes: &[&str]) -> CardFace {
+        let mut f = face(vec![CoreType::Land]);
+        f.card_type.subtypes = subtypes.iter().map(|s| s.to_string()).collect();
+        f
+    }
+
+    fn tap_for(colors: Vec<ManaColor>) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors,
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )
+    }
+
+    #[test]
+    fn fixing_land_via_basic_subtypes_scores_positive() {
+        // A true dual (Land — Plains Island) makes W+U via its types, no Effect::Mana.
+        let dual = land_with_subtypes(&["Plains", "Island"]);
+        assert_eq!(produced_color_count(&dual), 2);
+        assert_eq!(
+            evaluate_draft_card_default(&dual),
+            DraftWeights::default().fixing_land
+        );
+    }
+
+    #[test]
+    fn fixing_land_via_mana_abilities_scores_positive() {
+        // A painland-style land with two colored tap abilities.
+        let mut painland = face(vec![CoreType::Land]);
+        painland.abilities = vec![
+            tap_for(vec![ManaColor::White]),
+            tap_for(vec![ManaColor::Blue]),
+        ];
+        assert_eq!(produced_color_count(&painland), 2);
+        assert_eq!(
+            evaluate_draft_card_default(&painland),
+            DraftWeights::default().fixing_land
+        );
+    }
+
+    #[test]
+    fn mono_color_nonbasic_land_scores_zero() {
+        let mono = land_with_subtypes(&["Forest"]);
+        assert_eq!(produced_color_count(&mono), 1);
+        assert_eq!(evaluate_draft_card_default(&mono), 0.0);
+    }
+
+    #[test]
+    fn colorless_only_land_scores_zero() {
+        // Produces only {C} → no colored sources → not a fixing pick.
+        let mut utility = face(vec![CoreType::Land]);
+        utility.abilities = vec![AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+                target: None,
+            },
+        )];
+        assert_eq!(produced_color_count(&utility), 0);
+        assert_eq!(evaluate_draft_card_default(&utility), 0.0);
     }
 }
