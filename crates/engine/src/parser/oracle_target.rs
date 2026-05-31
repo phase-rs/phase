@@ -493,13 +493,11 @@ pub fn parse_target_with_syntax<'a>(
         }
     }
 
-    // "~" — self-reference (normalized from card name)
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("~").parse(lower.as_str()) {
-        return (
-            TargetFilter::SelfRef,
-            text[lower.len() - rest.len()..].trim_start(),
-            syntax,
-        );
+    // CR 201.5: self-references name only the source object. Bare "it" is
+    // handled by the anaphoric-pronoun block above, so this primarily covers
+    // "~", "itself", and typed self-reference phrases.
+    if let Some((filter, rest)) = nom_on_lower(text, &lower, nom_target::parse_self_reference) {
+        return (filter, rest, syntax);
     }
 
     // "any other target" — matches any legal target different from previously chosen targets
@@ -1778,20 +1776,13 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // omits the source permanent (Thundering Raiju: "modified creatures you
     // control other than this creature" — normalized to "~"). The trailing
     // self-reference is recognized via `nom_target::parse_self_reference`
-    // ("~"/"it"/"this creature"/…) plus an explicit "itself" alternative, which
-    // `parse_self_reference` does not cover.
+    // ("~"/"it"/"this creature"/"itself"/…).
     {
         let remaining_other_than = lower[pos..].trim_start();
         let other_than_offset = lower[pos..].len() - remaining_other_than.len();
         if let Ok((rest, _)) = (
             tag::<_, _, OracleError<'_>>("other than "),
-            alt((
-                nom_target::parse_self_reference,
-                value(
-                    TargetFilter::SelfRef,
-                    tag::<_, _, OracleError<'_>>("itself"),
-                ),
-            )),
+            nom_target::parse_self_reference,
         )
             .parse(remaining_other_than)
         {
@@ -5454,6 +5445,13 @@ mod tests {
         let (f, rest) = parse_target("this creature to its owner's hand");
         assert_eq!(f, TargetFilter::SelfRef);
         assert_eq!(rest, " to its owner's hand");
+    }
+
+    #[test]
+    fn itself_is_self_ref() {
+        let (f, rest) = parse_target("itself.");
+        assert_eq!(f, TargetFilter::SelfRef);
+        assert_eq!(rest, ".");
     }
 
     #[test]

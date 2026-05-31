@@ -779,6 +779,12 @@ function GamePageContent({
 
   const isDragging = useUiStore((s) => s.isDragging);
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
+  // Card-preview behavior preference (item: hover preview side/Shift). In
+  // "shift" mode the preview only renders while Shift is held; in "side" mode
+  // it docks to the screen edge instead of following the cursor.
+  const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode);
+  const shiftHeld = useUiStore((s) => s.shiftHeld);
+  const previewSuppressed = cardPreviewMode === "shift" && !shiftHeld;
   const inspectedObj =
     !isDragging && inspectedObjectId != null && objects
       ? (objects[inspectedObjectId] ?? null)
@@ -1325,7 +1331,11 @@ function GamePageContent({
       <BlockRequirementBadges />
 
       {/* Card preview overlay */}
-      <CardPreview cardName={inspectedCardName} backFaceName={inspectedOtherFaceName} />
+      <CardPreview
+        cardName={previewSuppressed ? null : inspectedCardName}
+        backFaceName={previewSuppressed ? null : inspectedOtherFaceName}
+        dockSide={cardPreviewMode === "side"}
+      />
 
       {/* WaitingFor-driven prompt overlays (only for human player).
           Wrapped in DialogHost so any active dialog can be peeked away to

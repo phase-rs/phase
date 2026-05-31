@@ -23,6 +23,7 @@ import {
 } from "../../animation/types.ts";
 import type {
   ArtChainEntry,
+  CardPreviewMode,
   CardSizePreference,
   LogDefaultState,
 } from "../../stores/preferencesStore.ts";
@@ -56,6 +57,7 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
 ];
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
+const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
 
@@ -165,6 +167,8 @@ export function PreferencesModal({
   const setShowKeywordStrip = usePreferencesStore((s) => s.setShowKeywordStrip);
   const battlefieldPeekOnHover = usePreferencesStore((s) => s.battlefieldPeekOnHover) ?? true;
   const setBattlefieldPeekOnHover = usePreferencesStore((s) => s.setBattlefieldPeekOnHover);
+  const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode) ?? "follow";
+  const setCardPreviewMode = usePreferencesStore((s) => s.setCardPreviewMode);
   const artChain = usePreferencesStore((s) => s.artChain);
   const addArtChainEntry = usePreferencesStore((s) => s.addArtChainEntry);
   const removeArtChainEntry = usePreferencesStore((s) => s.removeArtChainEntry);
@@ -382,6 +386,18 @@ export function PreferencesModal({
                       />
                       <span className="text-sm text-slate-200">{t("visual.showOpponentBoard")}</span>
                     </label>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("visual.cardPreview")}>
+                    <SegmentedControl
+                      options={CARD_PREVIEW_MODES}
+                      value={cardPreviewMode}
+                      onChange={setCardPreviewMode}
+                      renderLabel={(opt) => t(`visual.cardPreviewOptions.${opt}`)}
+                    />
+                    <p className="mt-1.5 text-xs text-slate-400">
+                      {t(`visual.cardPreviewHint.${cardPreviewMode}`)}
+                    </p>
                   </SettingGroup>
 
                   <SettingGroup label={t("visual.cardArtPreferences")}>

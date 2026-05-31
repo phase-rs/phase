@@ -131,6 +131,8 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::BecomesPlotted => match_becomes_plotted,
         // CR 104.3a: "Whenever a player loses the game" — dedicated matcher.
         TriggerMode::LosesGame => match_loses_game,
+        // CR 702.26c: Phasing triggers fire when a permanent phases in.
+        TriggerMode::PhaseIn => match_phase_in,
         TriggerMode::DamagePreventedOnce
         | TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
@@ -140,7 +142,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll
         | TriggerMode::PayLife
-        | TriggerMode::PhaseIn
         | TriggerMode::PhaseOut
         | TriggerMode::PhaseOutAll
         | TriggerMode::NewGame
@@ -373,6 +374,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Compound: attacks or blocks — fires on attack or block events
     r.insert(TriggerMode::AttacksOrBlocks, match_attacks_or_blocks);
 
+    // CR 702.26c: Phasing triggers fire when a permanent phases in.
+    r.insert(TriggerMode::PhaseIn, match_phase_in);
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -384,7 +388,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::CounterPlayerAddedAll,
         TriggerMode::CounterTypeAddedAll,
         TriggerMode::PayLife,
-        TriggerMode::PhaseIn,
         TriggerMode::PhaseOut,
         TriggerMode::PhaseOutAll,
         TriggerMode::NewGame,
@@ -3021,6 +3024,23 @@ pub(super) fn match_ability_activated(
         && valid_card_matches(trigger, state, *activated_id, source_id)
 }
 
+/// CR 702.26c: Matches when a permanent phases in.
+pub(super) fn match_phase_in(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::PermanentPhasedIn { object_id } = event {
+        if trigger.valid_card.is_some() {
+            valid_card_matches(trigger, state, *object_id, source_id)
+        } else {
+            *object_id == source_id
+        }
+    } else {
+        false
+    }
+}
 pub(super) fn match_unimplemented(
     _event: &GameEvent,
     _trigger: &TriggerDefinition,
@@ -6317,6 +6337,77 @@ mod tests {
         let registry = build_trigger_registry();
         assert!(trigger_matcher(TriggerMode::PayCumulativeUpkeep).is_some());
         assert!(registry.contains_key(&TriggerMode::PayCumulativeUpkeep));
+    }
+
+    #[test]
+    fn phase_in_matcher_registered_and_matches_source() {
+        let state = setup();
+        let source = ObjectId(1);
+        let trigger = make_trigger(TriggerMode::PhaseIn);
+        let registry = build_trigger_registry();
+
+        assert!(trigger_matcher(TriggerMode::PhaseIn).is_some());
+        assert!(registry.contains_key(&TriggerMode::PhaseIn));
+        assert!(match_phase_in(
+            &GameEvent::PermanentPhasedIn { object_id: source },
+            &trigger,
+            source,
+            &state
+        ));
+        assert!(!match_phase_in(
+            &GameEvent::PermanentPhasedIn {
+                object_id: ObjectId(2),
+            },
+            &trigger,
+            source,
+            &state
+        ));
+    }
+
+    #[test]
+    fn phase_in_matcher_observer_uses_valid_card_filter() {
+        let mut state = setup();
+        let observer = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Warp Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Phasing Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let trigger = make_trigger(TriggerMode::PhaseIn)
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()));
+
+        assert!(match_phase_in(
+            &GameEvent::PermanentPhasedIn {
+                object_id: creature,
+            },
+            &trigger,
+            observer,
+            &state
+        ));
+        assert!(!match_phase_in(
+            &GameEvent::PermanentPhasedIn {
+                object_id: observer,
+            },
+            &trigger,
+            observer,
+            &state
+        ));
     }
 
     #[test]

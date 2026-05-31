@@ -22,6 +22,10 @@ interface UiStoreState {
   inspectedObjectId: ObjectId | null;
   inspectedFaceIndex: number;
   altHeld: boolean;
+  /** Whether the Shift key is currently held. Drives the "shift" card-preview
+   *  mode (preview shows only while Shift is down). Tracked as held-state via
+   *  keydown/keyup (unlike altHeld, which press-toggles). */
+  shiftHeld: boolean;
   selectedCardIds: ObjectId[];
   fullControl: boolean;
   autoPass: boolean;
@@ -70,6 +74,7 @@ interface UiStoreActions {
   inspectObject: (id: ObjectId | null, faceIndex?: number) => void;
   dismissPreview: () => void;
   setAltHeld: (held: boolean) => void;
+  setShiftHeld: (held: boolean) => void;
   addSelectedCard: (cardId: ObjectId) => void;
   toggleSelectedCard: (cardId: ObjectId) => void;
   cycleSelectedCard: (cardId: ObjectId, max: number) => void;
@@ -117,6 +122,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   inspectedObjectId: null,
   inspectedFaceIndex: 0,
   altHeld: false,
+  shiftHeld: false,
   selectedCardIds: [],
   fullControl: false,
   autoPass: false,
@@ -147,6 +153,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   setDebugHighlightedObjectId: (id) => set({ debugHighlightedObjectId: id }),
   setDebugHighlightedPlayerId: (id) => set({ debugHighlightedPlayerId: id }),
   setAltHeld: (held) => set({ altHeld: held }),
+  setShiftHeld: (held) => set({ shiftHeld: held }),
   inspectObject: (id, faceIndex) => {
     if (id != null) {
       // Setting a new inspection target: cancel any pending clear and apply immediately

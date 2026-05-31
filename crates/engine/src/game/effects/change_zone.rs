@@ -69,16 +69,15 @@ fn resolution_choice_cardinality(
         return (1, 0, up_to);
     };
 
-    let max = spec
-        .max
-        .as_ref()
-        .map(|expr| crate::game::quantity::resolve_quantity_with_targets(state, expr, ability))
-        .map(|value| value.max(0) as usize)
-        .unwrap_or(eligible_count)
-        .max(spec.min)
-        .min(eligible_count);
-    let min = spec.min.min(max);
-    (max, min, min != max)
+    match crate::game::ability_utils::resolve_multi_target_bounds(
+        state,
+        ability,
+        spec,
+        eligible_count,
+    ) {
+        Ok(bounds) => (bounds.max, bounds.min, bounds.min != bounds.max),
+        Err(_) => (0, 0, up_to),
+    }
 }
 
 /// Result of a single zone-move attempt through the replacement pipeline.

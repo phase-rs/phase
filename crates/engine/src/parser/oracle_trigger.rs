@@ -862,6 +862,17 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         (None, None) => None,
     };
 
+    // CR 603.4: Intervening-if life-gain triggers check the gained-life
+    // condition when they trigger and resolve, so "that many" distribution
+    // references bind to the same turn-scoped life-gain quantity.
+    if def.condition.as_ref().is_some_and(
+        crate::parser::oracle_effect::trigger_condition_references_controller_life_gained,
+    ) {
+        if let Some(ability) = def.execute.as_deref_mut() {
+            crate::parser::oracle_effect::rewrite_gained_life_that_many_distribution_refs(ability);
+        }
+    }
+
     // CR 109.4 + CR 603.7c: Surface TargetFilter::Player when execute
     // references ControllerRef::TargetPlayer.
     if def.valid_target.is_none() {
@@ -2402,7 +2413,32 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         if !after.starts_with(" from") {
             return (
                 strip_condition_clause(text, pos, "if you cast it".len()),
-                Some(TriggerCondition::WasCast),
+                Some(TriggerCondition::WasCast { zone: None }),
+            );
+        }
+    }
+
+    // CR 603.4 + CR 601.2 + CR 603.2c: "if it/they entered or w(as|ere) cast from a graveyard"
+    // allow-noncombinator: structural if-clause excision, not parse dispatch
+    for pattern in &[
+        "if they entered or were cast from a graveyard",
+        "if it entered or was cast from a graveyard",
+    ] {
+        if let Some(pos) = tp.find(pattern) {
+            return (
+                strip_condition_clause(text, pos, pattern.len()),
+                Some(TriggerCondition::Or {
+                    conditions: vec![
+                        TriggerCondition::ZoneChangeObjectMatchesFilter {
+                            origin: Some(Zone::Graveyard),
+                            destination: Zone::Battlefield,
+                            filter: TargetFilter::Any,
+                        },
+                        TriggerCondition::WasCast {
+                            zone: Some(Zone::Graveyard),
+                        },
+                    ],
+                }),
             );
         }
     }
@@ -2417,7 +2453,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             Some(TriggerCondition::Or {
                 conditions: vec![
                     TriggerCondition::Not {
-                        condition: Box::new(TriggerCondition::WasCast),
+                        condition: Box::new(TriggerCondition::WasCast { zone: None }),
                     },
                     TriggerCondition::ManaSpentCondition {
                         text: "no mana was spent to cast them".to_string(),
@@ -2439,14 +2475,14 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // which is not cast — does not re-trigger the ability infinitely. The
     // literal "if it was cast" is not a substring of "if it wasn't cast"
     // (the latter has "wasn't", not "was cast"), so the two arms are disjoint.
-    // NOTE: if a zone-specific "if it was cast from <zone>" trigger arm is ever
-    // added, it must be ordered BEFORE this one — "if it was cast" is a prefix
-    // of "if it was cast from your hand" and would shadow it here.
+    // NOTE: a zone-specific "if it was cast from <zone>" arm must be ordered
+    // BEFORE this one — "if it was cast" is a prefix of "if it was cast from
+    // your hand" and would shadow it here.
     let was_cast_pos = tp.find("if it was cast"); // allow-noncombinator: anchor for strip_condition_clause — structural if-clause excision, not parse dispatch
     if let Some(pos) = was_cast_pos {
         return (
             strip_condition_clause(text, pos, "if it was cast".len()),
-            Some(TriggerCondition::WasCast),
+            Some(TriggerCondition::WasCast { zone: None }),
         );
     }
 
@@ -2455,7 +2491,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return (
             strip_condition_clause(text, pos, "if it wasn't cast".len()),
             Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasCast),
+                condition: Box::new(TriggerCondition::WasCast { zone: None }),
             }),
         );
     }
@@ -3871,6 +3907,9 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_phrase("becomes the target of an aura spell"),
         parse_event_phrase("becomes the target of an instant or sorcery spell"),
         parse_event_phrase("becomes the target of a spell"),
+        // CR 702.26c: "phases in" / "phase in" — phasing trigger verb.
+        parse_event_phrase("phases in"),
+        parse_event_phrase("phase in"),
     ));
     let player_actions = alt((
         passive_player_actions,
@@ -5291,10 +5330,13 @@ fn try_parse_event(
         return Some((TriggerMode::Blocks, def));
     }
 
-    // "leaves the battlefield" / "leaves"
+    // "leaves the battlefield" / "leaves" / "leave the battlefield" / "leave"
+    // CR 603.2c: Plural "leave" form is used with batched "one or more" subjects.
     let leaves_tail = alt((
         value((), tag::<_, _, OracleError<'_>>("leaves the battlefield")),
-        value((), tag("leaves")),
+        value((), tag::<_, _, OracleError<'_>>("leave the battlefield")),
+        value((), tag::<_, _, OracleError<'_>>("leaves")),
+        value((), tag("leave")),
     ))
     .parse(rest)
     .ok()
@@ -5514,6 +5556,8 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
+        /// CR 702.26c: Permanent phases in from phased-out state.
+        PhasesIn,
         /// CR 701.3d: Equipment/Aura becomes unattached from a permanent.
         BecomesUnattached(Option<TargetFilter>),
         // CR 701.3a: Equipment/Aura becomes attached to a permanent.
@@ -5637,6 +5681,11 @@ fn try_parse_event(
             // CR 702.171c: Actor-side saddle trigger (reserved — no cards today without
             // the compound, but the arm is ready for future printings).
             value(SimpleEvent::Saddles, tag("saddles a mount")),
+        )))
+        .or(alt((
+            // CR 702.26c: "phases in" / "phase in" — phasing trigger.
+            value(SimpleEvent::PhasesIn, tag("phases in")),
+            value(SimpleEvent::PhasesIn, tag("phase in")),
             // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
             parse_becomes_unattached,
             // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
@@ -5770,6 +5819,11 @@ fn try_parse_event(
                 // CR 702.122 + CR 702.171c: Compound actor-side trigger. Fires on
                 // either saddling a Mount or crewing a Vehicle.
                 def.mode = TriggerMode::SaddlesOrCrews;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::PhasesIn => {
+                // CR 702.26c: Permanent phases in from phased-out state.
+                def.mode = TriggerMode::PhaseIn;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::BecomesUnattached(host_filter) => {
@@ -10147,6 +10201,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_phases_in_trigger_as_phase_in_mode() {
+        let def = parse_trigger_line(
+            "Whenever Warping Wurm phases in, put a +1/+1 counter on it.",
+            "Warping Wurm",
+        );
+
+        assert_eq!(def.mode, TriggerMode::PhaseIn);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
     fn static_condition_to_trigger_condition_source_in_battlefield() {
         // SUB-FIX B regression: the existing SourceInZone mapper must pass
         // Zone::Battlefield through unchanged so the new battlefield condition
@@ -13211,6 +13276,22 @@ mod tests {
         assert!(
             !def.trigger_zones.contains(&Zone::Exile),
             "non-self-ref LTB must not extend to exile"
+        );
+    }
+
+    /// CR 603.2c: Batched "one or more permanents … leave the battlefield" uses the plural
+    /// verb form. The parser must accept "leave" alongside "leaves" for LTB triggers.
+    #[test]
+    fn trigger_one_or_more_permanents_leave_the_battlefield() {
+        let def = parse_trigger_line(
+            "Whenever one or more permanents you control leave the battlefield, scry 1.",
+            "Nefarious Imp",
+        );
+        assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+        assert!(def.batched, "one or more must set batched flag");
+        assert!(
+            !def.trigger_zones.contains(&Zone::Graveyard),
+            "non-self-ref LTB must not extend to graveyard"
         );
     }
 
@@ -20859,7 +20940,7 @@ mod tests {
                 assert_eq!(
                     conditions[0],
                     TriggerCondition::Not {
-                        condition: Box::new(TriggerCondition::WasCast),
+                        condition: Box::new(TriggerCondition::WasCast { zone: None }),
                     }
                 );
                 assert!(
@@ -20889,7 +20970,7 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasCast),
+                condition: Box::new(TriggerCondition::WasCast { zone: None }),
             })
         );
     }
@@ -23052,5 +23133,67 @@ mod snapshot_tests {
                 .map(|ability| ability.effect.as_ref()),
             Some(Effect::CopySpell { .. })
         ));
+    }
+
+    #[test]
+    fn twilight_diviner_second_trigger_has_graveyard_origin_condition() {
+        let def = parse_trigger_line(
+            "Whenever one or more other creatures you control enter, if they entered or were cast from a graveyard, create a token that's a copy of one of them. This ability triggers only once each turn.",
+            "Twilight Diviner",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert!(def.batched, "should be batched");
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+        match &def.condition {
+            Some(TriggerCondition::Or { conditions }) => {
+                assert_eq!(conditions.len(), 2);
+                assert!(
+                    matches!(
+                        &conditions[0],
+                        TriggerCondition::ZoneChangeObjectMatchesFilter {
+                            origin: Some(Zone::Graveyard),
+                            destination: Zone::Battlefield,
+                            ..
+                        }
+                    ),
+                    "first disjunct should be ZoneChangeObjectMatchesFilter(Graveyard→Battlefield)"
+                );
+                assert_eq!(
+                    conditions[1],
+                    TriggerCondition::WasCast {
+                        zone: Some(Zone::Graveyard)
+                    }
+                );
+            }
+            other => panic!("expected Or condition, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entered_or_cast_from_graveyard_singular_form() {
+        let def = parse_trigger_line(
+            "Whenever another creature enters under your control, if it entered or was cast from a graveyard, draw a card.",
+            "Test Card",
+        );
+        match &def.condition {
+            Some(TriggerCondition::Or { conditions }) => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(
+                    &conditions[0],
+                    TriggerCondition::ZoneChangeObjectMatchesFilter {
+                        origin: Some(Zone::Graveyard),
+                        destination: Zone::Battlefield,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    conditions[1],
+                    TriggerCondition::WasCast {
+                        zone: Some(Zone::Graveyard)
+                    }
+                );
+            }
+            other => panic!("expected Or condition, got: {other:?}"),
+        }
     }
 }

@@ -1025,6 +1025,7 @@ mod tests {
             player: PlayerId(0),
             pending_cast: pending.clone(),
             target_slots: vec![],
+            mode_labels: Vec::new(),
             selection: Default::default(),
         };
         state.pending_cast = Some(pending);

@@ -40,6 +40,7 @@ use super::oracle_util::{
     parse_number, split_around, starts_with_possessive, strip_after, TextPair,
 };
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
+use crate::game::triggers;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
@@ -3743,9 +3744,9 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
 
     // CR 115.1d: "Two target creatures" / "Three target artifacts" — numeric target prefix.
     // Strip the count, recursively parse the remainder, and attach MultiTargetSpec.
-    if let Some((count, rest)) = strip_numeric_target_prefix(tp.lower) {
+    if let Some((count, rest)) = strip_exact_target_prefix(tp.lower) {
         let mut clause = parse_effect_clause(rest, ctx);
-        clause.multi_target = Some(MultiTargetSpec::fixed(count, count));
+        clause.multi_target = Some(MultiTargetSpec::exact(count));
         return clause;
     }
 
@@ -6707,17 +6708,14 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     if matches!(clause.effect, Effect::PutCounter { .. }) && clause.multi_target.is_none() {
         clause.multi_target = extract_put_counter_multi_target(text);
     }
-    // Post-parse fixup for "exile N target" multi_target (same pattern as PutCounter above).
-    // "exile two target permanents" → strip "exile " → "two target permanents" → (2, ...)
-    if matches!(
-        clause.effect,
-        Effect::ChangeZone {
-            destination: Zone::Exile,
-            ..
-        }
-    ) && clause.multi_target.is_none()
+    // CR 601.2c: Post-parse fixup for exact-count multi-target text. The
+    // imperative parser lowers "destroy X target ..." to the target filter but
+    // the target count lives outside that filter, so recover it from the full
+    // source sentence here.
+    if clause.multi_target.is_none()
+        && triggers::extract_target_filter_from_effect(&clause.effect).is_some()
     {
-        clause.multi_target = extract_exile_multi_target(text);
+        clause.multi_target = extract_exact_target_multi_target(text);
     }
     if matches!(clause.effect, Effect::DealDamage { .. }) && clause.multi_target.is_none() {
         clause.multi_target = extract_deal_damage_multi_target(text);
@@ -10003,6 +10001,61 @@ fn apply_cast_target_suffixes(filter: &mut TargetFilter, rest: &str) {
     }
 }
 
+/// CR 610.3 + CR 608.2c: Parse the `"from among (the|those) [TYPED]
+/// (card|cards) exiled this way"` anchor and lift its optional typed leg
+/// into a `TargetFilter`.
+///
+/// Returns:
+/// * `Some(And { ExiledBySource, Typed(tf) })` — typed leg present
+///   (Etali: "the nonland cards exiled this way" → AND with Non(Land)).
+/// * `Some(ExiledBySource)` — bare "the cards exiled this way".
+/// * `None` — anchor or "exiled this way" suffix not present.
+///
+/// Composition mirrors `has_from_among_cards_exiled_with_self` (anchor
+/// strip) and `parse_cast_type_disjunction` / `parse_type_phrase` (typed
+/// leg extraction).
+fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
+    type E<'a> = OracleError<'a>;
+    let (after_anchor, _) = take_until::<_, _, E>("from among ").parse(rest).ok()?;
+    let (after_anchor, _) = tag::<_, _, E>("from among ").parse(after_anchor).ok()?;
+    let (after_article, _) = opt(alt((tag::<_, _, E>("the "), tag("those "))))
+        .parse(after_anchor)
+        .ok()?;
+
+    // Require the literal suffix anchor before lifting anything so we
+    // don't shadow the bare anaphor arm below.
+    if !scan_contains_phrase(after_article, "cards exiled this way")
+        && !scan_contains_phrase(after_article, "card exiled this way")
+    {
+        return None;
+    }
+
+    // Try disjunctive typed leg first ("instant or sorcery cards"); fall
+    // back to parse_type_phrase ("nonland cards", "creature cards").
+    let typed_filter = parse_cast_type_disjunction(after_article)
+        .map(TargetFilter::Typed)
+        .unwrap_or_else(|| super::oracle_target::parse_type_phrase(after_article).0);
+
+    // "the cards exiled this way" lifts a bare `Typed(Card)` leaf with no
+    // further constraint — that's the structural "cards" anchor, not a
+    // meaningful type filter, so degrade to bare `ExiledBySource`.
+    // `cast_filter_has_typed_leaf` would treat `[Card]` as non-empty;
+    // `TypedFilter::has_meaningful_type_constraint` is the canonical
+    // accessor that excludes Card/Any noise.
+    let meaningful = match &typed_filter {
+        TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+        _ => cast_filter_has_typed_leaf(&typed_filter),
+    };
+
+    Some(if meaningful {
+        TargetFilter::And {
+            filters: vec![TargetFilter::ExiledBySource, typed_filter],
+        }
+    } else {
+        TargetFilter::ExiledBySource
+    })
+}
+
 /// CR 406.6 + CR 603.10a: Detect the `"from among cards exiled with [self-ref]"`
 /// anchor — the persistent per-source exile-link anaphor used by cards that
 /// reference their own tracked exile set from a later, independent ability
@@ -10185,6 +10238,26 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
                     ),
                 ],
             },
+            without_paying_mana_cost: without_paying,
+            mode,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint,
+        });
+    }
+    // CR 610.3 + CR 118.9 + CR 608.2c + CR 701.13a: "Cast [quantifier] [filter]
+    // from among [the|those] [typed] cards exiled this way" — the article-`the`
+    // + "exiled this way" surface form of the per-resolution exile-set anaphor.
+    // Mirrors the "from among those nonland cards" arm above; suffix
+    // "exiled this way" keeps the anchor disjoint from the bare anaphor arm
+    // below ("from among the exiled cards" lacks this suffix and falls through).
+    //
+    // Unlocks the WotC-templated "exiled this way" family: Etali Primal
+    // Conqueror, Etali Primal Storm, Crabomination, Gix Yawgmoth Praetor,
+    // Hellcarver Demon, and similar.
+    if let Some(target) = parse_from_among_exiled_this_way(rest) {
+        return Some(Effect::CastFromZone {
+            target,
             without_paying_mana_cost: without_paying,
             mode,
             cast_transformed: false,
@@ -11964,6 +12037,105 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_event_player_quantity_refs_to_scoped(else_branch);
+    }
+}
+
+/// True when a trigger's intervening-if references the controller gaining life
+/// this turn (Lathiel / Ocelot Pride class).
+pub(crate) fn trigger_condition_references_controller_life_gained(
+    condition: &crate::types::ability::TriggerCondition,
+) -> bool {
+    use crate::types::ability::TriggerCondition;
+    match condition {
+        TriggerCondition::GainedLife { .. } => true,
+        TriggerCondition::QuantityComparison { lhs, .. } => {
+            quantity_expr_references_controller_life_gained(lhs)
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => conditions
+            .iter()
+            .any(trigger_condition_references_controller_life_gained),
+        TriggerCondition::Not { condition } => {
+            trigger_condition_references_controller_life_gained(condition)
+        }
+        _ => false,
+    }
+}
+
+fn quantity_expr_references_controller_life_gained(expr: &QuantityExpr) -> bool {
+    use crate::types::ability::{PlayerScope, QuantityRef};
+    match expr {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller,
+                },
+        } => true,
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_references_controller_life_gained(inner),
+        QuantityExpr::Sum { exprs } => exprs
+            .iter()
+            .any(quantity_expr_references_controller_life_gained),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_references_controller_life_gained(left)
+                || quantity_expr_references_controller_life_gained(right)
+        }
+        _ => false,
+    }
+}
+
+/// CR 609.3 + CR 119.3: "distribute up to that many ..." on end-step life-gain
+/// triggers anaphorizes "that many" to life gained this turn, not
+/// `EventContextAmount` (which has no scalar on a phase trigger).
+pub(crate) fn rewrite_gained_life_that_many_distribution_refs(def: &mut AbilityDefinition) {
+    use crate::types::ability::{PlayerScope, QuantityRef};
+    if def.distribute.is_none() {
+        if let Some(sub) = def.sub_ability.as_mut() {
+            rewrite_gained_life_that_many_distribution_refs(sub);
+        }
+        if let Some(else_branch) = def.else_ability.as_mut() {
+            rewrite_gained_life_that_many_distribution_refs(else_branch);
+        }
+        return;
+    }
+
+    fn rewrite_qty(expr: &mut QuantityExpr) {
+        match expr {
+            QuantityExpr::Ref { qty } if matches!(*qty, QuantityRef::EventContextAmount) => {
+                *qty = QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller,
+                };
+            }
+            QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::UpTo { max: inner }
+            | QuantityExpr::Power {
+                exponent: inner, ..
+            } => rewrite_qty(inner),
+            QuantityExpr::Sum { exprs } => {
+                for inner in exprs {
+                    rewrite_qty(inner);
+                }
+            }
+            QuantityExpr::Difference { left, right } => {
+                rewrite_qty(left);
+                rewrite_qty(right);
+            }
+            _ => {}
+        }
+    }
+
+    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_gained_life_that_many_distribution_refs(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_gained_life_that_many_distribution_refs(else_branch);
     }
 }
 
@@ -14886,7 +15058,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         }
         // CR 115.1d: Apply multi-target spec — prefer explicit choose-count text,
         // then strip result, then clause-level propagation.
-        if let Some(spec) = extract_choose_numeric_target_multi_target(&clause_ir.source_text) {
+        if let Some(spec) = extract_exact_target_multi_target(&clause_ir.source_text) {
             def = def.multi_target(spec);
         } else if let Some(ref spec) = clause_ir.multi_target {
             def = def.multi_target(spec.clone());
@@ -15827,10 +15999,12 @@ fn parse_for_each_opponent_target_fanout_clause(
 
     Some((
         clause,
-        MultiTargetSpec::bounded(
+        MultiTargetSpec::bounded_expr(
             stripped_multi_target
-                .map(|spec| spec.min)
-                .unwrap_or_else(|| per_opponent_target_fanout_min(text)),
+                .map(|spec| spec.min.clone())
+                .unwrap_or_else(|| QuantityExpr::Fixed {
+                    value: per_opponent_target_fanout_min(text) as i32,
+                }),
             QuantityExpr::Ref {
                 qty: QuantityRef::PlayerCount {
                     filter: PlayerFilter::Opponent,
@@ -15881,7 +16055,7 @@ fn per_opponent_target_fanout_min(text: &str) -> usize {
         return 1;
     };
     let (_, spec) = strip_optional_target_prefix(rest);
-    if spec.is_some_and(|spec| spec.min == 0) {
+    if spec.is_some_and(|spec| spec.min_is_fixed_zero()) {
         0
     } else {
         1
@@ -16855,24 +17029,17 @@ fn extract_put_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
     Some(MultiTargetSpec::up_to(max))
 }
 
-/// Post-parse fixup for "exile N target" multi_target.
-/// Strips "exile " verb via nom tag, then delegates to `strip_numeric_target_prefix`.
-fn extract_exile_multi_target(text: &str) -> Option<MultiTargetSpec> {
+fn extract_exact_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    let (after_verb, _) = tag::<_, _, OracleError<'_>>("exile ")
-        .parse(lower.as_str())
-        .ok()?;
-    let (count, _) = strip_numeric_target_prefix(after_verb)?;
-    Some(MultiTargetSpec::fixed(count, count))
-}
-
-fn extract_choose_numeric_target_multi_target(text: &str) -> Option<MultiTargetSpec> {
-    let lower = text.to_lowercase();
-    let (after_choose, _) = tag::<_, _, OracleError<'_>>("choose ")
-        .parse(lower.as_str())
-        .ok()?;
-    let (count, _) = strip_numeric_target_prefix(after_choose)?;
-    Some(MultiTargetSpec::fixed(count, count))
+    for verb in MULTI_TARGET_VERBS {
+        let mut parser = terminated(tag::<_, _, OracleError<'_>>(*verb), tag(" "));
+        let Ok((after_verb, _)) = parser.parse(lower.as_str()) else {
+            continue;
+        };
+        let (count, _) = strip_exact_target_prefix(after_verb)?;
+        return Some(MultiTargetSpec::exact(count));
+    }
+    None
 }
 
 fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
@@ -16986,20 +17153,12 @@ const MULTI_TARGET_VERBS: &[&str] = &[
     "exile", "tap", "untap", "goad", "return", "destroy", "choose",
 ];
 
-/// CR 115.1d: Strip numeric word prefix before "target" from effect text.
-/// "two target creatures" → (2, "target creatures")
-/// "three target artifacts" → (3, "target artifacts")
-/// Returns None if text doesn't start with a number word followed by "target".
-fn strip_numeric_target_prefix(lower: &str) -> Option<(usize, &str)> {
-    let (rest, count) = alt((
-        value(2usize, tag::<_, _, OracleError<'_>>("two ")),
-        value(3, tag("three ")),
-        value(4, tag("four ")),
-        value(5, tag("five ")),
-        value(6, tag("six ")),
-    ))
-    .parse(lower)
-    .ok()?;
+/// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
+/// phrase. "two target creatures" and "X target creatures" both set the exact
+/// number of targets, unlike "up to X target creatures".
+fn strip_exact_target_prefix(lower: &str) -> Option<(QuantityExpr, &str)> {
+    let (rest, count) = parse_exact_target_count_expr(lower).ok()?;
+    let rest = rest.trim_start();
     if alt((tag::<_, _, OracleError<'_>>("target "), tag("target,")))
         .parse(rest)
         .is_ok()
@@ -17008,6 +17167,28 @@ fn strip_numeric_target_prefix(lower: &str) -> Option<(usize, &str)> {
     } else {
         None
     }
+}
+
+fn parse_exact_target_count_expr(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
+    alt((
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            tag("x"),
+        ),
+        value(QuantityExpr::Fixed { value: 1 }, tag("one ")),
+        value(QuantityExpr::Fixed { value: 2 }, tag("two ")),
+        value(QuantityExpr::Fixed { value: 3 }, tag("three ")),
+        value(QuantityExpr::Fixed { value: 4 }, tag("four ")),
+        value(QuantityExpr::Fixed { value: 5 }, tag("five ")),
+        value(QuantityExpr::Fixed { value: 6 }, tag("six ")),
+    ))
+    .parse(input)
 }
 
 /// CR 115.1d: Strip optional target-count prefixes before a targeted phrase.
@@ -17041,6 +17222,14 @@ pub(super) fn parse_multi_target_count_expr(
     input: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
     alt((
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            tag("x"),
+        ),
         nom_quantity::parse_quantity_expr_number,
         nom_quantity::parse_quantity,
     ))
@@ -17603,7 +17792,13 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
     let (after_lower, _) = tag::<_, _, OracleError<'_>>("distribute ")
         .parse(lower)
         .ok()?;
-    let (count_expr, rest_lower) = super::oracle_util::parse_count_expr(after_lower)?;
+    let (count_expr, rest_lower) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_lower) {
+            let (inner, rest) = super::oracle_util::parse_count_expr(rest)?;
+            (QuantityExpr::up_to(inner), rest)
+        } else {
+            super::oracle_util::parse_count_expr(after_lower)?
+        };
 
     // CR 122.1 + CR 122.1b: shared counter-type combinator handles multi-word
     // keyword counter names. Keyword counters aren't a printed distribute
@@ -18693,9 +18888,7 @@ fn apply_where_x_ability_expression(def: &mut AbilityDefinition, where_x_express
         ));
     }
     if let Some(spec) = def.multi_target.as_mut() {
-        if let Some(max) = spec.max.take() {
-            spec.max = Some(apply_where_x_quantity_expression(max, where_x_expression));
-        }
+        spec.map_quantities(|expr| apply_where_x_quantity_expression(expr, where_x_expression));
     }
     apply_where_x_effect_expression(def.effect.as_mut(), where_x_expression);
     if let Some(sub) = def.sub_ability.as_mut() {
@@ -21513,6 +21706,44 @@ mod tests {
             ),
             "expected DealDamage with TargetPower/ParentTarget, got: {:?}",
             clause.effect
+        );
+    }
+
+    #[test]
+    fn damage_to_any_target_and_itself_preserves_both_segments() {
+        let def = parse_effect_chain(
+            "This creature deals 2 damage to any target and 3 damage to itself.",
+            AbilityKind::Activated,
+        );
+
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                }
+            ),
+            "expected primary any-target damage, got {:?}",
+            def.effect
+        );
+
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected self-damage sub-ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::SelfRef,
+                    damage_source: None,
+                }
+            ),
+            "expected self-damage continuation, got {:?}",
+            sub.effect
         );
     }
 
@@ -26593,7 +26824,7 @@ mod tests {
             panic!("Expected PutCounter");
         }
         let spec = multi.expect("should have multi_target");
-        assert_eq!(spec.min, 0);
+        assert!(spec.min_is_fixed_zero());
         assert_eq!(spec, MultiTargetSpec::fixed(0, 1));
     }
 
@@ -28047,7 +28278,7 @@ mod tests {
         let (text, spec) = strip_any_number_quantifier("exile any number of creatures");
         assert_eq!(text, "exile creatures");
         let spec = spec.unwrap();
-        assert_eq!(spec.min, 0);
+        assert!(spec.min_is_fixed_zero());
         assert_eq!(spec.max, None);
     }
 
@@ -30814,6 +31045,22 @@ mod tests {
     }
 
     #[test]
+    fn destroy_x_target_nonland_permanents_exact_multi_target() {
+        let def = parse_effect_chain("Destroy X target nonland permanents.", AbilityKind::Spell);
+        assert!(
+            matches!(&*def.effect, Effect::Destroy { .. }),
+            "Expected Destroy, got {:?}",
+            def.effect
+        );
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        assert_eq!(def.multi_target, Some(MultiTargetSpec::exact(x)));
+    }
+
+    #[test]
     fn parse_gift_wasnt_promised_condition() {
         // "Destroy target creature. If the gift wasn't promised, you lose 2 life."
         let def = parse_effect_chain(
@@ -31249,21 +31496,34 @@ mod tests {
     }
 
     #[test]
-    fn strip_numeric_target_prefix_two() {
-        let result = strip_numeric_target_prefix("two target creatures");
-        assert_eq!(result, Some((2, "target creatures")));
+    fn strip_exact_target_prefix_two() {
+        let result = strip_exact_target_prefix("two target creatures");
+        assert_eq!(
+            result,
+            Some((QuantityExpr::Fixed { value: 2 }, "target creatures"))
+        );
     }
 
     #[test]
-    fn strip_numeric_target_prefix_three() {
-        let result = strip_numeric_target_prefix("three target artifacts");
-        assert_eq!(result, Some((3, "target artifacts")));
+    fn strip_exact_target_prefix_x() {
+        let result = strip_exact_target_prefix("x target artifacts");
+        assert_eq!(
+            result,
+            Some((
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                },
+                "target artifacts"
+            ))
+        );
     }
 
     #[test]
-    fn strip_numeric_target_prefix_no_match() {
-        assert!(strip_numeric_target_prefix("target creature").is_none());
-        assert!(strip_numeric_target_prefix("a target creature").is_none());
+    fn strip_exact_target_prefix_no_match() {
+        assert!(strip_exact_target_prefix("target creature").is_none());
+        assert!(strip_exact_target_prefix("a target creature").is_none());
     }
 
     #[test]
@@ -40158,6 +40418,106 @@ mod tests {
                 |filter| matches!(filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land)
             ),
             "expected Non(Land), got {:?}",
+            typed.type_filters
+        );
+    }
+
+    /// CR 610.3 + CR 608.2c + CR 118.9: Etali, Primal Conqueror's ETB cast
+    /// surface — "cast any number of spells from among the nonland cards
+    /// exiled this way without paying their mana costs". Article-`the` +
+    /// `exiled this way` suffix variant of the per-resolution exile-set
+    /// anaphor; must bind to `And { ExiledBySource, Typed(Non(Land)) }`
+    /// identically to the `"those nonland cards"` sibling above.
+    #[test]
+    fn cast_from_among_the_nonland_cards_exiled_this_way_binds_to_exiled_by_source_and_nonland() {
+        let e = parse_effect(
+            "cast any number of spells from among the nonland cards exiled this way without paying their mana costs",
+        );
+        let Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            ..
+        } = e
+        else {
+            panic!("expected CastFromZone, got {:?}", e);
+        };
+        assert!(without_paying_mana_cost);
+        let TargetFilter::And { filters } = target else {
+            panic!("expected AND target filter, got {:?}", target);
+        };
+        assert!(
+            filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::ExiledBySource)),
+            "expected ExiledBySource leg in {:?}",
+            filters
+        );
+        let typed = filters
+            .iter()
+            .find_map(|f| match f {
+                TargetFilter::Typed(tf) => Some(tf),
+                _ => None,
+            })
+            .expect("expected typed-filter leg");
+        assert!(
+            typed
+                .type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Non(inner) if **inner == TypeFilter::Land)),
+            "expected Non(Land), got {:?}",
+            typed.type_filters
+        );
+    }
+
+    /// CR 610.3: Bare suffix-only — "cast spells from among the cards exiled
+    /// this way" — degrades to `ExiledBySource` alone (no typed leg).
+    #[test]
+    fn cast_from_among_the_cards_exiled_this_way_binds_to_exiled_by_source() {
+        let e = parse_effect("cast spells from among the cards exiled this way");
+        let Effect::CastFromZone { target, .. } = e else {
+            panic!("expected CastFromZone, got {:?}", e);
+        };
+        assert_eq!(target, TargetFilter::ExiledBySource);
+    }
+
+    /// CR 610.3 + CR 608.2c: Disjunctive typed leg via
+    /// `parse_cast_type_disjunction` — "from among the instant or sorcery
+    /// cards exiled this way" must bind to `And { ExiledBySource, Typed(...) }`
+    /// with the disjunctive type set.
+    #[test]
+    fn cast_from_among_the_instant_or_sorcery_cards_exiled_this_way_binds_to_exiled_by_source_and_types(
+    ) {
+        let e = parse_effect(
+            "cast any number of spells from among the instant or sorcery cards exiled this way without paying their mana costs",
+        );
+        let Effect::CastFromZone { target, .. } = e else {
+            panic!("expected CastFromZone, got {:?}", e);
+        };
+        let TargetFilter::And { filters } = target else {
+            panic!("expected AND target filter, got {:?}", target);
+        };
+        assert!(
+            filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::ExiledBySource)),
+            "expected ExiledBySource leg in {:?}",
+            filters
+        );
+        let typed = filters
+            .iter()
+            .find_map(|f| match f {
+                TargetFilter::Typed(tf) => Some(tf),
+                _ => None,
+            })
+            .expect("expected typed-filter leg");
+        assert!(
+            typed.type_filters.iter().any(|tf| matches!(
+                tf,
+                TypeFilter::AnyOf(types)
+                    if types.contains(&TypeFilter::Instant)
+                        && types.contains(&TypeFilter::Sorcery)
+            )),
+            "expected AnyOf[Instant, Sorcery], got {:?}",
             typed.type_filters
         );
     }

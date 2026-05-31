@@ -6,7 +6,8 @@
     "faceDownName": "Carta coperta",
     "loading": "Caricamento {{name}}",
     "unimplemented": "Non implementato: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "TAPpata"
   },
   "preview": {
     "holdCtrlBack": "Tieni premuto Ctrl per il retro",
@@ -214,6 +215,9 @@
     "radAriaLabel_one": "{{count}} segnalino radiazione",
     "radAriaLabel_other": "{{count}} segnalini radiazione",
     "radTooltip": "Segnalini radiazione: {{count}}",
+    "experienceAriaLabel_one": "{{count}} segnalino esperienza",
+    "experienceAriaLabel_other": "{{count}} segnalini esperienza",
+    "experienceTooltip": "Segnalini esperienza: {{count}}",
     "speedAriaLabel": "Velocità {{value}}",
     "speedTooltip": "Velocità: {{value}}",
     "companion": "Compagno"
@@ -388,6 +392,7 @@
     "chooseTargetOf": "Scegli il bersaglio {{current}} di {{total}}",
     "chooseTarget": "Scegli un bersaglio",
     "noLegalTargets": "Nessun bersaglio legale disponibile",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "fino a un {{target}}",
     "one": "un {{target}}",
     "nounPlayer": "giocatore",
@@ -1279,7 +1284,9 @@
     "searchSubtitle": "Digita per cercare tra tutte le carte",
     "searchPlaceholder": "Cerca per nome...",
     "noCardsFound": "Nessuna carta trovata",
-    "buttonSubtitle": "Seleziona un'opzione"
+    "buttonSubtitle": "Seleziona un'opzione",
+    "filterPlaceholder": "Filtra opzioni...",
+    "noOptionsMatch": "Nessuna opzione corrisponde"
   },
   "nonFatalPanic": {
     "heading": "Avviso del motore (non fatale)",

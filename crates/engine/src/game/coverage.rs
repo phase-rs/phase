@@ -2389,8 +2389,8 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
         d.push((
             "targets".into(),
             match &mt.max {
-                Some(max) => format!("{}-{}", mt.min, fmt_quantity(max)),
-                None => format!("{}+", mt.min),
+                Some(max) => format!("{}-{}", fmt_quantity(&mt.min), fmt_quantity(max)),
+                None => format!("{}+", fmt_quantity(&mt.min)),
             },
         ));
     }

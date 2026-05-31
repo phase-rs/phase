@@ -4105,6 +4105,7 @@ fn resolve_chain_body(
                     state.waiting_for = WaitingFor::TriggerTargetSelection {
                         player: ability.controller,
                         target_slots,
+                        mode_labels: Vec::new(),
                         target_constraints: vec![],
                         selection,
                         source_id: Some(ability.source_id),

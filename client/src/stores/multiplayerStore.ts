@@ -129,6 +129,22 @@ export interface HostingDeck {
   commander: string[];
 }
 
+/** Persisted snapshot of the host-setup form so the lobby remembers the
+ *  player's last choices across sessions instead of resetting to defaults.
+ *  Deliberately excludes per-match / sensitive fields (room name, password):
+ *  those are re-entered each time the player hosts. */
+export interface RememberedHostConfig {
+  format: GameFormat;
+  formatConfig: FormatConfig;
+  playerCount: number;
+  matchType: MatchType;
+  isPublic: boolean;
+  startWhenFull: boolean;
+  /** AI seat layout (seat index + difficulty). Deck choices are resolved fresh
+   *  from the catalog at host time, so only the picker-level config persists. */
+  aiSeats: AiSeatConfig[];
+}
+
 export interface HostingSettings {
   displayName: string;
   public: boolean;
@@ -194,6 +210,9 @@ interface MultiplayerState {
    * so the UI renders them top-down in the order they were raised. */
   toasts: Map<string, Toast>;
   formatConfig: FormatConfig | null;
+  /** Last host-setup form choices, persisted across sessions. `null` until the
+   *  player has hosted at least once. See {@link RememberedHostConfig}. */
+  lastHostConfig: RememberedHostConfig | null;
   playerSlots: PlayerSlot[];
   spectators: string[];
   isSpectator: boolean;
@@ -248,6 +267,7 @@ interface MultiplayerActions {
    * keyed `clearToast()`. Retained for full-reset paths. */
   clearAllToasts: () => void;
   setFormatConfig: (config: FormatConfig | null) => void;
+  rememberHostConfig: (config: RememberedHostConfig) => void;
   setPlayerSlots: (slots: PlayerSlot[]) => void;
   setSpectators: (names: string[]) => void;
   setIsSpectator: (value: boolean) => void;
@@ -422,6 +442,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       opponentDisplayName: null,
       toasts: new Map(),
       formatConfig: null,
+      lastHostConfig: null,
       playerSlots: [],
       spectators: [],
       isSpectator: false,
@@ -503,6 +524,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           state.toasts.size === 0 ? {} : { toasts: new Map() },
         ),
       setFormatConfig: (config) => set({ formatConfig: config }),
+      rememberHostConfig: (config) => set({ lastHostConfig: config }),
       setPlayerSlots: (slots) => set({ playerSlots: slots }),
       setSpectators: (names) => set({ spectators: names }),
       setIsSpectator: (value) => set({ isSpectator: value }),
@@ -1221,6 +1243,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         playerId: state.playerId,
         displayName: state.displayName,
         serverAddress: state.serverAddress,
+        lastHostConfig: state.lastHostConfig,
       }),
     },
   ),
