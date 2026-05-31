@@ -3,7 +3,9 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use crate::database::bracket_lists::BracketSignals;
-use crate::database::card_db::{build_name_alias_index, CardDatabase};
+use crate::database::card_db::{
+    build_name_alias_index, collect_creature_type_vocabulary, CardDatabase,
+};
 use crate::database::legality::normalize_legalities;
 use crate::database::mtgjson::load_atomic_cards;
 use crate::database::synthesis::{
@@ -100,6 +102,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         }
     }
 
+    let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
     Ok(CardDatabase {
         cards,
         name_alias_index: build_name_alias_index(face_index.keys()),
@@ -112,6 +115,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         errors,
         bracket_lists: Default::default(),
         bracket_signals_by_name,
+        creature_type_vocabulary,
     })
 }
 

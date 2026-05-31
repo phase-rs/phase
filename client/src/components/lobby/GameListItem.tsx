@@ -18,6 +18,11 @@ interface GameListItemProps {
    * vs the client's `__BUILD_HASH__`.
    */
   compatible?: boolean;
+  /**
+   * Game code of the current player's hosted game. Used to prevent the host
+   * from joining their own hosted game.
+   */
+  hostGameCode?: string | null;
 }
 
 // Badge color keyed on the format's group so we don't maintain a
@@ -43,7 +48,7 @@ function formatWaitTime(createdAt: number, t: TFunction<"multiplayer">): string 
   return t("gameListItem.waitTimeHours", { count: hours });
 }
 
-export function GameListItem({ game, onJoin, compatible = true }: GameListItemProps) {
+export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: GameListItemProps) {
   const { t } = useTranslation("multiplayer");
   const format = game.format ?? "Standard";
   const meta = formatMetadata(format);
@@ -59,7 +64,10 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
     game.max_players != null &&
     game.current_players != null &&
     game.current_players >= game.max_players;
-  const disabled = !compatible || isFull;
+
+  const isCurrentPlayerHost = Boolean(hostGameCode && game.game_code === hostGameCode);
+
+  const disabled = !compatible || isFull || isCurrentPlayerHost;
 
   const disabledTitle = !compatible
     ? t("gameListItem.buildMismatchTitle", {
@@ -68,7 +76,9 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
       })
     : isFull
       ? t("gameListItem.gameFull")
-      : undefined;
+      : isCurrentPlayerHost
+        ? t("gameListItem.youAreHosting")
+        : undefined;
 
   return (
     <button
@@ -180,6 +190,15 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
           />
         </svg>
       )}
+
+      <span
+        className={
+          "flex-shrink-0 rounded px-3 py-1 text-xs font-medium transition-colors " +
+          (disabled ? "bg-gray-700 text-gray-500" : "bg-emerald-600 text-white")
+        }
+      >
+        {isCurrentPlayerHost ? t("gameListItem.hosting") : t("gameListItem.join")}
+      </span>
 
       {/* Game code badge */}
       <span className="flex-shrink-0 rounded-full border border-white/10 bg-black/18 px-2 py-0.5 font-mono text-xs tracking-wider text-emerald-400">

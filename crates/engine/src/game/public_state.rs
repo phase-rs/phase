@@ -7,7 +7,7 @@ use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
 use super::derived::derive_display_state;
-use super::layers::evaluate_layers;
+use super::layers::flush_layers;
 use super::turn_control;
 
 /// Finalize outward-facing game state before it leaves the engine boundary.
@@ -21,9 +21,7 @@ pub fn finalize_public_state(state: &mut GameState) {
     // states; cheap on every other invocation.
     state.migrate_post_replacement_continuation();
     sync_priority_player_from_waiting_for(state);
-    if state.layers_dirty {
-        evaluate_layers(state);
-    }
+    flush_layers(state);
     derive_display_state(state);
     clear_public_state_dirty(state);
 }
@@ -106,14 +104,26 @@ fn mark_object_dirty_with_mana(state: &mut GameState, object_id: ObjectId) {
 pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]) {
     // GATE 1 — static/continuous ripple.
     // CR 611.1 + CR 613.1: A continuous effect can modify any object's
-    // characteristics across the whole board; if layers were re-evaluated this
-    // action (`layers_dirty`), display state for the entire board is potentially
-    // stale, so recompute all of it. This single check covers anthems,
-    // type-changers, keyword-granters, CDAs, control changes, P/T setters, and
-    // every transient continuous effect — they all set `layers_dirty`.
-    if state.layers_dirty {
-        mark_public_state_all_dirty(state);
-        return;
+    // characteristics across the whole board; if a FULL layer re-evaluation is
+    // pending this action, display state for the entire board is potentially
+    // stale, so recompute all of it. This covers anthems, type-changers,
+    // keyword-granters, CDAs, control changes, P/T setters, and every transient
+    // continuous effect — they all request a full layer flush.
+    //
+    // An `EnteredObjects` request is an incremental layer flush that only
+    // re-derives the entering objects (see `flush_layers`); it does NOT ripple
+    // board-wide, so it falls through to GATE 2. `finalize_public_state` runs
+    // `flush_layers` immediately after this function, and the incremental path
+    // marks each entered object (and the battlefield display) dirty itself, so
+    // the entered objects' display is recomputed. The entry's own
+    // `ZoneChanged` event is also handled by GATE 2 below.
+    match &state.layers_dirty {
+        crate::types::game_state::LayersDirty::Full => {
+            mark_public_state_all_dirty(state);
+            return;
+        }
+        crate::types::game_state::LayersDirty::Clean
+        | crate::types::game_state::LayersDirty::EnteredObjects(_) => {}
     }
 
     // GATE 2 — per-event targeted marking. `layers_dirty` was NOT set, so no
@@ -496,11 +506,14 @@ mod tests {
         // before classifying — exactly the state `apply()` reaches when layers
         // are not pending.
         assert!(
-            state.layers_dirty,
+            state.layers_dirty.is_dirty(),
             "real copy resolver must set layers_dirty"
         );
         evaluate_layers(&mut state);
-        assert!(!state.layers_dirty, "evaluate_layers clears layers_dirty");
+        assert!(
+            !state.layers_dirty.is_dirty(),
+            "evaluate_layers clears layers_dirty"
+        );
 
         clear_public_state_dirty(&mut state);
         mark_public_state_from_events(&mut state, &events);
@@ -521,31 +534,72 @@ mod tests {
         assert!(!dirty.all_players_dirty, "no player-wide change occurred");
     }
 
-    /// CORRECTNESS-FALLBACK: a real battlefield entry leaves `layers_dirty` set
-    /// (the resolver sets it because a static-bearing object or board static
-    /// could newly apply — Section 4 suppression is not in scope here), so
-    /// Gate 1 escalates to a full all-dirty recompute.
+    /// A real battlefield entry now leaves `layers_dirty` in the
+    /// `EnteredObjects` state (the resolver requests an incremental re-derive of
+    /// just the entering token). Gate 1 must NOT escalate to all-dirty for that
+    /// case — it falls through to Gate 2 targeted marking, and the subsequent
+    /// `flush_layers` incremental path produces the same display as a full
+    /// recompute (asserted via the differential test below).
     #[test]
-    fn battlefield_entry_with_layers_pending_escalates_to_all_dirty() {
+    fn battlefield_entry_with_layers_pending_stays_targeted() {
         let mut state = GameState::new_two_player(42);
+        // Settle layers to Clean first: a fresh state initializes `Full`, which
+        // would absorb the entry's `mark_entered` (Full subsumes EnteredObjects).
+        // The real engine reaches this site with layers already flushed.
+        flush_layers(&mut state);
         let (_source_id, events) = resolve_real_copy_token(&mut state);
 
         assert!(
-            state.layers_dirty,
-            "real entry must leave layers pending (Gate 1 input)"
+            matches!(
+                state.layers_dirty,
+                crate::types::game_state::LayersDirty::EnteredObjects(_)
+            ),
+            "real entry must request an incremental layer re-derive (Gate 1 input)"
         );
 
         clear_public_state_dirty(&mut state);
         mark_public_state_from_events(&mut state, &events);
 
         assert!(
-            state.public_state_dirty.all_objects_dirty,
-            "Gate 1 must escalate to all-objects when layers_dirty is set"
+            !state.public_state_dirty.all_objects_dirty,
+            "Gate 1 must NOT escalate to all-objects for an incremental entry"
         );
+    }
+
+    /// EnteredObjects-path display == full-recompute display. Drives the real
+    /// incremental `flush_layers` path through `finalize_public_state` and
+    /// compares per-object display fields against a forced all-dirty
+    /// full-evaluate finalize on the same pre-flush state.
+    #[test]
+    fn incremental_entry_display_matches_full_recompute() {
+        let mut base = GameState::new_two_player(42);
+        // Settle layers to Clean so the entry below requests EnteredObjects
+        // (a fresh state's initial Full would subsume it).
+        flush_layers(&mut base);
+        let (_src, events) = resolve_real_copy_token(&mut base);
         assert!(
-            state.public_state_dirty.all_players_dirty,
-            "Gate 1 must escalate to all-players when layers_dirty is set"
+            matches!(
+                base.layers_dirty,
+                crate::types::game_state::LayersDirty::EnteredObjects(_)
+            ),
+            "entry must request incremental re-derive"
         );
+
+        // Incremental path: targeted marking + finalize (runs flush_layers
+        // incremental).
+        let mut incremental = base.clone();
+        clear_public_state_dirty(&mut incremental);
+        mark_public_state_from_events(&mut incremental, &events);
+        finalize_public_state(&mut incremental);
+
+        // Full path: force a full layer flush + all-dirty recompute on the same
+        // pre-flush state.
+        let mut forced = base.clone();
+        forced.layers_dirty = crate::types::game_state::LayersDirty::Full;
+        mark_public_state_all_dirty(&mut forced);
+        finalize_public_state(&mut forced);
+
+        assert_display_state_eq(&incremental, &forced, "incremental copy entry");
     }
 
     /// DIFFERENTIAL: targeted marking + finalize produces per-object/per-player
@@ -558,7 +612,7 @@ mod tests {
         let mut base = GameState::new_two_player(42);
         let (_src, events) = resolve_real_copy_token(&mut base);
         evaluate_layers(&mut base);
-        base.layers_dirty = false;
+        base.layers_dirty = crate::types::game_state::LayersDirty::Clean;
 
         let mut targeted = base.clone();
         clear_public_state_dirty(&mut targeted);

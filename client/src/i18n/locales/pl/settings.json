@@ -49,6 +49,17 @@
     "showKeywords": "Pokaż słowa kluczowe na kartach na polu bitwy",
     "opponentHoverPreview": "Podgląd po najechaniu na przeciwnika",
     "showOpponentBoard": "Pokaż pole bitwy przeciwnika po najechaniu na HUD",
+    "cardPreview": "Podgląd karty po najechaniu",
+    "cardPreviewOptions": {
+      "follow": "Podążaj za kursorem",
+      "side": "Zadokuj z boku",
+      "shift": "Przytrzymaj Shift"
+    },
+    "cardPreviewHint": {
+      "follow": "Powiększony podgląd podąża za kursorem, gdy najeżdżasz na kartę.",
+      "side": "Podgląd dokuje się przy krawędzi ekranu, więc nigdy nie zasłania pola bitwy.",
+      "shift": "Podgląd pojawia się tylko wtedy, gdy przytrzymasz klawisz Shift, tak jak w Tabletop Simulator."
+    },
     "cardArtPreferences": "Preferencje grafiki kart",
     "clearArtOverrides_one": "Wyczyść wszystkie nadpisania grafiki ({{count}})",
     "clearArtOverrides_other": "Wyczyść wszystkie nadpisania grafiki ({{count}})",

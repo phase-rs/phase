@@ -878,6 +878,10 @@ pub(crate) fn extract_amount_from_event(event: &crate::types::events::GameEvent)
         // CR 706.2: the final number of a die roll is its result. Lets
         // `EventContextAmount` resolve "where X is the result" pump effects.
         GameEvent::DieRolled { result, .. } => Some(*result as i32),
+        // CR 120.1 + CR 603.7c: total combat damage dealt to this player by the
+        // matching source set. For DamageDoneOnceByController triggers, this is
+        // the filtered total stamped by matching_damage_done_once_by_controller_event.
+        GameEvent::CombatDamageDealtToPlayer { total_damage, .. } => Some(*total_damage as i32),
         _ => None,
     }
 }
@@ -1414,19 +1418,18 @@ pub(crate) fn latest_tracked_set_id(state: &GameState) -> Option<TrackedSetId> {
 /// creatures" on the resolving trigger can refer to the filtered source set
 /// carried by `CombatDamageDealtToPlayer`.
 pub(crate) fn current_combat_damage_source_filter(state: &GameState) -> Option<TargetFilter> {
-    let source_ids = match state.current_trigger_event.as_ref()? {
-        GameEvent::CombatDamageDealtToPlayer { source_ids, .. } => source_ids,
+    let source_amounts = match state.current_trigger_event.as_ref()? {
+        GameEvent::CombatDamageDealtToPlayer { source_amounts, .. } => source_amounts,
         _ => return None,
     };
 
-    match source_ids.as_slice() {
+    match source_amounts.as_slice() {
         [] => None,
-        [id] => Some(TargetFilter::SpecificObject { id: *id }),
-        ids => Some(TargetFilter::Or {
-            filters: ids
+        [(id, _)] => Some(TargetFilter::SpecificObject { id: *id }),
+        pairs => Some(TargetFilter::Or {
+            filters: pairs
                 .iter()
-                .copied()
-                .map(|id| TargetFilter::SpecificObject { id })
+                .map(|(id, _)| TargetFilter::SpecificObject { id: *id })
                 .collect(),
         }),
     }
@@ -1499,6 +1502,16 @@ mod tests {
     use crate::types::identifiers::CardId;
     use crate::types::keywords::ProtectionTarget;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn extract_amount_from_combat_damage_dealt_to_player_returns_total_damage() {
+        let event = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(ObjectId(1), 7)],
+            total_damage: 7,
+        };
+        assert_eq!(extract_amount_from_event(&event), Some(7));
+    }
 
     fn setup_with_creatures() -> (GameState, ObjectId, ObjectId) {
         let mut state = GameState::new_two_player(42);

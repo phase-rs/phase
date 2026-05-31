@@ -23,6 +23,7 @@ use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_nom::target::parse_event_context_ref;
+use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
     parse_chosen_qualifier_subject, parse_continuous_modifications, parse_static_line_multi,
@@ -657,6 +658,14 @@ pub(super) fn parse_subject_application(
             application.multi_target = multi_target;
             return Some(application);
         }
+    }
+    if let Some((count, target_text)) = super::strip_exact_target_prefix(lower.as_str()) {
+        let consumed = lower.len() - target_text.len();
+        let target_text = &subject[consumed..];
+        let (filter, _) = parse_target_with_ctx(target_text, ctx);
+        let mut application = subject_filter_application(filter, false)?;
+        application.multi_target = Some(MultiTargetSpec::exact(count));
+        return Some(application);
     }
     // CR 115.1d: "any number of target creatures" — variable-count targeting.
     // Strip "any number of " prefix, delegate to parse_target for the filter,
@@ -1944,7 +1953,8 @@ fn parse_attack_if_able_duration(input: &str) -> OracleResult<'_, Duration> {
 
 /// CR 119.5: Parse "life total becomes N" into SetLifeTotal effect.
 /// Handles: "half that player's starting life total", numeric amounts,
-/// "their starting life total", and other quantity expressions.
+/// "their starting life total", and any other quantity the general quantity
+/// parser recognizes (e.g. "the highest/lowest life total among all players").
 fn try_parse_set_life_total(
     become_text: &str,
     application: &SubjectApplication,
@@ -1969,7 +1979,14 @@ fn try_parse_set_life_total(
         }
         QuantityExpr::Fixed { value: n as i32 }
     } else {
-        return None;
+        // CR 119.5: the new life total may be a dynamic quantity rather than a
+        // fixed number — e.g. "the highest/lowest life total among all players"
+        // (Repay in Kind, Arbiter of Knollridge, Mortal Flesh Is Weak). Route
+        // the whole RHS through the general quantity parser so every
+        // "life total becomes <quantity>" card composes. `parse_cda_quantity`
+        // returns `Some` only when it fully consumes the phrase, so an
+        // unrecognized trailer yields `None` here — no false positives.
+        oracle_quantity::parse_cda_quantity(&lower)?
     };
 
     // CR 119.5: Use the parsed target if targeted ("target player's life total"),
@@ -2883,6 +2900,62 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 119.5: "<player>'s life total becomes <dynamic>" routes the RHS through
+    /// the general quantity parser, so a cross-player life extremum (CR 119.1 /
+    /// CR 102.1, parsed by `parse_cross_player_life_extremum`) resolves to a
+    /// dynamic `QuantityExpr::Ref(LifeTotal{..})` rather than collapsing to
+    /// `Effect::Unimplemented`. Covers the class shared by Repay in Kind,
+    /// Arbiter of Knollridge, and Mortal Flesh Is Weak.
+    #[test]
+    fn life_total_becomes_cross_player_extremum() {
+        use crate::types::ability::AggregateFunction;
+
+        for (text, expected_player) in [
+            (
+                "each player's life total becomes the highest life total among all players",
+                PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            ),
+            (
+                "each player's life total becomes the lowest life total among all players",
+                PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            ),
+            (
+                "each opponent's life total becomes the lowest life total among your opponents",
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+            ),
+        ] {
+            let mut ctx = ParseContext::default();
+            let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+                text,
+                AbilityKind::Spell,
+                &mut ctx,
+            );
+            let Effect::SetLifeTotal { amount, .. } = &*ability.effect else {
+                panic!(
+                    "expected SetLifeTotal for {text:?}, got {:?}",
+                    ability.effect
+                );
+            };
+            assert_eq!(
+                amount,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: expected_player,
+                    },
+                },
+                "wrong amount for {text:?}",
+            );
+        }
     }
 
     #[test]

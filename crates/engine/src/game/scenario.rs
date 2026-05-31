@@ -7,12 +7,11 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::database::synthesis::synthesize_all;
+use crate::database::synthesis::{parse_oracle_with_cleave_brackets, synthesize_all};
 use crate::game::engine::{apply_as_current, EngineError};
 use crate::game::game_object::GameObject;
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::zones::create_object;
-use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AdditionalCost, Effect, PtValue, QuantityExpr,
     ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition,
@@ -82,7 +81,14 @@ fn build_face_from_oracle(
         keyword_names
     };
 
-    let parsed = parse_oracle_text(
+    // CR 702.148a-b + CR 612: Route the cleave bracket prep through the SAME
+    // authority the real card-data build pipeline uses
+    // (`parse_oracle_with_cleave_brackets`) so test fixtures exercise the real
+    // cleave flow and the two pipelines cannot silently diverge. The helper
+    // gates the bracket strip on the keyword hints containing "cleave" (the
+    // inline-Oracle analog of MTGJSON reporting the keyword) so loyalty/other
+    // bracket usage is never stripped.
+    let (parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
         oracle_text,
         &obj.name,
         effective_kw_names,
@@ -124,6 +130,7 @@ fn build_face_from_oracle(
         triggers: parsed.triggers,
         static_abilities: parsed.statics,
         replacements: parsed.replacements,
+        cleave_variant,
         modal: parsed.modal,
         additional_cost: parsed.additional_cost,
         casting_restrictions: parsed.casting_restrictions,
@@ -966,10 +973,27 @@ impl<'a> CardBuilder<'a> {
         oracle_text: &str,
     ) -> &mut Self {
         let kw_strings: Vec<String> = keyword_names.iter().map(|s| s.to_string()).collect();
+        let zone = self.state.objects.get(&self.id).unwrap().zone;
         let obj = self.state.objects.get(&self.id).unwrap();
         let face = build_face_from_oracle(obj, &kw_strings, oracle_text);
         let obj = self.state.objects.get_mut(&self.id).unwrap();
         apply_card_face_to_object(obj, &face);
+        // CR 603.6a: `create_object` registers the trigger index before Oracle
+        // text is applied. Re-index after `from_oracle_text` so scenario-seeded
+        // triggers (e.g. upkeep lines added via `add_creature_from_oracle`) fire.
+        if zone == Zone::Battlefield {
+            let object_id = self.id;
+            let registration = self.state.objects.get(&object_id).map(|obj| {
+                let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
+                    obj.trigger_definitions.as_slice().iter().cloned().collect();
+                let synthetic = crate::game::trigger_index::has_synthetic_keyword_trigger_for(obj);
+                (defs, synthetic)
+            });
+            if let Some((defs, synthetic)) = registration {
+                self.state.trigger_index.remove(object_id);
+                self.state.trigger_index.add(object_id, &defs, synthetic);
+            }
+        }
         self
     }
 }
@@ -1262,6 +1286,12 @@ impl GameRunner {
                 }
                 crate::types::game_state::AlternativeCastKeyword::Bestow => {
                     "AlternativeCastChoice(Bestow)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Awaken => {
+                    "AlternativeCastChoice(Awaken)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Cleave => {
+                    "AlternativeCastChoice(Cleave)"
                 }
             },
             WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",

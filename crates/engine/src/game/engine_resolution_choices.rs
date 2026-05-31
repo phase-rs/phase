@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
-    PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
+    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind, PaymentCost, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -149,6 +149,47 @@ fn validate_keep_on_top_selection(
         if !seen.insert(*id) {
             return Err(EngineError::InvalidAction(
                 "keep-on-top selection contains a duplicate card".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// CR 401.2 + CR 608.2c: Validate a `DigChoice` keep-selection. A dig
+/// ("look at the top N, put [some] into your hand/elsewhere") may only act on
+/// the cards it actually looked at, and only on those matching the effect's
+/// filter. Mirrors `validate_keep_on_top_selection` (used by scry/surveil) but
+/// additionally enforces the filter, since `DigChoice` is one of the freeform
+/// card-selection states the multiplayer server forwards unvalidated — so
+/// `apply` is the sole legality boundary.
+///
+/// `looked_at` is the full revealed set; `selectable` is the subset matching the
+/// effect's filter (equal to `looked_at` when the effect has no filter, and
+/// empty when a filter matched nothing — in which case the only legal selection
+/// is empty). Previously the filter check was skipped whenever `selectable` was
+/// empty, which let a filtered dig that matched zero cards accept arbitrary
+/// object ids — moving cards the effect never looked at into the chooser's hand,
+/// or inserting foreign ids into the library and corrupting its order.
+fn validate_dig_selection(
+    kept: &[ObjectId],
+    looked_at: &[ObjectId],
+    selectable: &[ObjectId],
+) -> Result<(), EngineError> {
+    let mut seen = std::collections::HashSet::new();
+    for id in kept {
+        if !seen.insert(*id) {
+            return Err(EngineError::InvalidAction(
+                "dig selection contains a duplicate card".to_string(),
+            ));
+        }
+        if !looked_at.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "dig selection contains a card that was not looked at".to_string(),
+            ));
+        }
+        if !selectable.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "dig selection contains a card that does not match the effect's filter".to_string(),
             ));
         }
     }
@@ -862,25 +903,12 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
 
-            if kept
-                .iter()
-                .enumerate()
-                .any(|(index, card_id)| kept[index + 1..].contains(card_id))
-            {
-                return Err(EngineError::InvalidAction(
-                    "Selected cards must be unique".to_string(),
-                ));
-            }
-
-            if !selectable_cards.is_empty() {
-                for card_id in &kept {
-                    if !selectable_cards.contains(card_id) {
-                        return Err(EngineError::InvalidAction(
-                            "Selected card does not match filter".to_string(),
-                        ));
-                    }
-                }
-            }
+            // CR 401.2 + CR 608.2c: the keep-selection must be unique, drawn from
+            // the cards actually looked at, and (when the dig has a filter) from
+            // the filter-matching subset. The previous check skipped filter/look-
+            // at validation entirely whenever `selectable_cards` was empty, so a
+            // filtered dig that matched nothing accepted arbitrary object ids.
+            validate_dig_selection(&kept, &cards, &selectable_cards)?;
 
             let unkept: Vec<_> = cards
                 .iter()
@@ -2045,6 +2073,17 @@ pub(super) fn handle_resolution_choice(
                 EffectKind::Sacrifice | EffectKind::ChangeZone | EffectKind::BounceAll
             );
             if moves_permanents {
+                // CR 603.10a: the chosen permanents left the battlefield together
+                // in this single resolution event, so co-departing
+                // leaves-the-battlefield observers among them (Blood Artist among
+                // the sacrificed group) observe each other. Stamp only the
+                // sub-slice this handler produced — never the whole events vector —
+                // so earlier sequential departures in this resolution aren't grouped
+                // with these.
+                super::zones::mark_simultaneous_departures(
+                    &mut events[events_before_effect..events_after_move],
+                    &super::zones::departed_subset(state, &chosen),
+                );
                 if let Some(wf) = batch_or_drain_observer_triggers(
                     state,
                     events,
@@ -2210,7 +2249,7 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             state.ring_bearer.insert(player, Some(target));
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (WaitingFor::ChooseDungeon { player, options }, GameAction::ChooseDungeon { dungeon }) => {
@@ -2304,8 +2343,12 @@ pub(super) fn handle_resolution_choice(
         (
             WaitingFor::CategoryChoice {
                 player,
-                target_player,
+                target_player: _,
                 categories,
+                chooser_scope,
+                choose_filter,
+                sacrifice_filter,
+                source_controller,
                 eligible_per_category,
                 source_id,
                 remaining_players,
@@ -2323,36 +2366,33 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
 
-            // Validate each choice is eligible for its category and no duplicates.
+            // Validate each choice is eligible for its category. A permanent can
+            // legally satisfy multiple category slots (artifact creature, etc.);
+            // dedupe only when building the final protected set.
             let mut chosen_this_round = Vec::new();
             for (i, choice) in choices.iter().enumerate() {
-                if let Some(obj_id) = choice {
-                    if !eligible_per_category[i].contains(obj_id) {
+                let Some(obj_id) = choice else {
+                    if !eligible_per_category[i].is_empty() {
                         return Err(EngineError::InvalidAction(format!(
-                            "Object {:?} is not eligible for category {:?}",
-                            obj_id, categories[i]
+                            "Must choose a permanent for category {:?}",
+                            categories[i]
                         )));
                     }
-                    if chosen_this_round.contains(obj_id) {
-                        return Err(EngineError::InvalidAction(format!(
-                            "Object {:?} chosen for multiple categories",
-                            obj_id
-                        )));
-                    }
+                    continue;
+                };
+                if !eligible_per_category[i].contains(obj_id) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Object {:?} is not eligible for category {:?}",
+                        obj_id, categories[i]
+                    )));
+                }
+                if !chosen_this_round.contains(obj_id) {
                     chosen_this_round.push(*obj_id);
                 }
             }
 
             // Accumulate kept permanents.
             all_kept.extend(chosen_this_round);
-
-            // Determine chooser_scope from context: if player == target_player, it's EachPlayerSelf.
-            // If player != target_player for a non-first player, it's ControllerForAll.
-            let chooser_scope = if player == target_player {
-                CategoryChooserScope::EachPlayerSelf
-            } else {
-                CategoryChooserScope::ControllerForAll
-            };
 
             // Issue #423 (Correction 1): `sacrifice_unchosen` moves permanents
             // to the graveyard via `sacrifice_permanent`. Mark where those
@@ -2374,17 +2414,21 @@ pub(super) fn handle_resolution_choice(
                     state,
                     &all_kept,
                     &scoped_players,
+                    &sacrifice_filter,
                     source_id,
+                    source_controller,
                     events,
                 );
             } else if let Err(e) = effects::choose_and_sacrifice_rest::advance_to_next_player(
                 state,
                 &categories,
                 chooser_scope,
-                player, // controller for ControllerForAll
+                source_controller,
                 source_id,
                 &remaining_players,
                 all_kept,
+                &choose_filter,
+                &sacrifice_filter,
                 &scoped_players,
                 events,
             ) {
@@ -2397,6 +2441,16 @@ pub(super) fn handle_resolution_choice(
             } else {
                 // The sacrifice (if any) is complete. Mark its event slice.
                 let events_after_sacrifice = events.len();
+                // CR 603.10a + CR 608.2f + CR 701.21a: the permanents sacrificed by
+                // `sacrifice_unchosen` (keep-one-sacrifice-rest: Cataclysm,
+                // Tragic Arrogance) left the battlefield together in this single
+                // resolution event, so a co-departing leaves-the-battlefield
+                // observer among them (Blood Artist) observes the rest. Stamp the
+                // sacrifice sub-slice before the B1/B2 trigger dispatch reads it.
+                super::zones::stamp_simultaneous_from_slice(
+                    state,
+                    &mut events[events_before_sacrifice..events_after_sacrifice],
+                );
                 // Step B: if the sacrifice did not itself pause (no replacement
                 // choice was raised by `sacrifice_unchosen`), resolve any
                 // reflexive continuation. `state.waiting_for` is the `Priority`

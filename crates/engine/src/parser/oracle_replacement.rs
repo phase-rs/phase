@@ -1623,6 +1623,40 @@ fn inject_controller(filter: TargetFilter, controller: ControllerRef) -> TargetF
     }
 }
 
+/// Scope of a distributive ETB-with-counters subject (CR 614.12). `Other`
+/// excludes the source (`FilterProp::Another`); `Distributive` is a general
+/// subset that includes the source if it matches the type filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubjectScope {
+    /// "each other [type] ..." / "other [type] ..." — excludes the source.
+    Other,
+    /// "each [type] ..." — general subset including the source per CR 614.12.
+    Distributive,
+}
+
+/// Strip a distributive subject prefix from an ETB-with-counters line, reporting
+/// whether the source is excluded (`Other`) or included (`Distributive`).
+///
+/// CR 614.12: a replacement that modifies how a permanent enters may affect
+/// "only that permanent" or "a general subset of permanents that includes it".
+/// The "each other "/"other " forms exclude the source; the bare "each " form
+/// is a general subset that includes it. Returns `None` for self-ETB lines
+/// ("~ enters with ..."), which fall through to `SelfRef`.
+///
+/// The `"each other "` alternative must precede `"each "` so the longer match
+/// wins; `alt` is order-sensitive and `"each "` would otherwise shadow it.
+fn parse_distributive_subject(work_text: &str) -> Option<(&str, SubjectScope)> {
+    alt((
+        value(
+            SubjectScope::Other,
+            alt((tag::<_, _, OracleError<'_>>("each other "), tag("other "))),
+        ),
+        value(SubjectScope::Distributive, tag("each ")),
+    ))
+    .parse(work_text)
+    .ok()
+}
+
 /// Extract life payment amount from "pay N life" pattern.
 fn extract_life_payment(text: &str) -> Option<i32> {
     let after_pay = strip_after(text, "pay ")?;
@@ -1837,39 +1871,47 @@ fn parse_enters_with_counters(
         put_counter
     };
 
-    // Determine valid_card filter: self vs other permanents.
-    // CR 614.1c: "each other Angel you control enters with ..." is a
-    // replacement effect that applies to a general subset of permanents, not
-    // the source. Strip the "each other " / "other " prefix (nom), then let
-    // `parse_type_phrase` be the detector: accept the subject iff the parse
-    // yields a typed filter with a concrete type/subtype (not the `Any`
-    // fallback). `parse_type_phrase` already classifies "creature",
-    // "permanent", AND subtypes ("Angel", "Sliver", ...) — so subtype-only
-    // subjects are no longer rejected by a hardcoded "creature"/"permanent"
-    // keyword guard. A non-type subject parses to the `[Any]` fallback and is
+    // Determine valid_card filter: self vs a general subset of permanents.
+    // CR 614.1c: Effects that read "[permanent] enters with ..." are
+    // replacement effects. CR 614.12 distinguishes effects that affect "only
+    // that permanent" (self-ETB → SelfRef) from those affecting "a general
+    // subset of permanents that includes it" (distributive → typed filter).
+    //
+    // Two distributive shapes exist:
+    //   - "each other [type] you control enters with ..." (Giada) — explicitly
+    //     EXCLUDES the source, so `FilterProp::Another` must be injected.
+    //   - "each [type] you control enters with ..." (Dragonstorm Globe) — the
+    //     general subset INCLUDES the source if it matches the type; per
+    //     CR 614.12 the subset "includes it", so NO `Another` is injected. (The
+    //     artifact source simply doesn't match a Dragon type filter, so no
+    //     self-application occurs here — but the class must not exclude itself.)
+    //
+    // `parse_distributive_subject` strips the prefix and reports the scope, then
+    // `parse_type_phrase` acts as the type detector: accept the subject iff the
+    // parse yields a typed filter with a concrete type/subtype (not the `Any`
+    // fallback). A non-type subject parses to the `[Any]` fallback and is
     // rejected, falling through to the `SelfRef` self-ETB branch.
-    let subject = alt((tag::<_, _, OracleError<'_>>("each other "), tag("other ")))
-        .parse(work_text)
-        .ok()
-        .map(|(rest, _)| rest)
-        .filter(|s| {
-            let (filter, _) = parse_type_phrase(s);
-            matches!(
-                &filter,
-                TargetFilter::Typed(TypedFilter { type_filters, .. })
-                    if !type_filters.is_empty()
-                        && type_filters.as_slice() != [TypeFilter::Any]
-            )
-        });
-    let valid_card = if let Some(subject_text) = subject {
+    let subject = parse_distributive_subject(work_text).and_then(|(subject_text, scope)| {
         let (filter, _) = parse_type_phrase(subject_text);
-        // Inject Another since we stripped "other" above
-        let filter = match filter {
-            TargetFilter::Typed(TypedFilter {
-                type_filters,
-                controller,
-                mut properties,
-            }) => {
+        let is_valid = matches!(
+            &filter,
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if !type_filters.is_empty()
+                    && type_filters.as_slice() != [TypeFilter::Any]
+        );
+        is_valid.then_some((filter, scope))
+    });
+    let valid_card = if let Some((filter, scope)) = subject {
+        // CR 614.12: only the "other" scope excludes the source from the subset.
+        let filter = match (filter, scope) {
+            (
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    mut properties,
+                }),
+                SubjectScope::Other,
+            ) => {
                 properties.insert(0, FilterProp::Another);
                 TargetFilter::Typed(TypedFilter {
                     type_filters,
@@ -1877,7 +1919,7 @@ fn parse_enters_with_counters(
                     properties,
                 })
             }
-            other => other,
+            (other, _) => other,
         };
         Some(filter)
     } else {
@@ -6999,6 +7041,120 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// Dragonstorm Globe (#bug): "Each Dragon you control enters with an
+    /// additional +1/+1 counter on it." The bare distributive "each " subject
+    /// (no "other") must produce a typed Dragon filter WITHOUT `FilterProp::Another`
+    /// — per CR 614.12 the general subset includes the source if it matches.
+    /// Previously this fell through to `SelfRef`, so an Artifact source (which is
+    /// never a Dragon) could never match an entering Dragon and the counter was
+    /// never applied. External (non-SelfRef) → ChangeZone so token Dragons also
+    /// receive the counter (CR 614.12).
+    #[test]
+    fn each_distributive_subject_no_another_changezone() {
+        let def = parse_replacement_line(
+            "Each Dragon you control enters with an additional +1/+1 counter on it.",
+            "Dragonstorm Globe",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Dragon".to_string())],
+                controller: Some(ControllerRef::You),
+                // NO FilterProp::Another for the bare "each" distributive form.
+                properties: Vec::new(),
+            })),
+            "bare 'each [type]' must yield a typed filter WITHOUT Another (CR 614.12)"
+        );
+        match *def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            } => assert_eq!(*counter_type, CounterType::Plus1Plus1),
+            ref other => panic!("expected PutCounter Fixed(1) Plus1Plus1, got {other:?}"),
+        }
+    }
+
+    /// Regression guard: the explicit "each other " form still injects
+    /// `FilterProp::Another` (excludes the source) per CR 614.12.
+    #[test]
+    fn each_other_subject_keeps_another() {
+        let def = parse_replacement_line(
+            "Each other Angel you control enters with a +1/+1 counter on it.",
+            "Angelic Overseer",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Angel".to_string())],
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::Another],
+            })),
+            "'each other [type]' must keep FilterProp::Another (CR 614.12 excludes source)"
+        );
+    }
+
+    /// Regression guard: a bare "each [non-type]" subject is rejected by the
+    /// concrete-type `.filter()` guard (the word after "each " is not a card
+    /// type), so it falls through to `SelfRef` rather than being mis-redirected
+    /// to a typed distributive filter. This exercises the `Distributive`-scope
+    /// rejection branch that the bare "each " prefix newly reaches.
+    #[test]
+    fn each_non_type_subject_falls_through_to_selfref() {
+        // "each opponent" — "opponent" is not a `TypeFilter` variant, so
+        // `parse_type_phrase` yields the `[Any]` fallback and the subject is
+        // rejected, leaving the self-ETB `SelfRef`/`Moved` result.
+        let def = parse_replacement_line(
+            "Each opponent enters with a +1/+1 counter on it.",
+            "Nonsense Source",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// Plain self-ETB ("~ enters with N counters on it") with no subject prefix
+    /// stays `SelfRef`/`Moved` — `parse_distributive_subject` returns `None`.
+    #[test]
+    fn self_etb_no_subject_prefix_stays_selfref() {
+        let def = parse_replacement_line(
+            "This creature enters with two +1/+1 counters on it.",
+            "Generic Creature",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// Building-block unit test: `parse_distributive_subject` must report the
+    /// correct `SubjectScope` and strip the prefix, with `"each other "`
+    /// winning over the shorter `"each "` (order-sensitivity contract).
+    #[test]
+    fn parse_distributive_subject_scopes_and_ordering() {
+        assert_eq!(
+            parse_distributive_subject("each other dragon you control enters with"),
+            Some(("dragon you control enters with", SubjectScope::Other)),
+            "'each other ' must win over the shorter 'each ' prefix"
+        );
+        assert_eq!(
+            parse_distributive_subject("other dragon you control enters with"),
+            Some(("dragon you control enters with", SubjectScope::Other)),
+        );
+        assert_eq!(
+            parse_distributive_subject("each dragon you control enters with"),
+            Some(("dragon you control enters with", SubjectScope::Distributive)),
+        );
+        // No distributive prefix → None (self-ETB falls through to SelfRef).
+        assert_eq!(
+            parse_distributive_subject("this creature enters with two counters on it"),
+            None,
+        );
     }
 
     #[test]

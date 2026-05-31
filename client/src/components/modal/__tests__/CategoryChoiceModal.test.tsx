@@ -72,6 +72,7 @@ function categoryData(
     source_id: 1,
     remaining_players: [],
     all_kept: [],
+    scoped_players: [0],
     ...overrides,
   };
 }
@@ -118,9 +119,10 @@ describe("CategoryChoiceModal", () => {
     expect(noneButton).toBeDisabled();
   });
 
-  it("disables an artifact creature in the Creature category once chosen as Artifact", () => {
+  it("allows one artifact creature to be chosen in multiple category slots", () => {
     render(<CategoryChoiceModal data={categoryData()} />);
 
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
     const hellkiteButtons = screen.getAllByRole("button", { name: "Steel Hellkite" });
     // Both enabled before selection.
     expect(hellkiteButtons[0]).not.toBeDisabled();
@@ -131,11 +133,19 @@ describe("CategoryChoiceModal", () => {
 
     const afterButtons = screen.getAllByRole("button", { name: "Steel Hellkite" });
     expect(afterButtons[0]).toHaveAttribute("aria-pressed", "true");
-    // The Creature-section copy is now disabled (engine duplicate-object rule).
-    expect(afterButtons[1]).toBeDisabled();
+    expect(afterButtons[1]).not.toBeDisabled();
+
+    fireEvent.click(afterButtons[1]);
+    expect(screen.getByRole("button", { name: "Confirm" })).not.toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCategoryPermanents",
+      data: { choices: [57, 57] },
+    });
   });
 
-  it("dispatches SelectCategoryPermanents with the chosen choices including null", () => {
+  it("dispatches SelectCategoryPermanents with all nonempty categories chosen", () => {
     render(<CategoryChoiceModal data={categoryData()} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Sol Ring" }));

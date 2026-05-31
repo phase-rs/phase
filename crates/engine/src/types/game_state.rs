@@ -6,11 +6,12 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityCost, AbilityDefinition, AdditionalCost, BeholdCostAction, ChoiceType, ChoiceValue,
-    ChooseFromZoneConstraint, ContinuousModification, CostPaidObjectSnapshot,
-    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
-    ModalChoice, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
-    StaticCondition, TargetFilter, TargetRef, TriggerCondition,
+    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
+    BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
+    ContinuousModification, CostPaidObjectSnapshot, DelayedTriggerCondition, Duration, EffectKind,
+    GameRestriction, KeywordAction, KickerVariant, ModalChoice, ResolvedAbility,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
+    TriggerCondition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -372,6 +373,20 @@ pub struct ZoneChangeRecord {
     /// snapshot rather than current combat state.
     #[serde(default)]
     pub combat_status: ZoneChangeCombatStatus,
+    /// CR 603.10a: ObjectIds that left the battlefield in the SAME simultaneous
+    /// event as this object (every permanent destroyed by one board wipe, every
+    /// creature destroyed together by a single state-based-action check, etc.),
+    /// excluding this object. Populated only by producers of a simultaneous
+    /// departure batch via `zones::mark_simultaneous_departures`; empty for a
+    /// lone departure or for departures that are separate sequential instructions
+    /// of one resolution. A leaves-the-battlefield / dies observer listed here
+    /// observes this departure via last-known information (CR 603.10a's worked
+    /// example); a creature that left in an earlier, separate event is not listed
+    /// and therefore does not cross-observe. This is the authority for
+    /// simultaneity — trigger collection must not infer it from the shape of the
+    /// accumulated event vector.
+    #[serde(default)]
+    pub co_departed: Vec<ObjectId>,
 }
 
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
@@ -438,6 +453,7 @@ impl ZoneChangeRecord {
             linked_exile_snapshot: Vec::new(),
             is_token: false,
             combat_status: ZoneChangeCombatStatus::default(),
+            co_departed: Vec::new(),
         }
     }
 }
@@ -494,6 +510,14 @@ pub struct ChosenDamageSource {
 }
 
 /// CR 120.1: Snapshot of a damage event for "was dealt damage by" queries.
+///
+/// CR 608.2i + CR 608.2h: source characteristics snapshot at damage time
+/// (look-back; criteria need not still hold). Queries such as "opponents who
+/// were dealt combat damage by ~ or a Dragon this turn" (Estinien Varlineau)
+/// must match the source's qualities *as they were when damage was dealt* — the
+/// source may have since changed type, left the battlefield, or been removed.
+/// The `source_*` snapshot fields mirror `CounterAddedRecord`'s event-time
+/// characteristic capture and feed `matches_target_filter_on_damage_record_source`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageRecord {
     pub source_id: ObjectId,
@@ -505,6 +529,74 @@ pub struct DamageRecord {
     pub amount: u32,
     #[serde(default)]
     pub is_combat: bool,
+    // CR 608.2i + CR 608.2h: source characteristics snapshot at damage time
+    // (look-back; criteria need not still hold).
+    #[serde(default)]
+    pub source_name: String,
+    #[serde(default)]
+    pub source_core_types: Vec<CoreType>,
+    #[serde(default)]
+    pub source_subtypes: Vec<String>,
+    #[serde(default)]
+    pub source_supertypes: Vec<Supertype>,
+    #[serde(default)]
+    pub source_keywords: Vec<Keyword>,
+    #[serde(default)]
+    pub source_power: Option<i32>,
+    #[serde(default)]
+    pub source_toughness: Option<i32>,
+    #[serde(default)]
+    pub source_colors: Vec<ManaColor>,
+    #[serde(default)]
+    pub source_mana_value: u32,
+    #[serde(default)]
+    pub source_controller_snapshot: PlayerId,
+    #[serde(default)]
+    pub source_owner: PlayerId,
+    /// CR 608.2i + CR 608.2h: the source's zone at damage time. Non-combat
+    /// damage from a spell originates from the Stack, so a zone-discriminating
+    /// look-back source filter ("by a permanent") must evaluate against the
+    /// recorded zone, not an assumed battlefield. Defaults to `Battlefield`
+    /// (the common combat-damage case) for legacy records and test fixtures.
+    #[serde(default = "default_source_zone")]
+    pub source_zone: Zone,
+}
+
+/// CR 608.2i: Default damage-source zone. Combat damage — the overwhelmingly
+/// common recorded case — comes from the battlefield, so legacy serialized
+/// records and `..Default::default()` test fixtures default to it.
+fn default_source_zone() -> Zone {
+    Zone::Battlefield
+}
+
+impl Default for DamageRecord {
+    /// A non-combat, zero-amount record from/to player 0 with an empty source
+    /// snapshot. Production damage recording (`deal_damage.rs`) always fills
+    /// every field explicitly; this default exists so test and synthesis
+    /// fixtures that only care about a few fields can spread `..Default::default()`
+    /// for the CR 608.2i source-snapshot fields they don't exercise.
+    fn default() -> Self {
+        Self {
+            source_id: ObjectId(0),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(0)),
+            target_controller: PlayerId(0),
+            amount: 0,
+            is_combat: false,
+            source_name: String::new(),
+            source_core_types: Vec::new(),
+            source_subtypes: Vec::new(),
+            source_supertypes: Vec::new(),
+            source_keywords: Vec::new(),
+            source_power: None,
+            source_toughness: None,
+            source_colors: Vec::new(),
+            source_mana_value: 0,
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            source_zone: Zone::Battlefield,
+        }
+    }
 }
 
 /// CR 122.1 + CR 122.6: Snapshot of counters put on an object this turn.
@@ -1098,6 +1190,79 @@ pub struct TargetSelectionProgress {
     pub current_legal_targets: Vec<TargetRef>,
 }
 
+/// Lattice tracking which battlefield objects need layer (continuous-effect)
+/// re-evaluation. Replaces the old `bool` flag so that a token / conjure / copy
+/// entry can request an INCREMENTAL re-derive of only the entering object(s)
+/// instead of a full battlefield reset+reapply.
+///
+/// CR 613.1: continuous effects are evaluated in layer order over the whole
+/// board. A full evaluation is always correct; the incremental path is a
+/// performance optimization that `flush_layers` only takes when it can prove
+/// (per-entered preconditions + a board-wide escalation scan) that re-deriving
+/// just the entered objects produces a board state identical to a full pass.
+/// `mark_full()` is the conservative escalation any non-entry mutation uses.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum LayersDirty {
+    /// Layers are up to date; nothing to flush.
+    #[default]
+    Clean,
+    /// Only these objects entered the battlefield since the last flush and no
+    /// other layer-affecting mutation occurred. Candidate for the incremental
+    /// fast path.
+    EnteredObjects(HashSet<ObjectId>),
+    /// A full battlefield re-evaluation is required.
+    Full,
+}
+
+impl LayersDirty {
+    /// Constructor used as the `#[serde(default)]` for the field: deserialized
+    /// snapshots conservatively rebuild fully on first flush.
+    pub fn full() -> Self {
+        Self::Full
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        !matches!(self, Self::Clean)
+    }
+
+    pub fn mark_full(&mut self) {
+        *self = Self::Full;
+    }
+
+    pub fn mark_entered(&mut self, id: ObjectId) {
+        match self {
+            Self::Full => {}
+            Self::Clean => *self = Self::EnteredObjects(HashSet::from([id])),
+            Self::EnteredObjects(s) => {
+                s.insert(id);
+            }
+        }
+    }
+}
+
+/// Cache key for the source-level enabling-condition truth of a single
+/// CONTINUOUS static ability, used by the incremental layer-flush
+/// truth-delta short-circuit (`game/layers.rs`).
+///
+/// CR 611.3a + CR 611.3b: a static-ability continuous effect isn't "locked
+/// in"; it applies at all times the source is on the battlefield, re-evaluated
+/// against whatever its text indicates. When an object enters, an incremental
+/// flush re-derives only the entered objects. If a pre-existing source's
+/// population-sensitive, SOURCE-LEVEL (non-recipient-context) enabling
+/// condition would change truth, pre-existing recipients must be re-derived —
+/// so the flush must escalate to a full pass. This key indexes the recorded
+/// BEFORE truth so the consult can compare against a freshly-recomputed AFTER.
+///
+/// `def_index` indexes the LIVE post-layer `static_definitions` vec
+/// (`iter_all().enumerate()`), NOT `base_static_definitions`. The refresh and
+/// the consult both observe the identical live vec for pre-existing sources, so
+/// the index aligns (see invariant 5 in the plan / the consult below).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StaticGateKey {
+    pub source: ObjectId,
+    pub def_index: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PublicStateDirty {
     pub all_objects_dirty: bool,
@@ -1431,6 +1596,14 @@ pub enum AlternativeCastKeyword {
     Overload,
     /// CR 702.103a: Spell becomes an Aura with enchant creature (CR 702.103b).
     Bestow,
+    /// CR 702.113a: "If this spell's awaken cost was paid, put N +1/+1 counters
+    /// on target land you control. That land becomes a 0/0 Elemental creature
+    /// with haste. It's still a land." Paying the awaken cost adds the land
+    /// target (CR 702.113b); casting normally adds no target and no rider.
+    Awaken,
+    /// CR 702.148a-b + CR 612: Paying the cleave cost removes every
+    /// square-bracketed span from the spell's text (a text-changing effect).
+    Cleave,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -1515,6 +1688,15 @@ pub enum WaitingFor {
         player: PlayerId,
         pending_cast: Box<PendingCast>,
         target_slots: Vec<TargetSelectionSlot>,
+        /// CR 700.2 / CR 601.2b: For a modal spell whose chosen modes each
+        /// require targets, this carries a per-slot display label naming the
+        /// mode each target belongs to. `mode_labels[i]` ↔ `target_slots[i]`
+        /// (same length when present); `None` for slots without a mode
+        /// context (non-modal spells, or modes whose description is missing).
+        /// Display-only — the engine owns the slot→mode mapping; the UI just
+        /// surfaces it in the targeting banner.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mode_labels: Vec<Option<String>>,
         #[serde(default)]
         selection: TargetSelectionProgress,
     },
@@ -1906,6 +2088,12 @@ pub enum WaitingFor {
     TriggerTargetSelection {
         player: PlayerId,
         target_slots: Vec<TargetSelectionSlot>,
+        /// CR 700.2 / CR 601.2b: Per-slot mode display label, parallel to
+        /// `target_slots` (`mode_labels[i]` ↔ `target_slots[i]`). Populated for
+        /// modal triggered abilities (CR 700.2b) whose chosen modes target;
+        /// `None` per slot otherwise. Display-only — see `TargetSelection`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mode_labels: Vec<Option<String>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         target_constraints: Vec<TargetSelectionConstraint>,
         #[serde(default)]
@@ -2303,8 +2491,11 @@ pub enum WaitingFor {
     /// CR 118.3 / CR 601.2b: Player must choose permanent(s) to sacrifice as cost.
     SacrificeForCost {
         player: PlayerId,
-        /// How many permanents to sacrifice (usually 1; covers "sacrifice two creatures").
+        /// Maximum number of permanents the player may sacrifice for this cost.
         count: usize,
+        /// Minimum number of permanents the player must sacrifice.
+        #[serde(default)]
+        min_count: usize,
         /// Pre-filtered eligible permanents on the battlefield.
         permanents: Vec<ObjectId>,
         /// The pending cast to resume after the sacrifice is complete.
@@ -2724,6 +2915,20 @@ pub enum WaitingFor {
         target_player: PlayerId,
         /// Type categories to fill (e.g., [Artifact, Creature, Enchantment, Land]).
         categories: Vec<CoreType>,
+        /// CR 101.4: Whether each player chooses independently or one player decides for all.
+        #[serde(default)]
+        chooser_scope: CategoryChooserScope,
+        /// Permanents eligible to be chosen for the category slots.
+        #[serde(default = "default_target_filter_permanent")]
+        choose_filter: TargetFilter,
+        /// Permanents in scope for the final sacrifice sweep.
+        #[serde(default = "default_target_filter_permanent")]
+        sacrifice_filter: TargetFilter,
+        /// Controller of the source ability. Needed after a save/reload or any
+        /// paused choice because `player` is the chooser, not necessarily the
+        /// source controller.
+        #[serde(default)]
+        source_controller: PlayerId,
         /// For each category, the eligible permanent IDs (battlefield objects matching that type).
         eligible_per_category: Vec<Vec<ObjectId>>,
         source_id: ObjectId,
@@ -3212,6 +3417,21 @@ impl WaitingFor {
     pub fn accepts_freeform_counter_move_distribution(&self) -> bool {
         matches!(self, WaitingFor::MoveCountersDistribution { .. })
     }
+
+    /// Combat-damage assignment whose legal divisions cannot be captured by the
+    /// candidate enumerator. `candidates.rs` lists exactly one
+    /// `AssignCombatDamage` candidate (the greedy trample-through split), so the
+    /// multiplayer legality gate would wrongly reject every other legal division
+    /// — e.g. keeping excess on the blocker instead of trampling it through
+    /// (CR 702.19b), or any of the freely-chosen splits across multiple blockers
+    /// (CR 510.1c/d). The combinatorial space of legal divisions is too large to
+    /// enumerate, so `apply()` (handle_assign_combat_damage) is the real
+    /// validation boundary: it enforces total conservation, blocker membership,
+    /// and the CR 702.19b lethal-before-excess precondition, and rejects illegal
+    /// submissions. The server bypasses its enumeration gate for these.
+    pub fn accepts_freeform_combat_damage_assignment(&self) -> bool {
+        matches!(self, WaitingFor::AssignCombatDamage { .. })
+    }
 }
 
 /// What the frontend requests for auto-pass (no internal state).
@@ -3475,6 +3695,28 @@ pub enum CastingVariant {
     /// battlefield, the type-changing effect ends — it remains as an
     /// enchantment creature (overrides CR 704.5m for bestow Auras).
     Bestow,
+    /// CR 702.113a: Cast from hand via Awaken's alternative cost. The printed
+    /// mana cost is replaced by `Keyword::Awaken { cost }` at cast preparation
+    /// (mirrors `Overload`). A resolution rider is appended to the tail of the
+    /// spell's ability tree (`effects::awaken::append_awaken_rider`): the
+    /// printed effect resolves first, then "put N +1/+1 counters on target land
+    /// you control; that land becomes a 0/0 Elemental creature with haste; it's
+    /// still a land." Per CR 702.113b, the land target only exists on the awaken
+    /// variant — a normal cast appends no rider and requests no land target.
+    /// CR 702.113a: the spell goes to the graveyard normally, so this variant is
+    /// deliberately absent from `exiles_when_leaving_stack_for_any_reason`.
+    Awaken,
+    /// CR 702.148a-b + CR 612: Cast from hand via Cleave's alternative cost
+    /// (CR 118.9). The printed mana cost is replaced by `Keyword::Cleave(cost)`
+    /// at cast preparation (mirrors `Evoke`/`Overload`). Per CR 702.148a, paying
+    /// the cleave cost is a text-changing effect (CR 612) that removes every
+    /// square-bracketed span from the spell's rules text. The bracket-removed
+    /// ability set is parsed at build time into `CardFace::cleave_variant` and
+    /// swapped onto the stack object before preparation (mirroring the Bestow
+    /// object-mutation-before-prepare seam). Resolution routing matches a normal
+    /// spell — there is no on-resolve special behavior, so the spell goes to its
+    /// owner's graveyard like any instant/sorcery.
+    Cleave,
 }
 
 impl CastingVariant {
@@ -3676,6 +3918,35 @@ pub struct TriggerIndex {
     pub unclassified: smallvec::SmallVec<[ObjectId; 4]>,
 }
 
+/// CR 611.2 + CR 613.1: Candidate pre-filter for `for_each_static_effect_source`.
+/// Holds the ids of objects that GENERATE ≥1 continuous effect for the TWO
+/// `layers_dirty`-covered source categories: battlefield permanents with a
+/// continuous `static_definitions` entry (including `GrantStaticAbility` hosts)
+/// and command-zone emblems. The opt-in-zone / off-zone arm (Incarnation cycle —
+/// Anger/Brawn/Filth/Wonder/Valor, `active_zones`-gated statics functioning from
+/// the graveyard) is INTENTIONALLY NOT indexed: its generator-set changes (e.g.
+/// self-milling an Anger into the graveyard) do not all mark `layers_dirty`
+/// (`zones.rs` marks dirty only on battlefield/hand transitions; mill/effect
+/// movers add no mark), so a `layers_dirty`-gated cache of off-zone generators
+/// would go stale. That arm keeps its live `state.objects` scan in
+/// `for_each_static_effect_source`.
+///
+/// Backed by `im::Vector` so `GameState::clone()` stays O(1) structural share
+/// (and `GameState: Send` is preserved — no `Rc`). Rebuilt at the TOP of
+/// `evaluate_layers` / `apply_layers_incremental` (after the Step-1 base reset,
+/// before the first gather — unlike `TriggerIndex`, this index is consulted
+/// MID-pass, so it must be fresh before the gather) and lazily on first consult
+/// after deserialize via the empty-index direct-scan fallback.
+#[derive(Debug, Clone, Default)]
+pub struct StaticSourceIndex {
+    /// Battlefield generators, in `state.battlefield` order (preserves the
+    /// current gather order; phased-out objects are included here and skipped
+    /// at consult via `is_phased_out()`).
+    pub battlefield_sources: im::Vector<ObjectId>,
+    /// Command-zone emblem generators, in `state.command_zone` order.
+    pub command_sources: im::Vector<ObjectId>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub turn_number: u32,
@@ -3686,8 +3957,11 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_decision_controller: Option<PlayerId>,
 
-    // Central object store
-    pub objects: im::HashMap<ObjectId, GameObject>,
+    // Central object store. Uses FxBuildHasher (fast, deterministic) instead of
+    // the default SipHash RandomState: ObjectId is a thin integer key and this
+    // map is looked up millions of times per large-board resolution — profiling
+    // showed SipHash hashing + HAMT lookup was ~35% of resolution CPU.
+    pub objects: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
     pub next_object_id: u64,
 
     // Shared zones
@@ -3798,7 +4072,26 @@ pub struct GameState {
     pub deferred_entry_events: Vec<GameEvent>,
 
     // Layer system
-    pub layers_dirty: bool,
+    // CONSERVATIVE: deserialized snapshots (e.g. the WASM-export repro) rebuild
+    // fully on first flush. The previous `bool` field serialized as `true`
+    // initially; skipping + defaulting to `Full` preserves that intent without
+    // serializing the (derived) entered-object set.
+    #[serde(skip, default = "LayersDirty::full")]
+    pub layers_dirty: LayersDirty,
+    /// CR 611.3a + CR 611.3b: truth of each CONTINUOUS static's SOURCE-LEVEL
+    /// (non-recipient-context) enabling condition as of the last full
+    /// `evaluate_layers`. Read by the incremental-flush truth-delta
+    /// short-circuit to skip escalation when an entry perturbs the gate but
+    /// does not flip it. Recipient-context conditions are NEVER stored here
+    /// (their truth is per-recipient; `source_condition_gate_passes` is only an
+    /// over-approximation for them) and always escalate. Refreshed wholesale
+    /// every full eval (`refresh_static_gate_truth`). `#[serde(skip)]` derived
+    /// state, like `layers_dirty`/`trigger_index`. NOTE: a plain
+    /// `std::collections::HashMap` (not `im`-backed), so it deep-clones on every
+    /// `GameState::clone()` — kept small by storing only source-level-gated
+    /// continuous statics (a small fraction of the board).
+    #[serde(skip)]
+    pub static_gate_truth: std::collections::HashMap<StaticGateKey, bool>,
     /// CR 603.2: Candidate pre-filter for `collect_pending_triggers`. Rebuilt
     /// lazily after deserialize via a sentinel check at the top of the consult
     /// site; rebuilt eagerly at the end of `evaluate_layers` (CR 611.2e) so the
@@ -3807,6 +4100,15 @@ pub struct GameState {
     /// `trigger_definitions` whenever needed.
     #[serde(skip)]
     pub trigger_index: TriggerIndex,
+    /// CR 611.2 + CR 613.1: Derived generator index for the layer gather.
+    /// `#[serde(skip)]` derived state (like `trigger_index`/`layers_dirty`);
+    /// reconstructed from `state.battlefield` + `state.command_zone` +
+    /// per-object `static_definitions` at the top of every layer pass, and
+    /// lazily on first consult after deserialize via the empty-index fallback.
+    /// INTENTIONALLY omitted from `impl PartialEq for GameState` — derived state
+    /// must not break AI-search dedup on semantically-identical positions.
+    #[serde(skip)]
+    pub static_source_index: StaticSourceIndex,
     pub next_timestamp: u64,
     #[serde(skip, default = "PublicStateDirty::all_dirty")]
     pub public_state_dirty: PublicStateDirty,
@@ -4236,6 +4538,14 @@ pub struct GameState {
     pub players_attacked_this_turn: HashSet<PlayerId>,
     #[serde(default)]
     pub attacking_creatures_this_turn: HashMap<PlayerId, u32>,
+    /// CR 508.6 + CR 508.1b: For each attacking player, the set of defending
+    /// players they attacked this turn, accumulated across every combat's
+    /// declare-attackers step (CR 508.5 "defending player": planeswalker/battle
+    /// attacks resolve to controller/protector). Counted by
+    /// `PlayerFilter::OpponentAttackedThisTurn` for "opponents you attacked this
+    /// turn" (Militant Angel).
+    #[serde(default)]
+    pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
     /// CR 500.8 + CR 506.1: Number of combat phases that have begun this turn.
     /// Used by intervening-if triggers that only fire during the first combat phase.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -4274,8 +4584,11 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub battlefield_entries_this_turn: Vec<BattlefieldEntryRecord>,
     /// CR 120.1: Damage records this turn for "was dealt damage by" condition queries.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub damage_dealt_this_turn: Vec<DamageRecord>,
+    /// Backed by `im::Vector` so `GameState::clone()` structurally shares the
+    /// `DamageRecord` snapshots (each holds a `String` + several `Vec`s) instead
+    /// of deep-copying them on the AI-search hot path.
+    #[serde(default)]
+    pub damage_dealt_this_turn: im::Vector<DamageRecord>,
     /// CR 700.14: Cumulative mana spent on spells this turn per player (for Expend triggers).
     #[serde(default)]
     pub mana_spent_on_spells_this_turn: HashMap<PlayerId, u32>,
@@ -4788,6 +5101,14 @@ impl GameState {
             .collect()
     }
 
+    /// CR 508.6: True if `attacker` declared one or more creatures attacking
+    /// `defender` this turn (reads the per-turn attacked-defenders ledger).
+    pub fn has_attacked(&self, attacker: PlayerId, defender: PlayerId) -> bool {
+        self.attacked_defenders_this_turn
+            .get(&attacker)
+            .is_some_and(|defenders| defenders.contains(&defender))
+    }
+
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
         let players: Vec<Player> = (0..player_count)
@@ -4806,7 +5127,7 @@ impl GameState {
             players,
             priority_player: PlayerId(0),
             turn_decision_controller: None,
-            objects: im::HashMap::new(),
+            objects: im::HashMap::default(),
             next_object_id: 1,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
@@ -4832,8 +5153,10 @@ impl GameState {
             post_replacement_event_target: None,
             pending_spell_resolution: None,
             deferred_entry_events: Vec::new(),
-            layers_dirty: true,
+            layers_dirty: LayersDirty::full(),
+            static_gate_truth: std::collections::HashMap::new(),
             trigger_index: TriggerIndex::default(),
+            static_source_index: StaticSourceIndex::default(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
             state_revision: 0,
@@ -4908,6 +5231,7 @@ impl GameState {
             players_attacked_this_step: HashSet::new(),
             players_attacked_this_turn: HashSet::new(),
             attacking_creatures_this_turn: HashMap::new(),
+            attacked_defenders_this_turn: HashMap::new(),
             combat_phases_started_this_turn: 0,
             creatures_attacked_this_turn: HashSet::new(),
             creatures_blocked_this_turn: HashSet::new(),
@@ -4920,7 +5244,7 @@ impl GameState {
             sacrificed_permanents_this_turn: Vec::new(),
             zone_changes_this_turn: Vec::new(),
             battlefield_entries_this_turn: Vec::new(),
-            damage_dealt_this_turn: Vec::new(),
+            damage_dealt_this_turn: im::Vector::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             pending_spell_cost_reductions: Vec::new(),
             pending_next_spell_modifiers: Vec::new(),
@@ -5058,7 +5382,7 @@ impl GameState {
                 condition,
                 source_name,
             });
-        self.layers_dirty = true;
+        self.layers_dirty.mark_full();
         id
     }
 
@@ -5121,6 +5445,13 @@ impl PartialEq for GameState {
             && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events
             && self.layers_dirty == other.layers_dirty
+            // `static_gate_truth` is INTENTIONALLY excluded: unlike
+            // `layers_dirty`/`public_state_dirty` (which encode pending work),
+            // it is pure derived/self-healing state (reconstructed at the next
+            // full eval; implied entirely by objects + battlefield +
+            // static_definitions). Including it would break AI-search dedup on
+            // semantically-identical positions whose caches differ only in
+            // freshness.
             && self.next_timestamp == other.next_timestamp
             && self.public_state_dirty == other.public_state_dirty
             && self.state_revision == other.state_revision
@@ -5191,6 +5522,7 @@ impl PartialEq for GameState {
             && self.players_attacked_this_step == other.players_attacked_this_step
             && self.players_attacked_this_turn == other.players_attacked_this_turn
             && self.attacking_creatures_this_turn == other.attacking_creatures_this_turn
+            && self.attacked_defenders_this_turn == other.attacked_defenders_this_turn
             && self.combat_phases_started_this_turn == other.combat_phases_started_this_turn
             && self.creatures_attacked_this_turn == other.creatures_attacked_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn
@@ -5302,6 +5634,39 @@ mod tests {
             cards: vec![],
         }
         .accepts_freeform_card_selection());
+    }
+
+    #[test]
+    fn accepts_freeform_combat_damage_assignment_for_assign_combat_damage() {
+        // CR 510.1c/d + CR 702.19b: legal damage divisions (e.g. keeping excess
+        // on the blocker rather than trampling through) cannot be enumerated as
+        // candidate actions, so the multiplayer gate must bypass exact-match and
+        // let apply() validate the submitted division.
+        assert!(WaitingFor::AssignCombatDamage {
+            player: PlayerId(0),
+            attacker_id: ObjectId(1),
+            total_damage: 3,
+            blockers: vec![],
+            assignment_modes: vec![],
+            trample: None,
+            defending_player: PlayerId(1),
+            attack_target: crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            pw_loyalty: None,
+            pw_controller: None,
+        }
+        .accepts_freeform_combat_damage_assignment());
+
+        // Other states must NOT be freeform for combat damage — they remain
+        // validated by candidate enumeration.
+        assert!(!WaitingFor::Priority {
+            player: PlayerId(0),
+        }
+        .accepts_freeform_combat_damage_assignment());
+        assert!(!WaitingFor::ScryChoice {
+            player: PlayerId(0),
+            cards: vec![],
+        }
+        .accepts_freeform_combat_damage_assignment());
     }
 
     #[test]
@@ -5541,6 +5906,7 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(ObjectId(1))],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: vec![],
             selection: TargetSelectionProgress::default(),
             source_id: None,
@@ -5608,6 +5974,7 @@ mod tests {
         variants.push(Box::new(WaitingFor::SacrificeForCost {
             player: PlayerId(0),
             count: 1,
+            min_count: 1,
             permanents: vec![ObjectId(1)],
             pending_cast: dummy_pending(),
         }));
@@ -5870,6 +6237,7 @@ mod tests {
                 ],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: vec![],
             selection: TargetSelectionProgress::default(),
             source_id: Some(ObjectId(10)),
