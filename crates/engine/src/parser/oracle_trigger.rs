@@ -2413,7 +2413,32 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         if !after.starts_with(" from") {
             return (
                 strip_condition_clause(text, pos, "if you cast it".len()),
-                Some(TriggerCondition::WasCast),
+                Some(TriggerCondition::WasCast { zone: None }),
+            );
+        }
+    }
+
+    // CR 603.4 + CR 601.2 + CR 603.2c: "if it/they entered or w(as|ere) cast from a graveyard"
+    // allow-noncombinator: structural if-clause excision, not parse dispatch
+    for pattern in &[
+        "if they entered or were cast from a graveyard",
+        "if it entered or was cast from a graveyard",
+    ] {
+        if let Some(pos) = tp.find(pattern) {
+            return (
+                strip_condition_clause(text, pos, pattern.len()),
+                Some(TriggerCondition::Or {
+                    conditions: vec![
+                        TriggerCondition::ZoneChangeObjectMatchesFilter {
+                            origin: Some(Zone::Graveyard),
+                            destination: Zone::Battlefield,
+                            filter: TargetFilter::Any,
+                        },
+                        TriggerCondition::WasCast {
+                            zone: Some(Zone::Graveyard),
+                        },
+                    ],
+                }),
             );
         }
     }
@@ -2428,7 +2453,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             Some(TriggerCondition::Or {
                 conditions: vec![
                     TriggerCondition::Not {
-                        condition: Box::new(TriggerCondition::WasCast),
+                        condition: Box::new(TriggerCondition::WasCast { zone: None }),
                     },
                     TriggerCondition::ManaSpentCondition {
                         text: "no mana was spent to cast them".to_string(),
@@ -2450,14 +2475,14 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // which is not cast — does not re-trigger the ability infinitely. The
     // literal "if it was cast" is not a substring of "if it wasn't cast"
     // (the latter has "wasn't", not "was cast"), so the two arms are disjoint.
-    // NOTE: if a zone-specific "if it was cast from <zone>" trigger arm is ever
-    // added, it must be ordered BEFORE this one — "if it was cast" is a prefix
-    // of "if it was cast from your hand" and would shadow it here.
+    // NOTE: a zone-specific "if it was cast from <zone>" arm must be ordered
+    // BEFORE this one — "if it was cast" is a prefix of "if it was cast from
+    // your hand" and would shadow it here.
     let was_cast_pos = tp.find("if it was cast"); // allow-noncombinator: anchor for strip_condition_clause — structural if-clause excision, not parse dispatch
     if let Some(pos) = was_cast_pos {
         return (
             strip_condition_clause(text, pos, "if it was cast".len()),
-            Some(TriggerCondition::WasCast),
+            Some(TriggerCondition::WasCast { zone: None }),
         );
     }
 
@@ -2466,7 +2491,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return (
             strip_condition_clause(text, pos, "if it wasn't cast".len()),
             Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasCast),
+                condition: Box::new(TriggerCondition::WasCast { zone: None }),
             }),
         );
     }
@@ -20828,7 +20853,7 @@ mod tests {
                 assert_eq!(
                     conditions[0],
                     TriggerCondition::Not {
-                        condition: Box::new(TriggerCondition::WasCast),
+                        condition: Box::new(TriggerCondition::WasCast { zone: None }),
                     }
                 );
                 assert!(
@@ -20858,7 +20883,7 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasCast),
+                condition: Box::new(TriggerCondition::WasCast { zone: None }),
             })
         );
     }
@@ -23021,5 +23046,67 @@ mod snapshot_tests {
                 .map(|ability| ability.effect.as_ref()),
             Some(Effect::CopySpell { .. })
         ));
+    }
+
+    #[test]
+    fn twilight_diviner_second_trigger_has_graveyard_origin_condition() {
+        let def = parse_trigger_line(
+            "Whenever one or more other creatures you control enter, if they entered or were cast from a graveyard, create a token that's a copy of one of them. This ability triggers only once each turn.",
+            "Twilight Diviner",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert!(def.batched, "should be batched");
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+        match &def.condition {
+            Some(TriggerCondition::Or { conditions }) => {
+                assert_eq!(conditions.len(), 2);
+                assert!(
+                    matches!(
+                        &conditions[0],
+                        TriggerCondition::ZoneChangeObjectMatchesFilter {
+                            origin: Some(Zone::Graveyard),
+                            destination: Zone::Battlefield,
+                            ..
+                        }
+                    ),
+                    "first disjunct should be ZoneChangeObjectMatchesFilter(Graveyard→Battlefield)"
+                );
+                assert_eq!(
+                    conditions[1],
+                    TriggerCondition::WasCast {
+                        zone: Some(Zone::Graveyard)
+                    }
+                );
+            }
+            other => panic!("expected Or condition, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entered_or_cast_from_graveyard_singular_form() {
+        let def = parse_trigger_line(
+            "Whenever another creature enters under your control, if it entered or was cast from a graveyard, draw a card.",
+            "Test Card",
+        );
+        match &def.condition {
+            Some(TriggerCondition::Or { conditions }) => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(
+                    &conditions[0],
+                    TriggerCondition::ZoneChangeObjectMatchesFilter {
+                        origin: Some(Zone::Graveyard),
+                        destination: Zone::Battlefield,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    conditions[1],
+                    TriggerCondition::WasCast {
+                        zone: Some(Zone::Graveyard)
+                    }
+                );
+            }
+            other => panic!("expected Or condition, got: {other:?}"),
+        }
     }
 }

@@ -9552,10 +9552,11 @@ pub enum TriggerCondition {
     /// Used to gate continuous triggers that only become active at higher class levels.
     ClassLevelGE { level: u8 },
 
-    /// "if you cast it" — zoneless cast check (unlike CastFromZone which requires a specific zone).
-    /// CR 701.57a: Used by Discover ETB triggers.
-    /// Negation ("if it wasn't cast") is expressed via `Not { Box::new(WasCast) }`.
-    WasCast,
+    /// CR 601.2 + CR 603.4: reads the ENTERING object's `cast_from_zone`, never the source.
+    WasCast {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zone: Option<Zone>,
+    },
     /// CR 305.1 + CR 603.4: Intervening/event condition for zone-change
     /// triggers whose subject must have been played as a land. Negation
     /// ("without being played") is expressed via `Not { Box::new(WasPlayed) }`.
