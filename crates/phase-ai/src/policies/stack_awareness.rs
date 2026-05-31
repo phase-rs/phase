@@ -384,6 +384,7 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(target_id)],
                     optional: false,
                 }],
+                mode_labels: Vec::new(),
                 selection: Default::default(),
             },
             candidates: Vec::new(),

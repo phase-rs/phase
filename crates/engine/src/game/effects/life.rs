@@ -91,7 +91,7 @@ pub fn resolve_gain(
                 player.life += gain_amount as i32;
                 // CR 119.9: Track life gained this turn for triggered ability matching.
                 player.life_gained_this_turn += gain_amount;
-                state.layers_dirty = true;
+                crate::game::layers::mark_layers_full(state);
 
                 events.push(GameEvent::LifeChanged {
                     player_id,
@@ -220,7 +220,7 @@ pub fn apply_life_gain_after_replacement(
         player.life += gain_amount as i32;
         player.life_gained_this_turn += gain_amount;
     }
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: gain_amount as i32,
@@ -296,7 +296,7 @@ pub fn apply_life_loss_after_replacement(
         player.life -= loss_amount as i32;
         player.life_lost_this_turn += loss_amount;
     }
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: -(loss_amount as i32),
@@ -351,7 +351,7 @@ pub fn resolve_lose(
                     .ok_or(EffectError::PlayerNotFound)?;
                 player.life -= loss_amount as i32;
                 player.life_lost_this_turn += loss_amount;
-                state.layers_dirty = true;
+                crate::game::layers::mark_layers_full(state);
 
                 events.push(GameEvent::LifeChanged {
                     player_id,

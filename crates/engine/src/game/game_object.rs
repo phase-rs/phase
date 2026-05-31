@@ -65,6 +65,30 @@ pub struct PreparedState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BestowFormState;
 
+/// CR 702.148a-b + CR 612: Cleave form marker — `Some(_)` while this object's
+/// cleave text-changing effect is live (the spell was cast for its cleave cost
+/// and the bracket-removed ability set is currently installed on the object).
+///
+/// Unlike `BestowFormState` (an empty marker whose revert is formulaic — re-add
+/// Creature, drop the synthesized Aura subtype/keyword), a cleave revert cannot
+/// be recomputed: the text-changing effect swaps in a separately parsed ability
+/// set, so restoring the printed form requires the captured snapshot of the four
+/// ability classes as they were before the swap. This struct carries that
+/// snapshot so `apply_zone_exit_cleanup` can restore it when the spell leaves
+/// the stack (CR 702.148a: the abilities function only while the spell is on the
+/// stack). Parallels `BestowFormState` — a typed `Option` marker, never a bool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleaveFormState {
+    pub abilities: Arc<Vec<AbilityDefinition>>,
+    pub triggers: Definitions<TriggerDefinition>,
+    pub statics: Definitions<StaticDefinition>,
+    pub replacements: Definitions<ReplacementDefinition>,
+    pub base_abilities: Arc<Vec<AbilityDefinition>>,
+    pub base_triggers: Arc<Vec<TriggerDefinition>>,
+    pub base_statics: Arc<Vec<StaticDefinition>>,
+    pub base_replacements: Arc<Vec<ReplacementDefinition>>,
+}
+
 /// CR 702.26b / CR 702.26c: Whether a permanent is phased in (normal) or
 /// phased out (treated as though it doesn't exist). CR 702.26d: the phasing
 /// event doesn't change the object's zone — status is the sole encoding.
@@ -268,6 +292,15 @@ pub struct GameObject {
     /// attached to each other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paired_with: Option<ObjectId>,
+    /// CR 702.95a + CR 702.95e: The player who controlled this creature when the
+    /// soulbond pair was formed. A pair persists only while *both* creatures
+    /// remain on the battlefield under their respective pairing controllers; if
+    /// another player gains control of either, the pair must break. Comparing the
+    /// two creatures' current controllers to each other (rather than to this
+    /// recorded value) misses the case where one effect gains control of both
+    /// halves at once. `None` when the creature is unpaired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair_controller: Option<PlayerId>,
 
     // Counters
     pub counters: HashMap<CounterType, u32>,
@@ -297,6 +330,14 @@ pub struct GameObject {
     pub trigger_definitions: Definitions<TriggerDefinition>,
     pub replacement_definitions: Definitions<ReplacementDefinition>,
     pub static_definitions: Definitions<StaticDefinition>,
+    /// CR 702.148a-b + CR 612: When this object is a cleave spell, the alternate
+    /// ability set produced by removing every square-bracketed span from its
+    /// rules text. Projected from `CardFace::cleave_variant`. The casting flow
+    /// swaps this onto `abilities`/`trigger_definitions`/etc. before preparing
+    /// the spell when it is cast for its cleave cost. `None` for every other
+    /// object, keeping serialized state byte-identical for the rest of the corpus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleave_variant: Option<crate::types::card::CleaveVariant>,
     pub color: Vec<ManaColor>,
     pub printed_ref: Option<PrintedCardRef>,
     /// Exact token-art lookup metadata, populated only when the engine can
@@ -439,6 +480,15 @@ pub struct GameObject {
     /// CR 702.103e–g (illegal target, unattach, zone exit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bestow_form: Option<BestowFormState>,
+
+    /// CR 702.148a-b + CR 612: `Some(_)` while this object's cleave
+    /// text-changing effect is live (the spell was cast for its cleave cost).
+    /// Carries the printed-form ability snapshot captured before the swap so the
+    /// printed text can be restored when the spell leaves the stack. Set by
+    /// `apply_cleave_text_change`; cleared by `revert_cleave_text_change` and by
+    /// the zone-exit cleanup in `apply_zone_exit_cleanup` (CR 702.148a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleave_form: Option<CleaveFormState>,
 
     // Coverage: lists unimplemented mechanics (computed for serialization, not persisted)
     #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
@@ -712,6 +762,7 @@ impl GameObject {
             // "whenever a creature token dies").
             is_token: self.is_token,
             combat_status: Default::default(),
+            co_departed: Vec::new(),
         }
     }
 
@@ -782,6 +833,7 @@ impl GameObject {
             attached_to: None,
             attachments: Vec::new(),
             paired_with: None,
+            pair_controller: None,
             counters: HashMap::new(),
             name: name.clone(),
             power: None,
@@ -828,6 +880,8 @@ impl GameObject {
             additional_cost_payment_count: 0,
             convoked_creatures: Vec::new(),
             bestow_form: None,
+            cleave_form: None,
+            cleave_variant: None,
             unimplemented_mechanics: Vec::new(),
             has_summoning_sickness: false,
             has_mana_ability: false,
@@ -926,6 +980,7 @@ impl GameObject {
         self.prepared = None;
         self.is_saddled = false;
         self.paired_with = None;
+        self.pair_controller = None;
         self.chosen_attributes.clear();
         self.cast_variant_paid = None;
         // CR 400.7 + CR 603.6a: Ability-placement provenance is per-entry. Clear

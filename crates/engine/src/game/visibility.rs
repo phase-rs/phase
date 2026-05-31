@@ -1025,6 +1025,7 @@ mod tests {
             player: PlayerId(0),
             pending_cast: pending.clone(),
             target_slots: vec![],
+            mode_labels: Vec::new(),
             selection: Default::default(),
         };
         state.pending_cast = Some(pending);
@@ -1405,7 +1406,7 @@ mod tests {
                 1,
                 "viewer {viewer:?} must see the commander-damage entry",
             );
-            let views = derive_views(&filtered);
+            let views = derive_views(&filtered, Some(viewer));
             let from_p0 = views
                 .commander_damage_by_attacker
                 .get(&PlayerId(0))

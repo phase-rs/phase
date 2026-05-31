@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    AbilityCost, AbilityTag, AdditionalCost, Effect, ModalChoice, QuantityExpr, TargetRef,
-    TargetSelectionMode,
+    AbilityCost, AbilityTag, AdditionalCost, Effect, ModalChoice, QuantityExpr, ResolvedAbility,
+    TargetRef, TargetSelectionMode,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
@@ -12,7 +12,7 @@ use crate::types::player::PlayerId;
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_selected_slots_in_chain,
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_chained_resolved, build_target_slots, choose_target_for_ability,
+    build_chained_resolved, build_target_slots_labelled, choose_target_for_ability,
     flatten_targets_in_chain, random_select_targets_for_ability, validate_modal_indices,
     validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
@@ -104,11 +104,20 @@ pub(crate) fn handle_select_modes(
     }
 
     // Check for targeting on the combined ability
-    if state.layers_dirty {
-        super::layers::evaluate_layers(state);
-    }
+    super::layers::flush_layers(state);
 
-    let target_slots = build_target_slots(state, &resolved)?;
+    // CR 700.2 / CR 601.2b: Build slots and their per-mode display labels
+    // together against the SAME post-flush state, so `mode_labels.len()` can
+    // never diverge from `target_slots.len()` (slot count is state-dependent).
+    let (target_slots, mode_labels) = build_target_slots_labelled(
+        state,
+        &abilities,
+        &indices,
+        &modal.mode_descriptions,
+        pending.object_id,
+        controller,
+        &pending.ability.context,
+    )?;
     if !target_slots.is_empty() {
         // CR 115.1 + CR 701.9b: For abilities marked `Random`, the game (not the
         // controller) selects targets uniformly from each slot's legal-target set.
@@ -163,6 +172,7 @@ pub(crate) fn handle_select_modes(
             player: controller,
             pending_cast: Box::new(pending_sel),
             target_slots,
+            mode_labels,
             selection,
         });
     }
@@ -208,7 +218,7 @@ pub(crate) fn handle_select_targets(
     // WaitingFor::DistributeAmong. For non-X spells, extract the fixed total now.
     // For X-spells, distribution is deferred to after mana payment (engine.rs).
     if let Some(ref unit) = pending.distribute {
-        if let Some(total) = extract_fixed_distribution_total(&ability.effect) {
+        if let Some(total) = extract_distribution_total(state, &ability, &ability.effect) {
             let assigned_targets = flatten_targets_in_chain(&ability);
             // Store ability + targets on pending_cast for post-distribution resumption.
             let mut pending_dist = PendingCast::new(
@@ -308,15 +318,17 @@ pub(crate) fn handle_choose_target(
     target: Option<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (pending, target_slots, selection) = match &state.waiting_for {
+    let (pending, target_slots, mode_labels, selection) = match &state.waiting_for {
         WaitingFor::TargetSelection {
             pending_cast,
             target_slots,
+            mode_labels,
             selection,
             ..
         } => (
             *pending_cast.clone(),
             target_slots.clone(),
+            mode_labels.clone(),
             selection.clone(),
         ),
         _ => {
@@ -334,10 +346,13 @@ pub(crate) fn handle_choose_target(
         &selection,
         target,
     )? {
+        // CR 700.2: preserve the inbound mode labels unchanged — walking the
+        // slots one at a time does not change the slot→mode mapping.
         TargetSelectionAdvance::InProgress(selection) => Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending),
             target_slots,
+            mode_labels,
             selection,
         }),
         TargetSelectionAdvance::Complete(selected_slots) => {
@@ -495,6 +510,25 @@ pub(super) fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
         } => Some(*value as u32),
         _ => None,
     }
+}
+
+/// CR 601.2d + CR 603.3d: Resolve the distribution pool for damage/counter division.
+pub(super) fn extract_distribution_total(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    effect: &Effect,
+) -> Option<u32> {
+    if let Some(fixed) = extract_fixed_distribution_total(effect) {
+        return Some(fixed);
+    }
+    let count_expr = match effect {
+        Effect::DealDamage { amount, .. } => amount,
+        Effect::PutCounter { count, .. } | Effect::AddCounter { count, .. } => count,
+        _ => return None,
+    };
+    let (inner, _) = count_expr.peel_up_to();
+    let total = super::quantity::resolve_quantity_with_targets(state, inner, ability).max(0) as u32;
+    (total > 0).then_some(total)
 }
 
 /// CR 702.142b + CR 702.177a: If the activated ability at `ability_index` on

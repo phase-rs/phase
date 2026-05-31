@@ -17,7 +17,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::{
     begin_target_selection_for_ability, build_target_slots, compute_unavailable_modes,
-    modal_choice_for_player,
+    has_legal_target_assignment_for_ability, modal_choice_for_player,
 };
 use super::casting;
 use super::casting_costs;
@@ -1560,10 +1560,10 @@ fn apply_action(
         // CR 118.9: Player chooses between the printed mana cost and the
         // keyword-granted alternative cost. The `keyword` axis on the waiting
         // state drives dispatch to the per-keyword post-payment handler
-        // (CR 702.74a Evoke, CR 702.96a Overload, CR 702.103a Bestow, custom
-        // Warp). Each keyword retains its own resolver because post-payment
-        // semantics genuinely diverge — the unification is purely at the
-        // player-decision layer.
+        // (CR 702.74a Evoke, CR 702.96a Overload, CR 702.103a Bestow,
+        // CR 702.148a Cleave, custom Warp). Each keyword retains its own
+        // resolver because post-payment semantics genuinely diverge — the
+        // unification is purely at the player-decision layer.
         (
             WaitingFor::AlternativeCastChoice {
                 player,
@@ -1610,6 +1610,28 @@ fn apply_action(
                 }
                 AlternativeCastKeyword::Bestow => {
                     casting::handle_bestow_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
+                AlternativeCastKeyword::Awaken => {
+                    casting::handle_awaken_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
+                AlternativeCastKeyword::Cleave => {
+                    casting::handle_cleave_cost_choice_with_payment_mode(
                         state,
                         *player,
                         *object_id,
@@ -1813,6 +1835,7 @@ fn apply_action(
             WaitingFor::SacrificeForCost {
                 player,
                 count,
+                min_count,
                 permanents,
                 pending_cast,
             },
@@ -1821,7 +1844,7 @@ fn apply_action(
             state,
             *player,
             *pending_cast.clone(),
-            *count,
+            (*min_count, *count),
             permanents,
             &chosen,
             &mut events,
@@ -2242,7 +2265,7 @@ fn apply_action(
                 if super::pairing::is_unpaired_creature_you_control(state, *source_id, *player)
                     && super::pairing::is_unpaired_creature_you_control(state, partner_id, *player)
                 {
-                    super::pairing::pair_objects(state, *source_id, partner_id);
+                    super::pairing::pair_objects(state, *source_id, partner_id, *player);
                 }
             }
             events.push(GameEvent::EffectResolved {
@@ -2442,16 +2465,44 @@ fn apply_action(
             }
             let player = *player;
             let convoke_mode = *convoke_mode;
+            if let Some(pending) = state.pending_cast.as_ref() {
+                if pending.deferred_target_selection {
+                    // CR 601.2c + CR 601.2f: A chosen X that determines target
+                    // count must have a legal target assignment before it is
+                    // locked into the pending cast.
+                    let mut trial = pending.as_ref().clone();
+                    trial.ability.set_chosen_x_recursive(value);
+                    trial.cost.concretize_x(value);
+                    let target_slots = build_target_slots(state, &trial.ability)?;
+                    if !target_slots.is_empty()
+                        && !has_legal_target_assignment_for_ability(
+                            state,
+                            &trial.ability,
+                            &target_slots,
+                            &trial.target_constraints,
+                        )
+                    {
+                        return Err(EngineError::InvalidAction(format!(
+                            "X={value} has no legal target assignment"
+                        )));
+                    }
+                }
+            }
             let pending = state.pending_cast.as_mut().ok_or_else(|| {
                 EngineError::InvalidAction("No pending cast awaiting X".to_string())
             })?;
             pending.ability.set_chosen_x_recursive(value);
             pending.cost.concretize_x(value);
+            let object_id = pending.object_id;
             events.push(GameEvent::XValueChosen {
                 player,
-                object_id: pending.object_id,
+                object_id,
                 value,
             });
+            // CR 601.2b + CR 601.2f: X is now locked in. Apply the cost floor
+            // (Trinisphere class) that was deferred while X was symbolic, against
+            // the now-concrete total, before payment is determined.
+            casting::apply_post_x_cost_floor(state, player, object_id);
             casting_costs::enter_payment_step(state, player, convoke_mode, &mut events)?
         }
         // CR 601.2h: Player has confirmed payment — delegate to the shared finalizer
@@ -4288,6 +4339,7 @@ pub(super) fn begin_pending_trigger_target_selection(
     Ok(Some(WaitingFor::TriggerTargetSelection {
         player,
         target_slots,
+        mode_labels: Vec::new(),
         target_constraints,
         selection,
         source_id: Some(source_id),
@@ -6387,6 +6439,104 @@ mod tests {
                 .unwrap_or_default(),
             4,
             "Walking Ballista must enter with X=4 +1/+1 counters (DB-load path)"
+        );
+    }
+
+    /// CR 614.1c + CR 614.12: Dragonstorm Globe's external ETB replacement
+    /// applies to the general subset "Each Dragon you control", including
+    /// token Dragons. This drives the full spell -> stack -> token creation ->
+    /// replacement pipeline; if the parser falls back to `SelfRef`, the
+    /// Artifact source never matches the entering Dragon and this counter is
+    /// missing.
+    #[test]
+    fn dragonstorm_globe_counters_created_dragon_token() {
+        let mut state = setup_game_at_main_phase();
+        let globe = create_object(
+            &mut state,
+            CardId(9170),
+            PlayerId(0),
+            "Dragonstorm Globe".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&globe).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+        }
+        apply_oracle_to_object(
+            &mut state,
+            globe,
+            "Dragonstorm Globe",
+            "Each Dragon you control enters with an additional +1/+1 counter on it.",
+        );
+
+        let token_spell = create_object(
+            &mut state,
+            CardId(9171),
+            PlayerId(0),
+            "Make a Dragon".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&token_spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: "Dragon".to_string(),
+                    power: crate::types::ability::PtValue::Fixed(4),
+                    toughness: crate::types::ability::PtValue::Fixed(4),
+                    types: vec!["Creature".to_string(), "Dragon".to_string()],
+                    colors: vec![ManaColor::Red],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: token_spell,
+                card_id: CardId(9171),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        let dragon = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|object| {
+                object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Dragon")
+            })
+            .expect("Dragon token should be on the battlefield");
+        assert_eq!(
+            dragon
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default(),
+            1,
+            "Dragonstorm Globe must add one +1/+1 counter to the created Dragon token"
         );
     }
 
@@ -12072,6 +12222,7 @@ mod trigger_target_tests {
                 &[],
             )
             .unwrap(),
+            mode_labels: Vec::new(),
             source_id: None,
             description: None,
         };
@@ -12163,6 +12314,7 @@ mod trigger_target_tests {
                 legal_targets: vec![TargetRef::Object(legal_target)],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress::default(),
             source_id: None,
@@ -12584,6 +12736,7 @@ mod trigger_target_tests {
                     optional: false,
                 },
             ],
+            mode_labels: Vec::new(),
             target_constraints: vec![TargetSelectionConstraint::DifferentTargetPlayers],
             selection: crate::types::game_state::TargetSelectionProgress::default(),
             source_id: None,
@@ -12698,6 +12851,7 @@ mod trigger_target_tests {
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
             target_slots: target_slots.clone(),
+            mode_labels: Vec::new(),
             target_constraints: target_constraints.clone(),
             selection: crate::game::ability_utils::begin_target_selection(
                 &target_slots,
@@ -13783,6 +13937,110 @@ mod exile_return_tests {
         );
         assert!(!state.exile.contains(&victim_id));
         assert!(state.exile_links.is_empty(), "exile link must be consumed");
+    }
+
+    /// CR 607.2a + CR 610.3: Two-trigger exile-return cards link the ETB
+    /// exile to the LTB return text. Journey to Nowhere has no explicit
+    /// "until" text on the ETB trigger, so the parser synthesis must still
+    /// create an `UntilSourceLeaves` exile link for the runtime return path.
+    #[test]
+    fn journey_to_nowhere_two_trigger_oracle_returns_exiled_creature() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::TargetRef;
+        use crate::types::game_state::StackEntry;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let journey_id = scenario
+            .add_creature(P0, "Journey to Nowhere", 0, 0)
+            .as_enchantment()
+            .from_oracle_text(
+                "When this enchantment enters, exile target creature.\n\
+                 When this enchantment leaves the battlefield, return the exiled card \
+                 to the battlefield under its owner's control.",
+            )
+            .id();
+        let creature_id = scenario.add_creature(P1, "Opponent Creature", 2, 2).id();
+
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let journey = state
+            .objects
+            .get(&journey_id)
+            .expect("Journey to Nowhere on battlefield");
+        let etb_trigger = journey
+            .trigger_definitions
+            .iter_all()
+            .find(|t| {
+                matches!(t.mode, crate::types::TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)
+            })
+            .expect("Journey must have ETB trigger");
+        let execute_def = etb_trigger.execute.as_deref().expect("trigger.execute");
+        assert_eq!(
+            execute_def.duration,
+            Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+            "parser synthesis must make the ETB exile create an exile link"
+        );
+
+        let mut resolved = build_resolved_from_def(execute_def, journey_id, PlayerId(0));
+        resolved.targets = vec![TargetRef::Object(creature_id)];
+
+        state.stack.push_back(StackEntry {
+            id: ObjectId(9_000_001),
+            source_id: journey_id,
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                source_id: journey_id,
+                ability: Box::new(resolved),
+                description: Some("When Journey to Nowhere enters...".to_string()),
+                condition: None,
+                trigger_event: None,
+                source_name: String::new(),
+                subject_match_count: None,
+            },
+        });
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(state, &mut events);
+
+        assert!(state.exile.contains(&creature_id));
+        assert!(state.exile_links.iter().any(|link| {
+            link.exiled_id == creature_id
+                && link.source_id == journey_id
+                && matches!(
+                    link.kind,
+                    crate::types::game_state::ExileLinkKind::UntilSourceLeaves {
+                        return_zone: Zone::Battlefield
+                    }
+                )
+        }));
+
+        let mut events: Vec<GameEvent> = Vec::new();
+        crate::game::zones::move_to_zone(state, journey_id, Zone::Graveyard, &mut events);
+        let default_wf = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        crate::game::engine_priority::run_post_action_pipeline(
+            state,
+            &mut events,
+            &default_wf,
+            false,
+        )
+        .unwrap();
+
+        assert!(state.players[0].graveyard.contains(&journey_id));
+        assert!(state.battlefield.contains(&creature_id));
+        assert!(!state.exile.contains(&creature_id));
+        assert!(state.exile_links.is_empty());
     }
 }
 
@@ -18797,8 +19055,11 @@ mod crew_tests {
 mod station_tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{
+        ContinuousModification, StaticCondition, StaticDefinition, TargetFilter,
+    };
     use crate::types::card_type::CoreType;
-    use crate::types::counter::CounterType;
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -19076,6 +19337,102 @@ mod station_tests {
         assert_eq!(
             charge, 5,
             "CR 113.7a: snapshot_power applied even when tapped creature left battlefield"
+        );
+    }
+
+    #[test]
+    fn station_threshold_static_reapplies_and_spacecraft_becomes_creature() {
+        let (mut state, spacecraft_id, p5, _) = setup_station_scenario();
+
+        {
+            let spacecraft = state.objects.get_mut(&spacecraft_id).unwrap();
+            spacecraft.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .condition(StaticCondition::HasCounters {
+                        counters: CounterMatch::OfType(CounterType::Generic("charge".to_string())),
+                        minimum: 8,
+                        maximum: None,
+                    })
+                    .modifications(vec![
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Creature,
+                        },
+                        ContinuousModification::SetPower { value: 5 },
+                        ContinuousModification::SetToughness { value: 5 },
+                    ])
+                    .description("CR 721.2b: Spacecraft is an artifact creature at 8+".to_string()),
+            );
+        }
+
+        // First station activation: 5 charge counters, below threshold.
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateStation {
+                spacecraft_id,
+                creature_id: None,
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateStation {
+                spacecraft_id,
+                creature_id: Some(p5),
+            },
+        )
+        .unwrap();
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+
+        assert!(
+            !state
+                .objects
+                .get(&spacecraft_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "spacecraft should still be noncreature below threshold"
+        );
+
+        // Simulate a later main phase where the same creature can station again.
+        state.objects.get_mut(&p5).unwrap().tapped = false;
+        state.phase = Phase::PreCombatMain;
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Second station activation: another 5 counters, crossing threshold.
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateStation {
+                spacecraft_id,
+                creature_id: None,
+            },
+        )
+        .unwrap();
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateStation {
+                spacecraft_id,
+                creature_id: Some(p5),
+            },
+        )
+        .unwrap();
+        apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
+        apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
+
+        assert!(
+            state
+                .objects
+                .get(&spacecraft_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "spacecraft should become a creature at 8+ charge counters"
         );
     }
 

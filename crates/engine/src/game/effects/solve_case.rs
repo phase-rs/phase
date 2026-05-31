@@ -18,7 +18,7 @@ pub fn resolve(
                 events.push(GameEvent::CaseSolved {
                     object_id: source_id,
                 });
-                state.layers_dirty = true;
+                crate::game::layers::mark_layers_full(state);
             }
         }
     }

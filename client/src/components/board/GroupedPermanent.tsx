@@ -193,6 +193,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
         <div className={`relative rounded-lg ${aggregateRingClass}`}>
           <PermanentCard
             objectId={group.ids[0]}
+            coveredIds={group.ids}
             onPrimaryClickOverride={canOpenPicker ? () => setPickerOpen(true) : undefined}
           />
           {aggregateRingClass && (

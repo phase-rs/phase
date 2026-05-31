@@ -1,5 +1,5 @@
 use crate::types::ability::{EffectError, PtValue, ResolvedAbility};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 
 /// CR 701.16a: Investigate — create a Clue artifact token.
@@ -36,5 +36,18 @@ pub fn resolve(
         ability.source_id,
         ability.controller,
     );
-    super::token::resolve(state, &clue_ability, events)
+    super::token::resolve(state, &clue_ability, events)?;
+
+    // CR 608.2c + CR 109.5: Record the investigating player so downstream
+    // "the number of opponents who investigated this way" references resolve.
+    // During an `Effect`-level `player_scope: Opponent` fan-out the driver
+    // rebinds `ability.controller` to the scoped opponent (effects/mod.rs:2891),
+    // so each opponent's investigate records THAT opponent. The generic scan in
+    // effects/mod.rs inserts `(player_id, action)` into `player_actions_this_way`.
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id: ability.controller,
+        action: PlayerActionKind::Investigate,
+    });
+
+    Ok(())
 }

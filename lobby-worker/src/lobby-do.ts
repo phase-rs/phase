@@ -19,6 +19,11 @@
 
 import wasmModule from "./broker-wasm-pkg/broker_bg.wasm";
 import { initSync, WasmBroker } from "./broker-wasm-pkg/broker.js";
+import {
+  classifyHelloGate,
+  helloGateErrorMessage,
+  type ConnAttachment,
+} from "./hello-gate";
 import { moderationErrorForLobbyFrame } from "./name-filter";
 import { PROTOCOL_VERSION } from "./protocol";
 
@@ -122,6 +127,26 @@ export class LobbyDO {
     if (moderationError) {
       ws.send(JSON.stringify({ type: "Error", data: { message: moderationError } }));
       console.warn({ event: "lobby_name_rejected" });
+      return;
+    }
+
+    let frame: { type?: string; data?: Record<string, unknown> };
+    try {
+      frame = JSON.parse(text) as { type?: string; data?: Record<string, unknown> };
+    } catch {
+      console.warn({ event: "lobby_frame_rejected", reason: "invalid_json" });
+      return;
+    }
+
+    const attachment = conn as ConnAttachment;
+    const gate = classifyHelloGate(attachment.client_hello != null, frame);
+    const gateError = helloGateErrorMessage(gate);
+    if (gateError) {
+      ws.send(JSON.stringify({ type: "Error", data: { message: gateError } }));
+      console.warn({ event: "lobby_hello_gate_rejected", reason: gate.kind });
+      return;
+    }
+    if (gate.kind === "ignore") {
       return;
     }
 

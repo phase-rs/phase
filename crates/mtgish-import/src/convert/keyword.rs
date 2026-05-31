@@ -465,6 +465,15 @@ fn convert_ward_cost(c: &Cost, path: &str) -> ConvResult<WardCost> {
         Cost::PayMana(symbols) => WardCost::Mana(crate::convert::mana::convert(symbols)?),
         Cost::PayLife(g) => WardCost::PayLife(int_or_gap(g, "Rule::Ward.life", path)? as i32),
         Cost::DiscardACard => WardCost::DiscardCard,
+        // CR 702.21a: Ward with a sacrifice cost.
+        Cost::SacrificeNumberPermanents(n, filter) => {
+            let count = int_or_gap(n, "Rule::Ward.sacrifice", path)?;
+            let target = crate::convert::filter::convert(filter)?;
+            WardCost::Sacrifice {
+                count,
+                filter: target,
+            }
+        }
         _ => {
             return Err(ConversionGap::MalformedIdiom {
                 idiom: "Rule::Ward",

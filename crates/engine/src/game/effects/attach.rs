@@ -204,7 +204,7 @@ pub fn attach_to(
         }
     }
 
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     old_target
 }
 
@@ -260,7 +260,7 @@ pub fn attach_to_player(
         attachment.attached_to = Some(AttachTarget::Player(target_player));
     }
 
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     old_target
 }
 
@@ -283,7 +283,7 @@ pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option
     if let Some(attachment) = state.objects.get_mut(&attachment_id) {
         attachment.attached_to = None;
     }
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     Some(old_target)
 }
 
