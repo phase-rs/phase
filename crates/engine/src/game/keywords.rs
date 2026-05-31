@@ -723,6 +723,7 @@ mod tests {
             ("fungi", "Fungus"),
             ("pegasus", "Pegasus"),
             ("pegasi", "Pegasus"),
+            ("pegasuses", "Pegasus"),
         ] {
             let mut protected = make_obj();
             protected
