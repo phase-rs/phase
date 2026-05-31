@@ -3531,14 +3531,33 @@ fn damage_target_opponent_or_permanents() -> DamageTargetFilter {
     }
 }
 
+fn damage_target_source_chosen_player_or_permanents() -> DamageTargetFilter {
+    DamageTargetFilter::PlayerOrPermanentsControlledBy {
+        player: DamageTargetPlayerScope::SourceChosenPlayer,
+    }
+}
+
 /// Nom combinator for damage target phrases. Most specific tags first.
 fn parse_damage_target_phrase(
     input: &str,
 ) -> nom::IResult<&str, DamageTargetFilter, OracleError<'_>> {
     alt((
         value(
+            damage_target_source_chosen_player_or_permanents(),
+            alt((
+                tag("to the chosen player or a permanent they control"),
+                tag("to the chosen player or a permanent the chosen player controls"),
+            )),
+        ),
+        value(
             damage_target_opponent_or_permanents(),
             tag("to an opponent or a permanent an opponent controls"),
+        ),
+        value(
+            DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::SourceChosenPlayer,
+            },
+            tag("to the chosen player"),
         ),
         value(
             DamageTargetFilter::CreatureOnly,

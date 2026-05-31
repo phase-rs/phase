@@ -393,6 +393,13 @@ pub fn activate_mana_ability(
         .objects
         .get(&source_id)
         .ok_or_else(|| EngineError::InvalidAction("Mana ability source not found".to_string()))?;
+    // CR 702.26b: Phased-out permanents are treated as though they do not
+    // exist, so they cannot activate abilities.
+    if source.is_phased_out_permanent() {
+        return Err(EngineError::ActionNotAllowed(
+            "Phased-out permanents cannot activate abilities (CR 702.26b)".to_string(),
+        ));
+    }
     if source.controller != player {
         return Err(EngineError::NotYourPriority);
     }
@@ -901,6 +908,11 @@ fn mana_ability_ready_without_simulation(
     let Some(obj) = state.objects.get(&source_id) else {
         return false;
     };
+    // CR 702.26b: Phased-out permanents are treated as though they do not
+    // exist, so they cannot activate abilities.
+    if obj.is_phased_out_permanent() {
+        return false;
+    }
     // CR 701.35a: Detained permanents' activated abilities can't be activated.
     if !obj.detained_by.is_empty() {
         return false;
@@ -1930,9 +1942,6 @@ fn batch_eligible_siblings(
             let obj = state.objects.get(&id)?;
             (id != exclude
                 && obj.controller == player
-                // CR 702.26b: Phased-out permanents are treated as though they
-                // do not exist and cannot contribute batch mana activations.
-                && !obj.is_phased_out()
                 && obj.abilities.iter().enumerate().any(|(index, ability)| {
                     ability == ability_def
                         && mana_ability_ready_without_simulation(
@@ -3692,6 +3701,24 @@ mod tests {
         assert!(
             !siblings.contains(&phased),
             "phased-out mana sources must not batch (CR 702.26b)"
+        );
+        assert!(
+            !can_activate_mana_ability_now(&state, PlayerId(0), phased, 0, &def),
+            "phased-out mana sources must fail the readiness gate (CR 702.26b)"
+        );
+        let rejected = activate_mana_ability(
+            &mut state,
+            phased,
+            PlayerId(0),
+            0,
+            &def,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        );
+        assert!(
+            matches!(rejected, Err(EngineError::ActionNotAllowed(_))),
+            "phased-out mana sources must fail executor activation (CR 702.26b)"
         );
     }
 

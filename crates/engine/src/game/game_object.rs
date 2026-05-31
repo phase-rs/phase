@@ -944,6 +944,7 @@ impl GameObject {
             supertypes: self.card_types.supertypes.clone(),
             keywords: self.keywords.clone(),
             colors: self.color.clone(),
+            chosen_attributes: self.chosen_attributes.clone(),
             counters: self.counters.clone(),
         }
     }
@@ -1076,6 +1077,12 @@ impl GameObject {
     /// though it doesn't exist for almost all rules queries).
     pub fn is_phased_out(&self) -> bool {
         self.phase_status.is_phased_out()
+    }
+
+    /// CR 702.26b: Only phased-out permanents on the battlefield are treated
+    /// as though they do not exist.
+    pub fn is_phased_out_permanent(&self) -> bool {
+        self.zone == Zone::Battlefield && self.is_phased_out()
     }
 
     pub fn has_keyword_kind(&self, kind: KeywordKind) -> bool {

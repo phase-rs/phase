@@ -80,6 +80,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
@@ -257,6 +258,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
@@ -953,6 +955,8 @@ fn filter_inner_for_object(
         TargetFilter::Controller => false, // Controller is a player, not an object
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
+        // CR 607.2d + CR 608.2c: SourceChosenPlayer is a player reference, not an object.
+        TargetFilter::SourceChosenPlayer => false,
         TargetFilter::ScopedPlayer => false, // ScopedPlayer is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
         TargetFilter::SourceOrPaired => state
@@ -1269,6 +1273,8 @@ fn zone_change_filter_inner(
         TargetFilter::Controller => false,
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
+        // CR 607.2d + CR 608.2c: SourceChosenPlayer is a player reference, not an object.
+        TargetFilter::SourceChosenPlayer => false,
         TargetFilter::ScopedPlayer => false,
         TargetFilter::SelfRef => record.object_id == source_id,
         TargetFilter::SourceOrPaired => false,
@@ -1636,6 +1642,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
@@ -1868,6 +1875,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
@@ -2703,12 +2711,15 @@ fn matches_filter_prop(
         FilterProp::NotColor { color } => !obj.color.contains(color),
         // CR 205.4a: Object does NOT have this supertype.
         FilterProp::NotSupertype { value } => !obj.card_types.supertypes.contains(value),
+        // CR 205.3e + CR 205.3m + CR 702.73a: A chosen creature type matches
+        // any listed subtype, and changeling objects have every creature type.
         FilterProp::IsChosenCreatureType => match source.chosen_creature_type {
-            Some(chosen) => obj
-                .card_types
-                .subtypes
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(chosen)),
+            Some(chosen) => subtype_matches_with_changeling(
+                chosen,
+                &obj.card_types.subtypes,
+                &obj.keywords,
+                &state.all_creature_types,
+            ),
             None => false,
         },
         // CR 205.3m: Object's creature type ties for highest count
@@ -3036,12 +3047,15 @@ fn zone_change_record_matches_property(
                 crate::game::quantity::triggering_event_player(state).is_some_and(|pid| pid == record.owner)
             }
         },
-        // CR 701.12: Source's chosen creature type applied to the snapshot subtypes.
+        // CR 205.3e + CR 205.3m + CR 702.73a: Source's chosen creature type
+        // applied to the snapshot subtypes, including changeling snapshots.
         FilterProp::IsChosenCreatureType => source.chosen_creature_type.is_some_and(|chosen| {
-            record
-                .subtypes
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(chosen))
+            subtype_matches_with_changeling(
+                chosen,
+                &record.subtypes,
+                &record.keywords,
+                &state.all_creature_types,
+            )
         }),
         FilterProp::MostPrevalentCreatureTypeIn { .. } => false,
         // CR 509.1b: Power comparison against the live source.
@@ -4657,7 +4671,7 @@ mod tests {
             .unwrap()
             .card_types
             .subtypes
-            .push("Elf".to_string());
+            .extend(["Elf".to_string(), "Warrior".to_string()]);
 
         let goblin = add_creature(&mut state, PlayerId(0), "Goblin");
         state
@@ -6843,6 +6857,7 @@ mod tests {
             supertypes: vec![],
             keywords: vec![],
             colors: vec![],
+            chosen_attributes: Vec::new(),
             counters: Default::default(),
         };
         let filter =
@@ -6884,6 +6899,7 @@ mod tests {
             supertypes: vec![],
             keywords: vec![],
             colors: vec![],
+            chosen_attributes: Vec::new(),
             counters: Default::default(),
         };
         let filter =
@@ -7712,6 +7728,7 @@ mod tests {
             supertypes: vec![],
             keywords: vec![],
             colors: vec![],
+            chosen_attributes: Vec::new(),
             counters: HashMap::new(),
         };
         let land_lki = LKISnapshot {
@@ -7728,6 +7745,7 @@ mod tests {
             supertypes: vec![],
             keywords: vec![],
             colors: vec![],
+            chosen_attributes: Vec::new(),
             counters: HashMap::new(),
         };
 
@@ -7870,6 +7888,7 @@ mod tests {
                 keywords: vec![],
                 colors: vec![],
                 counters: Default::default(),
+                chosen_attributes: vec![],
             },
         );
 
@@ -7936,6 +7955,7 @@ mod tests {
                 keywords: vec![],
                 colors: vec![],
                 counters: Default::default(),
+                chosen_attributes: vec![],
             },
         );
 

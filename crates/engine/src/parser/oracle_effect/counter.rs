@@ -1311,6 +1311,76 @@ mod tests {
         );
     }
 
+    /// CR 122.1 + CR 115.1d: Omo, Queen of Vesuva's trigger effect —
+    /// "put an everything counter on each of up to one target land and up to
+    /// one target creature." Must produce TWO PutCounter siblings: the primary
+    /// (land target, up to one) and a chained sub_ability (creature target, up
+    /// to one), each optional. Neither may be `Unimplemented`.
+    #[test]
+    fn omo_dual_target_put_counter_emits_two_siblings() {
+        let def = super::super::parse_effect_chain(
+            "Put an everything counter on each of up to one target land and up to one target creature.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+
+        // "up to one" encodes optional targeting as a MultiTargetSpec with
+        // min == 0 (CR 601.2c). The parsed clauses carry it via `multi_target`.
+        let is_optional = |spec: &Option<MultiTargetSpec>| {
+            spec.as_ref()
+                .is_some_and(|s| matches!(s.min, QuantityExpr::Fixed { value: 0 }))
+        };
+
+        // Primary clause: land target, up to one, optional.
+        let Effect::PutCounter {
+            ref counter_type,
+            target: ref land_target,
+            ..
+        } = *def.effect
+        else {
+            panic!("expected primary PutCounter, got {:?}", def.effect);
+        };
+        assert_eq!(
+            *counter_type,
+            CounterType::Generic("everything".to_string())
+        );
+        assert!(matches!(land_target, TargetFilter::Typed(_)));
+        assert!(
+            is_optional(&def.multi_target),
+            "primary land target must be optional (up to one)"
+        );
+
+        // Second sibling: creature target, up to one, optional.
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected a second PutCounter sub_ability");
+        let Effect::PutCounter {
+            counter_type: ref sub_counter,
+            target: ref creature_target,
+            ..
+        } = *sub.effect
+        else {
+            panic!(
+                "expected second PutCounter sub_ability, got {:?}",
+                sub.effect
+            );
+        };
+        assert_eq!(
+            *sub_counter,
+            CounterType::Generic("everything".to_string()),
+            "second sibling reuses the same counter type"
+        );
+        assert!(matches!(creature_target, TargetFilter::Typed(_)));
+        assert!(
+            is_optional(&sub.multi_target),
+            "second creature target must be optional (up to one)"
+        );
+
+        // Neither clause may be Unimplemented.
+        assert!(!matches!(*def.effect, Effect::Unimplemented { .. }));
+        assert!(!matches!(*sub.effect, Effect::Unimplemented { .. }));
+    }
+
     /// Sibling coverage: same dynamic-count phrase shape with a different
     /// quantity reference ("equal to the number of cards in your hand").
     /// Confirms the building block generalizes beyond just SelfPower.

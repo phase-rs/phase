@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ContinuousModification, CostPaidObjectSnapshot, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, ModalChoice, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
-    TriggerCondition,
+    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, DelayedTriggerCondition,
+    Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant, ModalChoice,
+    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
+    TargetFilter, TargetRef, TriggerCondition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -168,6 +168,11 @@ pub struct LKISnapshot {
     /// CR 400.7: Colors as they last existed in the public zone.
     #[serde(default)]
     pub colors: Vec<ManaColor>,
+    /// CR 400.7: Persisted choices as they last existed in the public zone.
+    /// Source-linked abilities use this after the source leaves before a
+    /// linked "the chosen player" instruction resolves.
+    #[serde(default)]
+    pub chosen_attributes: Vec<ChosenAttribute>,
     /// CR 400.7: Counters as they last existed on the object.
     /// Used by `TriggerCondition::HadCounters` for "if it had counters on it" patterns.
     #[serde(default)]
@@ -4152,6 +4157,12 @@ pub struct GameState {
     #[serde(default)]
     pub commander_cast_count: HashMap<ObjectId, u32>,
 
+    /// Owner stamped when a commander cast from the command zone is recorded.
+    /// CR 903.8: `commander_casts_from_command_zone` must count committed casts
+    /// even when the recorded `ObjectId` no longer has `is_commander` set.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub commander_cast_owners: HashMap<ObjectId, PlayerId>,
+
     /// CR 903.9a: Commanders whose owner declined the zone-return choice this
     /// SBA cycle. Cleared when the commander changes zones again (giving the
     /// owner a fresh choice opportunity).
@@ -5096,6 +5107,7 @@ impl GameState {
             next_tracked_set_id: 1,
             chain_tracked_set_id: None,
             commander_cast_count: HashMap::new(),
+            commander_cast_owners: HashMap::new(),
             extra_turns: Vec::new(),
             turns_to_skip: vec![0; player_count as usize],
             steps_to_skip: vec![HashMap::new(); player_count as usize],
@@ -5387,6 +5399,7 @@ impl PartialEq for GameState {
             && self.next_tracked_set_id == other.next_tracked_set_id
             && self.chain_tracked_set_id == other.chain_tracked_set_id
             && self.commander_cast_count == other.commander_cast_count
+            && self.commander_cast_owners == other.commander_cast_owners
             && self.commander_declined_zone_return == other.commander_declined_zone_return
             && self.extra_turns == other.extra_turns
             && self.turns_to_skip == other.turns_to_skip

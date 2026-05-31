@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use draft_core::types::{DeckAddableCardPolicy, DeckAddableCards, DraftCardInstance};
 use engine::database::CardDatabase;
+use engine::types::mana::ManaType;
 use phase_ai::config::AiDifficulty;
-use phase_ai::draft_eval;
+use phase_ai::{draft_eval, mana_colors};
 
 /// A suggested Limited deck: spell names + land distribution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,11 +94,88 @@ pub fn suggest_deck(
     // (e.g. 23 spells + 17 lands in `main_deck`, then +17 lands again = 57).
     let spell_names: Vec<String> = spells.iter().map(|c| c.name.clone()).collect();
     let land_total = min_deck_size.saturating_sub(spell_names.len()) as u8;
-    let lands = suggest_addable_cards(&spell_names, pool, land_total, addable_cards);
+
+    // Admit on-color drafted nonbasic fixing lands into the manabase — only under
+    // the standard basic-land fill (a custom addable-card policy supplies its own
+    // lands, so injecting nonbasics there would be wrong). Each admitted nonbasic
+    // replaces exactly one basic, so the deck total is unchanged.
+    let nonbasic_lands = if matches!(
+        addable_cards.policy,
+        DeckAddableCardPolicy::StandardBasics | DeckAddableCardPolicy::StandardBasicsPlusCustom
+    ) {
+        select_fixing_lands(pool, &best_colors, card_db, land_total)
+    } else {
+        HashMap::new()
+    };
+    let nonbasic_count: u8 = nonbasic_lands.values().copied().sum();
+    let basics_total = land_total.saturating_sub(nonbasic_count);
+    let mut lands = suggest_addable_cards(&spell_names, pool, basics_total, addable_cards);
+    for (name, count) in nonbasic_lands {
+        *lands.entry(name).or_insert(0) += count;
+    }
 
     SuggestedDeck {
         main_deck: spell_names,
         lands,
+    }
+}
+
+/// On-color drafted nonbasic fixing lands as a `name -> copy-count` map, capped at
+/// `cap` lands total. A fixing land is a drafted nonbasic that taps for 2+ colors
+/// (via basic land subtypes and/or `Effect::Mana` abilities — shared with draft
+/// pick value through [`mana_colors::land_produced_color_types`]) including at
+/// least one of the deck's colors. Each admitted copy is a real drafted entry, so
+/// copy counts never exceed what the drafter owns. Empty without a card database
+/// (produced colors can't be read from the printed type line alone).
+fn select_fixing_lands(
+    pool: &[DraftCardInstance],
+    best_colors: &[&str],
+    card_db: Option<&CardDatabase>,
+    cap: u8,
+) -> HashMap<String, u8> {
+    let Some(db) = card_db else {
+        return HashMap::new();
+    };
+    let mut result: HashMap<String, u8> = HashMap::new();
+    let mut admitted: u8 = 0;
+    for card in pool {
+        if admitted >= cap {
+            break;
+        }
+        if !is_land(card) {
+            continue;
+        }
+        let Some(face) = db.get_face_by_name(&card.name) else {
+            continue;
+        };
+        let colors =
+            mana_colors::land_produced_color_types(&face.card_type.subtypes, &face.abilities);
+        if colors.len() < 2 {
+            continue;
+        }
+        let on_color = colors
+            .iter()
+            .filter_map(|&t| mana_type_to_color_str(t))
+            .any(|s| best_colors.contains(&s));
+        if !on_color {
+            continue;
+        }
+        *result.entry(card.name.clone()).or_insert(0) += 1;
+        admitted += 1;
+    }
+    result
+}
+
+/// Map a produced `ManaType` to the "W/U/B/R/G" key the color logic uses;
+/// colorless has no color key.
+fn mana_type_to_color_str(t: ManaType) -> Option<&'static str> {
+    match t {
+        ManaType::White => Some("W"),
+        ManaType::Blue => Some("U"),
+        ManaType::Black => Some("B"),
+        ManaType::Red => Some("R"),
+        ManaType::Green => Some("G"),
+        ManaType::Colorless => None,
     }
 }
 
@@ -326,5 +404,124 @@ fn color_to_land(color: &str) -> &'static str {
         "R" => "Mountain",
         "G" => "Forest",
         _ => "Wastes",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn instance(name: &str, colors: &[&str], cmc: u8, type_line: &str) -> DraftCardInstance {
+        DraftCardInstance {
+            instance_id: format!("id-{name}"),
+            name: name.to_string(),
+            set_code: "TST".to_string(),
+            collector_number: "1".to_string(),
+            rarity: "common".to_string(),
+            colors: colors.iter().map(|s| s.to_string()).collect(),
+            cmc,
+            type_line: type_line.to_string(),
+        }
+    }
+
+    /// Card DB with four W/U creatures plus an on-color (Plains/Island) and an
+    /// off-color (Swamp/Mountain) typed dual. The duals carry no `Effect::Mana`;
+    /// their produced colors come from the basic land subtypes (true-dual shape).
+    fn fixture_db() -> CardDatabase {
+        let creature = |name: &str| {
+            format!(
+                r#""{name}": {{ "name": "{name}", "mana_cost": {{ "type": "NoCost" }},
+                "card_type": {{ "supertypes": [], "core_types": ["Creature"], "subtypes": [] }},
+                "power": "2", "toughness": "2", "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [] }}"#
+            )
+        };
+        let dual = |name: &str, a: &str, b: &str| {
+            format!(
+                r#""{name}": {{ "name": "{name}", "mana_cost": {{ "type": "NoCost" }},
+                "card_type": {{ "supertypes": [], "core_types": ["Land"], "subtypes": ["{a}", "{b}"] }},
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [], "keywords": [] }}"#
+            )
+        };
+        let json = format!(
+            "{{ {}, {}, {}, {}, {}, {} }}",
+            creature("White Bear"),
+            creature("White Knight"),
+            creature("Blue Bird"),
+            creature("Blue Wizard"),
+            dual("On Color Dual", "Plains", "Island"),
+            dual("Off Color Dual", "Swamp", "Mountain"),
+        );
+        CardDatabase::from_json_str(&json).unwrap()
+    }
+
+    fn wu_pool() -> Vec<DraftCardInstance> {
+        vec![
+            instance("White Bear", &["W"], 2, "Creature — Bear"),
+            instance("White Knight", &["W"], 2, "Creature — Knight"),
+            instance("Blue Bird", &["U"], 1, "Creature — Bird"),
+            instance("Blue Wizard", &["U"], 3, "Creature — Wizard"),
+            instance("On Color Dual", &[], 0, "Land — Plains Island"),
+            instance("Off Color Dual", &[], 0, "Land — Swamp Mountain"),
+        ]
+    }
+
+    #[test]
+    fn admits_on_color_fixing_land_and_rejects_off_color() {
+        let db = fixture_db();
+        let deck = suggest_deck(
+            &wu_pool(),
+            AiDifficulty::Medium,
+            Some(&db),
+            8,
+            &DeckAddableCards::standard_basics(),
+        );
+        assert!(
+            deck.lands.contains_key("On Color Dual"),
+            "on-color (W/U) fixing land should be admitted to the manabase, got {:?}",
+            deck.lands
+        );
+        assert!(
+            !deck.lands.contains_key("Off Color Dual"),
+            "off-color (B/R) fixing land must not be admitted, got {:?}",
+            deck.lands
+        );
+    }
+
+    #[test]
+    fn admitting_nonbasics_keeps_deck_total_exact() {
+        let db = fixture_db();
+        let deck = suggest_deck(
+            &wu_pool(),
+            AiDifficulty::Medium,
+            Some(&db),
+            8,
+            &DeckAddableCards::standard_basics(),
+        );
+        let land_count: u32 = deck.lands.values().map(|&c| c as u32).sum();
+        // Each admitted nonbasic replaces one basic — the total never drifts.
+        assert_eq!(
+            deck.main_deck.len() as u32 + land_count,
+            8,
+            "spells + lands must equal min_deck_size; lands = {:?}",
+            deck.lands
+        );
+    }
+
+    #[test]
+    fn no_card_db_admits_no_nonbasics() {
+        // Without a card DB the produced colors are unknown, so no nonbasic is
+        // admitted (the manabase falls back to basics only).
+        let deck = suggest_deck(
+            &wu_pool(),
+            AiDifficulty::Medium,
+            None,
+            8,
+            &DeckAddableCards::standard_basics(),
+        );
+        assert!(!deck.lands.contains_key("On Color Dual"));
     }
 }
