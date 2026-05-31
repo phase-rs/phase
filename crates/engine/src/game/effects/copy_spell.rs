@@ -330,18 +330,16 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> Option<Sta
 fn triggering_spell_stack_entry(state: &GameState) -> Option<StackEntry> {
     let event = state.current_trigger_event.as_ref()?;
     let object_id = crate::game::targeting::extract_source_from_event(event)?;
-    state
-        .stack
-        .iter()
-        .find(|entry| entry.id == object_id)
-        .cloned()
-        .or_else(|| {
-            state
-                .stack
-                .iter()
-                .find(|entry| entry.source_id == object_id)
-                .cloned()
-        })
+    let mut fallback = None;
+    for entry in &state.stack {
+        if entry.id == object_id {
+            return Some(entry.clone());
+        }
+        if fallback.is_none() && entry.source_id == object_id {
+            fallback = Some(entry.clone());
+        }
+    }
+    fallback
 }
 
 fn stack_entry_cant_be_copied(state: &GameState, entry: &StackEntry) -> bool {
@@ -938,7 +936,11 @@ mod tests {
 
         resolve(&mut state, &copy_ability, &mut events).unwrap();
 
-        assert_eq!(state.stack.len(), 3, "cast spell, rhystic trigger, and copy");
+        assert_eq!(
+            state.stack.len(),
+            3,
+            "cast spell, rhystic trigger, and copy"
+        );
         let copy_entry = state.stack.back().unwrap();
         assert!(
             copy_entry
