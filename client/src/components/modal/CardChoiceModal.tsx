@@ -16,6 +16,7 @@ import type {
   ObjectId,
   OutsideGameChoiceEntry,
   OutsideGameSelection,
+  PlayerId,
   TargetFilter,
   WaitingFor,
   Zone,
@@ -49,7 +50,6 @@ type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
 type DrawnThisTurnTopdeckChoice = Extract<WaitingFor, { type: "DrawnThisTurnTopdeckChoice" }>;
 type PayCost = Extract<WaitingFor, { type: "PayCost" }>;
 type MultiTargetSelection = Extract<WaitingFor, { type: "MultiTargetSelection" }>;
-type CastOffer = Extract<WaitingFor, { type: "CastOffer" }>;
 type PayManaAbilityMana = Extract<WaitingFor, { type: "PayManaAbilityMana" }>;
 type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
 type CollectEvidenceChoice = Extract<WaitingFor, { type: "CollectEvidenceChoice" }>;
@@ -222,7 +222,7 @@ export function CardChoiceModal() {
     case "CastOffer":
       if (!canActForWaitingState) return null;
       if (waitingFor.data.kind.type === "Paradigm") {
-        return <ParadigmCastOfferModal data={waitingFor.data} />;
+        return <ParadigmCastOfferModal player={waitingFor.data.player} offers={waitingFor.data.kind.offers} />;
       }
       return null;
     case "PayManaAbilityMana":
@@ -1672,9 +1672,10 @@ function MultiTargetSelectionModal({ data }: { data: MultiTargetSelection["data"
 // ── Paradigm Cast Offer Modal ─────────────────────────────────────────────────
 
 function ParadigmCastOfferModal({
-  data,
+  offers,
 }: {
-  data: CastOffer["data"] & { kind: { type: "Paradigm"; offers: ObjectId[] } };
+  player: PlayerId;
+  offers: ObjectId[];
 }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
@@ -1705,7 +1706,7 @@ function ParadigmCastOfferModal({
       }
     >
       <ScrollableCardStrip>
-        {data.kind.offers.map((id, index) => {
+        {offers.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           return (
