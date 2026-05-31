@@ -139,8 +139,20 @@ export function createAIController(config: AIControllerConfig): AIController {
       if (waitingPlayerId === PLAYER_ID) return;
     }
 
+    // Stack-pressure deferral applies ONLY to discretionary Priority decisions.
+    // Under pressure the batch-resolve path (gameLoopController → dispatchResolveAll
+    // → engine `resolve_all`) drains the stack by passing priority, so the AI
+    // controller steps aside to avoid racing it. But `resolve_all` is a
+    // priority-only loop: it breaks the instant `waiting_for` leaves Priority
+    // (engine-wasm/src/lib.rs) and hands any mandatory mid-resolution choice
+    // (EffectZoneChoice, ChooseManaColor, scry/surveil, discard, resolution
+    // targeting, …) back to the frontend. Those choices belong to THIS controller
+    // and are exactly what lets the stack drain. Deferring them on stack size
+    // deadlocks the game: stack ≥ 10 → AI won't choose → stack never shrinks →
+    // batch path never restarts (it only fires on Priority). So skip only when
+    // the AI's pending decision is Priority itself.
     const stackLen = state.stack?.length ?? 0;
-    if (stackLen >= STACK_PRESSURE_ELEVATED) return;
+    if (waitingFor.type === "Priority" && stackLen >= STACK_PRESSURE_ELEVATED) return;
 
     // Reset failure counters when the WaitingFor state changes (type or player).
     // `consecutiveFailures` gates normal→fallback escalation; `totalFailures`
