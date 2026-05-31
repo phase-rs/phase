@@ -16,7 +16,6 @@ import type {
   ObjectId,
   OutsideGameChoiceEntry,
   OutsideGameSelection,
-  PlayerId,
   TargetFilter,
   WaitingFor,
   Zone,
@@ -222,7 +221,7 @@ export function CardChoiceModal() {
     case "CastOffer":
       if (!canActForWaitingState) return null;
       if (waitingFor.data.kind.type === "Paradigm") {
-        return <ParadigmCastOfferModal player={waitingFor.data.player} offers={waitingFor.data.kind.offers} />;
+        return <ParadigmCastOfferModal offers={waitingFor.data.kind.offers} />;
       }
       return null;
     case "PayManaAbilityMana":
@@ -1674,7 +1673,6 @@ function MultiTargetSelectionModal({ data }: { data: MultiTargetSelection["data"
 function ParadigmCastOfferModal({
   offers,
 }: {
-  player: PlayerId;
   offers: ObjectId[];
 }) {
   const { t } = useTranslation("game");
