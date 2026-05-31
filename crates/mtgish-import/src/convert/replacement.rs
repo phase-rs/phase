@@ -3215,9 +3215,9 @@ mod tests {
         use crate::schema::types::{Cards, Players, ReplacableEventWouldPutIntoGraveyard as E};
 
         let event = E::WouldPutACardInAPlayersGraveyardFromAnywhere(
-            Box::new(Cards::ControlledByAPlayer(Box::new(Players::Other(Box::new(
-                crate::schema::types::Player::You,
-            ))))),
+            Box::new(Cards::ControlledByAPlayer(Box::new(Players::Other(
+                Box::new(crate::schema::types::Player::You),
+            )))),
             Box::new(Players::Opponent),
         );
         let defs = convert_replace_would_put_into_graveyard(
