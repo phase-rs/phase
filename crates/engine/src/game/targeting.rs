@@ -573,7 +573,12 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         }
         TargetFilter::ParentTarget => {
             let event = event?;
-            blocked_attacker_from_event(event, source_id).map(TargetRef::Object)
+            // CR 603.7c: On a spell-cast trigger, "that spell" / "copy it"
+            // (Mendicant Core, Guidelight) is the spell that caused the trigger,
+            // not a player-chosen target or `stack.last()`.
+            extract_source_from_event(event)
+                .map(TargetRef::Object)
+                .or_else(|| blocked_attacker_from_event(event, source_id).map(TargetRef::Object))
         }
         // CR 506.3d: "defending player" — look up from combat state using the source creature.
         TargetFilter::DefendingPlayer => {

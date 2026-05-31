@@ -2625,6 +2625,8 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
             | TargetFilter::TriggeringSource
             | TargetFilter::DefendingPlayer
             | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::StackSpell
     ) {
         Some(filter)
     } else {
