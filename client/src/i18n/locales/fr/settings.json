@@ -49,6 +49,17 @@
     "showKeywords": "Afficher les mots-clés sur les cartes du champ de bataille",
     "opponentHoverPreview": "Aperçu au survol de l'adversaire",
     "showOpponentBoard": "Afficher le plateau de l'adversaire au survol du HUD",
+    "cardPreview": "Aperçu de la carte au survol",
+    "cardPreviewOptions": {
+      "follow": "Suivre le curseur",
+      "side": "Ancrer sur le côté",
+      "shift": "Maintenir Maj"
+    },
+    "cardPreviewHint": {
+      "follow": "L'aperçu agrandi suit votre curseur lorsque vous survolez une carte.",
+      "side": "L'aperçu s'ancre au bord de l'écran afin de ne jamais masquer le plateau.",
+      "shift": "L'aperçu n'apparaît que tant que vous maintenez la touche Maj, comme dans Tabletop Simulator."
+    },
     "cardArtPreferences": "Préférences d'illustration des cartes",
     "clearArtOverrides_one": "Effacer tous les remplacements d'illustration ({{count}})",
     "clearArtOverrides_other": "Effacer tous les remplacements d'illustration ({{count}})",

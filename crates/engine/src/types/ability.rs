@@ -1675,29 +1675,95 @@ pub enum DelayedTriggerCondition {
 /// CR 115.1d: "Any number" means zero or more.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiTargetSpec {
-    pub min: usize,
+    #[serde(
+        serialize_with = "serialize_multi_target_min",
+        deserialize_with = "deserialize_multi_target_min"
+    )]
+    pub min: QuantityExpr,
     /// `None` means "any number" (unlimited). CR 115.1d.
     pub max: Option<QuantityExpr>,
 }
 
 impl MultiTargetSpec {
     pub fn fixed(min: usize, max: usize) -> Self {
-        Self::bounded(min, QuantityExpr::Fixed { value: max as i32 })
+        Self::bounded_expr(
+            QuantityExpr::Fixed { value: min as i32 },
+            QuantityExpr::Fixed { value: max as i32 },
+        )
     }
 
     pub fn up_to(max: QuantityExpr) -> Self {
-        Self::bounded(0, max)
+        Self::bounded_expr(QuantityExpr::Fixed { value: 0 }, max)
+    }
+
+    pub fn exact(count: QuantityExpr) -> Self {
+        Self::bounded_expr(count.clone(), count)
     }
 
     pub fn unlimited(min: usize) -> Self {
-        Self { min, max: None }
+        Self {
+            min: QuantityExpr::Fixed { value: min as i32 },
+            max: None,
+        }
     }
 
     pub fn bounded(min: usize, max: QuantityExpr) -> Self {
+        Self::bounded_expr(QuantityExpr::Fixed { value: min as i32 }, max)
+    }
+
+    pub fn bounded_expr(min: QuantityExpr, max: QuantityExpr) -> Self {
         Self {
             min,
             max: Some(max),
         }
+    }
+
+    pub fn min_is_fixed_zero(&self) -> bool {
+        matches!(self.min, QuantityExpr::Fixed { value: 0 })
+    }
+
+    pub fn fixed_min_usize(&self) -> Option<usize> {
+        match self.min {
+            QuantityExpr::Fixed { value } if value >= 0 => Some(value as usize),
+            _ => None,
+        }
+    }
+
+    pub fn map_quantities<F>(&mut self, mut map: F)
+    where
+        F: FnMut(QuantityExpr) -> QuantityExpr,
+    {
+        self.min = map(self.min.clone());
+        if let Some(max) = self.max.take() {
+            self.max = Some(map(max));
+        }
+    }
+}
+
+fn serialize_multi_target_min<S>(min: &QuantityExpr, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match min {
+        QuantityExpr::Fixed { value } => serializer.serialize_i32(*value),
+        other => other.serialize(serializer),
+    }
+}
+
+fn deserialize_multi_target_min<'de, D>(deserializer: D) -> Result<QuantityExpr, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum MultiTargetMin {
+        Fixed(i32),
+        Expr(QuantityExpr),
+    }
+
+    match MultiTargetMin::deserialize(deserializer)? {
+        MultiTargetMin::Fixed(value) => Ok(QuantityExpr::Fixed { value }),
+        MultiTargetMin::Expr(expr) => Ok(expr),
     }
 }
 
@@ -3277,19 +3343,6 @@ pub enum PlayerRelation {
     All,
 }
 
-/// CR 109.4: Whether a player's controlled-permanent predicate is satisfied by
-/// the presence or the absence of a matching permanent. A typed two-variant
-/// enum — never a bool — so `PlayerFilter::ControlsPermanent` reads as
-/// self-documenting at every match site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ControlPresence {
-    /// The player controls at least one permanent matching the filter.
-    Controls,
-    /// The player controls no permanent matching the filter.
-    ControlsNone,
-}
-
 /// A filter matching players by game-state conditions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3306,12 +3359,25 @@ pub enum PlayerFilter {
     OpponentLostLife,
     /// Each opponent who gained life this turn (life_gained_this_turn > 0).
     OpponentGainedLife,
-    /// CR 120.1 + CR 510.1: Each opponent who was dealt combat damage this turn.
-    /// Resolved against `state.damage_dealt_this_turn` records whose
-    /// `is_combat = true` and `target = Player(p.id)`. Used by partner-quality
-    /// "for each opponent that was dealt combat damage this turn" cards
-    /// (Tymna the Weaver).
-    OpponentDealtCombatDamage,
+    /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was dealt
+    /// combat damage this turn, optionally restricted to damage from a source
+    /// matching `source`. Resolved against `state.damage_dealt_this_turn`
+    /// records whose `is_combat = true` and `target = Player(p.id)`. `source =
+    /// None` counts any combat-damage source (Tymna the Weaver); `source =
+    /// Some(f)` (CR 120.9) counts only opponents dealt combat damage by a source
+    /// matching `f` — matched against each record's CR 608.2i look-back source
+    /// snapshot, so the source's qualities are checked as they were at damage
+    /// time (Estinien Varlineau: "by ~ or a Dragon").
+    OpponentDealtCombatDamage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<Box<TargetFilter>>,
+    },
+    /// CR 508.6: A player has "attacked [a player]" if they declared one or more
+    /// creatures attacking that player. Each opponent the controller attacked this
+    /// turn, resolved against `state.attacked_defenders_this_turn[controller]`.
+    /// Used by "the number of opponents you attacked this turn" (Militant Angel).
+    /// (CR 508.1b: declare-attackers announcement; CR 506.2: active = attacking player.)
+    OpponentAttackedThisTurn,
     /// All players.
     All,
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
@@ -3365,15 +3431,55 @@ pub enum PlayerFilter {
     /// `ControllerRef::ParentTargetController`. Resolved via
     /// `ability_utils::parent_target_controller`.
     ParentObjectTargetController,
-    /// CR 109.4 + CR 700.1: Each player satisfying `relation` who controls
-    /// (`presence = Controls`) or does not control (`presence = ControlsNone`)
-    /// at least one permanent matching `filter`. Covers "each opponent who
-    /// controls an artifact", "each player who doesn't control a creature",
-    /// "each opponent who doesn't control an Elf" (Thornbow Archer), etc.
-    ControlsPermanent {
+    /// CR 109.4 + CR 109.5: Each player satisfying `relation` whose count of
+    /// controlled permanents matching `filter` compares to `count` under
+    /// `comparator`. The control relationship is enforced per-candidate at
+    /// runtime (`obj.controller == candidate`), so `filter` carries no
+    /// controller axis; `count`'s own `ObjectCount` may carry a `You`
+    /// controller (CR 109.5 — "you" is the effect controller) for comparative
+    /// "more X than you" phrasings.
+    ///
+    /// Covers the full presence/comparison class as a single parameterized
+    /// variant:
+    /// - "each opponent who controls an artifact" → `{ GE, Fixed(1) }`
+    ///   (at least one matching permanent).
+    /// - "each opponent who doesn't control an Elf" (Thornbow Archer) →
+    ///   `{ EQ, Fixed(0) }` (no matching permanent).
+    /// - "each player who controls more creatures than you" (Heidegger) →
+    ///   `{ GT, Ref(ObjectCount { filter: <creature>.controller(You) }) }`.
+    ///
+    /// `count` is boxed to break the `QuantityExpr → QuantityRef::PlayerCount →
+    /// PlayerFilter::ControlsCount → QuantityExpr` reference cycle that would
+    /// otherwise give the enum infinite size.
+    ControlsCount {
         relation: PlayerRelation,
-        presence: ControlPresence,
         filter: TargetFilter,
+        comparator: Comparator,
+        count: Box<QuantityExpr>,
+    },
+    /// CR 402.1 (hand) / CR 119.1 (life) / CR 122.1f (poison) / CR 404.1
+    /// (graveyard): Each player satisfying `relation` whose scalar player
+    /// attribute `attr`, read PER CANDIDATE PLAYER, satisfies `comparator`
+    /// against `value`. `attr` is the per-player-scalar `QuantityRef` subset
+    /// (`HandSize` / `LifeTotal` / `GraveyardSize` / `PlayerCounter`) — read
+    /// directly off the candidate `Player` at runtime, never via the
+    /// controller-scoped quantity resolver, so its embedded `PlayerScope` /
+    /// `CountScope` carries no game-state meaning here.
+    ///
+    /// Covers "opponents who have N or more poison counters" (Glissa's
+    /// Retriever) and "your opponents with N or more cards in hand"
+    /// (Wolfcaller's Howl). `value` is the controller-relative threshold,
+    /// resolved once per evaluation (candidate-independent).
+    ///
+    /// `attr` and `value` are boxed to break the `QuantityExpr →
+    /// QuantityRef::PlayerCount → PlayerFilter::PlayerAttribute →
+    /// {QuantityRef, QuantityExpr}` reference cycle that would otherwise give
+    /// the enum infinite size.
+    PlayerAttribute {
+        relation: PlayerRelation,
+        attr: Box<QuantityRef>,
+        comparator: Comparator,
+        value: Box<QuantityExpr>,
     },
 }
 
@@ -5464,7 +5570,7 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         filter: TargetFilter,
     },
-    /// CR 702.136: Investigate — create a Clue artifact token.
+    /// CR 701.16: Investigate — create a Clue token.
     Investigate,
     /// CR 702.104a: Tribute — "As this creature enters, an opponent of your choice may
     /// put N +1/+1 counters on it." The chosen opponent (persisted on the source as
@@ -6359,6 +6465,12 @@ pub enum Effect {
         /// CR 101.4: Whether each player chooses independently or one player decides for all.
         #[serde(default)]
         chooser_scope: CategoryChooserScope,
+        /// Permanents eligible to be chosen for the category slots.
+        #[serde(default = "default_target_filter_permanent")]
+        choose_filter: TargetFilter,
+        /// Permanents in scope for the final sacrifice sweep.
+        #[serde(default = "default_target_filter_permanent")]
+        sacrifice_filter: TargetFilter,
     },
     /// CR 702.110b: Exploit — sacrifice a creature you control (optional).
     /// The controller may sacrifice any creature they control, including the exploiter itself.
@@ -6906,6 +7018,10 @@ pub enum CopyRetargetPermission {
 
 pub(crate) fn default_target_filter_any() -> TargetFilter {
     TargetFilter::Any
+}
+
+pub(crate) fn default_target_filter_permanent() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::permanent())
 }
 
 /// CR 115.1: a copy keeps the original spell's declared targets unless an
@@ -9213,6 +9329,26 @@ pub enum AbilityCondition {
     /// CR 702.x: True when the source permanent does not have the specified keyword.
     /// Inverse of keyword presence check — used by "if ~ doesn't have [keyword]" gates.
     SourceLacksKeyword { keyword: Keyword },
+    /// CR 101.3 + CR 109.5 + CR 608.2c: True when the current per-iteration
+    /// scoped player (`ResolvedAbility.scoped_player`) matches `filter`
+    /// relative to the ability's controller. Used by cross-scope decline-tail
+    /// gates where the parent's `player_scope` iterates a wider set than the
+    /// decline clause's own `PlayerFilter` (Liliana, Waker of the Dead: parent
+    /// "each player discards a card" iterates `All`, decline clause "each
+    /// opponent who can't loses 3 life" filters to `Opponent`).
+    ///
+    /// Composed with `Not{IfCurrentScopeSucceeded}` via `AbilityCondition::And`
+    /// so the body fires only on iterations where (a) the parent action failed
+    /// AND (b) the scoped player matches the decline clause's own filter.
+    ///
+    /// For same-scope decline-tails (Plaguecrafter, Entropic Battlecruiser,
+    /// Momentum Breaker — parent and decline both iterate the same set) this
+    /// conjunct is trivially true for every iteration and acts as a no-op.
+    ///
+    /// Outside a `player_scope` iteration (no `scoped_player` bound) the
+    /// condition resolves against the ability's controller — the canonical
+    /// fallback semantics for the `ScopedPlayer`/`Controller` split.
+    ScopedPlayerMatches { filter: PlayerFilter },
 }
 
 impl AbilityCondition {
@@ -9492,10 +9628,11 @@ pub enum TriggerCondition {
     /// Used to gate continuous triggers that only become active at higher class levels.
     ClassLevelGE { level: u8 },
 
-    /// "if you cast it" — zoneless cast check (unlike CastFromZone which requires a specific zone).
-    /// CR 701.57a: Used by Discover ETB triggers.
-    /// Negation ("if it wasn't cast") is expressed via `Not { Box::new(WasCast) }`.
-    WasCast,
+    /// CR 601.2 + CR 603.4: reads the ENTERING object's `cast_from_zone`, never the source.
+    WasCast {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zone: Option<Zone>,
+    },
     /// CR 305.1 + CR 603.4: Intervening/event condition for zone-change
     /// triggers whose subject must have been played as a land. Negation
     /// ("without being played") is expressed via `Not { Box::new(WasPlayed) }`.
@@ -11620,7 +11757,11 @@ impl ResolvedAbility {
     /// the same "zero targets is legal" fact, so target-slot collection must
     /// honor either.
     pub fn targeting_is_optional(&self) -> bool {
-        self.optional_targeting || self.multi_target.as_ref().is_some_and(|spec| spec.min == 0)
+        self.optional_targeting
+            || self
+                .multi_target
+                .as_ref()
+                .is_some_and(MultiTargetSpec::min_is_fixed_zero)
     }
 }
 
@@ -12251,6 +12392,32 @@ mod tests {
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
+    }
+
+    #[test]
+    fn multi_target_spec_serializes_fixed_min_compatibly_and_dynamic_min_roundtrips() {
+        let fixed = MultiTargetSpec::fixed(0, 2);
+        let fixed_json = serde_json::to_value(&fixed).unwrap();
+        assert_eq!(fixed_json["min"], serde_json::json!(0));
+        assert_eq!(
+            serde_json::from_value::<MultiTargetSpec>(fixed_json).unwrap(),
+            fixed
+        );
+
+        let dynamic = MultiTargetSpec::exact(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        let dynamic_json = serde_json::to_value(&dynamic).unwrap();
+        assert!(
+            dynamic_json["min"].is_object(),
+            "dynamic min must serialize as a QuantityExpr object"
+        );
+        assert_eq!(
+            serde_json::from_value::<MultiTargetSpec>(dynamic_json).unwrap(),
+            dynamic
+        );
     }
 
     #[test]

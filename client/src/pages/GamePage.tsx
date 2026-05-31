@@ -88,6 +88,7 @@ import { GameMenu } from "../components/chrome/GameMenu.tsx";
 import { ConcedeDialog } from "../components/multiplayer/ConcedeDialog.tsx";
 import { ConnectionToast } from "../components/multiplayer/ConnectionToast.tsx";
 import { EmoteOverlay } from "../components/multiplayer/EmoteOverlay.tsx";
+import { ResolutionProgressOverlay } from "../components/board/ResolutionProgressOverlay.tsx";
 import { LobbyProgress } from "../components/multiplayer/LobbyProgress.tsx";
 import { DisconnectChoiceDialog } from "../components/hud/DisconnectChoiceDialog.tsx";
 import { PlayerEnchantmentsDialog } from "../components/hud/PlayerEnchantmentsDialog.tsx";
@@ -778,6 +779,12 @@ function GamePageContent({
 
   const isDragging = useUiStore((s) => s.isDragging);
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
+  // Card-preview behavior preference (item: hover preview side/Shift). In
+  // "shift" mode the preview only renders while Shift is held; in "side" mode
+  // it docks to the screen edge instead of following the cursor.
+  const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode);
+  const shiftHeld = useUiStore((s) => s.shiftHeld);
+  const previewSuppressed = cardPreviewMode === "shift" && !shiftHeld;
   const inspectedObj =
     !isDragging && inspectedObjectId != null && objects
       ? (objects[inspectedObjectId] ?? null)
@@ -1278,6 +1285,7 @@ function GamePageContent({
 
       {/* Overlay layers */}
       <DebugPanel />
+      <ResolutionProgressOverlay />
 
       {viewingZone && (
         <ZoneViewer
@@ -1323,7 +1331,11 @@ function GamePageContent({
       <BlockRequirementBadges />
 
       {/* Card preview overlay */}
-      <CardPreview cardName={inspectedCardName} backFaceName={inspectedOtherFaceName} />
+      <CardPreview
+        cardName={previewSuppressed ? null : inspectedCardName}
+        backFaceName={previewSuppressed ? null : inspectedOtherFaceName}
+        dockSide={cardPreviewMode === "side"}
+      />
 
       {/* WaitingFor-driven prompt overlays (only for human player).
           Wrapped in DialogHost so any active dialog can be peeked away to
@@ -1920,7 +1932,7 @@ function MulliganBottomCardsPrompt({
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
-  const addSelectedCard = useUiStore((s) => s.addSelectedCard);
+  const cycleSelectedCard = useUiStore((s) => s.cycleSelectedCard);
   const hoverProps = useInspectHoverProps();
 
   if (!player || !objects) return null;
@@ -1988,11 +2000,7 @@ function MulliganBottomCardsPrompt({
               return (
                 <motion.button
                   key={obj.id}
-                  onClick={() => {
-                    if (!isSelected && selectedCardIds.length < count) {
-                      addSelectedCard(obj.id);
-                    }
-                  }}
+                  onClick={() => cycleSelectedCard(obj.id, count)}
                   className={`flex-shrink-0 rounded-[18px] p-1 transition hover:z-50 ${
                     isSelected
                       ? "z-40 ring-2 ring-cyan-300 shadow-[0_0_0_1px_rgba(103,232,249,0.55)] opacity-75"
@@ -2322,6 +2330,9 @@ function AbilityChoiceModal() {
     pending ? s.gameState?.objects[pending.objectId] : undefined,
   );
   const objects = useGameStore((s) => s.gameState?.objects);
+  const webSlingingCosts = useGameStore(
+    (s) => s.gameState?.derived?.web_slinging_costs,
+  );
 
   if (!pending || !obj) return null;
 
@@ -2365,6 +2376,7 @@ function AbilityChoiceModal() {
           action,
           obj,
           objects,
+          webSlingingCosts,
         );
         return { id: String(i), label, description };
       })}

@@ -81,6 +81,8 @@
     "waitTimeHours": "há {{count}}h",
     "buildMismatchTitle": "O anfitrião está na {{version}} ({{commit}}) — sua build é diferente. Atualize para sincronizar.",
     "gameFull": "Este jogo está cheio.",
+    "youAreHosting": "Você está hospedando este jogo.",
+    "hosting": "Hospedando",
     "sandboxConfirm": "Este é um jogo de Sandbox. Jogadores com permissão de depuração podem manipular diretamente o estado do jogo. Continuar?",
     "draftBadgeTitle": "Draft {{kind}} — {{setCode}}",
     "draftBadge": "Draft {{setCode}}",
@@ -88,7 +90,8 @@
     "sandboxBadgeTitle": "Este jogo permite ações de depuração. Use para testes — não é uma partida competitiva.",
     "anonymous": "Anônimo",
     "by": "por {{name}}",
-    "passwordProtected": "Protegido por senha"
+    "passwordProtected": "Protegido por senha",
+    "join": "Entrar"
   },
   "serverPicker": {
     "title": "Servidor",

@@ -146,7 +146,8 @@ pub fn get_game_state(
     // Return the wire envelope `{ state, derived }` — same shape produced
     // by the engine-wasm getter, so the frontend adapter unwraps identically
     // regardless of platform.
-    let derived = engine::game::derived_views::derive_views(game);
+    // Tauri single-player desktop: the human is always PlayerId(0).
+    let derived = engine::game::derived_views::derive_views(game, Some(PlayerId(0)));
     Ok(engine::game::derived_views::ClientGameState {
         state: game.clone(),
         derived,

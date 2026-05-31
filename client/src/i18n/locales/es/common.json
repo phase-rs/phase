@@ -111,13 +111,13 @@
       "openingHandBottom": "Elige una carta para poner en el fondo antes de que empiecen los mulligans normales.",
       "openingHandWait": "Esperando a que otro jugador resuelva su mano inicial.",
       "waitOther": "Esperando a que otro jugador actúe.",
-      "priorityStack": "Tienes prioridad con algo en la pila. Resolver pasa la prioridad para que el objeto superior se resuelva.",
-      "priorityAutoPass": "Tienes prioridad. El cliente puede pasar automáticamente las ventanas tranquilas a menos que haya una parada o el Control total activado.",
+      "priorityStack": "Tienes prioridad con algo en la pila. <Resolver> pasa la prioridad para que el objeto superior se resuelva.",
+      "priorityAutoPass": "Tienes prioridad. El cliente puede pasar automáticamente si no hay opciones de interacción a menos que haya una parada o el Control total activado.",
       "priorityActions": "Tienes prioridad. Puedes usar las cartas disponibles o pasar para mantener el turno en marcha.",
-      "priorityPass": "Tienes prioridad. Pasar continúa al siguiente paso o jugador.",
+      "priorityPass": "Tienes prioridad. <Pasar> continúa al siguiente paso o jugador.",
       "manaPayment": "Paga el maná del hechizo o la habilidad pendiente. Pulsa T para girar las tierras disponibles.",
       "targetSelection": "Elige el objetivo legal resaltado o cancela si el aviso lo permite.",
-      "declareAttackers": "Elige atacantes y luego confírmalos. También puedes atacar con ninguno.",
+      "declareAttackers": "Elige atacantes y luego confírmalos. También puedes no atacar con ninguno.",
       "declareBlockers": "Elige bloqueadores y asígnalos a los atacantes, luego confirma los bloqueadores.",
       "chooseXValue": "Elige un valor para X antes de continuar con el hechizo o la habilidad.",
       "payAmountChoice": "Elige cuánto del recurso solicitado pagar.",
@@ -126,11 +126,11 @@
     "entries": {
       "automaticPhaseSkips": {
         "title": "Saltos de fase automáticos",
-        "body": "Los saltos de fase son automáticos. Usa paradas o el Control total cuando quieras ventanas de prioridad al estilo del papel."
+        "body": "Los saltos de fase son automáticos. Usa paradas o el Control total cuando quieras usar la prioridad al estilo del juego de cartas físico."
       },
       "phaseStops": {
         "title": "Paradas de fase",
-        "body": "Una parada se detiene antes de ese paso, similar a decir que puedes actuar antes del combate, antes de robar o antes del paso final en el papel."
+        "body": "Una parada se detiene antes de ese paso, similar a decir que puedes/quieres actuar antes del combate, antes de robar o antes del paso final en el papel."
       },
       "fullControl": {
         "title": "Control total",
@@ -138,7 +138,7 @@
       },
       "resolve": {
         "title": "Resolver",
-        "body": "Resolver significa que pasas la prioridad para que el hechizo o la habilidad superior de la pila se resuelva si todos los demás también pasan."
+        "body": "<Resolver> significa que pasas la prioridad para que el hechizo o la habilidad superior de la pila se resuelva si todos los demás también pasan."
       },
       "passToEnd": {
         "title": "Pasar hasta el final",

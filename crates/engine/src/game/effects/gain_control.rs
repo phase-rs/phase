@@ -154,7 +154,7 @@ mod tests {
             tce.modifications,
             vec![ContinuousModification::ChangeController]
         );
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
     }
 
     /// CR 613.1b: Non-regression for Bug B (layer fix). After switching the
