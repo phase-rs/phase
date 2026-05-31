@@ -3736,13 +3736,15 @@ fn auto_tap_mana_sources_inner(
         .flatten()
         .collect();
 
-    // CR 605.3b: Auto-tap sort key. Tier layout (preserved from the
-    // pre-refactor sort; the enum factors the two scattered bool flags):
+    // CR 605.3b: Auto-tap sort key. Tier layout (the enum factors the two
+    // scattered bool flags):
     //   outer (tier_byte): 0 = non-sacrifice mana source; 1 = sacrifice-for-mana
     //     (source will not come back — always last).
-    //   middle (card_tier): 0 = pure land, 1 = non-land mana dork,
-    //     2 = land-creature (preserve for combat), 3 = deprioritized source
-    //     (spell's own source).
+    //   middle (card_tier): 0 = free-colorless land row (ideal generic filler);
+    //     1 = other land row; 2 = non-land non-creature rock (Signet);
+    //     3 = non-land creature dork (preserve as blocker); 4 = land-creature
+    //     manland (preserve as blocker); 5 = deprioritized source (spell's own
+    //     source).
     //   inner (priority_amount): penalty sub-tier + fixed-amount tiebreak
     //     (e.g. painland-1 < painland-2 < painland-None). Replaces the
     //     collapsed `harms_controller` bool — amounts now rank.
@@ -3754,14 +3756,29 @@ fn auto_tap_mana_sources_inner(
         let is_land = obj.is_some_and(|o| o.card_types.core_types.contains(&CoreType::Land));
         let is_creature =
             obj.is_some_and(|o| o.card_types.core_types.contains(&CoreType::Creature));
+        let row_is_free_colorless =
+            option.atomic_combination.is_none() && option.mana_type == ManaType::Colorless;
         let card_tier: u32 = if deprioritize_source == Some(option.object_id) {
-            3
+            5
         } else if is_land && is_creature {
-            2
-        } else if is_land {
+            // CR 509.1a: a chosen blocker must be untapped. An animated manland
+            // is a creature body — preserve it (and after a 1/1 dork: it is
+            // usually the bigger blocker, so it sorts after the dork).
+            4
+        } else if is_creature {
+            // CR 509.1a: preserve a non-land creature mana source (dork) as a
+            // blocker.
+            3
+        } else if is_land && row_is_free_colorless {
+            // Heuristic (no CR): a free colorless row is the ideal generic
+            // filler — it commits no colored production a later shard in this
+            // same payment needs.
             0
-        } else {
+        } else if is_land {
             1
+        } else {
+            // non-land non-creature mana source (rock / Signet)
+            2
         };
         (
             option.penalty.tier_byte() as u32,

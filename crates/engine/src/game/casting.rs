@@ -16898,6 +16898,170 @@ mod tests {
         assert_eq!(state.players[0].life, 20);
     }
 
+    /// Auto-tap should spend a free colorless land row (card_tier 0) on the
+    /// generic part of a cost, preserving a pain-free colored dual whose
+    /// production a later shard might need. Cost {1}{G}: phase 1 taps the
+    /// Forest for {G} (fewest rows); phase 2's generic taps the brushland's
+    /// free {C} row (tier 0) rather than the dual (tier 1), leaving the dual
+    /// untapped.
+    #[test]
+    fn auto_tap_uses_colorless_row_for_generic_preserving_dual() {
+        let mut state = setup_game_at_main_phase();
+
+        // Spell costing {1}{G}.
+        let spell_id = create_single_color_spell_in_hand(
+            &mut state,
+            CardId(40),
+            "Test Generic Plus Green",
+            ManaCostShard::Green,
+        );
+        state.objects.get_mut(&spell_id).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+
+        // 1. Basic Forest — single {G} row.
+        let forest = add_basic_land(&mut state, CardId(41), "Forest", "Forest");
+
+        // 2. Pain-free dual producing {B} and {G} (penalty None) — inserted
+        //    BEFORE the brushland.
+        let dual = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Pain-Free Dual".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dual).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![ManaColor::Black, ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // 3. Brushland-shape land (free {C} row + AnyOneColor{Green,White}),
+        //    penalty None — inserted AFTER the dual.
+        let brushland = add_brushland_like_land(&mut state, CardId(43), "Llanowar Wastes", false);
+
+        let mut events = Vec::new();
+        handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(40), &mut events).unwrap();
+
+        assert!(
+            !state.objects[&dual].tapped,
+            "auto-tap should preserve the pain-free dual by spending the free colorless row on generic"
+        );
+        assert!(
+            state.objects[&forest].tapped,
+            "Forest should pay the {{G}} shard"
+        );
+        assert!(
+            state.objects[&brushland].tapped,
+            "brushland's free colorless row should pay the generic"
+        );
+    }
+
+    /// Auto-tap should preserve a non-land creature mana dork (card_tier 3) as
+    /// a potential blocker (CR 509.1a) by spending an equivalent non-creature
+    /// rock (card_tier 2) instead. Cost {G}: the rock taps, the dork stays
+    /// untapped.
+    #[test]
+    fn auto_tap_prefers_rock_over_creature_dork() {
+        let mut state = setup_game_at_main_phase();
+
+        let spell_id = create_single_color_spell_in_hand(
+            &mut state,
+            CardId(44),
+            "Test Mono Green",
+            ManaCostShard::Green,
+        );
+
+        // 1. Mono-green creature dork (T: Add {G}) — inserted BEFORE the rock.
+        let dork = create_object(
+            &mut state,
+            CardId(45),
+            PlayerId(0),
+            "Green Dork".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dork).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.summoning_sick = false;
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // 2. Mono-green non-creature non-land rock (T: Add {G}).
+        let rock = create_object(
+            &mut state,
+            CardId(46),
+            PlayerId(0),
+            "Green Rock".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&rock).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let mut events = Vec::new();
+        handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(44), &mut events).unwrap();
+
+        assert!(
+            state.objects[&rock].tapped,
+            "auto-tap should spend the rock for {{G}}"
+        );
+        assert!(
+            !state.objects[&dork].tapped,
+            "auto-tap should preserve the creature dork as a blocker"
+        );
+    }
+
     #[test]
     fn cancel_cast_during_target_selection_returns_to_priority() {
         use crate::game::engine::apply_as_current;
