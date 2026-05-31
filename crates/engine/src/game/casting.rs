@@ -8454,14 +8454,29 @@ pub fn handle_activate_ability(
             }
         }
         let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
-        super::ability_utils::filter_modes_by_target_legality(
-            state,
-            source_id,
-            player,
-            &ability_def.mode_abilities,
-            &modal,
-            &mut unavailable_modes,
-        );
+        let x_dependent_modal_targets = ability_def.cost.as_ref().is_some_and(|cost| {
+            casting_costs::extract_x_mana_cost(cost).is_some()
+                && ability_def.mode_abilities.iter().any(|mode| {
+                    ability_target_legality_needs_chosen_x(&build_resolved_from_def(
+                        mode, source_id, player,
+                    ))
+                })
+        });
+        // CR 602.2b + CR 601.2b/c: When modal activated ability target legality
+        // depends on an {X} activation cost, legality is not knowable until the
+        // player chooses X after mode selection. Do not pre-disable those modes
+        // using the unchosen-X target filter; the deferred target-selection path
+        // validates the chosen X before targets are committed.
+        if !x_dependent_modal_targets {
+            super::ability_utils::filter_modes_by_target_legality(
+                state,
+                source_id,
+                player,
+                &ability_def.mode_abilities,
+                &modal,
+                &mut unavailable_modes,
+            );
+        }
         // CR 700.2a: The controller chooses modes while activating a modal
         // ability. If every mode is illegal due to unavailable selections or
         // unsatisfied targeting requirements, the ability cannot be activated.
@@ -20049,6 +20064,218 @@ mod tests {
             }
             other => panic!("expected target selection after choosing X, got {other:?}"),
         }
+    }
+
+    /// CR 602.2b + CR 601.2b/c: Activated abilities follow the same mode/X/target
+    /// announcement ordering as spells. A modal activated ability with {X} in its
+    /// activation cost must choose X before building target slots whose legality
+    /// references X, while still preserving per-mode target labels.
+    #[test]
+    fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(84),
+            PlayerId(0),
+            "Modal X Relic".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let x_or_less = || {
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                }]))
+            };
+            let mode0 = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: x_or_less(),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            );
+            let mode1 = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Hand,
+                    target: x_or_less(),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            );
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Unimplemented {
+                        name: "modal_x_placeholder".to_string(),
+                        description: None,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                })
+                .with_modal(
+                    crate::types::ability::ModalChoice {
+                        min_choices: 2,
+                        max_choices: 2,
+                        mode_count: 2,
+                        mode_descriptions: vec![
+                            "Exile target creature with mana value X or less.".to_string(),
+                            "Return target creature with mana value X or less to its owner's hand."
+                                .to_string(),
+                        ],
+                        ..Default::default()
+                    },
+                    vec![mode0, mode1],
+                ),
+            );
+        }
+
+        let creature_a = create_object(
+            &mut state,
+            CardId(85),
+            PlayerId(1),
+            "Two Drop A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_a).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        let creature_b = create_object(
+            &mut state,
+            CardId(86),
+            PlayerId(1),
+            "Two Drop B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        let creature_too_large = create_object(
+            &mut state,
+            CardId(87),
+            PlayerId(1),
+            "Four Drop".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_too_large).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            obj.mana_cost = ManaCost::generic(4);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::AbilityModeChoice { .. }),
+            "activation should choose modes before choosing X"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectModes {
+                indices: vec![0, 1],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "mode selection must route to ChooseX before X-dependent target selection"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
+        match &state.waiting_for {
+            WaitingFor::TargetSelection {
+                target_slots,
+                mode_labels,
+                ..
+            } => {
+                assert_eq!(target_slots.len(), 2);
+                assert_eq!(
+                    mode_labels.len(),
+                    target_slots.len(),
+                    "mode labels must align with activated ability target slots"
+                );
+                assert_eq!(
+                    mode_labels[0].as_deref(),
+                    Some("Exile target creature with mana value X or less.")
+                );
+                assert_eq!(
+                    mode_labels[1].as_deref(),
+                    Some("Return target creature with mana value X or less to its owner's hand.")
+                );
+                for slot in target_slots {
+                    assert!(slot.legal_targets.contains(&TargetRef::Object(creature_a)));
+                    assert!(slot.legal_targets.contains(&TargetRef::Object(creature_b)));
+                    assert!(
+                        !slot
+                            .legal_targets
+                            .contains(&TargetRef::Object(creature_too_large)),
+                        "X=2 must exclude mana value 4 targets"
+                    );
+                }
+            }
+            other => panic!("expected target selection after choosing X, got {other:?}"),
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(creature_a), TargetRef::Object(creature_b)],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.players[0].mana_pool.mana.len(),
+            1,
+            "the {{X}} activation mana cost should be paid after target selection"
+        );
+        let StackEntryKind::ActivatedAbility { ability, .. } = &state.stack[0].kind else {
+            panic!("expected activated ability on stack");
+        };
+        assert_eq!(ability.chosen_x, Some(2));
     }
 
     #[test]

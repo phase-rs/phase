@@ -656,12 +656,29 @@ fn begin_deferred_target_selection(
                 "Modal spell object missing for deferred target labels".into(),
             )
         })?;
-        let abilities = obj.abilities.clone();
-        let mode_descriptions = obj
-            .modal
-            .as_ref()
-            .map(|m| m.mode_descriptions.clone())
-            .unwrap_or_default();
+        let (abilities, mode_descriptions) =
+            if let Some(ability_index) = pending.activation_ability_index {
+                let def = obj.abilities.get(ability_index).ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Modal activated ability missing for deferred target labels".into(),
+                    )
+                })?;
+                (
+                    def.mode_abilities.clone(),
+                    def.modal
+                        .as_ref()
+                        .map(|m| m.mode_descriptions.clone())
+                        .unwrap_or_default(),
+                )
+            } else {
+                (
+                    obj.abilities.to_vec(),
+                    obj.modal
+                        .as_ref()
+                        .map(|m| m.mode_descriptions.clone())
+                        .unwrap_or_default(),
+                )
+            };
         debug_assert!(
             !mode_descriptions.is_empty(),
             "begin_deferred_target_selection: chosen_modes is non-empty but the source object has no modal descriptions (object {:?}); per-mode target labels would silently degrade",

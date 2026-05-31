@@ -266,19 +266,13 @@ pub(crate) fn handle_select_targets(
     }
 
     if let Some(ability_index) = pending.activation_ability_index {
-        if let Some(ref activation_cost) = pending.activation_cost {
-            let should_record_loyalty = matches!(activation_cost, AbilityCost::Loyalty { .. })
-                && super::planeswalker::can_activate_loyalty_ability(
-                    state,
-                    pending.object_id,
-                    player,
-                    ability_index,
-                );
-            pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
-            if should_record_loyalty {
-                super::planeswalker::record_loyalty_activation(state, pending.object_id, player);
-            }
-        }
+        pay_activation_costs_after_target_selection(
+            state,
+            player,
+            &pending,
+            ability_index,
+            events,
+        )?;
 
         let assigned_targets = flatten_targets_in_chain(&ability);
         emit_targeting_events(state, &assigned_targets, pending.object_id, player, events);
@@ -377,24 +371,13 @@ pub(crate) fn handle_choose_target(
             assign_selected_slots_in_chain(state, &mut ability, &selected_slots)?;
 
             if let Some(ability_index) = pending.activation_ability_index {
-                if let Some(ref activation_cost) = pending.activation_cost {
-                    let should_record_loyalty =
-                        matches!(activation_cost, AbilityCost::Loyalty { .. })
-                            && super::planeswalker::can_activate_loyalty_ability(
-                                state,
-                                pending.object_id,
-                                player,
-                                ability_index,
-                            );
-                    pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
-                    if should_record_loyalty {
-                        super::planeswalker::record_loyalty_activation(
-                            state,
-                            pending.object_id,
-                            player,
-                        );
-                    }
-                }
+                pay_activation_costs_after_target_selection(
+                    state,
+                    player,
+                    &pending,
+                    ability_index,
+                    events,
+                )?;
 
                 let assigned_targets = flatten_targets_in_chain(&ability);
                 emit_targeting_events(state, &assigned_targets, pending.object_id, player, events);
@@ -446,6 +429,48 @@ pub(crate) fn handle_choose_target(
             finish_pending_cast_cost_or_pay(state, player, pending, ability, cost, events)
         }
     }
+}
+
+fn pay_activation_costs_after_target_selection(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    ability_index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if !matches!(pending.cost, ManaCost::NoCost) {
+        let excluded_sources = pending
+            .activation_cost
+            .as_ref()
+            .map(|cost| {
+                super::casting::ability_mana_payment_excluded_sources(cost, pending.object_id)
+            })
+            .unwrap_or_default();
+        super::casting::pay_ability_mana_cost_excluding(
+            state,
+            player,
+            pending.object_id,
+            &pending.cost,
+            events,
+            &excluded_sources,
+        )?;
+    }
+
+    if let Some(ref activation_cost) = pending.activation_cost {
+        let should_record_loyalty = matches!(activation_cost, AbilityCost::Loyalty { .. })
+            && super::planeswalker::can_activate_loyalty_ability(
+                state,
+                pending.object_id,
+                player,
+                ability_index,
+            );
+        pay_ability_cost(state, player, pending.object_id, activation_cost, events)?;
+        if should_record_loyalty {
+            super::planeswalker::record_loyalty_activation(state, pending.object_id, player);
+        }
+    }
+
+    Ok(())
 }
 
 /// CR 702.172a + CR 601.2f + CR 702.42a: Compose a modal spell's total cost.
