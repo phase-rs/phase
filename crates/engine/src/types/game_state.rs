@@ -1661,6 +1661,44 @@ pub enum CostResume {
     },
 }
 
+/// The specific kind of cast offer being presented to the player.
+/// Parameterizes `WaitingFor::CastOffer` — all variants share `player: PlayerId`
+/// at the outer level; the kind-specific payload lives here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CastOfferKind {
+    /// CR 715.3a: Player chooses creature face vs Adventure half.
+    Adventure {
+        object_id: ObjectId,
+        card_id: CardId,
+        #[serde(default)]
+        payment_mode: CastPaymentMode,
+    },
+    /// CR 702.94a: Miracle triggered ability resolved — cast for miracle cost.
+    Miracle {
+        object_id: ObjectId,
+        cost: super::mana::ManaCost,
+    },
+    /// CR 702.35a: Madness triggered ability resolved — cast from exile or go to graveyard.
+    Madness {
+        object_id: ObjectId,
+        cost: super::mana::ManaCost,
+    },
+    /// CR 702.xxx: Paradigm (Strixhaven) — turn-based offer to cast a copy.
+    Paradigm { offers: Vec<ObjectId> },
+    /// CR 702.85a: Cascade — cast the hit card without paying mana cost or decline.
+    Cascade {
+        hit_card: ObjectId,
+        exiled_misses: Vec<ObjectId>,
+        source_mv: u32,
+    },
+    /// CR 701.57a: Discover — cast the discovered card or put it to hand.
+    Discover {
+        hit_card: ObjectId,
+        exiled_misses: Vec<ObjectId>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -2212,14 +2250,11 @@ pub enum WaitingFor {
         mana_reduction: ManaCost,
         pending_cast: Box<PendingCast>,
     },
-    /// CR 715.3a: Player chooses creature face vs Adventure half when casting
-    /// an Adventure card from hand (or exile with permission).
-    AdventureCastChoice {
+    /// CR 715.3a + CR 702.94a + CR 702.35a + CR 702.85a + CR 701.57a + CR 702.xxx:
+    /// A player is offered a card to cast via a special rule.
+    CastOffer {
         player: PlayerId,
-        object_id: ObjectId,
-        card_id: CardId,
-        #[serde(default)]
-        payment_mode: CastPaymentMode,
+        kind: CastOfferKind,
     },
     /// CR 712.12 / CR 712.11b: Player chooses which face of an MDFC to
     /// play/cast. Two cases reach this prompt: (a) both faces are lands (CR
@@ -2378,25 +2413,6 @@ pub enum WaitingFor {
     /// { accept: false }` declines (reuses the generic optional-decline path).
     /// Either response consumes the offer.
     MiracleReveal {
-        player: PlayerId,
-        object_id: ObjectId,
-        cost: super::mana::ManaCost,
-    },
-    /// CR 702.94a: The miracle triggered ability has resolved — the player may now
-    /// cast the revealed card for its miracle cost. This happens during trigger
-    /// resolution per CR 608.2g (timing restrictions do not apply).
-    /// `GameAction::CastSpellAsMiracle` accepts; `GameAction::DecideOptionalEffect
-    /// { accept: false }` declines.
-    MiracleCastOffer {
-        player: PlayerId,
-        object_id: ObjectId,
-        cost: super::mana::ManaCost,
-    },
-    /// CR 702.35a: The madness triggered ability has resolved — the player may
-    /// cast the exiled discarded card for its madness cost or put it into their
-    /// graveyard. `GameAction::CastSpellAsMadness` accepts; `DecideOptionalEffect
-    /// { accept: false }` declines.
-    MadnessCastOffer {
         player: PlayerId,
         object_id: ObjectId,
         cost: super::mana::ManaCost,
@@ -2600,14 +2616,6 @@ pub enum WaitingFor {
         /// The pending cast to resume after the tap choice.
         pending_cast: Box<PendingCast>,
     },
-    /// CR 701.57a: Player chooses to cast the discovered card or put it to hand.
-    DiscoverChoice {
-        player: PlayerId,
-        /// The nonland card that was hit.
-        hit_card: ObjectId,
-        /// Cards exiled as misses (go to bottom in random order).
-        exiled_misses: Vec<ObjectId>,
-    },
     /// CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" — the
     /// controller chooses the kept card's destination after `RevealUntil` finds a
     /// hit. Accept → `accept_zone`; decline → `decline_zone`. The misses (and, on
@@ -2640,38 +2648,10 @@ pub enum WaitingFor {
         /// `repeat_until` is retained so the next iteration re-prompts.
         ability: Box<crate::types::ability::ResolvedAbility>,
     },
-    /// CR 702.85a: Player chooses to cast the cascaded card without paying its
-    /// mana cost or decline. Unlike `DiscoverChoice`, the declined card goes to
-    /// the bottom of the library in a random order together with the misses
-    /// (cascade has no put-to-hand branch).
-    CascadeChoice {
-        player: PlayerId,
-        /// The nonland card with MV < source MV that was hit.
-        hit_card: ObjectId,
-        /// Cards exiled as misses (go to bottom in random order alongside the
-        /// hit card if it is not cast).
-        exiled_misses: Vec<ObjectId>,
-        /// CR 702.85a: Source cascade spell's mana value, snapshotted at the
-        /// moment the trigger resolved. Needed at accept time to construct the
-        /// `CascadeResultingMvBelow` cast-time predicate so the resulting
-        /// spell's MV can be compared after X is chosen. Walking the stack
-        /// for the source would be fragile — nested cascades, copies, and
-        /// reordering would all misidentify the owning spell.
-        source_mv: u32,
-    },
     /// CR 401.4: Owner chooses to put a permanent on top or bottom of their library.
     TopOrBottomChoice {
         player: PlayerId,
         object_id: ObjectId,
-    },
-    /// CR 702.xxx: Paradigm (Strixhaven) — turn-based offer at the beginning of
-    /// the player's first precombat main phase. `offers` is the list of
-    /// exiled paradigm sources belonging to `player`; each may be cast as a
-    /// token copy without paying its mana cost, or passed. Assign when WotC
-    /// publishes SOS CR update.
-    ParadigmCastOffer {
-        player: PlayerId,
-        offers: Vec<ObjectId>,
     },
     /// CR 701.36a: Choose a creature token you control to create a copy of.
     PopulateChoice {
@@ -3151,7 +3131,7 @@ impl WaitingFor {
             | WaitingFor::DefilerPayment { player, .. }
             | WaitingFor::AbilityModeChoice { player, .. }
             | WaitingFor::MultiTargetSelection { player, .. }
-            | WaitingFor::AdventureCastChoice { player, .. }
+            | WaitingFor::CastOffer { player, .. }
             | WaitingFor::ModalFaceChoice { player, .. }
             | WaitingFor::AlternativeCastChoice { player, .. }
             | WaitingFor::CastingVariantChoice { player, .. }
@@ -3172,12 +3152,9 @@ impl WaitingFor {
             | WaitingFor::TributeChoice { player, .. }
             | WaitingFor::UnlessPayment { player, .. }
             | WaitingFor::UnlessPaymentChooseCost { player, .. }
-            | WaitingFor::DiscoverChoice { player, .. }
             | WaitingFor::RevealUntilKeptChoice { player, .. }
             | WaitingFor::RepeatDecision { player, .. }
-            | WaitingFor::CascadeChoice { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }
-            | WaitingFor::ParadigmCastOffer { player, .. }
             | WaitingFor::PopulateChoice { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
@@ -3200,8 +3177,6 @@ impl WaitingFor {
             | WaitingFor::PhyrexianPayment { player, .. }
             | WaitingFor::DiscardChoice { player, .. }
             | WaitingFor::MiracleReveal { player, .. }
-            | WaitingFor::MiracleCastOffer { player, .. }
-            | WaitingFor::MadnessCastOffer { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. }
             | WaitingFor::SeparatePilesPartition { player, .. }
             | WaitingFor::SeparatePilesChoice { player, .. } => Some(*player),

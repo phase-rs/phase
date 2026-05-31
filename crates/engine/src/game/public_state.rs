@@ -379,6 +379,7 @@ pub fn clear_public_state_dirty(state: &mut GameState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::game_state::CastOfferKind;
     use crate::types::identifiers::ObjectId;
 
     #[test]
@@ -388,10 +389,12 @@ mod tests {
 
         sync_waiting_for(
             &mut state,
-            &WaitingFor::DiscoverChoice {
+            &WaitingFor::CastOffer {
                 player: PlayerId(0),
-                hit_card: ObjectId(10),
-                exiled_misses: Vec::new(),
+                kind: CastOfferKind::Discover {
+                    hit_card: ObjectId(10),
+                    exiled_misses: Vec::new(),
+                },
             },
         );
 
@@ -402,10 +405,12 @@ mod tests {
     fn finalize_public_state_updates_priority_player_for_resolution_choices() {
         let mut state = GameState::new_two_player(42);
         state.priority_player = PlayerId(1);
-        state.waiting_for = WaitingFor::DiscoverChoice {
+        state.waiting_for = WaitingFor::CastOffer {
             player: PlayerId(0),
-            hit_card: ObjectId(10),
-            exiled_misses: Vec::new(),
+            kind: CastOfferKind::Discover {
+                hit_card: ObjectId(10),
+                exiled_misses: Vec::new(),
+            },
         };
 
         finalize_public_state(&mut state);

@@ -10,7 +10,7 @@ use crate::game::mana_sources;
 use crate::types::ability::AbilityKind;
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
-use crate::types::game_state::{GameState, PayCostKind, WaitingFor};
+use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -251,10 +251,22 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
         }
-        (WaitingFor::DiscoverChoice { .. }, GameAction::DiscoverChoice { .. })
+        (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { .. },
+                ..
+            },
+            GameAction::DiscoverChoice { .. },
+        )
         | (WaitingFor::RevealUntilKeptChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::RepeatDecision { .. }, GameAction::DecideOptionalEffect { .. })
-        | (WaitingFor::CascadeChoice { .. }, GameAction::CascadeChoice { .. })
+        | (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { .. },
+                ..
+            },
+            GameAction::CascadeChoice { .. },
+        )
         | (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { .. })
         | (WaitingFor::BetweenGamesChoosePlayDraw { .. }, GameAction::ChoosePlayDraw { .. })
         | (WaitingFor::TopOrBottomChoice { .. }, GameAction::ChooseTopOrBottom { .. })
@@ -274,7 +286,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { .. })
         | (WaitingFor::UnlessPaymentChooseCost { .. }, GameAction::ChooseUnlessCostBranch { .. })
         | (WaitingFor::CombatTaxPayment { .. }, GameAction::PayCombatTax { .. })
-        | (WaitingFor::AdventureCastChoice { .. }, GameAction::ChooseAdventureFace { .. })
+        | (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Adventure { .. },
+                ..
+            },
+            GameAction::ChooseAdventureFace { .. },
+        )
         | (WaitingFor::ModalFaceChoice { .. }, GameAction::ChooseModalFace { .. })
         | (WaitingFor::AlternativeCastChoice { .. }, GameAction::ChooseAlternativeCast { .. })
         | (WaitingFor::CastingVariantChoice { .. }, GameAction::ChooseCastingVariant { .. }) => {

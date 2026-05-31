@@ -12,7 +12,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AutoMayChoice, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
+    AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
     MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor, ZoneChangeRecord,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
@@ -902,10 +902,16 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::PairChoice { .. }
             | WaitingFor::OpponentMayChoice { .. }
             | WaitingFor::TributeChoice { .. }
-            | WaitingFor::DiscoverChoice { .. }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { .. },
+                ..
+            }
             | WaitingFor::RevealUntilKeptChoice { .. }
             | WaitingFor::RepeatDecision { .. }
-            | WaitingFor::CascadeChoice { .. }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { .. },
+                ..
+            }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::ProliferateChoice { .. }
             | WaitingFor::ChooseObjectsSelection { .. }
@@ -1742,19 +1748,23 @@ pub fn resolve_effect(
         Effect::Cascade => cascade::resolve(state, ability, events),
         // CR 702.94a: Miracle trigger resolution — offer the cast from hand.
         Effect::MiracleCast { ref cost } => {
-            state.waiting_for = WaitingFor::MiracleCastOffer {
+            state.waiting_for = WaitingFor::CastOffer {
                 player: ability.controller,
-                object_id: ability.source_id,
-                cost: cost.clone(),
+                kind: CastOfferKind::Miracle {
+                    object_id: ability.source_id,
+                    cost: cost.clone(),
+                },
             };
             Ok(())
         }
         // CR 702.35a: Madness trigger resolution — offer the cast from exile.
         Effect::MadnessCast { ref cost } => {
-            state.waiting_for = WaitingFor::MadnessCastOffer {
+            state.waiting_for = WaitingFor::CastOffer {
                 player: ability.controller,
-                object_id: ability.source_id,
-                cost: cost.clone(),
+                kind: CastOfferKind::Madness {
+                    object_id: ability.source_id,
+                    cost: cost.clone(),
+                },
             };
             Ok(())
         }

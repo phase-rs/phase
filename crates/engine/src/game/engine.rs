@@ -5,8 +5,8 @@ use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
-    ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, CostResume, GameState, PayCostKind,
-    RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    ActionResult, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode, CostResume, GameState,
+    PayCostKind, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -1484,11 +1484,14 @@ fn apply_action(
         }
         // CR 715.3a: Player chooses creature or Adventure face.
         (
-            WaitingFor::AdventureCastChoice {
+            WaitingFor::CastOffer {
                 player,
-                object_id,
-                card_id,
-                payment_mode,
+                kind:
+                    CastOfferKind::Adventure {
+                        object_id,
+                        card_id,
+                        payment_mode,
+                    },
             },
             GameAction::ChooseAdventureFace { creature },
         ) => casting::handle_adventure_choice_with_payment_mode(
@@ -3347,8 +3350,9 @@ fn apply_action(
         // This cast happens during trigger resolution, so timing restrictions
         // do not apply (CR 608.2g).
         (
-            WaitingFor::MiracleCastOffer {
-                player, object_id, ..
+            WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::Miracle { object_id, .. },
             },
             GameAction::CastSpellAsMiracle {
                 object_id: action_obj,
@@ -3365,8 +3369,9 @@ fn apply_action(
             super::casting::handle_cast_spell_as_miracle(state, p, obj, card_id, &mut events)?
         }
         (
-            WaitingFor::MiracleCastOffer {
-                player, object_id, ..
+            WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::Miracle { object_id, .. },
             },
             GameAction::CastSpellAsMiracleWithPaymentMode {
                 object_id: action_obj,
@@ -3392,7 +3397,10 @@ fn apply_action(
         }
         // CR 702.94a: Miracle cast offer — decline. Resume resolution.
         (
-            WaitingFor::MiracleCastOffer { player, .. },
+            WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::Miracle { .. },
+            },
             GameAction::DecideOptionalEffect { accept: false },
         ) => {
             let p = *player;
@@ -3407,8 +3415,9 @@ fn apply_action(
         // CR 702.35a: Madness cast offer — the madness triggered ability has
         // resolved. The player may now cast the exiled card for its madness cost.
         (
-            WaitingFor::MadnessCastOffer {
-                player, object_id, ..
+            WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::Madness { object_id, .. },
             },
             GameAction::CastSpellAsMadness {
                 object_id: action_obj,
@@ -3425,8 +3434,9 @@ fn apply_action(
             super::casting::handle_cast_spell_as_madness(state, p, obj, card_id, &mut events)?
         }
         (
-            WaitingFor::MadnessCastOffer {
-                player, object_id, ..
+            WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::Madness { object_id, .. },
             },
             GameAction::CastSpellAsMadnessWithPaymentMode {
                 object_id: action_obj,
@@ -3452,8 +3462,9 @@ fn apply_action(
         }
         // CR 702.35a: Madness decline — put the exiled card into its owner's graveyard.
         (
-            WaitingFor::MadnessCastOffer {
-                player, object_id, ..
+            WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::Madness { object_id, .. },
             },
             GameAction::DecideOptionalEffect { accept: false },
         ) => {
@@ -3596,7 +3607,10 @@ fn apply_action(
         // cast a copy of an exiled paradigm source. Assign when WotC
         // publishes SOS CR update.
         (
-            WaitingFor::ParadigmCastOffer { player, offers },
+            WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::Paradigm { offers },
+            },
             GameAction::CastParadigmCopy { source },
         ) => {
             let src = source;
@@ -3621,9 +3635,13 @@ fn apply_action(
         }
         // CR 702.xxx: Paradigm (Strixhaven) — decline the turn-based offer.
         // Assign when WotC publishes SOS CR update.
-        (WaitingFor::ParadigmCastOffer { player, .. }, GameAction::PassParadigmOffer) => {
-            WaitingFor::Priority { player: *player }
-        }
+        (
+            WaitingFor::CastOffer {
+                player,
+                kind: CastOfferKind::Paradigm { .. },
+            },
+            GameAction::PassParadigmOffer,
+        ) => WaitingFor::Priority { player: *player },
         (WaitingFor::Priority { player }, GameAction::SetAutoPass { mode }) => {
             // Convert request to stored mode, capturing engine state as needed.
             let stored_mode = match mode {

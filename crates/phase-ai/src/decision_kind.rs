@@ -92,7 +92,10 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::AbilityModeChoice { .. }
-        | WaitingFor::AdventureCastChoice { .. }
+        // CR 715.3a + CR 702.94a + CR 702.35a + CR 702.85a + CR 701.57a + CR 702.xxx:
+        // Adventure / Miracle / Madness / Cascade / Discover / Paradigm cast
+        // offers are modeled as ability-style opt-in decisions.
+        | WaitingFor::CastOffer { .. }
         | WaitingFor::ModalFaceChoice { .. }
         | WaitingFor::AlternativeCastChoice { .. }
         | WaitingFor::CastingVariantChoice { .. }
@@ -114,10 +117,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::WardSacrificeChoice { .. }
         | WaitingFor::UnlessBounceChoice { .. }
-        | WaitingFor::DiscoverChoice { .. }
         | WaitingFor::RevealUntilKeptChoice { .. }
         | WaitingFor::RepeatDecision { .. }
-        | WaitingFor::CascadeChoice { .. }
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashCardPlacement { .. }
@@ -136,14 +137,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // mid-resolution choices; route to ActivateAbility as a catch-all.
         | WaitingFor::PayAmountChoice { .. }
         | WaitingFor::GameOver { .. }
-        // CR 702.xxx: Paradigm (Strixhaven) — modeled as an ability-style
-        // offer decision. Assign when WotC publishes SOS CR update.
-        | WaitingFor::ParadigmCastOffer { .. }
         // CR 702.94a: Miracle reveal — opt-in cast offer, routed to the
         // ability-offer bucket so activation policies evaluate the candidates.
         | WaitingFor::MiracleReveal { .. }
-        | WaitingFor::MiracleCastOffer { .. }
-        | WaitingFor::MadnessCastOffer { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::PayManaAbilityMana { .. }
         | WaitingFor::ActivationCostOneOfChoice { .. } => DecisionKind::ActivateAbility,

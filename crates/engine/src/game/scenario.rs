@@ -21,7 +21,9 @@ use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ActionResult, ConvokeMode, GameState, PendingCast, WaitingFor};
+use crate::types::game_state::{
+    ActionResult, CastOfferKind, ConvokeMode, GameState, PendingCast, WaitingFor,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaUnit};
@@ -1272,7 +1274,10 @@ impl GameRunner {
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
             WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
-            WaitingFor::AdventureCastChoice { .. } => "AdventureCastChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Adventure { .. },
+                ..
+            } => "AdventureCastChoice",
             WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
             WaitingFor::AlternativeCastChoice { keyword, .. } => match keyword {
                 crate::types::game_state::AlternativeCastKeyword::Warp => {
@@ -1311,10 +1316,16 @@ impl GameRunner {
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
             WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
             WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
-            WaitingFor::DiscoverChoice { .. } => "DiscoverChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { .. },
+                ..
+            } => "DiscoverChoice",
             WaitingFor::RevealUntilKeptChoice { .. } => "RevealUntilKeptChoice",
             WaitingFor::RepeatDecision { .. } => "RepeatDecision",
-            WaitingFor::CascadeChoice { .. } => "CascadeChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { .. },
+                ..
+            } => "CascadeChoice",
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
@@ -1343,10 +1354,19 @@ impl GameRunner {
             WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
             WaitingFor::PhyrexianPayment { .. } => "PhyrexianPayment",
             WaitingFor::BlightChoice { .. } => "BlightChoice",
-            WaitingFor::ParadigmCastOffer { .. } => "ParadigmCastOffer",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Paradigm { .. },
+                ..
+            } => "ParadigmCastOffer",
             WaitingFor::MiracleReveal { .. } => "MiracleReveal",
-            WaitingFor::MiracleCastOffer { .. } => "MiracleCastOffer",
-            WaitingFor::MadnessCastOffer { .. } => "MadnessCastOffer",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Miracle { .. },
+                ..
+            } => "MiracleCastOffer",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Madness { .. },
+                ..
+            } => "MadnessCastOffer",
             WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",

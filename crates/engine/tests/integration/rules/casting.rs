@@ -6,7 +6,7 @@ use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, QuantityExpr,
     TargetFilter, TargetRef,
 };
-use engine::types::game_state::{CastingVariant, StackEntryKind};
+use engine::types::game_state::{CastOfferKind, CastingVariant, StackEntryKind};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -1752,7 +1752,10 @@ fn miracle_accept_casts_for_miracle_cost() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::MiracleCastOffer { .. }
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Miracle { .. },
+                ..
+            }
         ),
         "should be MiracleCastOffer, got {:?}",
         runner.state().waiting_for
@@ -1854,7 +1857,10 @@ fn miracle_sorcery_casts_during_draw_step() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::MiracleCastOffer { .. }
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Miracle { .. },
+                ..
+            }
         ),
         "should be MiracleCastOffer during draw step"
     );

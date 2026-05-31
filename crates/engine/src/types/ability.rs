@@ -1617,7 +1617,7 @@ pub enum CastPermissionConstraint {
     /// finalization, not at offer time.
     ///
     /// `exiled_misses` is rejection-cleanup state: when the cast-time check
-    /// fails, the original `WaitingFor::CascadeChoice` has already been
+    /// fails, the original `WaitingFor::CastOffer` (Cascade) has already been
     /// cleared, so the misses ride inside the permission so the bottom-shuffle
     /// step can still reach them.
     CascadeResultingMvBelow {
@@ -6598,7 +6598,7 @@ pub enum Effect {
     Cascade,
     /// CR 702.94a: Miracle trigger resolution — offers the player the chance to
     /// cast the source card from hand for its miracle cost. Carries the cost so
-    /// the resolution handler can populate `WaitingFor::MiracleCastOffer`.
+    /// the resolution handler can populate `WaitingFor::CastOffer` (Miracle).
     MiracleCast {
         cost: super::mana::ManaCost,
     },

@@ -3,7 +3,7 @@ use rand::Rng;
 use engine::ai_support::build_decision_context;
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CostResume, GameState, WaitingFor};
+use engine::types::game_state::{CastOfferKind, CostResume, GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::cast_facts_for_action;
@@ -414,10 +414,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::TributeChoice { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::MiracleReveal { .. }
-        | WaitingFor::MiracleCastOffer { .. }
-        | WaitingFor::MadnessCastOffer { .. } => {
-            Some(GameAction::DecideOptionalEffect { accept: false })
-        }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::Miracle { .. } | CastOfferKind::Madness { .. },
+            ..
+        } => Some(GameAction::DecideOptionalEffect { accept: false }),
 
         // Unless payment: decline to pay (let the effect resolve).
         WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
@@ -509,7 +509,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ChooseOneOfBranch { .. } => Some(GameAction::ChooseBranch { index: 0 }),
 
         // Discover/Cascade: decline.
-        WaitingFor::DiscoverChoice { .. } => Some(GameAction::DiscoverChoice {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Discover { .. },
+            ..
+        } => Some(GameAction::DiscoverChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
         // CR 701.20a: RevealUntil kept choice — accept (put onto the battlefield)
@@ -517,7 +520,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::RevealUntilKeptChoice { .. } => {
             Some(GameAction::DecideOptionalEffect { accept: true })
         }
-        WaitingFor::CascadeChoice { .. } => Some(GameAction::CascadeChoice {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Cascade { .. },
+            ..
+        } => Some(GameAction::CascadeChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
         // CR 107.1c: "repeat this process" — stop as the forced-action default;
@@ -537,9 +543,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         }
 
         // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
-        WaitingFor::AdventureCastChoice { .. } => {
-            Some(GameAction::ChooseAdventureFace { creature: true })
-        }
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Adventure { .. },
+            ..
+        } => Some(GameAction::ChooseAdventureFace { creature: true }),
         WaitingFor::ModalFaceChoice { .. } => {
             Some(GameAction::ChooseModalFace { back_face: false })
         }
@@ -609,7 +616,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .map(|&room_index| GameAction::ChooseDungeonRoom { room_index }),
 
         // Paradigm: pass.
-        WaitingFor::ParadigmCastOffer { .. } => Some(GameAction::PassParadigmOffer),
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Paradigm { .. },
+            ..
+        } => Some(GameAction::PassParadigmOffer),
 
         // Vote: pick the first option.
         // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe),

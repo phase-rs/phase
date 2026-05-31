@@ -16,7 +16,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastOfferKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -159,9 +159,9 @@ fn adventure_cast_stomp_from_hand() {
     assert!(
         matches!(
             result.waiting_for,
-            WaitingFor::AdventureCastChoice {
+            WaitingFor::CastOffer {
                 player,
-                ..
+                kind: CastOfferKind::Adventure { .. },
             } if player == P0
         ),
         "Expected AdventureCastChoice, got {:?}",
@@ -342,7 +342,13 @@ fn adventure_cast_creature_from_exile() {
         .expect("cast from exile should succeed");
 
     assert!(
-        !matches!(result.waiting_for, WaitingFor::AdventureCastChoice { .. }),
+        !matches!(
+            result.waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Adventure { .. },
+                ..
+            }
+        ),
         "Casting from exile should NOT prompt for face choice, got {:?}",
         result.waiting_for
     );
@@ -580,7 +586,13 @@ fn bonecrusher_full_flow() {
         .expect("cast creature from exile should succeed");
 
     assert!(
-        !matches!(result.waiting_for, WaitingFor::AdventureCastChoice { .. }),
+        !matches!(
+            result.waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Adventure { .. },
+                ..
+            }
+        ),
         "Should not prompt for face choice from exile"
     );
 

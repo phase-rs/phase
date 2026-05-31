@@ -8,8 +8,8 @@ use crate::types::ability::{
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastPaymentMode, CastingVariant, CastingVariantChoiceOption, ConvokeMode, CostResume,
-    GameState, PayCostKind, PendingCast, SneakPlacement, SpellCastRecord, StackEntry,
+    CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption, ConvokeMode,
+    CostResume, GameState, PayCostKind, PendingCast, SneakPlacement, SpellCastRecord, StackEntry,
     StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
@@ -4953,11 +4953,13 @@ pub fn handle_cast_spell_with_payment_mode(
     // the normal creature face or alternative spell face.
     if let Some(obj) = state.objects.get(&object_id) {
         if obj.zone == Zone::Hand && alternative_spell_layout(obj).is_some() {
-            return Ok(WaitingFor::AdventureCastChoice {
+            return Ok(WaitingFor::CastOffer {
                 player,
-                object_id,
-                card_id,
-                payment_mode,
+                kind: CastOfferKind::Adventure {
+                    object_id,
+                    card_id,
+                    payment_mode,
+                },
             });
         }
     }
@@ -20020,7 +20022,7 @@ mod tests {
             handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(70), &mut events).unwrap();
 
         assert!(
-            matches!(result, WaitingFor::AdventureCastChoice { player, .. }
+            matches!(result, WaitingFor::CastOffer { player, kind: CastOfferKind::Adventure { .. } }
                 if player == PlayerId(0)),
             "Expected AdventureCastChoice even when only adventure face is affordable, got {:?}",
             result
@@ -20039,7 +20041,7 @@ mod tests {
 
         // Should prompt for Adventure face choice
         assert!(
-            matches!(result, WaitingFor::AdventureCastChoice { player, card_id, .. }
+            matches!(result, WaitingFor::CastOffer { player, kind: CastOfferKind::Adventure { card_id, .. } }
                 if player == PlayerId(0) && card_id == CardId(70)),
             "Expected AdventureCastChoice, got {:?}",
             result
@@ -20062,7 +20064,7 @@ mod tests {
             handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(71), &mut events).unwrap();
 
         assert!(
-            matches!(result, WaitingFor::AdventureCastChoice { player, .. }
+            matches!(result, WaitingFor::CastOffer { player, kind: CastOfferKind::Adventure { .. } }
                 if player == PlayerId(0)),
             "Expected AdventureCastChoice for Omen card, got {:?}",
             result
@@ -20079,7 +20081,13 @@ mod tests {
         let result =
             handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(71), &mut events).unwrap();
         assert!(
-            matches!(result, WaitingFor::AdventureCastChoice { .. }),
+            matches!(
+                result,
+                WaitingFor::CastOffer {
+                    kind: CastOfferKind::Adventure { .. },
+                    ..
+                }
+            ),
             "Expected AdventureCastChoice for Omen card, got {:?}",
             result
         );
@@ -20271,7 +20279,13 @@ mod tests {
             handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(70), &mut events).unwrap();
         // Should proceed to payment, not to AdventureCastChoice
         assert!(
-            !matches!(result, WaitingFor::AdventureCastChoice { .. }),
+            !matches!(
+                result,
+                WaitingFor::CastOffer {
+                    kind: CastOfferKind::Adventure { .. },
+                    ..
+                }
+            ),
             "Casting from exile should not prompt for face choice"
         );
     }
