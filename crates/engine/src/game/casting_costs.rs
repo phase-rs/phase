@@ -1584,6 +1584,53 @@ pub(super) fn begin_optional_cost_before_targets(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+pub(super) fn required_additional_cost_can_declare_x(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<AbilityCost> {
+    let Some(AdditionalCost::Required(cost)) = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.additional_cost.clone())
+    else {
+        return None;
+    };
+    additional_cost_x_max(state, player, object_id, &cost)
+        .is_some()
+        .then_some(cost)
+}
+
+/// CR 601.2b/c/f: Some required additional costs announce X before targets
+/// are chosen. Keep the required cost pending while the shared payment step
+/// asks for X, then returns to deferred target selection.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn begin_required_cost_before_targets(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: ManaCost,
+    required_cost: AbilityCost,
+    casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
+    distribute: Option<DistributionUnit>,
+    origin_zone: Zone,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+    pending.casting_variant = casting_variant;
+    pending.cast_timing_permission = cast_timing_permission;
+    pending.distribute = distribute;
+    pending.origin_zone = origin_zone;
+    pending.payment_mode = payment_mode;
+    pending.deferred_target_selection = true;
+    pending.additional_cost_flow = Some(AdditionalCost::Required(required_cost));
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// CR 601.2d: Extended version of `check_additional_cost_or_pay` that threads the
 /// `distribute` flag through PendingCast creation so X-spell distribution
 /// survives to the `(ManaPayment, PassPriority)` handler.
@@ -2234,7 +2281,7 @@ fn pay_additional_cost(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if pending.ability.chosen_x.is_none() {
-        if let Some(max) = additional_cost_x_max(state, player, &cost) {
+        if let Some(max) = additional_cost_x_max(state, player, pending.object_id, &cost) {
             let min = pending.ability.min_x_value;
             if min > max {
                 super::casting::handle_cancel_cast(state, &pending, events);
@@ -2386,8 +2433,11 @@ fn pay_additional_cost(
                     pending.object_id,
                     target,
                 );
-                let (min_count, max_count) =
-                    super::casting::sacrifice_cost_bounds(count, eligible.len());
+                let (min_count, max_count) = super::casting::sacrifice_cost_bounds_with_chosen_x(
+                    count,
+                    eligible.len(),
+                    pending.ability.chosen_x,
+                );
                 if eligible.len() < min_count {
                     return Err(EngineError::ActionNotAllowed(
                         "Not enough eligible permanents to sacrifice".into(),
@@ -2595,16 +2645,29 @@ fn prepend_deferred_required_cost(cost: AbilityCost, pending: &mut PendingCast) 
     }
 }
 
-fn additional_cost_x_max(state: &GameState, player: PlayerId, cost: &AbilityCost) -> Option<u32> {
+fn additional_cost_x_max(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+) -> Option<u32> {
     match cost {
         AbilityCost::PayLife { amount } if quantity_expr_contains_x(amount) => {
             Some(max_pay_life_x(state, player))
         }
+        AbilityCost::Sacrifice { target, count } if *count == u32::MAX => Some(
+            super::casting::find_eligible_sacrifice_targets(state, player, source_id, target)
+                .len()
+                .try_into()
+                .unwrap_or(u32::MAX),
+        ),
         AbilityCost::Composite { costs } => costs
             .iter()
-            .filter_map(|cost| additional_cost_x_max(state, player, cost))
+            .filter_map(|cost| additional_cost_x_max(state, player, source_id, cost))
             .min(),
-        AbilityCost::PerCounter { base, .. } => additional_cost_x_max(state, player, base),
+        AbilityCost::PerCounter { base, .. } => {
+            additional_cost_x_max(state, player, source_id, base)
+        }
         _ => None,
     }
 }
@@ -4289,6 +4352,18 @@ pub fn enter_payment_step(
         }
     }
 
+    if state
+        .pending_cast
+        .as_ref()
+        .is_some_and(|pending| pending.deferred_target_selection)
+    {
+        let pending = *state
+            .pending_cast
+            .take()
+            .expect("checked pending cast presence");
+        return begin_deferred_target_selection(state, player, pending, events);
+    }
+
     if state.pending_cast.as_ref().is_some_and(|pending| {
         matches!(
             pending.additional_cost_flow,
@@ -4300,18 +4375,6 @@ pub fn enter_payment_step(
             .take()
             .expect("checked pending cast presence");
         return finish_pending_cost_or_cast(state, player, pending, events);
-    }
-
-    if state
-        .pending_cast
-        .as_ref()
-        .is_some_and(|pending| pending.deferred_target_selection)
-    {
-        let pending = *state
-            .pending_cast
-            .take()
-            .expect("checked pending cast presence");
-        return begin_deferred_target_selection(state, player, pending, events);
     }
 
     // CR 601.2h: Auto-finalize when no player-level decision remains. Convoke requires

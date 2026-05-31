@@ -3390,7 +3390,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
             enter_transformed,
             enters_attacking,
             up_to,
-            choice_count,
+            choice_count: choice_count.map(Box::new),
             enter_with_counters,
         });
     }
@@ -6132,7 +6132,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 enter_with_counters,
             });
             let mut clause = parsed_clause(effect);
-            clause.multi_target = Some(choice_count);
+            clause.multi_target = Some(*choice_count);
             clause
         }
         ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::PutCounterList {
