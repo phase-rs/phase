@@ -1,5 +1,10 @@
 // CR 601.3 — casting/activation restriction statics.
 
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
 /// CR 601.2 + CR 602.5 + CR 117.1a + CR 117.1b: Parse "[subject] can cast spells
 /// and activate abilities only during {your | their own} turn(s)" — City of
 /// Solitude class. Emits TWO statics (cast-half + activate-half) so the
@@ -11,7 +16,7 @@
 ///
 /// Grammar:
 ///   <SUBJECT> "can cast spells and activate abilities " parse_when_clause
-fn parse_cast_and_activate_only_during(
+pub(crate) fn parse_cast_and_activate_only_during(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<Vec<StaticDefinition>> {
@@ -69,7 +74,10 @@ fn parse_cast_and_activate_only_during(
 /// "Numot … have vigilance and haste, and the legend rule doesn't apply to
 /// them" (The Herald of Numot) — fall through and remain Unimplemented rather
 /// than being misparsed.
-fn parse_legend_rule_exemption(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_legend_rule_exemption(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
     let rest = nom_tag_tp(tp, "the \"legend rule\" doesn't apply")?;
 
     // Global form: nothing (or just the sentence terminator) follows.
@@ -96,7 +104,7 @@ fn parse_legend_rule_exemption(tp: &TextPair<'_>, text: &str) -> Option<StaticDe
 /// so those cards are deferred rather than given a filter that silently matches
 /// nothing.
 /// CR 109.5: "you control" resolves to the source's controller.
-fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilter> {
+pub(crate) fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilter> {
     // Drop the trailing sentence terminator so the combinator suffix split sees
     // a clean "<descriptor> you control" phrase. allow-noncombinator: punctuation
     // cleanup on a pre-tokenized chunk, not parsing dispatch.
@@ -131,12 +139,16 @@ fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilter> {
 /// Parse the subject of "X can't be countered" lines.
 /// CR 101.2: Returns SelfRef for "~ can't be countered", or a typed filter for
 /// "Green spells you control can't be countered", "Creature spells you control can't be countered", etc.
-fn parse_cant_be_countered_subject(tp: &TextPair) -> TargetFilter {
+pub(crate) fn parse_cant_be_countered_subject(tp: &TextPair) -> TargetFilter {
     // Find the subject before "can't be countered"
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     if let Some(pos) = tp.lower.find("can't be countered") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let subject = tp.lower[..pos].trim();
         // Self-referential: "~" or card name (handled by tp.contains matching the card name)
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         if subject.is_empty() || subject == "~" || subject.ends_with(" ~") {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             return TargetFilter::SelfRef;
         }
         let normalized = format!("all {subject}");
@@ -155,7 +167,9 @@ fn parse_cant_be_countered_subject(tp: &TextPair) -> TargetFilter {
 /// Composed from nom `tag()`/`alt()`/`value()`/`preceded`/`opt` so additional
 /// exemption kinds can be added as one combinator branch when a real card needs
 /// them — do not add variants speculatively.
-fn parse_activation_exemption_suffix(input: &str) -> OracleResult<'_, ActivationExemption> {
+pub(crate) fn parse_activation_exemption_suffix(
+    input: &str,
+) -> OracleResult<'_, ActivationExemption> {
     let mut parser = opt(preceded(
         tag(" unless they're "),
         value(ActivationExemption::ManaAbilities, tag("mana abilities")),
@@ -164,7 +178,7 @@ fn parse_activation_exemption_suffix(input: &str) -> OracleResult<'_, Activation
     Ok((rest, exemption.unwrap_or_default()))
 }
 
-fn parse_cant_be_activated_exemption_in_text(lower: &str) -> ActivationExemption {
+pub(crate) fn parse_cant_be_activated_exemption_in_text(lower: &str) -> ActivationExemption {
     nom_primitives::scan_preceded(lower, |i| {
         preceded(tag("can't be activated"), parse_activation_exemption_suffix).parse(i)
     })
@@ -201,7 +215,7 @@ fn parse_cant_be_activated_exemption_in_text(lower: &str) -> ActivationExemption
 /// Returns `None` for the self-reference case ("its activated abilities can't be activated"
 /// / "activated abilities can't be activated" on creature text), which the self-ref
 /// branch below handles directly.
-fn parse_filter_scoped_cant_be_activated(
+pub(crate) fn parse_filter_scoped_cant_be_activated(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
@@ -243,11 +257,11 @@ fn parse_filter_scoped_cant_be_activated(
     // Otherwise fall back to the type-list + controller-suffix form (Karn, Clarion).
     // Require the predicate ending "... can't be activated[.]" at the tail.
     let predicate_tp = rest_tp
-        .strip_suffix(" can't be activated.")
-        .or_else(|| rest_tp.strip_suffix(" can't be activated"))?;
-    // Extract the type-list + optional controller suffix via the shared helper.
-    // `parse_type_phrase` consumes the filter and returns the unconsumed tail —
-    // for this pattern the tail should be empty (the whole predicate IS the filter).
+        .strip_suffix(" can't be activated.") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        .or_else(|| rest_tp.strip_suffix(" can't be activated"))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+                                                                   // Extract the type-list + optional controller suffix via the shared helper.
+                                                                   // `parse_type_phrase` consumes the filter and returns the unconsumed tail —
+                                                                   // for this pattern the tail should be empty (the whole predicate IS the filter).
     let (source_filter, tail) = parse_type_phrase(predicate_tp.original);
     if !tail.trim().is_empty() {
         return None;
@@ -275,7 +289,7 @@ fn parse_filter_scoped_cant_be_activated(
 ///   library." (Ashiok class)
 /// - "Players can't search libraries." / "Each player can't search libraries."
 ///   (Mindlock Orb class)
-fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     fn parse_search_negation_prefix(input: &str) -> OracleResult<'_, ()> {
         let (input, _) = alt((
             value((), tag::<_, _, OracleError<'_>>("can't ")),
@@ -346,7 +360,7 @@ fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
 ///
 /// The optional `and dying` clause toggles the `Dies` event in the event set.
 /// Parser constructs events in canonical order `[EntersBattlefield, Dies]`.
-fn parse_suppress_triggers(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_suppress_triggers(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     use crate::types::statics::SuppressedTriggerEvent;
 
     // Consume the type-list + optional controller suffix (e.g., "Creatures your
@@ -410,7 +424,7 @@ fn parse_suppress_triggers(tp: &TextPair<'_>, text: &str) -> Option<StaticDefini
 /// of a preceding noun phrase (e.g., "spells and abilities your opponents control ...").
 /// Distinct from `strip_casting_prohibition_subject` which consumes sentence-subject
 /// pronoun forms like "you" / "your opponents".
-fn strip_controller_possessive_scope(tp: &str) -> Option<(ProhibitionScope, &str)> {
+pub(crate) fn strip_controller_possessive_scope(tp: &str) -> Option<(ProhibitionScope, &str)> {
     let lower = tp.to_lowercase();
     // Try "your opponents control " first (plural form — Ashiok).
     if let Some(rest) = nom_tag_lower(tp, &lower, "your opponents control ") {
@@ -430,7 +444,7 @@ fn strip_controller_possessive_scope(tp: &str) -> Option<(ProhibitionScope, &str
 /// Strip a subject prefix that maps to a `ProhibitionScope`.
 /// Returns `(scope, remaining_predicate)` or `None` if no known subject prefix matches.
 /// Shared by all casting prohibition parsers (CantCastDuring, PerTurnCastLimit, etc.).
-fn strip_casting_prohibition_subject(tp: &str) -> Option<(ProhibitionScope, &str)> {
+pub(crate) fn strip_casting_prohibition_subject(tp: &str) -> Option<(ProhibitionScope, &str)> {
     nom_tag_lower(tp, tp, "each opponent ")
         .or_else(|| nom_tag_lower(tp, tp, "your opponents "))
         .map(|rest| (ProhibitionScope::Opponents, rest))
@@ -467,7 +481,10 @@ fn strip_casting_prohibition_subject(tp: &str) -> Option<(ProhibitionScope, &str
 /// diverge (a hypothetical future card like "who has cast an artifact spell ... can't
 /// cast noncreature spells"), the `max=1` reduction is no longer sound and we return
 /// `None` so the line falls through to other parsers (or `Unimplemented`).
-fn parse_conditional_subject_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_conditional_subject_per_turn_cast_limit(
+    tp: &str,
+    text: &str,
+) -> Option<StaticDefinition> {
     // 1. Strip subject prefix → scope, via the shared building block. This is the
     //    single authority for subject→`ProhibitionScope` mapping; inlining a
     //    hard-coded "each player" branch here would silently exclude every other
@@ -534,7 +551,7 @@ fn parse_conditional_subject_per_turn_cast_limit(tp: &str, text: &str) -> Option
 /// CR 101.2 + CR 604.1: Parse per-turn casting limits from Oracle text.
 /// Handles "Each player/opponent can't cast more than N [type] spell(s) each turn"
 /// and the alternate phrasing "You can cast no more than N spells each turn."
-fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
     // CR 601.2 + CR 601.3a + CR 604.1: Conditional-subject phrasing — "<SUBJECT> who
     // has cast a [type] spell this turn can't cast additional [type] spells."
     // Semantically equivalent to `max=1` per-turn cast limit on the same [type]
@@ -556,7 +573,9 @@ fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
         .or_else(|| nom_tag_lower(predicate, predicate, "can cast no more than "))
         .or_else(|| {
             // Compound clause: look for " and " joining two restrictions
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             predicate.split_once(" and ").and_then(|(_, second)| {
+                // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 let (_, rest) = strip_casting_prohibition_subject(second)?;
                 nom_tag_lower(rest, rest, "can't cast more than ")
                     .or_else(|| nom_tag_lower(rest, rest, "can cast no more than "))
@@ -569,13 +588,13 @@ fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
     // 4. Require "each turn" suffix
     let before_each_turn = rest
         .trim_start()
-        .strip_suffix(" each turn.")
-        .or_else(|| rest.trim_start().strip_suffix(" each turn"))?;
+        .strip_suffix(" each turn.") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        .or_else(|| rest.trim_start().strip_suffix(" each turn"))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 
     // 5. Extract optional spell type filter between count and "spell(s)"
     let type_text = before_each_turn
-        .strip_suffix(" spells")
-        .or_else(|| before_each_turn.strip_suffix(" spell"))
+        .strip_suffix(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        .or_else(|| before_each_turn.strip_suffix(" spell")) // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         .unwrap_or("")
         .trim();
 
@@ -619,7 +638,7 @@ fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
 ///
 /// Composed from the shared `strip_casting_prohibition_subject` building block plus
 /// nom `tag`/`alt`/`value` — no string-matching dispatch.
-fn parse_per_player_conditional_prohibition(
+pub(crate) fn parse_per_player_conditional_prohibition(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
@@ -694,7 +713,7 @@ fn parse_per_player_conditional_prohibition(
 /// - "[Subject] can't cast spells with the chosen name" (Alhammarret)
 /// - "[Subject] can't cast spells of the chosen type" (Archon of Valor's Reach)
 /// - "Enchanted creature's controller can't cast [type] spells" (Brand of Ill Omen)
-fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition> {
     // Exclude patterns handled by other parsers
     if nom_primitives::scan_contains(tp, "can't cast more than")
         || nom_primitives::scan_contains(tp, "can't cast spells during")
@@ -797,8 +816,8 @@ fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition>
     // --- "[type] spells" / "[type] spell" — standard type-based prohibition ---
     // 4. Require it ends with "spell" or "spells"
     let before_spells = trimmed
-        .strip_suffix(" spells")
-        .or_else(|| trimmed.strip_suffix(" spell"))?;
+        .strip_suffix(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        .or_else(|| trimmed.strip_suffix(" spell"))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 
     // 5. Parse type filter from the remaining text
     let type_text = before_spells.trim();
@@ -824,14 +843,16 @@ fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition>
 /// Parse passive voice "[Type] spells can't be cast" pattern.
 /// E.g., Aether Storm: "Creature spells can't be cast."
 /// Also handles "[Type] spells with mana value N or greater/less can't be cast."
-fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticDefinition> {
     // Look for "spells can't be cast" suffix
     let trimmed = tp.trim_end_matches('.');
-    let before_cant = trimmed.strip_suffix(" can't be cast")?;
+    let before_cant = trimmed.strip_suffix(" can't be cast")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 
     // Check for "spells with mana value N or less/greater" pattern
     // E.g., "noncreature spells with mana value 4 or greater can't be cast"
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     if let Some(pos) = before_cant.find(" spells with mana value ") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let type_text = &before_cant[..pos];
         let mv_rest = &before_cant[pos + " spells with mana value ".len()..];
         let (filter, remainder) = parse_type_phrase(type_text);
@@ -867,7 +888,7 @@ fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticDefinition> 
     }
 
     // Require " spells" at the end of the subject
-    let type_text = before_cant.strip_suffix(" spells")?;
+    let type_text = before_cant.strip_suffix(" spells")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 
     let (filter, remainder) = parse_type_phrase(type_text);
     if !remainder.trim().is_empty() {
@@ -893,7 +914,7 @@ fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticDefinition> 
 /// Handles:
 /// - "During your turn, your opponents can't cast spells or activate abilities..."
 /// - "During combat, players can't cast instant spells or activate abilities..."
-fn parse_temporal_prefix_cant_cast(tp: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_temporal_prefix_cant_cast(tp: &str, text: &str) -> Option<StaticDefinition> {
     // Require "during " prefix
     let after_during = nom_tag_lower(tp, tp, "during ")?;
 
@@ -925,8 +946,9 @@ fn parse_temporal_prefix_cant_cast(tp: &str, text: &str) -> Option<StaticDefinit
 
     // Extract optional spell type filter: "instant spells", "spells", etc.
     let spell_filter = if let Some(before_spells) = trimmed
-        .strip_suffix(" spells")
+        .strip_suffix(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         .or_else(|| trimmed.strip_suffix(" spell"))
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     {
         let type_text = before_spells.trim();
         if type_text.is_empty() || type_text == "spells" {
@@ -954,7 +976,10 @@ fn parse_temporal_prefix_cant_cast(tp: &str, text: &str) -> Option<StaticDefinit
 
 /// Parse "Enchanted creature's controller can't cast [type] spells" pattern.
 /// E.g., Brand of Ill Omen: "Enchanted creature's controller can't cast creature spells."
-fn parse_enchanted_controller_cant_cast(tp: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_enchanted_controller_cant_cast(
+    tp: &str,
+    text: &str,
+) -> Option<StaticDefinition> {
     let rest = nom_tag_lower(tp, tp, "enchanted creature's controller ")
         .or_else(|| nom_tag_lower(tp, tp, "enchanted creature\u{2019}s controller "))?;
     let after_cant_cast = nom_tag_lower(rest, rest, "can't cast ")
@@ -962,8 +987,8 @@ fn parse_enchanted_controller_cant_cast(tp: &str, text: &str) -> Option<StaticDe
 
     let trimmed = after_cant_cast.trim_end_matches('.');
     let before_spells = trimmed
-        .strip_suffix(" spells")
-        .or_else(|| trimmed.strip_suffix(" spell"))?;
+        .strip_suffix(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        .or_else(|| trimmed.strip_suffix(" spell"))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 
     let type_text = before_spells.trim();
     let spell_filter = if type_text.is_empty() {
@@ -988,7 +1013,7 @@ fn parse_enchanted_controller_cant_cast(tp: &str, text: &str) -> Option<StaticDe
 
 /// Parse "mana value N or less" / "mana value N or greater" from the remainder
 /// after "spells with mana value ".
-fn parse_cant_cast_mana_value(
+pub(crate) fn parse_cant_cast_mana_value(
     rest: &str,
     who: ProhibitionScope,
     text: &str,
@@ -1025,7 +1050,7 @@ fn parse_cant_cast_mana_value(
 /// Handles "[Subject] can't draw more than N card(s) each turn."
 /// E.g., Spirit of the Labyrinth: "Each player can't draw more than one card each turn."
 /// E.g., Narset, Parter of Veils: "Each opponent can't draw more than one card each turn."
-fn parse_per_turn_draw_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_per_turn_draw_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
     // 1. Strip subject → scope
     let (who, predicate) = strip_casting_prohibition_subject(tp)?;
 
@@ -1058,7 +1083,7 @@ fn parse_per_turn_draw_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
 /// Handles "[Subject] can't draw cards."
 /// E.g., Omen Machine: "Players can't draw cards."
 /// E.g., Maralen of the Mornsong: "Players can't draw cards."
-fn parse_cant_draw_cards(tp: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_cant_draw_cards(tp: &str, text: &str) -> Option<StaticDefinition> {
     type VE<'a> = OracleError<'a>;
 
     let (who, predicate) = strip_casting_prohibition_subject(tp)?;
@@ -1077,20 +1102,22 @@ fn parse_cant_draw_cards(tp: &str, text: &str) -> Option<StaticDefinition> {
 
 /// Parse the subject of "[type] cards in [zones] can't enter the battlefield".
 /// CR 604.3: Extracts the card type filter and zone restrictions into a TypedFilter.
-fn parse_cant_enter_battlefield_subject(tp: &TextPair) -> TargetFilter {
+pub(crate) fn parse_cant_enter_battlefield_subject(tp: &TextPair) -> TargetFilter {
     let mut card_type = None;
     let mut properties = Vec::new();
 
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     if let Some(pos) = tp.lower.find("can't enter the battlefield") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let subject = tp.lower[..pos].trim();
         // "creature cards in graveyards and libraries" → card_type = Creature
         if let Some(type_part) = subject.split(" cards").next() {
             card_type = match type_part.trim() {
-                "creature" => Some(TypeFilter::Creature),
-                "artifact" => Some(TypeFilter::Artifact),
-                "enchantment" => Some(TypeFilter::Enchantment),
-                "instant" => Some(TypeFilter::Instant),
-                "sorcery" => Some(TypeFilter::Sorcery),
+                "creature" => Some(TypeFilter::Creature), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+                "artifact" => Some(TypeFilter::Artifact), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+                "enchantment" => Some(TypeFilter::Enchantment), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+                "instant" => Some(TypeFilter::Instant), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+                "sorcery" => Some(TypeFilter::Sorcery), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 _ => None,
             };
         }
@@ -1118,7 +1145,7 @@ fn parse_cant_enter_battlefield_subject(tp: &TextPair) -> TargetFilter {
 /// - "Each opponent's maximum hand size is reduced by [N]." → AdjustedBy(-N), opponent scope
 /// - "The chosen player's maximum hand size is [N]." → SetTo(N), chosen player scope
 /// - "Your maximum hand size is equal to [quantity]." → EqualTo(quantity)
-fn try_parse_max_hand_size(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn try_parse_max_hand_size(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     type NomErr<'a> = OracleError<'a>;
 
     let lower_trimmed = tp.lower.trim_end_matches('.');
@@ -1185,7 +1212,10 @@ fn try_parse_max_hand_size(tp: &TextPair<'_>, text: &str) -> Option<StaticDefini
 /// returned `affected: TargetFilter`, so eligibility is gated on that granted keyword.
 /// CR 604.2 + CR 118.9: static continuous effect granting permission to cast via an
 /// alternative cost associated with the named keyword.
-fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+pub(crate) fn try_parse_graveyard_cast_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
     // CR 110.4 + CR 305.1 + CR 601.2a: Muldrotha-class — "During each of your
     // turns, you may play a land or cast a permanent spell of each permanent
     // type from your graveyard." A single permission grants both the land
@@ -1319,7 +1349,7 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
 ///
 /// Returns `None` for shapes outside this class (graveyard/top-of-library/hand
 /// permissions all anchor on different phrases earlier in the dispatch chain).
-fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
     // CR 601.2a: Frequency prefix. Both "once each turn" (Maralen) and the
     // longer "once during each of your turns" synonym map to `OncePerTurn`.
     // Both prefixes are tried via the file-wide `or_else` chain — adding an
@@ -1422,7 +1452,10 @@ fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option<StaticDefi
 /// life equal to its mana value rather than paying its mana cost.") is
 /// recognised via the existing `oracle_effect::try_parse_alt_cost_rider`
 /// helper and stamped into `StaticMode::TopOfLibraryCastPermission.alt_cost`.
-fn try_parse_top_of_library_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+pub(crate) fn try_parse_top_of_library_cast_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
     // Compound Bolas's Citadel form first — "you may play lands and cast
     // spells from the top of your library". Both halves collapse to a single
     // `Play` permission with `affected: Any`: under CR 305.1, `Play` mode
@@ -1500,7 +1533,7 @@ fn try_parse_top_of_library_cast_permission(text: &str, lower: &str) -> Option<S
 /// zone qualifier — implicit hand per CR 601.2: "To cast a spell is to take it
 /// from where it is (usually the hand)..."). Continuous static — not a one-shot
 /// effect.
-fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
     // CR 601.2b: Prefix determines frequency. `OncePerTurn` (Zaffai) is the
     // explicit-choice path; `Unlimited` (Omniscience, Dracogenesis) runs silently.
     let (rest, frequency) = if let Some(r) = nom_tag_lower(

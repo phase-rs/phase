@@ -1,14 +1,19 @@
 // CR 509.1b — combat restriction / evasion statics.
 
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
 /// CR 509.1b / CR 702.111b: "<N> or more creatures" minimum-blocker phrase.
 /// Composed from `parse_number` + `tag(" or more creatures")`.
-fn parse_min_blockers_phrase(input: &str) -> OracleResult<'_, u32> {
+pub(crate) fn parse_min_blockers_phrase(input: &str) -> OracleResult<'_, u32> {
     let (rest, n) = nom_primitives::parse_number(input)?;
     let (rest, _) = tag(" or more creatures").parse(rest)?;
     Ok((rest, n))
 }
 
-fn parse_source_power_block_restriction(text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_source_power_block_restriction(text: &str) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     let (rest, _) = tag::<_, _, OracleError<'_>>("creatures with power less than ")
         .parse(lower.as_str())
@@ -76,7 +81,7 @@ pub(crate) fn classify_block_exception(filter_text: &str) -> BlockExceptionKind 
 /// / "of the chosen type"). A bare "permanent you control" needs no filter —
 /// `apply_trigger_doubling`'s controller match already enforces control — so
 /// this returns `None`, leaving `affected` unset (Panharmonicon/Isshin/Drivnod).
-fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
     // The source phrase sits between "a triggered ability of " and the trigger
     // verb: " to trigger" (cause-form: "...causes a triggered ability of X to
     // trigger") or " triggers" (source-form: "a triggered ability of X
@@ -120,7 +125,7 @@ fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
     restrictive.then_some(filter)
 }
 
-fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
+pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("no more than ")
         .parse(lower)
         .ok()?;
@@ -145,7 +150,10 @@ fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
     Some(mode)
 }
 
-fn parse_compound_subject_rule_static(text: &str, lower: &str) -> Option<Vec<StaticDefinition>> {
+pub(crate) fn parse_compound_subject_rule_static(
+    text: &str,
+    lower: &str,
+) -> Option<Vec<StaticDefinition>> {
     let (subject_lower, first, after_first) =
         nom_primitives::scan_preceded(lower, parse_rule_static_predicate_nom)?;
     let (rest, mut predicates) = many0(preceded(
@@ -182,7 +190,10 @@ fn parse_compound_subject_rule_static(text: &str, lower: &str) -> Option<Vec<Sta
 /// Restricted to `Protection(_)` grants — the only player-applicable keyword
 /// with a runtime-implemented `PlayerProtection` mode. Returns `None` for any
 /// other granted keyword (a player cannot meaningfully "have flying").
-fn parse_compound_subject_keyword_static(text: &str, lower: &str) -> Option<Vec<StaticDefinition>> {
+pub(crate) fn parse_compound_subject_keyword_static(
+    text: &str,
+    lower: &str,
+) -> Option<Vec<StaticDefinition>> {
     type VE<'a> = OracleError<'a>;
 
     // Subject: "you and <object subject phrase> ".
@@ -225,7 +236,7 @@ fn parse_compound_subject_keyword_static(text: &str, lower: &str) -> Option<Vec<
     Some(vec![object_def, player_def])
 }
 
-fn parse_rule_static_separator_nom(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_rule_static_separator_nom(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
@@ -249,7 +260,9 @@ fn parse_rule_static_separator_nom(input: &str) -> OracleResult<'_, ()> {
 /// definition. All emitted definitions share the original full-line
 /// description, matching the convention used by other compound handlers
 /// (e.g., `CantBeEquipped` + `CantBeEnchanted`).
-fn try_split_and_can_attack_despite_defender(text: &str) -> Option<Vec<StaticDefinition>> {
+pub(crate) fn try_split_and_can_attack_despite_defender(
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
@@ -300,7 +313,7 @@ fn try_split_and_can_attack_despite_defender(text: &str) -> Option<Vec<StaticDef
     Some(defs)
 }
 
-fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> {
+pub(crate) fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
@@ -388,7 +401,7 @@ fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> 
 /// CR 105.2c / CR 205.4a: Parse property-based creature descriptors that are not subtypes.
 /// Handles "colorless", "multicolored", "snow", and "snow and [Subtype]" patterns.
 /// Returns a fully constructed `TargetFilter` with the appropriate properties.
-fn parse_property_descriptor(
+pub(crate) fn parse_property_descriptor(
     desc_lower: &str,
     desc_remaining: &str,
     extra_props: &[FilterProp],
@@ -439,7 +452,9 @@ fn parse_property_descriptor(
     }
 
     // CR 205.4a: "snow and [Subtype]" — supertype + subtype compound
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     if let Some(rest) = desc_lower.strip_prefix("snow and ") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         props.push(FilterProp::HasSupertype {
             value: Supertype::Snow,
         });
@@ -472,14 +487,14 @@ fn parse_property_descriptor(
 /// CR 205.3m: Try to parse a compound subtype descriptor like "Ninja and Rogue" or "Elf or Warrior"
 /// into an `Or` filter with one creature+subtype+controller per part.
 /// Returns `None` if the descriptor is not a compound subtype pattern.
-fn try_parse_compound_subtypes(
+pub(crate) fn try_parse_compound_subtypes(
     descriptor: &str,
     extra_props: &[FilterProp],
     is_other: bool,
 ) -> Option<TargetFilter> {
     let (left, right) = descriptor
-        .split_once(" and ")
-        .or_else(|| descriptor.split_once(" or "))?;
+        .split_once(" and ") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        .or_else(|| descriptor.split_once(" or "))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     let left_trimmed = left.trim();
     let right_trimmed = right.trim();
     if !is_capitalized_words(left_trimmed) || !is_capitalized_words(right_trimmed) {
@@ -521,7 +536,10 @@ fn try_parse_compound_subtypes(
 /// - "each creature you control with toughness greater than its power assigns combat damage..."
 /// - "each creature assigns combat damage equal to its toughness..." (global, no controller)
 /// - "this creature assigns combat damage equal to its toughness..." (self-referential)
-fn parse_assigns_damage_from_toughness(lower: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_assigns_damage_from_toughness(
+    lower: &str,
+    text: &str,
+) -> Option<StaticDefinition> {
     let suffix = "assigns combat damage equal to its toughness rather than its power";
     let suffix_alt = "assign combat damage equal to their toughness rather than their power";
 
@@ -590,7 +608,7 @@ fn parse_assigns_damage_from_toughness(lower: &str, text: &str) -> Option<Static
     )
 }
 
-fn parse_attached_assigns_damage_from_toughness(
+pub(crate) fn parse_attached_assigns_damage_from_toughness(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
@@ -651,7 +669,10 @@ fn parse_attached_assigns_damage_from_toughness(
 
 /// CR 510.1c: Parse "you may have this creature assign its combat damage as though it
 /// weren't blocked" self-referential static.
-fn parse_assign_damage_as_though_unblocked(lower: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_assign_damage_as_though_unblocked(
+    lower: &str,
+    text: &str,
+) -> Option<StaticDefinition> {
     type VE<'a> = OracleError<'a>;
 
     let clean = lower.trim_end_matches('.');
@@ -680,7 +701,7 @@ fn parse_assign_damage_as_though_unblocked(lower: &str, text: &str) -> Option<St
 /// CR 510.1c: Parse attached-creature controller wording:
 /// - "Enchanted creature's controller may have it assign its combat damage as though it weren't blocked."
 /// - "Equipped creature's controller may have it assign its combat damage as though it weren't blocked."
-fn parse_attached_creature_assign_damage_as_though_unblocked(
+pub(crate) fn parse_attached_creature_assign_damage_as_though_unblocked(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
@@ -717,7 +738,7 @@ fn parse_attached_creature_assign_damage_as_though_unblocked(
     )
 }
 
-fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let (affected, predicate_text) = strip_rule_static_subject(tp.original, tp.lower)?;
@@ -743,7 +764,7 @@ fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> {
 /// they didn't have Xwalk" cycle (Ur-Drago and four siblings — one per basic
 /// land subtype). Produces a `StaticMode::IgnoreLandwalkForBlocking` global
 /// rule-modification static.
-fn try_parse_ignore_landwalk_for_blocking(
+pub(crate) fn try_parse_ignore_landwalk_for_blocking(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
@@ -786,7 +807,7 @@ fn try_parse_ignore_landwalk_for_blocking(
 ///
 /// Returns `None` if the text does not match this family. Callers fall through
 /// to the general "~ can't attack/block" handlers below.
-fn parse_combat_tax_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_combat_tax_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     // Run on the ORIGINAL-case text so `{X}` mana shards and `X` in the dynamic
     // clause are preserved for nom's `parse_mana_cost` (which is case-sensitive
     // on X). All structural tags use `tag_no_case` to remain robust to
@@ -814,7 +835,7 @@ fn parse_combat_tax_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefini
     Some(def)
 }
 
-fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     let (subject_lower, predicate, rest) =
         nom_primitives::scan_preceded(&lower, parse_combat_rule_static_predicate_nom)?;
@@ -839,7 +860,7 @@ fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefinition> {
 ///   payer     := "their controller pays " | "its controller pays " | "you pay "
 ///   suffix    := " for each ..." dynamic_x?
 ///   dynamic_x := ", where x is the number of " <filter-phrase>
-fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
+pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     use crate::parser::oracle_nom::error::OracleError;
     use crate::types::ability::UnlessPayScaling;
 
@@ -1064,7 +1085,7 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
 /// Fails gracefully (returns `None`) when the phrase is missing, the tail
 /// doesn't match either pronoun form, or the subject cannot be resolved
 /// to a known filter — letting subsequent dispatch branches try.
-fn parse_can_attack_despite_defender(
+pub(crate) fn parse_can_attack_despite_defender(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
@@ -1139,7 +1160,7 @@ fn parse_can_attack_despite_defender(
 /// Returns `None` (graceful fall-through) when the phrase is absent, the tail
 /// doesn't match, or the subject cannot be resolved — so unrelated lines like
 /// "can attack as though it had haste" never match here.
-fn parse_activate_abilities_as_though_haste(
+pub(crate) fn parse_activate_abilities_as_though_haste(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
@@ -1188,7 +1209,10 @@ fn parse_activate_abilities_as_though_haste(
 /// Handles "All creatures attack each combat if able", "Creatures you control attack each
 /// combat if able", "Creatures your opponents control attack each combat if able", and the
 /// combined "attacks or blocks each combat if able" variant.
-fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<StaticDefinition>> {
+pub(crate) fn try_parse_scoped_must_attack_block(
+    lower: &str,
+    text: &str,
+) -> Option<Vec<StaticDefinition>> {
     // Strip trailing period for matching.
     let clean = lower.trim_end_matches('.');
     let clean_text = text.trim_end_matches('.');
@@ -1259,10 +1283,14 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
     // Determine the affected filter from the subject phrase.
     let affected = match subject_lower {
         "all creatures" | "each creature" => TargetFilter::Typed(TypedFilter::creature()),
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         "creatures you control" => {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         }
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         "creatures your opponents control" => {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent))
         }
         "~" | "this creature" => TargetFilter::SelfRef,
@@ -1283,4 +1311,3 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
             .collect(),
     )
 }
-

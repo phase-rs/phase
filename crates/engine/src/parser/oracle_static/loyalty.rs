@@ -1,6 +1,11 @@
 // CR 606.3 — planeswalker loyalty activation statics.
 
-fn parse_self_loyalty_activation_permission(input: &str) -> OracleResult<'_, ()> {
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
+pub(crate) fn parse_self_loyalty_activation_permission(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         (
@@ -18,7 +23,7 @@ fn parse_self_loyalty_activation_permission(input: &str) -> OracleResult<'_, ()>
     .parse(input)
 }
 
-fn parse_loyalty_activation_timing_permission(
+pub(crate) fn parse_loyalty_activation_timing_permission(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {

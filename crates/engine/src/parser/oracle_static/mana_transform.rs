@@ -1,5 +1,10 @@
 // CR 613.3 — mana transformation static abilities.
 
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
 /// CR 614.1a + CR 703.4q: Parse "If you would lose unspent mana, that mana
 /// becomes [type] instead." — Horizon Stone / Kruphix / Omnath / Ozai class.
 /// Emits the unified `StepEndUnspentMana { filter: None, action: Transform(to) }`

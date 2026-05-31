@@ -1,11 +1,16 @@
 // CR 604.3 — characteristic-defining ability statics.
 
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
 /// Parse CDA power/toughness equality patterns like:
 /// - "~'s power and toughness are each equal to the number of creatures you control."
 /// - "~'s power is equal to the number of card types among cards in all graveyards
 ///   and its toughness is equal to that number plus 1."
 /// - "~'s toughness is equal to the number of cards in your hand."
-fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
     // Detect framing
     let both = nom_primitives::scan_contains(lower, "power and toughness are each equal to");
     let power_only = !both && nom_primitives::scan_contains(lower, "power is equal to");
@@ -19,15 +24,15 @@ fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
     // Extract the quantity text after "equal to "
     let quantity_start = if both {
         lower
-            .find("are each equal to ")
+            .find("are each equal to ") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .map(|p| p + "are each equal to ".len())
     } else if power_only {
         lower
-            .find("power is equal to ")
+            .find("power is equal to ") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .map(|p| p + "power is equal to ".len())
     } else {
         lower
-            .find("toughness is equal to ")
+            .find("toughness is equal to ") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .map(|p| p + "toughness is equal to ".len())
     };
     let quantity_text = &lower[quantity_start?..];

@@ -1,7 +1,12 @@
 // CR 613.3f (Layer 6) — keyword-grant static abilities.
 
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuleStaticPredicate {
+pub(crate) enum RuleStaticPredicate {
     CantUntap,
     CantAttack,
     CantBlock,
@@ -51,7 +56,7 @@ pub(crate) fn try_parse_graveyard_keyword_grant_clause(
     Some((filter, kind))
 }
 
-fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option<QuantityRef>)> {
+pub(crate) fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option<QuantityRef>)> {
     type VE<'a> = OracleError<'a>;
 
     let input = input.trim().trim_end_matches('.');
@@ -72,7 +77,7 @@ fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option<QuantityRe
 }
 
 #[cfg(test)]
-fn parse_spells_have_keyword_for_test(text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_spells_have_keyword_for_test(text: &str) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     parse_spells_have_keyword(&tp, text)
@@ -81,7 +86,7 @@ fn parse_spells_have_keyword_for_test(text: &str) -> Option<StaticDefinition> {
 /// Parse "[Type] spells you cast [from zone] have [keyword]" patterns.
 /// CR 702.51a: Grants a keyword (typically convoke) to spells matching a filter during casting.
 /// Also handles "Creature cards you own that aren't on the battlefield have flash."
-fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     type VE<'a> = OracleError<'a>;
 
     let scoped_tp = nom_tag_tp(tp, "during your turn, ");
@@ -273,7 +278,7 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
     None
 }
 
-fn apply_spell_keyword_subject_constraints(
+pub(crate) fn apply_spell_keyword_subject_constraints(
     filter: TargetFilter,
     zone_filter: Option<FilterProp>,
     mv_filter: Option<FilterProp>,
@@ -519,7 +524,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     {
         // Parse the keyword from "can't have or gain [keyword]" / "can't have [keyword]"
         // allow-noncombinator: punctuation cleanup after parser dispatch, not dispatch itself.
-        let stripped_lower = unquoted_lower.strip_suffix('.').unwrap_or(&unquoted_lower);
+        let stripped_lower = unquoted_lower.strip_suffix('.').unwrap_or(&unquoted_lower); // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let cant_text = if let Ok((_, (_, after))) =
             nom_primitives::split_once_on(stripped_lower, "can't have or gain ")
         {
@@ -591,7 +596,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     modifications
 }
 
-fn push_grant_clause_modifications(
+pub(crate) fn push_grant_clause_modifications(
     modifications: &mut Vec<ContinuousModification>,
     part: &str,
     where_x_expression: Option<&str>,

@@ -1,19 +1,10 @@
-// CR 604 / CR 613 — shared static parser infrastructure.
+// CR 604 / CR 613 - cross-category static parser helpers.
 
-/// CR 109.5 vs CR 102.1 + structural distributive: the pronoun-binding axis
-/// of an "only during X turn(s)" prohibition.
-///
-/// - `SourceRelative` ≡ "your turn" — CR 109.5 binds to the static's source
-///   controller (Fires of Invention).
-/// - `PerAffected` ≡ "their own turn(s)" — distributive per-affected-player
-///   binding (Dosan, City of Solitude). The CompRules don't carve out a
-///   specific pronoun rule for "their"; the distributive reading follows from
-///   CR 102.1 + the template structure of "[every player] can [action] only
-///   during their own [time]".
-///
-/// This enum is parser-internal — it never appears on `StaticMode`. The
-/// resulting `CastingProhibitionCondition` (`NotDuringYourTurn` vs
-/// `NotDuringAffectedPlayersTurn`) carries the binding axis into the runtime.
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
 /// CR 601.2f: Parse cost modification statics from Oracle text.
 /// Handles all four sub-patterns:
 /// 1. Type-filtered: "Creature spells you cast cost {1} less to cast"
@@ -24,7 +15,7 @@
 ///    — emitted with `affected = SelfRef`, `active_zones = [Hand, Stack, Command]`.
 ///
 /// Dynamic "for each" counts are extracted when present.
-fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefinition> {
+pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefinition> {
     let is_raise = nom_primitives::scan_contains(lower, "more to cast")
         || nom_primitives::scan_contains(lower, "more to activate");
     let is_reduce = nom_primitives::scan_contains(lower, "less to cast")
@@ -77,12 +68,16 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
     // This must be extracted before type parsing so it doesn't pollute type_desc.
     let cast_from_zones: Vec<Zone> = {
         let mut zones = Vec::new();
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         if let Some(cost_idx) = lower.find(" cost") {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             let prefix = &lower[..cost_idx];
             // Look for "from <zone> or from <zone>" or "from <zone>" after "cast".
             // Use the first " from " to capture compound patterns like
             // "from graveyards or from exile".
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             if let Some(from_idx) = prefix.find(" from ") {
+                // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 let from_text = &prefix[from_idx..];
                 // Skip "from anywhere other than" — that's a negation pattern
                 // requiring a Not filter, not a direct zone match.
@@ -111,12 +106,16 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
         parse_self_spell_target_cost_filter(lower)
     } else if let Some(filter) = first_qualified_spell_filter.clone() {
         Some(filter)
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     } else if let Some(cost_idx) = lower.find(" cost") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let prefix = &lower[..cost_idx];
         let prefix = strip_cost_modifier_target_clause(prefix);
         // Strip "from [zones]" clause (only if zones were detected), player scope, then "spells"
         let without_from = if !cast_from_zones.is_empty() {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             if let Some(from_idx) = prefix.find(" from ") {
+                // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 &prefix[..from_idx]
             } else {
                 prefix
@@ -154,11 +153,11 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
             (without_chosen, false)
         };
         let type_desc = without_chosen
-            .trim_end_matches(" you cast")
-            .trim_end_matches(" your opponents cast")
-            .trim_end_matches(" opponents cast")
-            .trim_end_matches(" spells")
-            .trim_end_matches(" spell")
+            .trim_end_matches(" you cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+            .trim_end_matches(" your opponents cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+            .trim_end_matches(" opponents cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+            .trim_end_matches(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+            .trim_end_matches(" spell") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .trim();
         // "spells" alone means no type restriction (bare "Spells you cast cost...")
         let typed_filter = if type_desc.is_empty() || type_desc == "spells" || type_desc == "spell"
@@ -281,7 +280,9 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
             })
             .or_else(|| super::oracle_quantity::parse_quantity_ref(count_text))
             .or_else(|| {
+                // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 if let Some(prefixed) = count_text.strip_prefix("the number of ") {
+                    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                     super::oracle_quantity::parse_quantity_ref(prefixed)
                 } else {
                     None
@@ -402,7 +403,7 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
     Some(definition)
 }
 
-fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCondition> {
+pub(crate) fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCondition> {
     // CR 702.166a: "This spell costs {N} less to cast if it's bargained" — route the
     // bargained predicate to the cost-determination StaticCondition. Checked ahead of
     // the "another spell" delegation and the parse_inner_condition fallback so the
@@ -434,7 +435,7 @@ fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCondition> {
 /// ("This spell costs {N} less to cast if it's bargained"). `cond_text` is already
 /// lowercase. Returns `StaticCondition::AdditionalCostPaid` — Bargain's optional
 /// sacrifice sets `additional_cost_paid` on the in-flight cast.
-fn parse_bargained_condition(cond_text: &str) -> Option<StaticCondition> {
+pub(crate) fn parse_bargained_condition(cond_text: &str) -> Option<StaticCondition> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("it's bargained"),
         tag("it is bargained"),
@@ -449,7 +450,9 @@ fn parse_bargained_condition(cond_text: &str) -> Option<StaticCondition> {
     Some(StaticCondition::AdditionalCostPaid)
 }
 
-fn parse_cost_modifier_another_spell_condition(input: &str) -> OracleResult<'_, TargetFilter> {
+pub(crate) fn parse_cost_modifier_another_spell_condition(
+    input: &str,
+) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = alt((tag("you've cast another "), tag("you cast another "))).parse(input)?;
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("spell this turn").parse(rest) {
         return Ok((rest, TargetFilter::Any));
@@ -466,27 +469,29 @@ fn parse_cost_modifier_another_spell_condition(input: &str) -> OracleResult<'_, 
 }
 
 /// Parse a basic land type name (case-insensitive) to its enum variant.
-fn parse_basic_land_type(name: &str) -> Option<BasicLandType> {
+pub(crate) fn parse_basic_land_type(name: &str) -> Option<BasicLandType> {
     match name.to_ascii_lowercase().as_str() {
-        "plains" => Some(BasicLandType::Plains),
-        "island" => Some(BasicLandType::Island),
-        "swamp" => Some(BasicLandType::Swamp),
-        "mountain" => Some(BasicLandType::Mountain),
-        "forest" => Some(BasicLandType::Forest),
+        "plains" => Some(BasicLandType::Plains), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        "island" => Some(BasicLandType::Island), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        "swamp" => Some(BasicLandType::Swamp), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        "mountain" => Some(BasicLandType::Mountain), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        "forest" => Some(BasicLandType::Forest), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         _ => None,
     }
 }
 
 /// Parse a basic land type name, accepting both singular and plural forms.
 /// "Mountains" → Mountain, "Islands" → Island. "Plains" is already valid singular.
-fn parse_basic_land_type_plural(name: &str) -> Option<BasicLandType> {
+pub(crate) fn parse_basic_land_type_plural(name: &str) -> Option<BasicLandType> {
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     parse_basic_land_type(name).or_else(|| name.strip_suffix('s').and_then(parse_basic_land_type))
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 }
 
 /// CR 305.7: Parse a comma-and-separated list of basic land types.
 /// "Mountain, Forest, and Plains" → [Mountain, Forest, Plains].
 /// Also handles single types: "Island" → [Island].
-fn parse_basic_land_type_list(text: &str) -> Option<Vec<BasicLandType>> {
+pub(crate) fn parse_basic_land_type_list(text: &str) -> Option<Vec<BasicLandType>> {
     // Try single type first (most common case)
     if let Some(single) = parse_basic_land_type_plural(text) {
         return Some(vec![single]);
@@ -495,9 +500,13 @@ fn parse_basic_land_type_list(text: &str) -> Option<Vec<BasicLandType>> {
     let mut types = Vec::new();
     for part in text.split(", ") {
         let part = part.trim();
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         if let Some(rest) = part.strip_prefix("and ") {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             types.push(parse_basic_land_type(rest.trim())?);
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         } else if let Some((before, after)) = part.split_once(" and ") {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             types.push(parse_basic_land_type(before.trim())?);
             types.push(parse_basic_land_type(after.trim())?);
         } else {
@@ -518,7 +527,7 @@ fn parse_basic_land_type_list(text: &str) -> Option<Vec<BasicLandType>> {
 /// or "X, Y, and Z" (CR 105.1).
 /// Input must be fully consumed by the combinator path; trailing content
 /// returns `None` so the outer dispatcher falls through.
-fn parse_color_predicate(text: &str) -> Option<Vec<ManaColor>> {
+pub(crate) fn parse_color_predicate(text: &str) -> Option<Vec<ManaColor>> {
     // CR 105.2: "all colors" / "every color" means the full WUBRG set.
     if let Ok((rest, _)) = alt((
         tag::<_, _, OracleError<'_>>("all colors"),
@@ -545,7 +554,7 @@ fn parse_color_predicate(text: &str) -> Option<Vec<ManaColor>> {
 /// This covers the class of card text that defines the source object's own
 /// color as a characteristic (Ghostfire-style), not global/class filters
 /// handled by `parse_all_subject_are_color`.
-fn parse_self_subject_is_color_cda(
+pub(crate) fn parse_self_subject_is_color_cda(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
@@ -569,7 +578,9 @@ fn parse_self_subject_is_color_cda(
     )
 }
 
-fn parse_self_subject_is_color_cda_line(input: &str) -> OracleResult<'_, Vec<ManaColor>> {
+pub(crate) fn parse_self_subject_is_color_cda_line(
+    input: &str,
+) -> OracleResult<'_, Vec<ManaColor>> {
     let (after_subject, _) = parse_self_color_subject(input)?;
     let (after_predicate, predicate_lower) = alt((
         terminated(take_until::<_, _, OracleError<'_>>("."), tag(".")),
@@ -586,7 +597,7 @@ fn parse_self_subject_is_color_cda_line(input: &str) -> OracleResult<'_, Vec<Man
     Ok((after_predicate, colors))
 }
 
-fn parse_self_color_subject(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_self_color_subject(input: &str) -> OracleResult<'_, ()> {
     let (rest, _) = alt((
         value((), tag::<_, _, OracleError<'_>>("~")),
         value((), tag("this card")),
@@ -598,7 +609,7 @@ fn parse_self_color_subject(input: &str) -> OracleResult<'_, ()> {
     Ok((rest, ()))
 }
 
-fn parse_self_ref_type_subject(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_self_ref_type_subject(input: &str) -> OracleResult<'_, ()> {
     for phrase in SELF_REF_TYPE_PHRASES {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(input) {
             return Ok((rest, ()));
@@ -616,7 +627,7 @@ fn parse_self_ref_type_subject(input: &str) -> OracleResult<'_, ()> {
 /// `parse_counter_suffix` combinator. Used by Omo, Queen of Vesuva's
 /// "Each nonland creature with an everything counter on it is every creature
 /// type" — routes to `AddAllCreatureTypes` via `parse_all_creature_types_grant`.
-fn parse_counter_conditioned_nonland_creature_subject(
+pub(crate) fn parse_counter_conditioned_nonland_creature_subject(
     input: &str,
 ) -> OracleResult<'_, TargetFilter> {
     let (input, _) = opt(alt((
@@ -648,11 +659,15 @@ fn parse_counter_conditioned_nonland_creature_subject(
 /// Handles "during your turn" and "during turns other than yours" suffixes
 /// on keyword/modification predicates. Returns the stripped predicate and
 /// the corresponding `StaticCondition`, or the original text with `None`.
-fn strip_suffix_turn_condition(text: &str) -> (String, Option<StaticCondition>) {
+pub(crate) fn strip_suffix_turn_condition(text: &str) -> (String, Option<StaticCondition>) {
     let trimmed = text.trim_end_matches('.');
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     if let Some(rest) = trimmed.strip_suffix(" during your turn") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         (format!("{rest}."), Some(StaticCondition::DuringYourTurn))
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     } else if let Some(rest) = trimmed.strip_suffix(" during turns other than yours") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         (
             format!("{rest}."),
             Some(StaticCondition::Not {
@@ -666,7 +681,7 @@ fn strip_suffix_turn_condition(text: &str) -> (String, Option<StaticCondition>) 
 
 /// Strip "in addition to {its/their} other {land }types" suffix,
 /// returning the type name before it.
-fn strip_in_addition_suffix(text: &str) -> Option<&str> {
+pub(crate) fn strip_in_addition_suffix(text: &str) -> Option<&str> {
     [
         " in addition to its other land types",
         " in addition to its other types",
@@ -674,14 +689,14 @@ fn strip_in_addition_suffix(text: &str) -> Option<&str> {
         " in addition to their other types",
     ]
     .iter()
-    .find_map(|suffix| text.strip_suffix(suffix))
+    .find_map(|suffix| text.strip_suffix(suffix)) // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 }
 
 /// CR 502.3: Extract a trailing condition from a "doesn't untap during [untap step]" clause.
 /// Handles patterns like:
 /// - "doesn't untap during your untap step as long as [condition]"
 /// - "doesn't untap during your untap step if [condition]"
-fn extract_cant_untap_condition(lower: &str) -> Option<StaticCondition> {
+pub(crate) fn extract_cant_untap_condition(lower: &str) -> Option<StaticCondition> {
     // Find the end of the "untap step" phrase
     let untap_phrases = [
         "its controller's untap step",

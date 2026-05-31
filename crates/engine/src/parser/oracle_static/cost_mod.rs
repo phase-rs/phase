@@ -1,6 +1,11 @@
 // CR 601.2e — cost modification static abilities.
 
-fn parse_activated_cost_reduction_minimum_mana(lower: &str) -> Option<u32> {
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
+pub(crate) fn parse_activated_cost_reduction_minimum_mana(lower: &str) -> Option<u32> {
     preceded(
         take_until::<_, _, OracleError<'_>>(
             "this effect can't reduce the mana in that cost to less than ",
@@ -15,7 +20,7 @@ fn parse_activated_cost_reduction_minimum_mana(lower: &str) -> Option<u32> {
     .map(|(_, minimum)| minimum)
 }
 
-fn parse_cost_payment_prohibition_statics(
+pub(crate) fn parse_cost_payment_prohibition_statics(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<Vec<StaticDefinition>> {
@@ -59,7 +64,7 @@ fn parse_cost_payment_prohibition_statics(
 /// and the Phyrexian-shape infrastructure assumes 2.
 ///
 /// Composed from nom combinators end-to-end; no string matching for dispatch.
-fn parse_pay_life_as_colored_mana(text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_pay_life_as_colored_mana(text: &str) -> Option<StaticDefinition> {
     let trimmed = text.trim().trim_end_matches('.');
     // Mana symbols are case-preserved in Oracle text — parse against original
     // case, not lowercase. The phrase tail is normalized so case-insensitive

@@ -1,20 +1,12 @@
-// CR 604 / CR 613 — shared static parser infrastructure.
+// CR 604 / CR 613 - shared static parser grammar utilities.
 
-/// CR 109.5 vs CR 102.1 + structural distributive: the pronoun-binding axis
-/// of an "only during X turn(s)" prohibition.
-///
-/// - `SourceRelative` ≡ "your turn" — CR 109.5 binds to the static's source
-///   controller (Fires of Invention).
-/// - `PerAffected` ≡ "their own turn(s)" — distributive per-affected-player
-///   binding (Dosan, City of Solitude). The CompRules don't carve out a
-///   specific pronoun rule for "their"; the distributive reading follows from
-///   CR 102.1 + the template structure of "[every player] can [action] only
-///   during their own [time]".
-///
-/// This enum is parser-internal — it never appears on `StaticMode`. The
-/// resulting `CastingProhibitionCondition` (`NotDuringYourTurn` vs
-/// `NotDuringAffectedPlayersTurn`) carries the binding axis into the runtime.
-fn lower_rule_static(
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
+/// Lower a parsed rule-static predicate into the runtime static mode.
+pub(crate) fn lower_rule_static(
     predicate: RuleStaticPredicate,
     affected: TargetFilter,
     description: &str,
@@ -100,7 +92,7 @@ fn lower_rule_static(
     }
 }
 
-fn rule_static_affected_is_player_scope(affected: &TargetFilter) -> bool {
+pub(crate) fn rule_static_affected_is_player_scope(affected: &TargetFilter) -> bool {
     matches!(
         affected,
         TargetFilter::Player
@@ -128,7 +120,7 @@ fn rule_static_affected_is_player_scope(affected: &TargetFilter) -> bool {
 
 /// Determine player scope for "can't [verb]" patterns based on subject phrasing.
 /// Handles "your opponents can't ...", "you can't ...", and "players can't ..." subjects.
-fn parse_player_scope_filter(tp: &TextPair<'_>) -> TargetFilter {
+pub(crate) fn parse_player_scope_filter(tp: &TextPair<'_>) -> TargetFilter {
     if nom_primitives::scan_contains(tp.lower, "your opponents")
         || nom_tag_tp(tp, "opponents").is_some()
     {
@@ -146,7 +138,7 @@ fn parse_player_scope_filter(tp: &TextPair<'_>) -> TargetFilter {
 /// can't change" patterns. The possessor is a possessive noun phrase ("your",
 /// "your opponents'", "each opponent's", "players'") rather than the bare
 /// subject form handled by `parse_player_scope_filter`.
-fn parse_life_total_scope_filter(lower: &str) -> TargetFilter {
+pub(crate) fn parse_life_total_scope_filter(lower: &str) -> TargetFilter {
     // Opponent possessives — scoped to opponents only.
     if nom_primitives::scan_contains(lower, "your opponents'")
         || nom_primitives::scan_contains(lower, "each opponent's")
@@ -170,7 +162,7 @@ fn parse_life_total_scope_filter(lower: &str) -> TargetFilter {
 
 /// Extract zone names referenced in Oracle text.
 /// Handles "graveyards", "libraries", "exile" and their singular/plural forms.
-fn parse_zone_names_from_tp(tp: &TextPair) -> Vec<Zone> {
+pub(crate) fn parse_zone_names_from_tp(tp: &TextPair) -> Vec<Zone> {
     let mut zones = Vec::new();
     if nom_primitives::scan_contains(tp.lower, "graveyard") {
         zones.push(Zone::Graveyard);
@@ -188,7 +180,7 @@ fn parse_zone_names_from_tp(tp: &TextPair) -> Vec<Zone> {
 ///
 /// Accepts leading/trailing whitespace and requires complete consumption (no trailing text
 /// beyond whitespace). This preserves the original behavior of the match-based implementation.
-fn parse_named_color(text: &str) -> Option<ManaColor> {
+pub(crate) fn parse_named_color(text: &str) -> Option<ManaColor> {
     let lower = text.trim().to_ascii_lowercase();
     let (rest, color) = nom_primitives::parse_color.parse(&lower).ok()?;
     if rest.is_empty() {
@@ -199,7 +191,7 @@ fn parse_named_color(text: &str) -> Option<ManaColor> {
 }
 
 /// CR 614.1b: Parse a step name from Oracle text using nom combinators.
-fn parse_step_name(input: &str) -> Option<Phase> {
+pub(crate) fn parse_step_name(input: &str) -> Option<Phase> {
     use crate::parser::oracle_nom::error::OracleError;
     let result: Result<(&str, Phase), nom::Err<OracleError<'_>>> = alt((
         value(Phase::Draw, tag("draw step")),
@@ -215,7 +207,7 @@ fn parse_step_name(input: &str) -> Option<Phase> {
 /// CR 205.2a: Check if a lowercase descriptor names a core card type that can modify
 /// "creatures" (e.g., "artifact" in "artifact creatures"). Returns the TypeFilter if so.
 /// Delegates to the existing nom type-word combinator for authoritative type recognition.
-fn try_parse_core_type_descriptor(descriptor_lower: &str) -> Option<TypeFilter> {
+pub(crate) fn try_parse_core_type_descriptor(descriptor_lower: &str) -> Option<TypeFilter> {
     match nom_target::parse_type_filter_word(descriptor_lower) {
         Ok(("", tf)) => match tf {
             TypeFilter::Artifact
@@ -232,7 +224,7 @@ fn try_parse_core_type_descriptor(descriptor_lower: &str) -> Option<TypeFilter> 
 /// Build a TypedFilter for a subtype, using the correct core type.
 /// Uses `infer_core_type_for_subtype` to map artifact/land/enchantment subtypes
 /// to their parent type instead of defaulting everything to Creature.
-fn typed_filter_for_subtype(subtype: &str) -> TypedFilter {
+pub(crate) fn typed_filter_for_subtype(subtype: &str) -> TypedFilter {
     use crate::types::ability::TypeFilter;
     if let Some(core_type) = infer_core_type_for_subtype(subtype) {
         let type_filter = match core_type {
@@ -247,7 +239,7 @@ fn typed_filter_for_subtype(subtype: &str) -> TypedFilter {
     }
 }
 
-fn is_capitalized_words(s: &str) -> bool {
+pub(crate) fn is_capitalized_words(s: &str) -> bool {
     let trimmed = s.trim();
     !trimmed.is_empty()
         && trimmed
@@ -263,7 +255,7 @@ fn is_capitalized_words(s: &str) -> bool {
 /// For a single subtype → `TargetFilter::Typed(typed_filter_for_subtype(X).controller(You))`.
 /// For multiple → `TargetFilter::Or` of per-subtype typed filters (all controller=You).
 /// Plural subtypes are normalized via `parse_subtype`.
-fn try_parse_thats_a_subtype_list(input: &str) -> Option<(TargetFilter, &str)> {
+pub(crate) fn try_parse_thats_a_subtype_list(input: &str) -> Option<(TargetFilter, &str)> {
     use nom::multi::separated_list1;
 
     fn parse_subtype_word(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
@@ -286,7 +278,7 @@ fn try_parse_thats_a_subtype_list(input: &str) -> Option<(TargetFilter, &str)> {
         .parse(input)
         .ok()?;
     // Predicate must follow a space
-    let predicate = rest.strip_prefix(' ')?;
+    let predicate = rest.strip_prefix(' ')?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     if predicate.is_empty() {
         return None;
     }
@@ -318,7 +310,7 @@ fn try_parse_thats_a_subtype_list(input: &str) -> Option<(TargetFilter, &str)> {
 /// benign Continuous lines ("gets +1/+1 and has trample and lifelink") are
 /// already merged into one def by `parse_continuous_modifications` and must NOT
 /// be split.
-fn with_keyword_companion(
+pub(crate) fn with_keyword_companion(
     primary: StaticDefinition,
     predicate: &str,
     affected: &TargetFilter,
@@ -351,7 +343,7 @@ fn with_keyword_companion(
 /// clauses (Multiclass Baldric: "lifelink if you control a Cleric, deathtouch
 /// if you control a Rogue, ..."). The successful parse IS the detector — no
 /// `contains`. The leading "has " prefix is stripped by the caller.
-fn parse_conditional_keyword_list(
+pub(crate) fn parse_conditional_keyword_list(
     input: &str,
 ) -> OracleResult<'_, Vec<(Keyword, StaticCondition)>> {
     separated_list1(
@@ -367,7 +359,7 @@ fn parse_conditional_keyword_list(
 
 /// Parse a single keyword spelled as a run of alphabetic words, returning the
 /// mapped `Keyword`. Consumes greedily up to (but not including) " if ".
-fn map_keyword_run(input: &str) -> OracleResult<'_, Keyword> {
+pub(crate) fn map_keyword_run(input: &str) -> OracleResult<'_, Keyword> {
     let (rest, word) = take_until::<_, _, OracleError<'_>>(" if ").parse(input)?;
     match map_keyword(word.trim()) {
         Some(kw) => Ok((rest, kw)),
@@ -387,7 +379,7 @@ fn map_keyword_run(input: &str) -> OracleResult<'_, Keyword> {
 /// `rest` captures the last member, which has no trailing separator. The
 /// recovered span is a single subtype-presence condition with no embedded
 /// separators, so the shortest non-empty match is always the correct boundary.
-fn parse_attached_condition_run(input: &str) -> OracleResult<'_, StaticCondition> {
+pub(crate) fn parse_attached_condition_run(input: &str) -> OracleResult<'_, StaticCondition> {
     let (remaining, cond_span) = alt((
         take_until::<_, _, OracleError<'_>>(", "),
         take_until(" and "),
@@ -418,7 +410,7 @@ fn parse_attached_condition_run(input: &str) -> OracleResult<'_, StaticCondition
 /// vec.
 ///
 /// CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Enchanted/equipped predicate dispatch.
-fn parse_enchanted_equipped_predicate(
+pub(crate) fn parse_enchanted_equipped_predicate(
     predicate: &str,
     affected: TargetFilter,
     description: &str,
@@ -645,7 +637,7 @@ fn parse_enchanted_equipped_predicate(
     }
 }
 
-fn push_dynamic_pt_modifications(
+pub(crate) fn push_dynamic_pt_modifications(
     modifications: &mut Vec<ContinuousModification>,
     power: i32,
     toughness: i32,
@@ -663,7 +655,7 @@ fn push_dynamic_pt_modifications(
     }
 }
 
-fn scale_pt_quantity(amount: i32, quantity: &QuantityExpr) -> QuantityExpr {
+pub(crate) fn scale_pt_quantity(amount: i32, quantity: &QuantityExpr) -> QuantityExpr {
     match amount {
         1 => quantity.clone(),
         -1 => QuantityExpr::Multiply {
@@ -680,7 +672,7 @@ fn scale_pt_quantity(amount: i32, quantity: &QuantityExpr) -> QuantityExpr {
 /// A member of a "loses all [other] abilities, card types, and creature types"
 /// enumeration. Parser-local — maps to one `ContinuousModification` each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LossMember {
+pub(crate) enum LossMember {
     Abilities,
     CardTypes,
     CreatureTypes,
@@ -692,7 +684,7 @@ enum LossMember {
 /// `separated_list1` over a three-way `alt` covers every combination — the
 /// literal substrings "loses all other card types" never appear contiguously
 /// in the Oxford-comma form, so whole-phrase `tag()` arms would be dead code.
-fn parse_loss_enumeration(input: &str) -> OracleResult<'_, Vec<LossMember>> {
+pub(crate) fn parse_loss_enumeration(input: &str) -> OracleResult<'_, Vec<LossMember>> {
     preceded(
         alt((
             tag("loses all other "),
@@ -718,7 +710,7 @@ fn parse_loss_enumeration(input: &str) -> OracleResult<'_, Vec<LossMember>> {
 /// (the clause appears mid-string in "is a [type] ... and it loses all ...")
 /// and return the parsed loss members. The successful parse is the detector —
 /// no `contains()`.
-fn scan_loss_enumeration(lower: &str) -> Vec<LossMember> {
+pub(crate) fn scan_loss_enumeration(lower: &str) -> Vec<LossMember> {
     let mut remaining = lower;
     loop {
         if let Ok((_, members)) = parse_loss_enumeration(remaining) {
@@ -731,7 +723,7 @@ fn scan_loss_enumeration(lower: &str) -> Vec<LossMember> {
     }
 }
 
-fn strip_quoted_segments(text: &str) -> String {
+pub(crate) fn strip_quoted_segments(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut in_quote = false;
     for ch in text.chars() {
@@ -750,7 +742,7 @@ fn strip_quoted_segments(text: &str) -> String {
     output
 }
 
-fn remove_trailing_quote_connector(text: &mut String) {
+pub(crate) fn remove_trailing_quote_connector(text: &mut String) {
     let trimmed_len = text.trim_end().len();
     text.truncate(trimmed_len);
     for connector in [" and", " or"] {
@@ -767,7 +759,7 @@ fn remove_trailing_quote_connector(text: &mut String) {
 /// Returns AddDynamicPower + AddDynamicToughness modifications if found.
 /// CR 613.4c: Parse a variable P/T modifier pattern like "+x/+x", "-x/-0", "+0/-x".
 /// Returns (power_sign, power_is_x, toughness_sign, toughness_is_x) and remaining text.
-fn parse_variable_pt_pattern(
+pub(crate) fn parse_variable_pt_pattern(
     input: &str,
 ) -> nom::IResult<&str, (i32, bool, i32, bool), OracleError<'_>> {
     let (rest, p_sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(input)?;
@@ -778,7 +770,7 @@ fn parse_variable_pt_pattern(
     Ok((rest, (p_sign, p_is_x, t_sign, t_is_x)))
 }
 
-fn parse_fixed_pt_in_text(lower: &str) -> Option<(i32, i32)> {
+pub(crate) fn parse_fixed_pt_in_text(lower: &str) -> Option<(i32, i32)> {
     nom_primitives::scan_at_word_boundaries(lower, |input| {
         let (rest, _) = alt((
             tag::<_, _, OracleError<'_>>("gets "),
@@ -790,24 +782,24 @@ fn parse_fixed_pt_in_text(lower: &str) -> Option<(i32, i32)> {
     })
 }
 
-fn parse_legendary_supertype_grant(lower: &str) -> Option<()> {
+pub(crate) fn parse_legendary_supertype_grant(lower: &str) -> Option<()> {
     nom_primitives::scan_at_word_boundaries(lower, |input| {
         value((), tag::<_, _, OracleError<'_>>("is legendary")).parse(input)
     })
 }
 
-fn parse_clause_before_optional_period(input: &str) -> OracleResult<'_, &str> {
+pub(crate) fn parse_clause_before_optional_period(input: &str) -> OracleResult<'_, &str> {
     terminated(alt((take_until("."), rest)), opt(tag("."))).parse(input)
 }
 
-fn split_type_retention_clause(input: &str) -> Option<(&str, CoreType)> {
+pub(crate) fn split_type_retention_clause(input: &str) -> Option<(&str, CoreType)> {
     let (descriptor, retention_clause) =
         nom_primitives::scan_split_at_phrase(input, |i| parse_type_retention_clause(i))?;
     let (_, retained_core_type) = parse_type_retention_clause(retention_clause).ok()?;
     Some((descriptor, retained_core_type))
 }
 
-fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreType> {
+pub(crate) fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreType> {
     let (input, is_plural) = alt((
         value(false, alt((tag("it's still "), tag("that's still ")))),
         value(true, tag("they're still ")),
@@ -841,7 +833,7 @@ fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreType> {
     .parse(input)
 }
 
-fn push_base_pt_mana_value_dynamic_modifications(
+pub(crate) fn push_base_pt_mana_value_dynamic_modifications(
     modifications: &mut Vec<ContinuousModification>,
     lower: &str,
 ) -> bool {
@@ -858,13 +850,13 @@ fn push_base_pt_mana_value_dynamic_modifications(
 /// One side of a dynamic base-P/T value token like `X/X` or `-X/2`.
 /// Dynamic sides carry the sign (`+X` vs `-X`); fixed sides carry the literal.
 #[derive(Clone, Copy)]
-enum BasePtSide {
+pub(crate) enum BasePtSide {
     Dynamic { sign: i32 },
     Fixed { value: i32 },
 }
 
 /// Build a `QuantityExpr` for one side of a dynamic base-P/T pattern.
-fn base_pt_side_to_expr(side: BasePtSide, x_ref: &QuantityRef) -> QuantityExpr {
+pub(crate) fn base_pt_side_to_expr(side: BasePtSide, x_ref: &QuantityRef) -> QuantityExpr {
     match side {
         BasePtSide::Fixed { value } => QuantityExpr::Fixed { value },
         BasePtSide::Dynamic { sign } => {
@@ -885,7 +877,7 @@ fn base_pt_side_to_expr(side: BasePtSide, x_ref: &QuantityRef) -> QuantityExpr {
 /// Spell-cast contexts (Biomass Mutation) have no explicit "where X is" clause:
 /// X is the cost X paid when the spell was cast, so fall back to `CostXPaid`.
 /// When a "where X is …" expression is present, parse it via `parse_quantity_ref`.
-fn resolve_base_pt_x_ref(where_x_expression: Option<&str>) -> Option<QuantityRef> {
+pub(crate) fn resolve_base_pt_x_ref(where_x_expression: Option<&str>) -> Option<QuantityRef> {
     if let Some(expr) = where_x_expression {
         return parse_quantity_ref(expr);
     }
@@ -893,7 +885,7 @@ fn resolve_base_pt_x_ref(where_x_expression: Option<&str>) -> Option<QuantityRef
     Some(QuantityRef::CostXPaid)
 }
 
-fn parse_base_power_mod(text: &str) -> Option<i32> {
+pub(crate) fn parse_base_power_mod(text: &str) -> Option<i32> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     if nom_primitives::scan_contains(tp.lower, "base power and toughness") {
@@ -903,7 +895,7 @@ fn parse_base_power_mod(text: &str) -> Option<i32> {
     parse_single_pt_value(power_text)
 }
 
-fn parse_base_toughness_mod(text: &str) -> Option<i32> {
+pub(crate) fn parse_base_toughness_mod(text: &str) -> Option<i32> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     if nom_primitives::scan_contains(tp.lower, "base power and toughness") {
@@ -913,14 +905,16 @@ fn parse_base_toughness_mod(text: &str) -> Option<i32> {
     parse_single_pt_value(toughness_text)
 }
 
-fn parse_single_pt_value(text: &str) -> Option<i32> {
+pub(crate) fn parse_single_pt_value(text: &str) -> Option<i32> {
     let value = text
         .split(|c: char| c.is_whitespace() || matches!(c, '.' | ','))
         .next()?;
     value.replace('+', "").parse::<i32>().ok()
 }
 
-fn parse_quoted_rule_static_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
+pub(crate) fn parse_quoted_rule_static_modifications(
+    text: &str,
+) -> Option<Vec<ContinuousModification>> {
     if find_cost_separator(text).is_some() {
         return None;
     }
@@ -973,7 +967,7 @@ fn parse_quoted_rule_static_modifications(text: &str) -> Option<Vec<ContinuousMo
 /// If the text contains a cost separator (e.g., `{T}: ...`), it's treated as an
 /// activated ability with the cost parsed separately. Otherwise it's treated as
 /// a spell-like effect.
-fn parse_quoted_ability(text: &str) -> AbilityDefinition {
+pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
     let lower = text.to_lowercase();
 
     // CR 702.142a: Detect "Boast — " prefix and strip it, adding the implicit
@@ -1046,7 +1040,7 @@ fn parse_quoted_ability(text: &str) -> AbilityDefinition {
 /// Looks for `: ` or `:\n` that appears after cost-like content (mana symbols,
 /// {T}, numeric loyalty, or text-based costs like "Sacrifice this token").
 /// Returns the byte offset of the colon, or None.
-fn find_cost_separator(text: &str) -> Option<usize> {
+pub(crate) fn find_cost_separator(text: &str) -> Option<usize> {
     // Walk through looking for ':' that follows a closing brace or known cost prefix
     for (idx, ch) in text.char_indices() {
         if ch == ':' && idx > 0 {
@@ -1056,8 +1050,8 @@ fn find_cost_separator(text: &str) -> Option<usize> {
             let lower_prefix = trimmed_prefix.to_lowercase();
             let has_cost = prefix.contains('{')
                 || trimmed_prefix.parse::<i32>().is_ok()
-                || trimmed_prefix.strip_prefix('+').is_some()
-                || trimmed_prefix.strip_prefix('\u{2212}').is_some() // minus sign for loyalty
+                || trimmed_prefix.strip_prefix('+').is_some() // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+                || trimmed_prefix.strip_prefix('\u{2212}').is_some() // minus sign for loyalty // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 // CR 118.12: Text-based costs — sacrifice, discard, pay life, tap/untap, exile, remove
                 || is_text_based_cost_prefix(&lower_prefix);
             if has_cost {
@@ -1072,7 +1066,7 @@ fn find_cost_separator(text: &str) -> Option<usize> {
 /// Handles common Oracle text cost patterns that don't use mana symbols:
 /// "Sacrifice this token", "Discard a card", "Pay 2 life", "Tap an untapped creature",
 /// "Exile ~ from your graveyard", "Remove a counter from ~", etc.
-fn is_text_based_cost_prefix(lower_prefix: &str) -> bool {
+pub(crate) fn is_text_based_cost_prefix(lower_prefix: &str) -> bool {
     type E<'a> = OracleError<'a>;
 
     alt((
@@ -1096,7 +1090,7 @@ fn is_text_based_cost_prefix(lower_prefix: &str) -> bool {
 /// no boundary is present. Mirrors the keyword recognition in
 /// `extract_keyword_clause` but in the inverse direction (returns the
 /// pre-boundary span instead of the post-boundary one).
-fn strip_trailing_keyword_clause(clause: &str) -> &str {
+pub(crate) fn strip_trailing_keyword_clause(clause: &str) -> &str {
     for needle in [" and gains ", " and gain ", " and has ", " and have "] {
         if let Some(pos) = clause.find(needle) {
             return &clause[..pos];
@@ -1105,7 +1099,7 @@ fn strip_trailing_keyword_clause(clause: &str) -> &str {
     clause
 }
 
-fn extract_keyword_clause(text: &str) -> Option<&str> {
+pub(crate) fn extract_keyword_clause(text: &str) -> Option<&str> {
     let lower = text.to_lowercase();
 
     for needle in [
@@ -1134,7 +1128,7 @@ fn extract_keyword_clause(text: &str) -> Option<&str> {
 
 /// Extract the keyword text from "lose [keyword]" / "loses [keyword]" clauses.
 /// Mirrors `extract_keyword_clause` but for keyword removal.
-fn extract_lose_keyword_clause(text: &str) -> Option<&str> {
+pub(crate) fn extract_lose_keyword_clause(text: &str) -> Option<&str> {
     let lower = text.to_lowercase();
 
     for needle in [" and loses ", " and lose "] {
@@ -1142,7 +1136,7 @@ fn extract_lose_keyword_clause(text: &str) -> Option<&str> {
             let after = &text[pos + needle.len()..];
             // Stop before "and gains" to avoid consuming the gain clause
             let end = lower[pos + needle.len()..]
-                .find(" and gain")
+                .find(" and gain") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
                 .unwrap_or(after.len());
             return Some(&after[..end]);
         }
@@ -1152,7 +1146,7 @@ fn extract_lose_keyword_clause(text: &str) -> Option<&str> {
         if let Some(rest) = nom_tag_lower(&lower, &lower, prefix) {
             let after = &text[prefix.len()..];
             // Stop before "and gains"/"and gain" to avoid consuming the gain clause
-            let end = rest.find(" and gain").unwrap_or(after.len());
+            let end = rest.find(" and gain").unwrap_or(after.len()); // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             return Some(&after[..end]);
         }
     }
@@ -1165,7 +1159,7 @@ fn extract_lose_keyword_clause(text: &str) -> Option<&str> {
 /// Delegates to the shared nom P/T combinator for signed P/T values.
 /// Falls back to manual parsing for unsigned values (e.g. "0/0") which the
 /// nom combinator doesn't handle (it requires explicit +/- signs).
-fn parse_pt_mod(text: &str) -> Option<(i32, i32)> {
+pub(crate) fn parse_pt_mod(text: &str) -> Option<(i32, i32)> {
     let text = text.trim();
     // Try the nom combinator first — handles +N/+M, -N/-M, +N/-M patterns.
     if let Ok((_, (p, t))) = nom_primitives::parse_pt_modifier.parse(text) {
@@ -1186,7 +1180,7 @@ fn parse_pt_mod(text: &str) -> Option<(i32, i32)> {
 
 /// Map a keyword text to a Keyword enum variant using the FromStr impl.
 /// Returns None only for `Keyword::Unknown`.
-fn map_keyword(text: &str) -> Option<Keyword> {
+pub(crate) fn map_keyword(text: &str) -> Option<Keyword> {
     let word = text.trim().trim_end_matches('.').trim();
     if word.is_empty() {
         return None;
@@ -1215,13 +1209,13 @@ fn map_keyword(text: &str) -> Option<Keyword> {
     }
 }
 
-fn parse_landwalk_keyword(text: &str) -> Option<Keyword> {
+pub(crate) fn parse_landwalk_keyword(text: &str) -> Option<Keyword> {
     match text.trim().to_ascii_lowercase().as_str() {
-        "plainswalk" => Some(Keyword::Landwalk("Plains".to_string())),
-        "islandwalk" => Some(Keyword::Landwalk("Island".to_string())),
-        "swampwalk" => Some(Keyword::Landwalk("Swamp".to_string())),
-        "mountainwalk" => Some(Keyword::Landwalk("Mountain".to_string())),
-        "forestwalk" => Some(Keyword::Landwalk("Forest".to_string())),
+        "plainswalk" => Some(Keyword::Landwalk("Plains".to_string())), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        "islandwalk" => Some(Keyword::Landwalk("Island".to_string())), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        "swampwalk" => Some(Keyword::Landwalk("Swamp".to_string())), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        "mountainwalk" => Some(Keyword::Landwalk("Mountain".to_string())), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        "forestwalk" => Some(Keyword::Landwalk("Forest".to_string())), // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         _ => None,
     }
 }
@@ -1255,7 +1249,7 @@ pub(crate) fn parse_basic_landwalk_qualifier(input: &str) -> OracleResult<'_, &'
 /// `active_zones: [Graveyard]` (CR 113.6b — a zone-restricted ability functions
 /// only from the zones it names). A non-self-reference filter (e.g. a creature
 /// type) falls through to `parse_type_phrase` and is not zone-restricted here.
-fn parse_graveyard_permission_filter(input: &str) -> (TargetFilter, bool) {
+pub(crate) fn parse_graveyard_permission_filter(input: &str) -> (TargetFilter, bool) {
     // The self-reference token `~` is substituted for type phrases ("this
     // creature", "this permanent", ...) by `normalize_self_references` before
     // this parser runs; `SELF_REF_PARSE_ONLY_PHRASES` (e.g. "this card") are
@@ -1282,7 +1276,9 @@ fn parse_graveyard_permission_filter(input: &str) -> (TargetFilter, bool) {
 /// are evaluated when the permission is queried, so they share the same
 /// `StaticCondition` carrier. The condition body is delegated to
 /// `parse_inner_condition` — the single authority for game-state conditions.
-fn parse_graveyard_permission_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+pub(crate) fn parse_graveyard_permission_condition(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
     let (rest, condition) = preceded(
         alt((tag(" as long as "), tag(" if "))),
         nom_condition::parse_inner_condition,
@@ -1292,7 +1288,7 @@ fn parse_graveyard_permission_condition(input: &str) -> OracleResult<'_, StaticC
     Ok((rest, condition))
 }
 
-fn parse_exile_spell_cast_this_way_rider(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_exile_spell_cast_this_way_rider(input: &str) -> OracleResult<'_, ()> {
     all_consuming(preceded(
         terminated(opt(tag(".")), space0),
         value(
@@ -1306,7 +1302,7 @@ fn parse_exile_spell_cast_this_way_rider(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-fn parse_top_of_library_permission_condition(trailing: &str) -> Option<StaticCondition> {
+pub(crate) fn parse_top_of_library_permission_condition(trailing: &str) -> Option<StaticCondition> {
     let (rest, condition) = preceded(
         tag::<_, _, OracleError<'_>>(" as long as "),
         nom_condition::parse_inner_condition,
@@ -1327,7 +1323,7 @@ fn parse_top_of_library_permission_condition(trailing: &str) -> Option<StaticCon
 /// trailing text and the full line, slicing from that index forward so the
 /// existing `try_parse_alt_cost_rider` (which expects the input to start at
 /// the rider) sees a clean prefix.
-fn parse_top_of_library_alt_cost_rider(
+pub(crate) fn parse_top_of_library_alt_cost_rider(
     trailing: &str,
     text: &str,
 ) -> Option<crate::types::ability::AbilityCost> {
@@ -1355,7 +1351,7 @@ fn parse_top_of_library_alt_cost_rider(
 /// Parse the optional " using (its|their) <keyword> (ability|abilities)" rider on
 /// graveyard-cast-permission statics. Returns the named alt-cost keyword's kind.
 /// CR 118.9: the rider restricts the permission to casting via the named alt cost.
-fn parse_alt_cost_rider(input: &str) -> OracleResult<'_, KeywordKind> {
+pub(crate) fn parse_alt_cost_rider(input: &str) -> OracleResult<'_, KeywordKind> {
     preceded(
         tag(" using "),
         preceded(
@@ -1372,7 +1368,10 @@ fn parse_alt_cost_rider(input: &str) -> OracleResult<'_, KeywordKind> {
 /// Inject a `HasKeywordKind` property into a `TargetFilter`. If the filter is already
 /// `Typed`, push into its `properties`. Otherwise wrap with `And` over a new typed
 /// filter carrying only the keyword constraint.
-fn inject_keyword_kind_filter_prop(filter: TargetFilter, kind: KeywordKind) -> TargetFilter {
+pub(crate) fn inject_keyword_kind_filter_prop(
+    filter: TargetFilter,
+    kind: KeywordKind,
+) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut tf) => {
             tf.properties
@@ -1392,11 +1391,11 @@ fn inject_keyword_kind_filter_prop(filter: TargetFilter, kind: KeywordKind) -> T
     }
 }
 
-fn parse_first_qualified_spell_filter(lower: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_first_qualified_spell_filter(lower: &str) -> Option<TargetFilter> {
     let after_prefix = nom_tag_lower(lower, lower, "the first ")?;
     let qualifier = after_prefix
-        .split_once(" you cast during each of your turns cost")
-        .or_else(|| after_prefix.split_once(" you cast during each of your turns costs"))?
+        .split_once(" you cast during each of your turns cost") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        .or_else(|| after_prefix.split_once(" you cast during each of your turns costs"))? // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         .0
         .trim();
 
@@ -1408,7 +1407,7 @@ fn parse_first_qualified_spell_filter(lower: &str) -> Option<TargetFilter> {
     }
 }
 
-fn first_qualified_spell_condition(filter: &TargetFilter) -> StaticCondition {
+pub(crate) fn first_qualified_spell_condition(filter: &TargetFilter) -> StaticCondition {
     StaticCondition::And {
         conditions: vec![
             StaticCondition::DuringYourTurn,
@@ -1433,14 +1432,14 @@ fn first_qualified_spell_condition(filter: &TargetFilter) -> StaticCondition {
 /// your graveyard."). Callers use this to flag self-reference so the static
 /// is emitted with `affected = SelfRef` and `active_zones = [Hand, Stack, Command]`
 /// instead of the default battlefield scope.
-fn parse_self_spell_cost_subject(lower: &str) -> Option<()> {
+pub(crate) fn parse_self_spell_cost_subject(lower: &str) -> Option<()> {
     nom_on_lower(lower, lower, |i| {
         value((), alt((tag("this spell "), tag("this card "), tag("~ ")))).parse(i)
     })
     .map(|_| ())
 }
 
-fn parse_self_spell_target_cost_filter(lower: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_self_spell_target_cost_filter(lower: &str) -> Option<TargetFilter> {
     let (_, target_text) = preceded(
         take_until::<_, _, OracleError<'_>>(" if "),
         preceded(
@@ -1464,7 +1463,7 @@ fn parse_self_spell_target_cost_filter(lower: &str) -> Option<TargetFilter> {
     ])))
 }
 
-fn parse_cost_modifier_target_filter(lower: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_cost_modifier_target_filter(lower: &str) -> Option<TargetFilter> {
     type VE<'a> = OracleError<'a>;
 
     let (input, _) = take_until::<_, _, VE>(" that target").parse(lower).ok()?;
@@ -1497,13 +1496,13 @@ fn parse_cost_modifier_target_filter(lower: &str) -> Option<TargetFilter> {
     ])))
 }
 
-fn strip_cost_modifier_target_clause(prefix: &str) -> &str {
+pub(crate) fn strip_cost_modifier_target_clause(prefix: &str) -> &str {
     take_until::<_, _, OracleError<'_>>(" that target")
         .parse(prefix)
         .map_or(prefix, |(_, before)| before)
 }
 
-fn merge_cost_modifier_target_filter(
+pub(crate) fn merge_cost_modifier_target_filter(
     spell_filter: Option<TargetFilter>,
     target_filter: Option<TargetFilter>,
 ) -> Option<TargetFilter> {
@@ -1552,7 +1551,7 @@ fn merge_cost_modifier_target_filter(
 /// here) and any trailing "as long as" / "if" condition lifted into the
 /// `StaticDefinition.condition` field (handles Trinisphere's "as long as this
 /// artifact is untapped" gate).
-fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefinition> {
+pub(crate) fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefinition> {
     use nom::sequence::preceded;
 
     // Strip optional trailing condition before matching the body — keeps the
@@ -1612,4 +1611,3 @@ fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefinition> {
 
     Some(definition)
 }
-

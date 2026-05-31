@@ -1,7 +1,12 @@
 // CR 613.3d (Layer 4) — type-changing static abilities.
 
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
 /// CR 607.2d: Parse a self-chosen type static ability line.
-fn parse_self_chosen_type_static(input: &str) -> OracleResult<'_, ChosenSubtypeKind> {
+pub(crate) fn parse_self_chosen_type_static(input: &str) -> OracleResult<'_, ChosenSubtypeKind> {
     let (input, kind) = alt((
         value(ChosenSubtypeKind::BasicLandType, tag("~ is")),
         value(ChosenSubtypeKind::CreatureType, tag("this creature is")),
@@ -20,7 +25,7 @@ fn parse_self_chosen_type_static(input: &str) -> OracleResult<'_, ChosenSubtypeK
     Ok((input, kind))
 }
 
-fn parse_arcane_adaptation_chosen_type_static(
+pub(crate) fn parse_arcane_adaptation_chosen_type_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
@@ -57,7 +62,9 @@ pub(crate) fn parse_chosen_creature_type_static_prefix(input: &str) -> OracleRes
     Ok((input, ()))
 }
 
-fn parse_chosen_creature_type_static_subject(input: &str) -> OracleResult<'_, &'static str> {
+pub(crate) fn parse_chosen_creature_type_static_subject(
+    input: &str,
+) -> OracleResult<'_, &'static str> {
     alt((
         value("their", tag("creatures you control are")),
         value("its", tag("each creature you control is")),
@@ -74,7 +81,7 @@ fn parse_chosen_creature_type_static_subject(input: &str) -> OracleResult<'_, &'
 // control and creature cards you own that aren't on the battlefield" tail is
 // stripped upstream by `oracle.rs` (it's reported as `Unimplemented` because
 // continuous effects on non-battlefield zones aren't currently modeled).
-fn parse_every_creature_type_static(
+pub(crate) fn parse_every_creature_type_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
@@ -107,7 +114,7 @@ pub(crate) fn parse_every_creature_type_static_prefix(input: &str) -> OracleResu
     Ok((input, ()))
 }
 
-fn parse_collection_counter_play_permission_static(
+pub(crate) fn parse_collection_counter_play_permission_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
@@ -247,7 +254,7 @@ pub(crate) fn parse_additive_type_clause_modifications(
 }
 
 /// CR 205.1: Map a bare type word (singular or plural) to its `CoreType`.
-fn core_type_from_additive_word(word: &str) -> Option<CoreType> {
+pub(crate) fn core_type_from_additive_word(word: &str) -> Option<CoreType> {
     match word {
         "artifact" | "artifacts" => Some(CoreType::Artifact),
         "creature" | "creatures" => Some(CoreType::Creature),
@@ -275,7 +282,9 @@ fn core_type_from_additive_word(word: &str) -> Option<CoreType> {
 /// `parse_subject_additive_type_static`. We therefore reject any token whose
 /// canonical subtype maps to a non-creature core type so a stray Forest /
 /// Equipment / Aura is not silently added to a creature.
-fn try_parse_self_is_also_subtypes(tp: &TextPair<'_>) -> Option<Vec<ContinuousModification>> {
+pub(crate) fn try_parse_self_is_also_subtypes(
+    tp: &TextPair<'_>,
+) -> Option<Vec<ContinuousModification>> {
     type VE<'a> = OracleError<'a>;
 
     let (after_anchor, _): (&str, &str) = alt((
@@ -356,7 +365,10 @@ fn try_parse_self_is_also_subtypes(tp: &TextPair<'_>) -> Option<Vec<ContinuousMo
 ///
 /// Handles type-changing aura effects like Ensoul Artifact, Imprisoned in the Moon,
 /// and Darksteel Mutation. Reuses nom type-word and P/T combinators.
-fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_enchanted_is_type(
+    tp: &TextPair,
+    description: &str,
+) -> Option<StaticDefinition> {
     // Match "enchanted " prefix
     let rest_tp = nom_tag_tp(tp, "enchanted ")?;
 
@@ -391,7 +403,9 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
     // (additive). Its absence means CR 205.1a applies: the new card type(s)
     // replace the existing ones.
     let (type_part, is_additive) =
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         if let Some(before) = is_rest_lower.strip_suffix(" in addition to its other types") {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             (before.trim(), true)
         } else {
             (is_rest_lower, false)
@@ -405,25 +419,28 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
     // consumes only the leading "N/N" — the unconsumed remainder (the
     // "and has <kw> ... and it loses all ..." clause) is captured and fed to
     // `parse_continuous_modifications` below so it is not silently dropped.
-    let (type_part, base_pt, trailing_clause) = if let Some((before_pt, pt_part)) =
-        type_part.rsplit_once(" with base power and toughness ")
-    {
-        if let Some((p, t)) = parse_pt_mod(pt_part) {
-            // Locate the end of the "N/N" token to capture the remainder.
-            let slash_pos = pt_part.find('/').unwrap_or(0);
-            let after_slash = &pt_part[slash_pos + 1..];
-            let t_end = after_slash
-                .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
-                .unwrap_or(after_slash.len());
-            let remainder = after_slash[t_end..].trim();
-            let clause = (!remainder.is_empty()).then_some(remainder);
-            (before_pt.trim(), Some((p, t)), clause)
+    let (type_part, base_pt, trailing_clause) =
+        if let Some((before_pt, pt_part)) =
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+            type_part.rsplit_once(" with base power and toughness ")
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        {
+            if let Some((p, t)) = parse_pt_mod(pt_part) {
+                // Locate the end of the "N/N" token to capture the remainder.
+                let slash_pos = pt_part.find('/').unwrap_or(0);
+                let after_slash = &pt_part[slash_pos + 1..];
+                let t_end = after_slash
+                    .find(|c: char| c.is_whitespace() || c == '.' || c == ',')
+                    .unwrap_or(after_slash.len());
+                let remainder = after_slash[t_end..].trim();
+                let clause = (!remainder.is_empty()).then_some(remainder);
+                (before_pt.trim(), Some((p, t)), clause)
+            } else {
+                (type_part, None, None)
+            }
         } else {
             (type_part, None, None)
-        }
-    } else {
-        (type_part, None, None)
-    };
+        };
 
     // Parse "N/N [color] [type] [subtype]" patterns for Darksteel Mutation style
     // e.g., "0/1 green Insect creature"
@@ -661,7 +678,9 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
 /// token-by-token classification. One `AddType` per CR 205.2 core type and
 /// one `AddSubtype` per CR 205.3 subtype are emitted; CR 205.4 supertypes are
 /// recognized-and-discarded (animations don't grant supertypes).
-fn parse_becomes_type_addition_modifications(tp: &TextPair<'_>) -> Vec<ContinuousModification> {
+pub(crate) fn parse_becomes_type_addition_modifications(
+    tp: &TextPair<'_>,
+) -> Vec<ContinuousModification> {
     type VE<'a> = OracleError<'a>;
 
     // Scan for the "becomes a"/"becomes an" phrase anywhere in the lowered
@@ -704,7 +723,7 @@ fn parse_becomes_type_addition_modifications(tp: &TextPair<'_>) -> Vec<Continuou
 /// effects are replacement-form changes. Setting core card types replaces the
 /// previous card-type set except for CR 205.1b's artifact-creature exception;
 /// setting creature subtypes replaces the object's previous creature types.
-fn parse_bare_becomes_type_replacement_modifications(
+pub(crate) fn parse_bare_becomes_type_replacement_modifications(
     tp: &TextPair<'_>,
 ) -> Vec<ContinuousModification> {
     type VE<'a> = OracleError<'a>;
@@ -816,7 +835,10 @@ fn parse_bare_becomes_type_replacement_modifications(
 /// …`) and keyword tails (`with flying`) are deliberately deferred to a
 /// FOLLOWUP — this function does NOT reuse `parse_animation_modifications`
 /// (which rejects `it's an` and drops the P/T clause).
-fn parse_pronoun_becomes_type_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_pronoun_becomes_type_static(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
     // STEP A — peel a trailing " as long as <condition>" FIRST. The canonical
     // inverted-form rewrite produces "<effect> as long as <condition>"; the
     // condition must come off before the effect is parsed, or it leaks into
@@ -888,7 +910,7 @@ fn parse_pronoun_becomes_type_static(tp: &TextPair<'_>, text: &str) -> Option<St
 /// recognizes the affirmative type; `nom_tag_lower` (leading-space-anchored) peels
 /// the optional controller clause and the copula; the dynamic-P/T-by-mana-value
 /// tail is delegated to `push_base_pt_mana_value_dynamic_modifications`.
-fn parse_each_noncreature_subject_is_creature_with_pt_mv(
+pub(crate) fn parse_each_noncreature_subject_is_creature_with_pt_mv(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
@@ -979,16 +1001,19 @@ fn parse_each_noncreature_subject_is_creature_with_pt_mv(
 /// CR 205.1a: Parse "All permanents are [type] in addition to their other types."
 /// Handles global type-addition effects like Mycosynth Lattice ("artifacts") and
 /// Enchanted Evening ("enchantments").
-fn parse_all_permanents_are_type(tp: &TextPair<'_>, description: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_all_permanents_are_type(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
     let rest_tp = nom_tag_tp(tp, "all permanents are ")?;
     let rest = rest_tp.lower.trim_end_matches('.');
-    let type_part = rest.strip_suffix(" in addition to their other types")?;
-    // Map the type word to a CoreType
+    let type_part = rest.strip_suffix(" in addition to their other types")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+                                                                             // Map the type word to a CoreType
     let core_type = match type_part.trim() {
-        "artifacts" => CoreType::Artifact,
-        "enchantments" => CoreType::Enchantment,
-        "creatures" => CoreType::Creature,
-        "lands" => CoreType::Land,
+        "artifacts" => CoreType::Artifact, // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        "enchantments" => CoreType::Enchantment, // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        "creatures" => CoreType::Creature, // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        "lands" => CoreType::Land, // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         _ => return None,
     };
     Some(
@@ -1026,7 +1051,10 @@ fn parse_all_permanents_are_type(tp: &TextPair<'_>, description: &str) -> Option
 ///
 /// Dispatch ordering constraints are documented at the call site in
 /// `parse_static_line_inner` and pinned by three regression tests below.
-fn parse_all_subject_are_color(tp: &TextPair<'_>, description: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_all_subject_are_color(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
     let rest_tp = nom_tag_tp(tp, "all ")?;
     // Subject: single shared combinator for both core types and plural subtypes.
     let (after_subject, type_filter) = nom_target::parse_type_filter_word(rest_tp.lower).ok()?;
@@ -1056,7 +1084,7 @@ fn parse_all_subject_are_color(tp: &TextPair<'_>, description: &str) -> Option<S
 /// Handles replacement ("Nonbasic lands are Mountains"), additive ("Each land is a
 /// Swamp in addition to its other land types"), and all-basic-types ("Lands you control
 /// are every basic land type in addition to their other types").
-fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     let (subject_tp, rest_tp) = tp
         .split_around(" are ")
         .or_else(|| tp.split_around(" is a "))
@@ -1129,19 +1157,25 @@ fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinit
 }
 
 /// Parse the subject of a land type-change line into a TargetFilter.
-fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilter> {
     match subject.to_lowercase().as_str() {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         "nonbasic lands" => Some(TargetFilter::Typed(TypedFilter::land().properties(vec![
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             FilterProp::NotSupertype {
                 value: Supertype::Basic,
             },
         ]))),
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         "lands you control" => Some(TargetFilter::Typed(
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             TypedFilter::land().controller(ControllerRef::You),
         )),
         "each land" | "all lands" => Some(TargetFilter::Typed(TypedFilter::land())),
         // CR 305.7: Aura enchantments that change the enchanted land's type.
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         "enchanted land" => Some(TargetFilter::Typed(
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
         )),
         _ => None,
@@ -1163,7 +1197,10 @@ fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilter> {
 /// don't strip, plus every self-reference grant.
 ///
 /// Returns None when the line's subject doesn't map to a recognized filter.
-fn parse_all_creature_types_grant(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_all_creature_types_grant(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
     let (subject_tp, rest_tp) = tp
         .split_around(" is every creature type")
         .or_else(|| tp.split_around(" are every creature type"))?;
@@ -1206,7 +1243,7 @@ fn parse_all_creature_types_grant(tp: &TextPair<'_>, text: &str) -> Option<Stati
 /// CR 702.73a creature-type class. Counter-conditioned subjects ("each nonland
 /// creature with an everything counter on it" — Omo, Queen of Vesuva) are
 /// handled by `parse_counter_conditioned_nonland_creature_subject`.
-fn parse_creature_type_change_subject(subject: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_creature_type_change_subject(subject: &str) -> Option<TargetFilter> {
     // Combinator dispatch — each subject phrase maps to its TypedFilter
     // shape. `all_consuming` requires the whole subject to be matched, so a
     // partial prefix like "creatures" inside "creatures with X" does not

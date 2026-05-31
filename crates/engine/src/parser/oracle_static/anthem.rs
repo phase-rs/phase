@@ -1,13 +1,24 @@
 // CR 613.3g (Layer 7) — P/T anthem static abilities.
 
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
 /// Try to parse "[Subtype] creatures you control get/have ..." patterns.
 /// `text` is the original-case text starting at the subtype word.
 /// `lower` is the lowercased version of `text`.
 /// `is_other` indicates whether this was preceded by "Other ".
-fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<StaticDefinition> {
+pub(crate) fn parse_typed_you_control(
+    text: &str,
+    lower: &str,
+    is_other: bool,
+) -> Option<StaticDefinition> {
     let tp = TextPair::new(text, lower);
     // Try "X creatures you control get/have" first
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     if let Some(creatures_pos) = tp.find(" creatures you control ") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let (before, after) = tp.split_at(creatures_pos);
         let descriptor = before.original.trim();
         if !descriptor.is_empty() {
@@ -144,7 +155,9 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
     }
 
     // Try "Xs you control get/have" (e.g. "Zombies you control get +1/+1")
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     if let Some(yc_pos) = tp.find(" you control ") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let (before, after) = tp.split_at(yc_pos);
         let descriptor = before.original.trim();
         if !descriptor.is_empty() {
@@ -242,7 +255,7 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
     None
 }
 
-fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
@@ -302,7 +315,7 @@ fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
 /// `"have base power and toughness 2/2 and are Bears in addition to their
 /// other types"`) go through the main path instead and reach the same
 /// extractor via `parse_continuous_modifications`.
-fn parse_subject_additive_type_static(text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_subject_additive_type_static(text: &str) -> Option<StaticDefinition> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
     let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(&lower, |i| {
@@ -344,7 +357,10 @@ fn parse_subject_additive_type_static(text: &str) -> Option<StaticDefinition> {
 ///
 /// Produces `StaticCondition::And { DuringYourTurn, HasCounters { .. } }` with
 /// `ContinuousModification` list for type/subtype/P-T/keyword changes.
-fn parse_compound_turn_counter_animation(lower: &str, text: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_compound_turn_counter_animation(
+    lower: &str,
+    text: &str,
+) -> Option<StaticDefinition> {
     // Strip "during your turn, " prefix via nom tag
     let (rest, _) = tag::<_, _, OracleError<'_>>("during your turn, ")(lower).ok()?;
 
@@ -359,7 +375,7 @@ fn parse_compound_turn_counter_animation(lower: &str, text: &str) -> Option<Stat
 
     // Parse "[type] counters on [pronoun], "
     let rest = rest.trim_start();
-    let counters_pos = rest.find(" counter")?;
+    let counters_pos = rest.find(" counter")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     let counter_type_text = rest[..counters_pos].trim();
     // CR 122.1: bare "a counter on it" with no type word → Any; typed "a [type]
     // counter on it" → OfType(ct). Routes through the shared mapping in
@@ -399,7 +415,7 @@ fn parse_compound_turn_counter_animation(lower: &str, text: &str) -> Option<Stat
 
 /// Parse "one or more" / "N or more" / "a" into a counter minimum count.
 /// Returns (minimum, remaining text).
-fn parse_counter_minimum(text: &str) -> Option<(u32, &str)> {
+pub(crate) fn parse_counter_minimum(text: &str) -> Option<(u32, &str)> {
     if let Some(rest) = nom_tag_lower(text, text, "one or more ") {
         return Some((1, rest));
     }
@@ -421,7 +437,7 @@ fn parse_counter_minimum(text: &str) -> Option<(u32, &str)> {
 /// Handles patterns like:
 /// - "he's a 3/4 ninja creature and has hexproof"
 /// - "it's a 3/4 ninja creature with hexproof"
-fn parse_animation_modifications(text: &str) -> Vec<ContinuousModification> {
+pub(crate) fn parse_animation_modifications(text: &str) -> Vec<ContinuousModification> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let mut modifications = Vec::new();
@@ -439,9 +455,13 @@ fn parse_animation_modifications(text: &str) -> Vec<ContinuousModification> {
 
     // Split on " and has " or " with " to separate type/PT from keywords
     let body_lower = body.to_lowercase();
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     let (type_pt_part, keyword_part) = if let Some(pos) = body_lower.find(" and has ") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         (&body[..pos], Some(&body[pos + 9..]))
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     } else if let Some(pos) = body_lower.find(" with ") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         (&body[..pos], Some(&body[pos + 6..]))
     } else {
         (body, None)
@@ -466,8 +486,11 @@ fn parse_animation_modifications(text: &str) -> Vec<ContinuousModification> {
         if word.is_empty() {
             continue;
         }
-        use std::str::FromStr;
-        let capitalized = format!("{}{}", word[..1].to_uppercase(), &word[1..]);
+        let mut chars = word.chars();
+        let Some(first) = chars.next() else {
+            continue;
+        };
+        let capitalized = format!("{}{}", first.to_uppercase(), chars.as_str());
         if let Ok(core_type) = crate::types::card_type::CoreType::from_str(&capitalized) {
             modifications.push(ContinuousModification::AddType { core_type });
         } else {
@@ -489,9 +512,9 @@ fn parse_animation_modifications(text: &str) -> Vec<ContinuousModification> {
     modifications
 }
 
-fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
-    let conditional = text.strip_prefix("As long as ")?;
-    let (condition_text, remainder) = conditional.split_once(", ")?;
+pub(crate) fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
+    let conditional = text.strip_prefix("As long as ")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+    let (condition_text, remainder) = conditional.split_once(", ")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 
     let condition =
         parse_static_condition(condition_text).unwrap_or(StaticCondition::Unrecognized {
@@ -517,7 +540,7 @@ fn parse_conditional_static(text: &str) -> Option<StaticDefinition> {
     Some(def)
 }
 
-fn parse_contextual_continuous_subject_static(
+pub(crate) fn parse_contextual_continuous_subject_static(
     tp: &TextPair<'_>,
     description: &str,
 ) -> Option<StaticDefinition> {
@@ -531,7 +554,7 @@ fn parse_contextual_continuous_subject_static(
     parse_continuous_gets_has(&predicate, affected, description)
 }
 
-fn continuous_subject_verb(lower: &str) -> Option<(&str, &'static str, &str)> {
+pub(crate) fn continuous_subject_verb(lower: &str) -> Option<(&str, &'static str, &str)> {
     let (subject, verb_prefix, rest) = nom_primitives::scan_preceded(lower, |input| {
         alt((
             value("gets ", tag::<_, _, OracleError<'_>>("gets ")),
@@ -544,7 +567,7 @@ fn continuous_subject_verb(lower: &str) -> Option<(&str, &'static str, &str)> {
     Some((subject.trim(), verb_prefix, rest))
 }
 
-fn predicate_condition(predicate: &str) -> Option<StaticCondition> {
+pub(crate) fn predicate_condition(predicate: &str) -> Option<StaticCondition> {
     let lower = predicate.to_lowercase();
     let tp = TextPair::new(predicate, &lower);
     let (_, condition_tp) = tp.split_around(" as long as ")?;
@@ -552,7 +575,7 @@ fn predicate_condition(predicate: &str) -> Option<StaticCondition> {
     parse_static_condition(condition_text)
 }
 
-fn contextual_continuous_subject_filter(
+pub(crate) fn contextual_continuous_subject_filter(
     subject_lower: &str,
     subject_original: &str,
     condition: Option<&StaticCondition>,
@@ -580,7 +603,7 @@ fn contextual_continuous_subject_filter(
 /// before one shared predicate ("Skeletons you control and other Zombies you
 /// control get ..."). Parse each complete subject phrase and union them rather
 /// than letting the first subject consume the whole predicate.
-fn parse_controlled_compound_continuous_subject_filter(
+pub(crate) fn parse_controlled_compound_continuous_subject_filter(
     subject: &TextPair<'_>,
 ) -> Option<TargetFilter> {
     let (left_lower, _, right_lower) = nom_primitives::scan_preceded(subject.lower, |input| {
@@ -611,7 +634,10 @@ fn parse_controlled_compound_continuous_subject_filter(
     Some(TargetFilter::Or { filters })
 }
 
-fn parse_soulbond_paired_static(tp: &TextPair<'_>, description: &str) -> Option<StaticDefinition> {
+pub(crate) fn parse_soulbond_paired_static(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
     let parser = preceded(
         tag("as long as "),
         preceded(
@@ -628,7 +654,7 @@ fn parse_soulbond_paired_static(tp: &TextPair<'_>, description: &str) -> Option<
     Some(def)
 }
 
-fn bind_where_x_in_quantity_expr(
+pub(crate) fn bind_where_x_in_quantity_expr(
     value: QuantityExpr,
     where_x: &QuantityRef,
 ) -> Option<QuantityExpr> {
@@ -645,7 +671,9 @@ fn bind_where_x_in_quantity_expr(
 
 /// CR 109.5: In a static ability, "you" and "your" refer to the current
 /// controller of the object with that ability.
-fn parse_typed_you_control_subject_filter(subject: &TextPair<'_>) -> Option<TargetFilter> {
+pub(crate) fn parse_typed_you_control_subject_filter(
+    subject: &TextPair<'_>,
+) -> Option<TargetFilter> {
     if let Some(descriptor) = parse_subject_suffix(subject, " creatures you control") {
         let descriptor = descriptor.trim_end();
         if descriptor.is_empty() {
@@ -665,7 +693,7 @@ fn parse_typed_you_control_subject_filter(subject: &TextPair<'_>) -> Option<Targ
 
 /// Parse "gets +N/+M [and has {keyword}]" after the subject.
 /// Also handles "gets +N/+M for each [clause]" dynamic P/T patterns.
-fn parse_continuous_gets_has(
+pub(crate) fn parse_continuous_gets_has(
     text: &str,
     affected: TargetFilter,
     description: &str,
@@ -749,7 +777,9 @@ fn parse_continuous_gets_has(
     )
 }
 
-fn parse_dynamic_for_each_pt_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
+pub(crate) fn parse_dynamic_for_each_pt_modifications(
+    text: &str,
+) -> Option<Vec<ContinuousModification>> {
     let lower = text.to_lowercase();
     let (for_each_with_marker, pt_text) = take_until::<_, _, OracleError<'_>>("for each ")
         .parse(lower.as_str())
@@ -770,12 +800,12 @@ fn parse_dynamic_for_each_pt_modifications(text: &str) -> Option<Vec<ContinuousM
     (!modifications.is_empty()).then_some(modifications)
 }
 
-fn parse_dynamic_pt_in_text(
+pub(crate) fn parse_dynamic_pt_in_text(
     lower: &str,
     where_x_expression: Option<&str>,
 ) -> Option<Vec<ContinuousModification>> {
     // Find "get " or "gets " followed by a variable P/T pattern via nom combinator
-    let gets_pos = lower.find("gets ").or_else(|| lower.find("get "))?;
+    let gets_pos = lower.find("gets ").or_else(|| lower.find("get "))?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     let after_gets = &lower[gets_pos..];
     let after_verb = nom_tag_lower(after_gets, after_gets, "gets ")
         .or_else(|| nom_tag_lower(after_gets, after_gets, "get "))?;
@@ -836,14 +866,14 @@ fn parse_dynamic_pt_in_text(
     Some(mods)
 }
 
-fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
+pub(crate) fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let pt_text = tp.strip_after("base power and toughness ")?.original.trim();
     parse_pt_mod(pt_text)
 }
 
-fn parse_base_pt_mana_value_dynamic(lower: &str) -> Option<QuantityExpr> {
+pub(crate) fn parse_base_pt_mana_value_dynamic(lower: &str) -> Option<QuantityExpr> {
     type VE<'a> = OracleError<'a>;
     nom_primitives::scan_split_at_phrase(lower, |input| {
         alt((
@@ -863,7 +893,7 @@ fn parse_base_pt_mana_value_dynamic(lower: &str) -> Option<QuantityExpr> {
     })
 }
 
-fn parse_base_pt_side(input: &str) -> nom::IResult<&str, BasePtSide, OracleError<'_>> {
+pub(crate) fn parse_base_pt_side(input: &str) -> nom::IResult<&str, BasePtSide, OracleError<'_>> {
     let (rest, sign) = opt(alt((value(-1i32, tag("-")), value(1i32, tag("+"))))).parse(input)?;
     let sign = sign.unwrap_or(1);
     if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("x")(rest) {
@@ -885,7 +915,7 @@ fn parse_base_pt_side(input: &str) -> nom::IResult<&str, BasePtSide, OracleError
 /// `where_x_expression` (for patterns like "base power and toughness X/X,
 /// where X is the number of …"), falling back to `CostXPaid` for spell-cast
 /// contexts where X is the cost X (e.g., Biomass Mutation).
-fn parse_base_pt_dynamic(
+pub(crate) fn parse_base_pt_dynamic(
     text: &str,
     where_x_expression: Option<&str>,
 ) -> Option<(QuantityExpr, QuantityExpr)> {

@@ -1,5 +1,10 @@
 // CR 604 / CR 613 — shared static parser infrastructure.
 
+#[allow(unused_imports)]
+use super::prelude::*;
+#[allow(unused_imports)]
+use super::support::*;
+
 /// CR 109.5 vs CR 102.1 + structural distributive: the pronoun-binding axis
 /// of an "only during X turn(s)" prohibition.
 ///
@@ -15,7 +20,7 @@
 /// resulting `CastingProhibitionCondition` (`NotDuringYourTurn` vs
 /// `NotDuringAffectedPlayersTurn`) carries the binding axis into the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WhenKind {
+pub(crate) enum WhenKind {
     SourceRelative,
     PerAffected,
 }
@@ -31,7 +36,7 @@ enum WhenKind {
 ///   "only during " (`"your"` | `"their own"`) " turn" `"s"?` `"."?`
 ///
 /// Returns `(remaining_input, WhenKind)` on success.
-fn parse_when_clause(input: &str) -> OracleResult<'_, WhenKind> {
+pub(crate) fn parse_when_clause(input: &str) -> OracleResult<'_, WhenKind> {
     let (input, _) = tag::<_, _, OracleError<'_>>("only during ").parse(input)?;
     let (input, kind) = alt((
         value(WhenKind::SourceRelative, tag("your")),
@@ -46,7 +51,7 @@ fn parse_when_clause(input: &str) -> OracleResult<'_, WhenKind> {
 
 /// Map a `WhenKind` to its `CastingProhibitionCondition`. Single-authority
 /// mapper so the binding axis lives in exactly one place.
-fn when_kind_to_condition(kind: WhenKind) -> CastingProhibitionCondition {
+pub(crate) fn when_kind_to_condition(kind: WhenKind) -> CastingProhibitionCondition {
     match kind {
         WhenKind::SourceRelative => CastingProhibitionCondition::NotDuringYourTurn,
         WhenKind::PerAffected => CastingProhibitionCondition::NotDuringAffectedPlayersTurn,
@@ -56,7 +61,7 @@ fn when_kind_to_condition(kind: WhenKind) -> CastingProhibitionCondition {
 /// Try matching a nom `tag()` against the lowercase text, returning the remaining original-case
 /// text on success. This bridges nom's exact-match combinators with the TextPair dual-string
 /// pattern used throughout the parser.
-fn nom_tag_lower<'a>(text: &'a str, lower: &str, prefix: &str) -> Option<&'a str> {
+pub(crate) fn nom_tag_lower<'a>(text: &'a str, lower: &str, prefix: &str) -> Option<&'a str> {
     tag::<_, _, OracleError<'_>>(prefix)
         .parse(lower)
         .ok()
@@ -65,7 +70,7 @@ fn nom_tag_lower<'a>(text: &'a str, lower: &str, prefix: &str) -> Option<&'a str
 
 /// Like `nom_tag_lower`, but operates on a `TextPair` and returns a new `TextPair`
 /// with both original and lowercase remainders advanced past the matched prefix.
-fn nom_tag_tp<'a>(tp: &TextPair<'a>, prefix: &str) -> Option<TextPair<'a>> {
+pub(crate) fn nom_tag_tp<'a>(tp: &TextPair<'a>, prefix: &str) -> Option<TextPair<'a>> {
     tag::<_, _, OracleError<'_>>(prefix)
         .parse(tp.lower)
         .ok()
@@ -83,7 +88,7 @@ fn nom_tag_tp<'a>(tp: &TextPair<'a>, prefix: &str) -> Option<TextPair<'a>> {
 /// corpus of currently-affected cards in `client/public/card-data.json` and is
 /// intentionally conservative: bare nouns/verbs that commonly appear inside
 /// condition clauses (e.g. `"creatures "`, `"lands "`, `"a "`) are omitted.
-fn parse_effect_subject_prefix(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_effect_subject_prefix(input: &str) -> OracleResult<'_, ()> {
     alt((
         // Self-reference pronouns ("it …", "it's …").
         value(
@@ -182,7 +187,9 @@ fn parse_effect_subject_prefix(input: &str) -> OracleResult<'_, ()> {
 /// points (not for parsing dispatch); the dispatch itself is a nom combinator.
 /// This mirrors the word-boundary-scan pattern used by `scan_timing_restrictions`
 /// in `oracle_casting.rs`.
-fn split_on_effect_subject_comma<'a>(tp: &TextPair<'a>) -> Option<(TextPair<'a>, TextPair<'a>)> {
+pub(crate) fn split_on_effect_subject_comma<'a>(
+    tp: &TextPair<'a>,
+) -> Option<(TextPair<'a>, TextPair<'a>)> {
     for (pos, sep) in tp.lower.match_indices(", ") {
         let after = pos + sep.len();
         let tail_lower = &tp.lower[after..];
@@ -196,15 +203,15 @@ fn split_on_effect_subject_comma<'a>(tp: &TextPair<'a>) -> Option<(TextPair<'a>,
 }
 
 /// Result of splitting an inverted `"As long as <cond>, <effect>"` line.
-struct InvertedSplit {
+pub(crate) struct InvertedSplit {
     /// Canonical-form rewrite `"<effect> as long as <condition>"` ready for
     /// re-dispatch through `parse_static_line_inner`.
-    canonical: String,
+    pub(super) canonical: String,
     /// The effect clause in original case.
-    effect_text: String,
+    pub(super) effect_text: String,
     /// The condition clause in original case, suitable for
     /// `StaticCondition::Unrecognized { text }` when the recursed parse fails.
-    condition_text: String,
+    pub(super) condition_text: String,
 }
 
 /// Detect inverted static form `"As long as <condition>, <effect>"` and split
@@ -217,7 +224,7 @@ struct InvertedSplit {
 /// CR 611.3a: Continuous effects from static abilities apply when their stated
 /// condition is true; orientation of the condition clause in the printed text
 /// is irrelevant to rules semantics.
-fn try_split_inverted_as_long_as(tp: &TextPair<'_>) -> Option<InvertedSplit> {
+pub(crate) fn try_split_inverted_as_long_as(tp: &TextPair<'_>) -> Option<InvertedSplit> {
     let rest = nom_tag_tp(tp, "as long as ")?;
     // Trim a trailing period from both sides before splitting so the canonical
     // form does not carry a stray `.` at the condition boundary.
@@ -235,7 +242,7 @@ fn try_split_inverted_as_long_as(tp: &TextPair<'_>) -> Option<InvertedSplit> {
     })
 }
 
-fn try_parse_inverted_attached_subject_grant(
+pub(crate) fn try_parse_inverted_attached_subject_grant(
     split: &InvertedSplit,
     description: &str,
 ) -> Option<StaticDefinition> {
@@ -250,7 +257,9 @@ fn try_parse_inverted_attached_subject_grant(
     parse_continuous_gets_has(predicate.original, affected, description)
 }
 
-fn parse_attached_subject_is_legendary(condition: &TextPair<'_>) -> Option<TargetFilter> {
+pub(crate) fn parse_attached_subject_is_legendary(
+    condition: &TextPair<'_>,
+) -> Option<TargetFilter> {
     let (rest, attachment_prop) = if let Some(rest) = nom_tag_tp(condition, "equipped ") {
         (rest, FilterProp::EquippedBy)
     } else {
@@ -274,7 +283,7 @@ fn parse_attached_subject_is_legendary(condition: &TextPair<'_>) -> Option<Targe
     )))
 }
 
-fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
+pub(crate) fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => {
             tf.controller == Some(ControllerRef::You)
@@ -323,7 +332,7 @@ impl GraveyardGrantedKeywordKind {
 /// multiple zones (Eminence: "in the command zone or on the battlefield").
 /// When ALL collected zones happen to be `Battlefield`, `active_zones` is left
 /// empty so the standard battlefield-default applies.
-fn populate_active_zones_from_condition(def: &mut StaticDefinition) {
+pub(crate) fn populate_active_zones_from_condition(def: &mut StaticDefinition) {
     use crate::types::zones::Zone;
     let mut zones: Vec<Zone> = Vec::new();
     if let Some(cond) = def.condition.as_ref() {
@@ -347,7 +356,10 @@ fn populate_active_zones_from_condition(def: &mut StaticDefinition) {
     }
 }
 
-fn collect_source_in_zones(cond: &StaticCondition, out: &mut Vec<crate::types::zones::Zone>) {
+pub(crate) fn collect_source_in_zones(
+    cond: &StaticCondition,
+    out: &mut Vec<crate::types::zones::Zone>,
+) {
     match cond {
         StaticCondition::SourceInZone { zone } if !out.contains(zone) => {
             out.push(*zone);
@@ -373,7 +385,7 @@ fn collect_source_in_zones(cond: &StaticCondition, out: &mut Vec<crate::types::z
 ///
 /// "enchanted land is a " is intentionally NOT handled here; that type-changing
 /// branch has its own dedicated dispatch in `parse_static_line_inner`.
-fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFilter, &'a str)> {
+pub(crate) fn attached_subject_filter<'a>(tp: &TextPair<'a>) -> Option<(TargetFilter, &'a str)> {
     if let Some(rest) = nom_tag_tp(tp, "enchanted creature ") {
         return Some((
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
@@ -427,7 +439,7 @@ pub(crate) fn parse_static_line_multi_ir(text: &str) -> Vec<StaticIr> {
         .collect()
 }
 
-fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
+pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
@@ -572,14 +584,14 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     parse_static_line(text).into_iter().collect()
 }
 
-fn push_or_filter_branch(filters: &mut Vec<TargetFilter>, filter: TargetFilter) {
+pub(crate) fn push_or_filter_branch(filters: &mut Vec<TargetFilter>, filter: TargetFilter) {
     match filter {
         TargetFilter::Or { filters: inner } => filters.extend(inner),
         other => filters.push(other),
     }
 }
 
-fn filter_has_source_or_controller_anchor(filter: &TargetFilter) -> bool {
+pub(crate) fn filter_has_source_or_controller_anchor(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::SelfRef | TargetFilter::Controller => true,
         TargetFilter::Typed(typed) => matches!(
@@ -593,7 +605,9 @@ fn filter_has_source_or_controller_anchor(filter: &TargetFilter) -> bool {
     }
 }
 
-fn exactly_one_creature_you_control_filter(condition: &StaticCondition) -> Option<&TargetFilter> {
+pub(crate) fn exactly_one_creature_you_control_filter(
+    condition: &StaticCondition,
+) -> Option<&TargetFilter> {
     match condition {
         StaticCondition::QuantityComparison {
             lhs:
@@ -607,7 +621,7 @@ fn exactly_one_creature_you_control_filter(condition: &StaticCondition) -> Optio
     }
 }
 
-fn is_creature_you_control_filter(filter: &TargetFilter) -> bool {
+pub(crate) fn is_creature_you_control_filter(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -622,13 +636,13 @@ fn is_creature_you_control_filter(filter: &TargetFilter) -> bool {
     }
 }
 
-fn matches_soulbond_paired_condition(condition_text: &str) -> bool {
+pub(crate) fn matches_soulbond_paired_condition(condition_text: &str) -> bool {
     all_consuming(parse_soulbond_paired_condition_nom)
         .parse(condition_text)
         .is_ok()
 }
 
-fn parse_soulbond_paired_condition_nom(input: &str) -> OracleResult<'_, ()> {
+pub(crate) fn parse_soulbond_paired_condition_nom(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
@@ -648,11 +662,13 @@ fn parse_soulbond_paired_condition_nom(input: &str) -> OracleResult<'_, ()> {
 /// Try splitting a condition on " and " into compound `StaticCondition::And`.
 /// Only succeeds when BOTH halves parse as valid conditions — prevents false splits
 /// on noun phrases like "artifacts and creatures".
-fn try_split_compound_and(text: &str) -> Option<StaticCondition> {
+pub(crate) fn try_split_compound_and(text: &str) -> Option<StaticCondition> {
     let lower = text.to_lowercase();
     // Find " and " boundaries — try each occurrence in case the first is a noun conjunction.
     let mut search_from = 0;
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     while let Some(pos) = lower[search_from..].find(" and ") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let abs_pos = search_from + pos;
         let left = &text[..abs_pos];
         let right = &text[abs_pos + 5..]; // " and " is 5 bytes
@@ -673,7 +689,7 @@ fn try_split_compound_and(text: &str) -> Option<StaticCondition> {
 /// - "your devotion to [colors] is less than N" → DevotionGE (with inverted threshold)
 /// - "it's your turn" → DuringYourTurn
 /// - "you control a/an [type]" → IsPresent with filter
-fn parse_static_condition(text: &str) -> Option<StaticCondition> {
+pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
     let text = text.trim().trim_end_matches('.');
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -700,7 +716,9 @@ fn parse_static_condition(text: &str) -> Option<StaticCondition> {
 
     // "you have at least N life more than your starting life total"
     if let Some(amount_text) = nom_tag_lower(tp.lower, tp.lower, "you have at least ")
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         .and_then(|s| s.strip_suffix(" life more than your starting life total"))
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     {
         let (amount, rest) = parse_number(amount_text)?;
         if rest.trim().is_empty() {
@@ -725,7 +743,9 @@ fn parse_static_condition(text: &str) -> Option<StaticCondition> {
         });
     }
     if let Some(speed_text) = nom_tag_lower(tp.lower, tp.lower, "your speed is ") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         if let Some(number_text) = speed_text.strip_suffix(" or higher") {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             if let Some((threshold, remainder)) = parse_number(number_text) {
                 if remainder.trim().is_empty() {
                     return Some(StaticCondition::SpeedGE {
@@ -759,11 +779,13 @@ fn parse_static_condition(text: &str) -> Option<StaticCondition> {
     None
 }
 
-fn parse_attached_static_condition(text: &str) -> Option<StaticCondition> {
+pub(crate) fn parse_attached_static_condition(text: &str) -> Option<StaticCondition> {
     parse_static_condition(text).map(rebind_source_object_quantities_to_recipient)
 }
 
-fn rebind_source_object_quantities_to_recipient(condition: StaticCondition) -> StaticCondition {
+pub(crate) fn rebind_source_object_quantities_to_recipient(
+    condition: StaticCondition,
+) -> StaticCondition {
     match condition {
         StaticCondition::QuantityComparison {
             lhs,
@@ -802,7 +824,7 @@ fn rebind_source_object_quantities_to_recipient(condition: StaticCondition) -> S
     }
 }
 
-fn rebind_source_object_quantity_expr_to_recipient(expr: QuantityExpr) -> QuantityExpr {
+pub(crate) fn rebind_source_object_quantity_expr_to_recipient(expr: QuantityExpr) -> QuantityExpr {
     match expr {
         QuantityExpr::Ref { qty } => QuantityExpr::Ref {
             qty: rebind_source_object_quantity_ref_to_recipient(qty),
@@ -845,7 +867,7 @@ fn rebind_source_object_quantity_expr_to_recipient(expr: QuantityExpr) -> Quanti
     }
 }
 
-fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -> QuantityRef {
+pub(crate) fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -> QuantityRef {
     match qty {
         QuantityRef::Power {
             scope: ObjectScope::Source,
@@ -870,7 +892,7 @@ fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -> QuantityR
 /// static. Delegates `Not`-wrapping (with the `UnlessPay` raw-passthrough
 /// exception) to the shared `parse_unless_condition` combinator so the static
 /// layer and the `parse_condition` "unless " dispatch share one polarity rule.
-fn parse_unless_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
+pub(crate) fn parse_unless_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
     let (_, unless_text) = tp.split_around(" unless ")?;
     let lower = unless_text
         .original
@@ -887,28 +909,28 @@ fn parse_unless_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
 /// untapped land"). Mirrors `parse_unless_static_condition`; delegates the
 /// condition body to `parse_static_condition` → `parse_inner_condition` (the
 /// single authority for game-state conditions).
-fn parse_if_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
+pub(crate) fn parse_if_static_condition(tp: &TextPair<'_>) -> Option<StaticCondition> {
     let (_, if_text) = tp.split_around(" if ")?;
     parse_static_condition(if_text.original)
 }
 
 /// Result of the combat-tax nom parse.
-struct CombatTaxParse {
-    mode: StaticMode,
-    affected: TargetFilter,
-    base_cost: ManaCost,
-    scaling: crate::types::ability::UnlessPayScaling,
+pub(crate) struct CombatTaxParse {
+    pub(super) mode: StaticMode,
+    pub(super) affected: TargetFilter,
+    pub(super) base_cost: ManaCost,
+    pub(super) scaling: crate::types::ability::UnlessPayScaling,
     /// CR 506.3 + CR 508.1d: Which declared attacks this tax applies to. `None`
     /// for the block side and for tax-attack lines with no explicit defender
     /// scope. `Some(AttackTargetFilter::Player)` for "...attack you...";
     /// `Some(AttackTargetFilter::PlayerOrPlaneswalker)` for "...attack you or
     /// planeswalkers you control...".
-    defended: Option<crate::types::triggers::AttackTargetFilter>,
+    pub(super) defended: Option<crate::types::triggers::AttackTargetFilter>,
 }
 
 /// Subject axis of the combat-tax grammar.
 #[derive(Debug, Clone)]
-enum CombatTaxSubject {
+pub(crate) enum CombatTaxSubject {
     /// "[Color] creatures [can't attack you]" — applies to opponents' creatures.
     /// CR 105.2: the optional `FilterProp` carries a color predicate
     /// (`HasColor` for "Red creatures", `NotColor` for "Nonblack creatures" —
@@ -927,7 +949,7 @@ enum CombatTaxSubject {
     SourcePermanent,
 }
 
-fn parse_for_each_cost_quantity(input: &str) -> OracleResult<'_, QuantityRef> {
+pub(crate) fn parse_for_each_cost_quantity(input: &str) -> OracleResult<'_, QuantityRef> {
     let (input, _) = tag_no_case::<_, _, OracleError<'_>>(" for each ").parse(input)?;
     let lowered = input.trim_end_matches('.').to_lowercase();
     let quantity = parse_for_each_clause(&lowered).ok_or_else(|| {
@@ -945,7 +967,7 @@ fn parse_for_each_cost_quantity(input: &str) -> OracleResult<'_, QuantityRef> {
 /// The shared `parse_quantity_ref` rejects this because it requires a non-empty
 /// counter-type prefix; Nils, Discipline Enforcer's text omits the counter type,
 /// so the dedicated branch is tried first.
-fn parse_dynamic_x_clause(input: &str) -> OracleResult<'_, QuantityRef> {
+pub(crate) fn parse_dynamic_x_clause(input: &str) -> OracleResult<'_, QuantityRef> {
     use crate::parser::oracle_nom::error::OracleError;
 
     let (input, _) = tag_no_case::<_, _, OracleError<'_>>(", where x is ").parse(input)?;
@@ -985,11 +1007,11 @@ fn parse_dynamic_x_clause(input: &str) -> OracleResult<'_, QuantityRef> {
 }
 
 /// Parse "your devotion to [color(s)] is less than N" or "is N or greater".
-fn parse_devotion_condition(lower: &str) -> Option<StaticCondition> {
+pub(crate) fn parse_devotion_condition(lower: &str) -> Option<StaticCondition> {
     let rest = nom_tag_lower(lower, lower, "your devotion to ")?;
 
     // Split at " is " to get colors and comparison
-    let (color_text, comparison) = rest.split_once(" is ")?;
+    let (color_text, comparison) = rest.split_once(" is ")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
 
     // Parse colors: "white", "blue and red", "white and black"
     let colors = parse_color_list(color_text)?;
@@ -1003,7 +1025,9 @@ fn parse_devotion_condition(lower: &str) -> Option<StaticCondition> {
         });
     }
 
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     if let Some(n_rest) = comparison.strip_suffix(" or greater") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let threshold = parse_number(n_rest.trim())?.0;
         return Some(StaticCondition::DevotionGE { colors, threshold });
     }
@@ -1015,7 +1039,7 @@ fn parse_devotion_condition(lower: &str) -> Option<StaticCondition> {
 /// Parse a list of color names: "red", "white and blue", "red, white, and blue".
 ///
 /// Delegates individual color word recognition to the shared nom color combinator.
-fn parse_color_list(text: &str) -> Option<Vec<crate::types::mana::ManaColor>> {
+pub(crate) fn parse_color_list(text: &str) -> Option<Vec<crate::types::mana::ManaColor>> {
     /// Parse a single color name using the nom combinator with case normalization.
     fn color_from_name(s: &str) -> Option<crate::types::mana::ManaColor> {
         let lower = s.trim().to_ascii_lowercase();
@@ -1033,7 +1057,9 @@ fn parse_color_list(text: &str) -> Option<Vec<crate::types::mana::ManaColor>> {
     }
 
     // "X and Y"
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     if let Some((a, b)) = text.split_once(" and ") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let mut colors = Vec::new();
         // Handle "X, Y, and Z" — a would be "X, Y" and b would be "Z"
         for part in a.split(", ") {
@@ -1047,9 +1073,9 @@ fn parse_color_list(text: &str) -> Option<Vec<crate::types::mana::ManaColor>> {
 }
 
 /// Parse "the number of [quantity] is [comparator] [quantity]" into a QuantityComparison.
-fn parse_quantity_comparison(lower: &str) -> Option<StaticCondition> {
+pub(crate) fn parse_quantity_comparison(lower: &str) -> Option<StaticCondition> {
     let rest = nom_tag_lower(lower, lower, "the number of ")?;
-    let (lhs_text, comparison) = rest.split_once(" is ")?;
+    let (lhs_text, comparison) = rest.split_once(" is ")?; // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     let lhs = parse_quantity_ref(lhs_text)?;
     let (comparator, rhs_text) = parse_comparator_prefix(comparison)?;
     let rhs = parse_quantity_ref(rhs_text.trim())?;
@@ -1060,7 +1086,7 @@ fn parse_quantity_comparison(lower: &str) -> Option<StaticCondition> {
     })
 }
 
-fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
+pub(crate) fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
     [
         " gets ", " get ", " gains ", " gain ", " has ", " have ", " loses ", " lose ",
     ]
@@ -1069,7 +1095,7 @@ fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
     .min()
 }
 
-fn parse_qualified_creatures_you_control_suffix<'a>(
+pub(crate) fn parse_qualified_creatures_you_control_suffix<'a>(
     subject_prefix: &str,
     after_prefix: &'a str,
     after_prefix_lower: &str,
@@ -1086,7 +1112,7 @@ fn parse_qualified_creatures_you_control_suffix<'a>(
     Some((filter, predicate_text))
 }
 
-fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
     let tp = TextPair::new(trimmed, &lower);
@@ -1169,7 +1195,10 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
 
 /// CR 109.5: Keep the subject descriptor paired with its "you control" suffix
 /// so controller-scoped subjects can lower to the source controller.
-fn parse_subject_suffix<'a>(subject: &TextPair<'a>, suffix: &str) -> Option<TextPair<'a>> {
+pub(crate) fn parse_subject_suffix<'a>(
+    subject: &TextPair<'a>,
+    suffix: &str,
+) -> Option<TextPair<'a>> {
     let (_, descriptor_lower) = all_consuming(terminated(
         take_until::<_, _, OracleError<'_>>(suffix),
         tag::<_, _, OracleError<'_>>(suffix),
@@ -1185,7 +1214,7 @@ fn parse_subject_suffix<'a>(subject: &TextPair<'a>, suffix: &str) -> Option<Text
 /// CR 109.5 + CR 205.3 + CR 205.4a: Controller-scoped subject descriptors
 /// may name object types, colors, subtypes, or supertypes controlled by the
 /// source's controller.
-fn typed_you_control_descriptor_filter(
+pub(crate) fn typed_you_control_descriptor_filter(
     descriptor: TextPair<'_>,
     creature_subject: bool,
 ) -> Option<TargetFilter> {
@@ -1238,7 +1267,7 @@ fn typed_you_control_descriptor_filter(
 /// CR 205.2a: Core card type descriptors may appear in singular or regular
 /// plural form in Oracle subject phrases; remove at most one ASCII plural `s`
 /// for core-type lookup only.
-fn strip_one_trailing_ascii_s(text: &str) -> &str {
+pub(crate) fn strip_one_trailing_ascii_s(text: &str) -> &str {
     if text.as_bytes().last() == Some(&b's') {
         &text[..text.len() - 1]
     } else {
@@ -1250,7 +1279,7 @@ fn strip_one_trailing_ascii_s(text: &str) -> &str {
 /// Splits on "that's a " / "that is a ", parses the base phrase (with controller/zone
 /// suffix) via `parse_type_phrase`, then parses a comma/or/and-separated subtype list
 /// and composes with `TargetFilter::And`.
-fn parse_thats_a_subject_filter(text: &str, lower: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_thats_a_subject_filter(text: &str, lower: &str) -> Option<TargetFilter> {
     type VE<'a> = OracleError<'a>;
 
     let (before, subtype_lower, _) = nom_primitives::scan_preceded(lower, |i| {
@@ -1279,7 +1308,7 @@ fn parse_thats_a_subject_filter(text: &str, lower: &str) -> Option<TargetFilter>
 /// Handles: "Wolf or a Werewolf", "Barbarian, a Warrior, or a Berserker",
 /// "Cleric, Rogue, Warrior, and/or Wizard", "Cat, Elemental, Nightmare, Dinosaur, or Beast".
 /// Returns `TargetFilter::Or` for multiple subtypes, single `TargetFilter::Typed` for one.
-fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
     fn parse_subtype_word(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         use nom::bytes::complete::take_while1;
         let (rest, word) = take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)?;
@@ -1338,7 +1367,7 @@ fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
 /// Try to strip a leading "with [counter] counter(s) on it/them" clause from `text`,
 /// returning the `FilterProp` and the remaining text after the clause.
 /// CR 613.1 + CR 613.7: Used to parse conditional static keyword grants in layer 6.
-fn strip_counter_condition_prefix(text: &str) -> Option<(FilterProp, &str)> {
+pub(crate) fn strip_counter_condition_prefix(text: &str) -> Option<(FilterProp, &str)> {
     let lower = text.to_lowercase();
     nom_tag_lower(&lower, &lower, "with ")?;
     // parse_counter_suffix expects optional leading whitespace before "with"
@@ -1346,7 +1375,7 @@ fn strip_counter_condition_prefix(text: &str) -> Option<(FilterProp, &str)> {
     Some((prop, text[consumed..].trim_start()))
 }
 
-fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let lower = subject.to_lowercase();
     let tp = TextPair::new(subject, &lower);
     if tp.lower == "equipped creature" {
@@ -1394,7 +1423,9 @@ fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter>
         ("", None),
     ];
     for (suffix, controller) in controller_suffix_patterns {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         let Some(core) = tp.lower.strip_suffix(suffix) else {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             continue;
         };
         for (phrase, has_other) in [
@@ -1420,7 +1451,7 @@ fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter>
     None
 }
 
-fn parse_creatures_you_control_that_clause<'a>(
+pub(crate) fn parse_creatures_you_control_that_clause<'a>(
     original: &'a str,
     lower: &str,
     is_other: bool,
@@ -1439,7 +1470,9 @@ fn parse_creatures_you_control_that_clause<'a>(
     ))
 }
 
-fn parse_attachment_creatures_you_control_descriptor(descriptor: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_attachment_creatures_you_control_descriptor(
+    descriptor: &str,
+) -> Option<TargetFilter> {
     // CR 303.4b + CR 301.5a: plural/global "enchanted/equipped creatures you
     // control" is not source-relative. It means creatures with a qualifying
     // Aura/Equipment attached, unlike Aura/Equipment text such as "Enchanted
@@ -1456,7 +1489,7 @@ fn parse_attachment_creatures_you_control_descriptor(descriptor: &str) -> Option
     Some(attachment_creatures_you_control_filter(kind))
 }
 
-fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> TargetFilter {
+pub(crate) fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> TargetFilter {
     TargetFilter::Typed(
         TypedFilter::creature()
             .controller(ControllerRef::You)
@@ -1478,7 +1511,7 @@ fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> TargetFilter
 /// Guardian Augmenter, The Dilu Horse, Dancer's Chakrams ("other commanders
 /// you control"), and analogous "[other] commander(s) [you control | your
 /// opponents control]" subject phrases.
-fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilter> {
     type VE<'a> = OracleError<'a>;
     let lower = subject.trim().to_lowercase();
     let i = lower.as_str();
@@ -1572,7 +1605,7 @@ fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilter> {
 /// `non`/`non-` is the genuine head of a complete negation descriptor token
 /// (a non-empty negated word follows the prefix), so it cannot match the
 /// prefix of an unrelated subtype word.
-fn descriptor_is_negation(descriptor: &str) -> bool {
+pub(crate) fn descriptor_is_negation(descriptor: &str) -> bool {
     let lower = descriptor.to_lowercase();
     let Ok((after_non, _)) =
         alt((tag::<_, _, OracleError<'_>>("non-"), tag("non"))).parse(lower.as_str())
@@ -1585,7 +1618,7 @@ fn descriptor_is_negation(descriptor: &str) -> bool {
 /// CR 205.4a: Supertype descriptors include legendary, basic, snow, and world;
 /// parse supported supertype words through the shared target combinator so they
 /// fall through to `parse_type_phrase` instead of becoming fabricated subtypes.
-fn descriptor_is_supertype(descriptor: &str) -> bool {
+pub(crate) fn descriptor_is_supertype(descriptor: &str) -> bool {
     let lower = descriptor.to_lowercase();
     let is_supertype = all_consuming(nom_target::parse_supertype_word)
         .parse(lower.as_str())
@@ -1593,15 +1626,19 @@ fn descriptor_is_supertype(descriptor: &str) -> bool {
     is_supertype
 }
 
-fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
     let tp = TextPair::new(trimmed, &lower);
 
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     let (subject_core, controller) = if let Some(prefix) = tp.original.strip_suffix(" you control")
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     {
         (prefix.trim(), Some(ControllerRef::You))
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     } else if let Some(prefix) = tp.original.strip_suffix(" your opponents control") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         (prefix.trim(), Some(ControllerRef::Opponent))
     } else {
         (tp.original, None)
@@ -1610,15 +1647,21 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     let subject_core_lower = subject_core.to_lowercase();
     let subject_core_tp = TextPair::new(subject_core, &subject_core_lower);
     let (descriptor_text, has_other) =
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         if let Some(rest) = subject_core_tp.original.strip_prefix("Other ") {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             (rest.trim(), true)
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         } else if let Some(rest) = subject_core_tp.original.strip_prefix("other ") {
+            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             (rest.trim(), true)
         } else {
             (subject_core_tp.original.trim(), false)
         };
 
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     let descriptor = if let Some(prefix) = descriptor_text.strip_suffix(" creatures") {
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         prefix.trim()
     } else if !descriptor_text.contains(' ') && descriptor_text.to_lowercase().ends_with('s') {
         if descriptor_text.eq_ignore_ascii_case("creatures") {
@@ -1700,7 +1743,7 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     None
 }
 
-fn add_another_filter(filter: TargetFilter) -> TargetFilter {
+pub(crate) fn add_another_filter(filter: TargetFilter) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed) => {
             typed.properties.push(FilterProp::Another);
@@ -1719,7 +1762,7 @@ fn add_another_filter(filter: TargetFilter) -> TargetFilter {
 }
 
 /// Add a single `FilterProp` to an existing `TargetFilter`.
-fn add_property(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
+pub(crate) fn add_property(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed) => {
             typed.properties.push(prop);
@@ -1734,7 +1777,10 @@ fn add_property(filter: TargetFilter, prop: FilterProp) -> TargetFilter {
     }
 }
 
-fn strip_rule_static_subject<'a>(text: &'a str, lower: &str) -> Option<(TargetFilter, &'a str)> {
+pub(crate) fn strip_rule_static_subject<'a>(
+    text: &'a str,
+    lower: &str,
+) -> Option<(TargetFilter, &'a str)> {
     for marker in [
         " doesn't untap during ",
         " doesn't untap during ",
@@ -1777,7 +1823,7 @@ fn strip_rule_static_subject<'a>(text: &'a str, lower: &str) -> Option<(TargetFi
     None
 }
 
-fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFilter> {
     let lower = subject.to_lowercase();
     let tp = TextPair::new(subject, &lower);
 
@@ -1824,7 +1870,7 @@ fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFilter> {
     None
 }
 
-fn parse_rule_static_predicate(text: &str) -> Option<RuleStaticPredicate> {
+pub(crate) fn parse_rule_static_predicate(text: &str) -> Option<RuleStaticPredicate> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
@@ -1938,7 +1984,9 @@ fn parse_rule_static_predicate(text: &str) -> Option<RuleStaticPredicate> {
     None
 }
 
-fn parse_rule_static_predicate_nom(input: &str) -> OracleResult<'_, RuleStaticPredicate> {
+pub(crate) fn parse_rule_static_predicate_nom(
+    input: &str,
+) -> OracleResult<'_, RuleStaticPredicate> {
     let (rest, predicate) = alt((
         parse_combat_rule_static_predicate_nom,
         value(
@@ -1955,7 +2003,9 @@ fn parse_rule_static_predicate_nom(input: &str) -> OracleResult<'_, RuleStaticPr
     Ok((rest, predicate))
 }
 
-fn parse_combat_rule_static_predicate_nom(input: &str) -> OracleResult<'_, RuleStaticPredicate> {
+pub(crate) fn parse_combat_rule_static_predicate_nom(
+    input: &str,
+) -> OracleResult<'_, RuleStaticPredicate> {
     alt((
         value(
             RuleStaticPredicate::CantAttackOrBlock,
@@ -2000,7 +2050,7 @@ fn parse_combat_rule_static_predicate_nom(input: &str) -> OracleResult<'_, RuleS
     .parse(input)
 }
 
-fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleStaticPredicate>> {
+pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleStaticPredicate>> {
     let mut remaining = rest;
     let mut predicates = Vec::new();
 
@@ -2016,11 +2066,10 @@ fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleStaticPredica
     }
 }
 
-fn parse_cant_attack_rule_static_predicate_nom(
+pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
     input: &str,
 ) -> OracleResult<'_, RuleStaticPredicate> {
     let (rest, _) = tag("can't attack").parse(input)?;
     let (rest, _) = opt(preceded(space1, tag("its owner"))).parse(rest)?;
     Ok((rest, RuleStaticPredicate::CantAttack))
 }
-
