@@ -191,7 +191,7 @@ fn optional_cost_skipped_clears_flag() {
 #[test]
 fn bargain_additional_cost_paid_reduces_self_spell_cost() {
     use engine::types::ability::{StaticCondition, StaticDefinition};
-    use engine::types::statics::StaticMode;
+    use engine::types::statics::{CostModifyMode, StaticMode};
 
     fn build_scenario() -> (engine::game::scenario::GameRunner, ObjectId, Vec<ObjectId>) {
         let mut scenario = GameScenario::new();
@@ -201,7 +201,8 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
             .map(|_| scenario.add_basic_land(P0, ManaColor::Green))
             .collect();
 
-        let reduce_static = StaticDefinition::new(StaticMode::ReduceCost {
+        let reduce_static = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::generic(2),
             spell_filter: None,
             dynamic_count: None,

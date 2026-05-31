@@ -19,7 +19,7 @@ use crate::types::mana::{
 };
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    ActivationExemption, CastFrequency, CastingProhibitionCondition, ExileCastCost,
+    ActivationExemption, CastFrequency, CastingProhibitionCondition, CostModifyMode, ExileCastCost,
     ProhibitionScope, StaticMode,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
@@ -2899,17 +2899,17 @@ fn apply_self_spell_cost_modifiers_inner(
         }
 
         let (amount, spell_filter, dynamic_count, is_raise) = match &def.mode {
-            StaticMode::ReduceCost {
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount,
                 spell_filter,
                 dynamic_count,
-                ..
             } => (amount, spell_filter, dynamic_count, false),
-            StaticMode::RaiseCost {
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Raise,
                 amount,
                 spell_filter,
                 dynamic_count,
-                ..
             } => (amount, spell_filter, dynamic_count, true),
             _ => continue,
         };
@@ -3155,12 +3155,14 @@ fn apply_battlefield_cost_modifiers_inner(
 
         {
             let (amount, spell_filter, dynamic_count, is_raise) = match &def.mode {
-                StaticMode::ReduceCost {
+                StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
                     amount,
                     spell_filter,
                     dynamic_count,
                 } => (amount, spell_filter, dynamic_count, false),
-                StaticMode::RaiseCost {
+                StaticMode::ModifyCost {
+                    mode: CostModifyMode::Raise,
                     amount,
                     spell_filter,
                     dynamic_count,
@@ -3291,9 +3293,11 @@ fn apply_cost_floor_inner(
     for (bf_obj, def) in super::functioning_abilities::battlefield_functioning_statics(state) {
         let bf_id = bf_obj.id;
 
-        let StaticMode::MinimumCost {
+        let StaticMode::ModifyCost {
+            mode: CostModifyMode::Minimum,
             ref amount,
             ref spell_filter,
+            ..
         } = def.mode
         else {
             continue;
@@ -14002,7 +14006,8 @@ mod tests {
             // Self-spell cost reduction as the parser emits it: 1 generic per qualifying
             // card in the graveyard, affected = SelfRef, active in Hand/Stack/Command.
             use crate::types::ability::{CountScope, QuantityRef, ZoneRef};
-            let mut def = StaticDefinition::new(StaticMode::ReduceCost {
+            let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount: ManaCost::generic(1),
                 spell_filter: None,
                 dynamic_count: Some(QuantityRef::ZoneCardCount {
@@ -14080,7 +14085,8 @@ mod tests {
                 shards: vec![ManaCostShard::Green, ManaCostShard::Green],
                 generic: 10,
             };
-            let mut def = StaticDefinition::new(StaticMode::ReduceCost {
+            let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount: ManaCost::generic(1),
                 spell_filter: None,
                 dynamic_count: Some(QuantityRef::Aggregate {
@@ -14142,7 +14148,8 @@ mod tests {
             obj.chosen_attributes
                 .push(ChosenAttribute::CreatureType("Elf".to_string()));
             obj.static_definitions.push(
-                StaticDefinition::new(StaticMode::ReduceCost {
+                StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
                     amount: ManaCost::Cost {
                         generic: 0,
                         shards: vec![
@@ -14436,7 +14443,8 @@ mod tests {
             let obj = state.objects.get_mut(&spell_id).unwrap();
             obj.card_types.core_types.push(CoreType::Instant);
             obj.mana_cost = ManaCost::generic(3);
-            let mut def = StaticDefinition::new(StaticMode::ReduceCost {
+            let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount: ManaCost::generic(2),
                 spell_filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
                     FilterProp::Targets {
@@ -19461,7 +19469,8 @@ mod tests {
             .unwrap()
             .static_definitions
             .push(
-                StaticDefinition::new(StaticMode::RaiseCost {
+                StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Raise,
                     amount: ManaCost::generic(3),
                     spell_filter: Some(spell_filter),
                     dynamic_count: None,
@@ -26125,7 +26134,8 @@ mod tests {
         /// OR alternative — mirroring a flat cost reduction.
         fn add_self_cost_reduction(state: &mut GameState, obj_id: ObjectId, generic: u32) {
             let obj = state.objects.get_mut(&obj_id).unwrap();
-            let mut def = StaticDefinition::new(StaticMode::ReduceCost {
+            let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount: ManaCost::generic(generic),
                 spell_filter: None,
                 dynamic_count: None,
@@ -28668,9 +28678,11 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Artifact);
         obj.entered_battlefield_turn = Some(0);
         obj.static_definitions.push(
-            StaticDefinition::new(StaticMode::MinimumCost {
+            StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Minimum,
                 amount: ManaCost::generic(3),
                 spell_filter: None,
+                dynamic_count: None,
             })
             .condition(StaticCondition::Not {
                 condition: Box::new(StaticCondition::SourceIsTapped),
@@ -29035,9 +29047,11 @@ mod tests {
             obj.card_types.core_types.push(CoreType::Artifact);
             obj.entered_battlefield_turn = Some(0);
             obj.static_definitions
-                .push(StaticDefinition::new(StaticMode::MinimumCost {
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Minimum,
                     amount: ManaCost::generic(5),
                     spell_filter: None,
+                    dynamic_count: None,
                 }));
         }
         let spell = create_stack_spell(&mut state, PlayerId(0), ManaCost::generic(2));

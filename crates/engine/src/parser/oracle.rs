@@ -4216,7 +4216,7 @@ mod tests {
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::replacements::ReplacementEvent;
-    use crate::types::statics::{ProhibitionScope, StaticMode};
+    use crate::types::statics::{CostModifyMode, ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
@@ -11324,7 +11324,8 @@ mod tests {
             r.abilities[0].effect
         );
         assert_eq!(r.statics.len(), 1);
-        let StaticMode::ReduceCost {
+        let StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 1, .. },
             dynamic_count:
                 Some(QuantityRef::ObjectCount {
@@ -11379,7 +11380,13 @@ mod tests {
         );
         assert_eq!(r.statics.len(), 1);
         assert!(
-            matches!(r.statics[0].mode, StaticMode::ReduceCost { .. }),
+            matches!(
+                r.statics[0].mode,
+                StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    ..
+                }
+            ),
             "cost-reduction sentence should be a static, got {:?}",
             r.statics[0].mode
         );
