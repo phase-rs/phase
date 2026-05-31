@@ -5329,10 +5329,13 @@ fn try_parse_event(
         return Some((TriggerMode::Blocks, def));
     }
 
-    // "leaves the battlefield" / "leaves"
+    // "leaves the battlefield" / "leaves" / "leave the battlefield" / "leave"
+    // CR 603.2c: Plural "leave" form is used with batched "one or more" subjects.
     let leaves_tail = alt((
         value((), tag::<_, _, OracleError<'_>>("leaves the battlefield")),
-        value((), tag("leaves")),
+        value((), tag::<_, _, OracleError<'_>>("leave the battlefield")),
+        value((), tag::<_, _, OracleError<'_>>("leaves")),
+        value((), tag("leave")),
     ))
     .parse(rest)
     .ok()
@@ -13260,6 +13263,22 @@ mod tests {
         assert!(
             !def.trigger_zones.contains(&Zone::Exile),
             "non-self-ref LTB must not extend to exile"
+        );
+    }
+
+    /// CR 603.2c: Batched "one or more permanents … leave the battlefield" uses the plural
+    /// verb form. The parser must accept "leave" alongside "leaves" for LTB triggers.
+    #[test]
+    fn trigger_one_or_more_permanents_leave_the_battlefield() {
+        let def = parse_trigger_line(
+            "Whenever one or more permanents you control leave the battlefield, scry 1.",
+            "Nefarious Imp",
+        );
+        assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+        assert!(def.batched, "one or more must set batched flag");
+        assert!(
+            !def.trigger_zones.contains(&Zone::Graveyard),
+            "non-self-ref LTB must not extend to graveyard"
         );
     }
 
