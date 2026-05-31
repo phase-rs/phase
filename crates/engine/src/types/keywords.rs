@@ -627,6 +627,10 @@ pub enum Keyword {
     Improvise,
     Ingest,
     Melee,
+    /// CR 702.134a: Mentor — "Whenever this creature attacks, put a +1/+1
+    /// counter on target attacking creature with power less than this
+    /// creature's power." CR 702.134b: each instance triggers separately.
+    /// Runtime trigger synthesized by `database::synthesis::synthesize_mentor`.
     Mentor,
     Myriad,
     Provoke,

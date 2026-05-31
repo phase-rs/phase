@@ -217,6 +217,8 @@ impl KeywordTriggerInstaller {
             // moment on.
             Keyword::Graft(_) => vec![build_graft_enters_trigger()],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
+            // CR 702.134a + CR 702.134b: Mentor — one trigger per instance.
+            Keyword::Mentor => vec![build_mentor_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
             Keyword::Extort => vec![build_extort_trigger()],
@@ -253,6 +255,10 @@ impl KeywordTriggerInstaller {
             // removed.
             Keyword::Graft(_) => is_graft_enters_trigger(trigger),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
+            // CR 702.134a + CR 604.1: symmetric removal — `RemoveKeyword`
+            // strips the Mentor attack trigger when the granted keyword is
+            // removed.
+            Keyword::Mentor => is_mentor_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
             Keyword::Extort => is_extort_trigger(trigger),
@@ -2075,6 +2081,14 @@ pub fn synthesize_dethrone(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Dethrone));
 }
 
+/// CR 702.134a: Mentor — an attack trigger that fires whenever this creature
+/// attacks, putting a +1/+1 counter on target attacking creature with power
+/// less than this creature's power. CR 702.134b: each instance triggers
+/// separately.
+pub fn synthesize_mentor(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Mentor));
+}
+
 /// CR 702.100a: Evolve — an ETB trigger that fires whenever another creature you
 /// control enters with greater power or toughness than the Evolve creature,
 /// putting a +1/+1 counter on it. CR 702.100d: each instance triggers
@@ -2275,6 +2289,66 @@ fn is_dethrone_attack_trigger(t: &TriggerDefinition) -> bool {
         }
     ) && t.condition.is_some()
 }
+
+/// CR 702.134a: Idempotency-shape predicate for `synthesize_mentor`. True iff
+/// `trigger` is the synthesized Mentor attack-trigger shape: `TriggerMode::Attacks`,
+/// `valid_card = SelfRef`, no `attack_target_filter`, no condition, and execute
+/// body `Effect::PutCounter(Plus1Plus1, Fixed 1)` on a Typed creature filter
+/// carrying `FilterProp::Attacking` and `FilterProp::PtComparison(Power, Current,
+/// LT, Power { scope: Source })`. Mirrors `is_dethrone_attack_trigger` so a
+/// later change to `build_mentor_trigger` stays consistent.
+fn is_mentor_attack_trigger(t: &TriggerDefinition) -> bool {
+    if !matches!(t.mode, TriggerMode::Attacks)
+        || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        || t.attack_target_filter.is_some()
+        || t.condition.is_some()
+    {
+        return false;
+    }
+    let Some(execute) = t.execute.as_deref() else {
+        return false;
+    };
+    let Effect::PutCounter {
+        counter_type: CounterType::Plus1Plus1,
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Typed(tf),
+    } = &*execute.effect
+    else {
+        return false;
+    };
+    // Type axis: must be the `creature` typed filter.
+    if !tf
+        .type_filters
+        .iter()
+        .any(|t| matches!(t, TypeFilter::Creature))
+    {
+        return false;
+    }
+    // Properties axis: must include Attacking and the Power LT Power{Source}
+    // comparison. We assert presence rather than exact equality so additive
+    // future refinements (e.g. extra normalization) don't break the predicate.
+    let has_attacking = tf
+        .properties
+        .iter()
+        .any(|p| matches!(p, FilterProp::Attacking));
+    let has_lt_source_power = tf.properties.iter().any(|p| {
+        matches!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LT,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+            }
+        )
+    });
+    has_attacking && has_lt_source_power
+}
+
 fn is_echo_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::PayEcho)
         && t.phase == Some(Phase::Upkeep)
@@ -2634,6 +2708,52 @@ fn build_dethrone_trigger() -> TriggerDefinition {
     // planeswalker or battle.
     trigger.attack_target_filter = Some(crate::types::triggers::AttackTargetFilter::Player);
     trigger
+}
+
+/// CR 702.134a: Mentor — "Whenever this creature attacks, put a +1/+1 counter
+/// on target attacking creature with power less than this creature's power."
+///
+/// Build-for-the-class: keyed entirely on `Keyword::Mentor`, so every printed
+/// Mentor card and every creature granted Mentor at runtime gets an identical
+/// trigger. CR 702.134b: each instance triggers separately.
+fn build_mentor_trigger() -> TriggerDefinition {
+    // CR 702.134a target: "another attacking creature with power less than
+    // this creature's power". Encoded as a typed creature filter with two
+    // FilterProps: Attacking (must be an attacker) and PtComparison
+    // (current power LT this creature's current power). Power scope is
+    // Current so layer-7c counter modifications are honored.
+    let target = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+        FilterProp::Attacking,
+        FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::LT,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+        },
+    ]));
+
+    // CR 122.1: put a single +1/+1 counter on the chosen attacking creature.
+    let put_counter = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target,
+        },
+    )
+    .description("Put a +1/+1 counter on target attacking creature with lesser power".to_string());
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(put_counter)
+        .description(
+            "CR 702.134a: Mentor — whenever ~ attacks, put a +1/+1 counter on target attacking creature with power less than ~'s power."
+                .to_string(),
+        )
 }
 
 fn is_renown_trigger(t: &TriggerDefinition) -> bool {
@@ -4013,6 +4133,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // creature whenever it attacks the player with the most life or tied for
     // most life. CR 702.105b: each instance triggers separately.
     synthesize_dethrone(face);
+    // CR 702.134a: Mentor — attack trigger that puts a +1/+1 counter on target
+    // attacking creature with power less than this creature's power.
+    // CR 702.134b: each instance triggers separately.
+    synthesize_mentor(face);
     // CR 702.100a: Evolve — ETB trigger that puts a +1/+1 counter on the
     // creature whenever another creature you control enters with greater power
     // or toughness. CR 702.100d: each instance triggers separately.
@@ -6770,6 +6894,133 @@ mod dethrone_tests {
 }
 
 #[cfg(test)]
+mod mentor_synthesis_tests {
+    //! CR 702.134a: Mentor synthesis tests. The synthesized trigger must be
+    //! `TriggerMode::Attacks` with `valid_card = SelfRef`, no condition, no
+    //! `attack_target_filter` (Mentor fires on any attack target), and an
+    //! execute body of `Effect::PutCounter(Plus1Plus1, Fixed 1)` on a Typed
+    //! creature filter carrying `FilterProp::Attacking` and
+    //! `FilterProp::PtComparison(Power, Current, LT, Power { scope: Source })`.
+    use super::*;
+
+    fn mentor_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Mentor);
+        face
+    }
+
+    /// CR 702.134a: synthesizer emits an `Attacks` trigger with execute body
+    /// `Effect::PutCounter(P1P1)` on a typed attacking-creature-with-lesser-power
+    /// target.
+    #[test]
+    fn synthesize_mentor_adds_attack_trigger() {
+        let mut face = mentor_face();
+        synthesize_mentor(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_mentor_attack_trigger(t))
+            .expect("mentor should add an Attacks trigger");
+
+        assert!(
+            matches!(trigger.valid_card, Some(TargetFilter::SelfRef)),
+            "valid_card must be SelfRef so the trigger fires only when this creature attacks"
+        );
+        assert!(
+            trigger.attack_target_filter.is_none(),
+            "Mentor has no attack-target filter — it fires whether attacking player or planeswalker"
+        );
+        assert!(
+            trigger.condition.is_none(),
+            "Mentor has no intervening-if condition — target legality is enforced by the typed target filter at resolution (CR 603.4 not applicable)"
+        );
+
+        let Some(execute) = trigger.execute.as_deref() else {
+            panic!("execute body required");
+        };
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("execute body must be Effect::PutCounter");
+        };
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+
+        let TargetFilter::Typed(tf) = target else {
+            panic!("Mentor target must be TargetFilter::Typed");
+        };
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Creature)),
+            "Mentor target must be a creature filter"
+        );
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Attacking)),
+            "Mentor target must restrict to attacking creatures"
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LT,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                }
+            )),
+            "Mentor target must restrict to creatures with power LT this creature's power"
+        );
+    }
+
+    #[test]
+    fn synthesize_mentor_is_idempotent() {
+        let mut face = mentor_face();
+        synthesize_mentor(&mut face);
+        synthesize_mentor(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_mentor_attack_trigger(t))
+            .count();
+        assert_eq!(count, 1, "mentor trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_mentor_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flying);
+        synthesize_mentor(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.134b: multiple instances trigger separately.
+    #[test]
+    fn synthesize_mentor_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Mentor);
+        face.keywords.push(Keyword::Mentor);
+        synthesize_mentor(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_mentor_attack_trigger(t))
+            .count();
+        assert_eq!(count, 2);
+    }
+}
+
+#[cfg(test)]
 mod annihilator_runtime_tests {
     //! CR 702.86a runtime integration: an attacking creature with
     //! `Keyword::Annihilator(N)` declared as an attacker fires the synthesized
@@ -7069,6 +7320,405 @@ mod annihilator_runtime_tests {
             }
             other => panic!("expected EffectZoneChoice on P1, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod mentor_runtime_tests {
+    //! CR 702.134a runtime integration: an attacking creature with
+    //! `Keyword::Mentor` declared as an attacker fires the synthesized Attacks
+    //! trigger via `process_triggers(&[AttackersDeclared { … }])`. The
+    //! triggered ability — whose target is a typed creature filter requiring
+    //! Attacking + power LT this creature's power — proceeds through
+    //! `TriggerTargetSelection`. When a target is chosen, `resolve_top` runs
+    //! the PutCounter resolver and lands a +1/+1 counter on the chosen
+    //! attacker.
+    use super::*;
+    use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::triggers::process_triggers;
+    use crate::game::zones::create_object;
+    use crate::types::ability::TargetRef;
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+
+    /// Build a Mentor-bearing creature face with the given printed power and
+    /// run the full synthesis pipeline so the Attacks trigger is installed.
+    fn mentor_creature_face(name: &str, power: i32) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(power)),
+            toughness: Some(PtValue::Fixed(power)),
+            keywords: vec![Keyword::Mentor],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    /// Place a creature with explicit P/T on the battlefield for `controller`.
+    fn place_creature(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card_id,
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+        id
+    }
+
+    /// Spawn a Mentor creature onto the battlefield for `controller` and apply
+    /// the synthesized face to it (installs the Mentor Attacks trigger).
+    fn place_mentor(
+        state: &mut GameState,
+        face: &CardFace,
+        controller: PlayerId,
+        power: i32,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card_id,
+            controller,
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            apply_card_face_to_object(obj, face);
+            obj.power = Some(power);
+            obj.toughness = Some(power);
+            obj.base_power = Some(power);
+            obj.base_toughness = Some(power);
+        }
+        id
+    }
+
+    /// CR 702.134a happy path: a power-3 Mentor attacks alongside an
+    /// opponent's power-1 attacker. The synthesized trigger fires with the
+    /// opponent's attacker as the sole legal target; resolution puts a +1/+1
+    /// counter on it. (Mentor targets ANY attacking creature with lesser
+    /// power — there is no controller restriction in CR 702.134a, so an
+    /// opposing attacker is legally targetable.)
+    #[test]
+    fn mentor_attacks_with_lesser_attacker_target_gets_counter() {
+        let face = mentor_creature_face("Goblin Mentor", 3);
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let mentor_id = place_mentor(&mut state, &face, PlayerId(0), 3);
+        // Opponent's lesser-power attacker (already declared as attacking in
+        // some prior step in this simulated combat — Mentor's target filter
+        // requires `FilterProp::Attacking` at resolution).
+        let lesser = place_creature(&mut state, PlayerId(1), "Goblin Cub", 1, 1);
+
+        // Both creatures are attacking. CR 508.5: populate `state.combat`
+        // with both attacker entries so the FilterProp::Attacking check sees
+        // them as attackers at resolution time.
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::new(mentor_id, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
+                AttackerInfo::new(lesser, AttackTarget::Player(PlayerId(0)), PlayerId(0)),
+            ],
+            ..Default::default()
+        });
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![mentor_id],
+                defending_player: PlayerId(1),
+                attacks: vec![(mentor_id, AttackTarget::Player(PlayerId(1)))],
+            }],
+        );
+
+        // The Mentor trigger must end up on the stack with the opposing
+        // attacker as the chosen target. The engine auto-selects the sole
+        // legal target when only one exists (rather than parking the player
+        // in `TriggerTargetSelection` for a forced choice), so either
+        // disposition is acceptable as long as the chosen target is the
+        // lesser-power attacker.
+        if let WaitingFor::TriggerTargetSelection {
+            player,
+            target_slots,
+            ..
+        } = &state.waiting_for
+        {
+            assert_eq!(*player, PlayerId(0), "Mentor controller chooses target");
+            assert_eq!(target_slots.len(), 1, "Mentor has exactly one target slot");
+            let slot = &target_slots[0];
+            assert!(
+                slot.legal_targets
+                    .iter()
+                    .any(|t| matches!(t, TargetRef::Object(id) if *id == lesser)),
+                "lesser-power attacker must be a legal Mentor target; legal_targets = {:?}",
+                slot.legal_targets
+            );
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(lesser)),
+                },
+            )
+            .unwrap();
+        }
+
+        // Trigger entry must be on the stack with `lesser` as its chosen target.
+        let entry = state
+            .stack
+            .iter()
+            .find(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }))
+            .expect("Mentor trigger must land on the stack");
+        let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+            unreachable!()
+        };
+        assert!(
+            ability
+                .targets
+                .iter()
+                .any(|t| matches!(t, TargetRef::Object(id) if *id == lesser)),
+            "Mentor stack entry must target the lesser-power attacker; targets = {:?}",
+            ability.targets
+        );
+
+        let mut resolve_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+
+        // CR 122.1 + CR 702.134a: a +1/+1 counter must now sit on the chosen
+        // attacker.
+        let lesser_obj = state.objects.get(&lesser).expect("lesser still in play");
+        let counters = lesser_obj.counters.get(&CounterType::Plus1Plus1).copied();
+        assert_eq!(
+            counters,
+            Some(1),
+            "Mentor trigger must place exactly one +1/+1 counter on the chosen attacker"
+        );
+
+        // CR 702.134a strict less-than: Mentor's target filter requires the
+        // chosen creature's power be strictly less than the Mentor source's
+        // own power. The Mentor itself can never satisfy `power LT own power`,
+        // so it must never end up with a +1/+1 counter from its own trigger.
+        let mentor_self_counters = state
+            .objects
+            .get(&mentor_id)
+            .and_then(|o| o.counters.get(&CounterType::Plus1Plus1).copied())
+            .unwrap_or(0);
+        assert_eq!(
+            mentor_self_counters, 0,
+            "CR 702.134a strict less-than: Mentor must not place a counter on itself"
+        );
+    }
+
+    /// CR 702.134a + CR 603.3d: a power-1 Mentor attacks alone. The trigger
+    /// still fires (no intervening-if; CR 603.4 not applicable), but there
+    /// are zero legal targets (the Mentor itself doesn't qualify — its power
+    /// is not less than its own power — and no other attacker exists). Per
+    /// CR 603.3d, a triggered ability with no legal targets is removed from
+    /// the stack as it would be placed there — i.e. it is dropped before
+    /// landing, and no counter is placed.
+    #[test]
+    fn mentor_attacks_alone_with_no_legal_targets_does_nothing() {
+        let face = mentor_creature_face("Weak Mentor", 1);
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let mentor_id = place_mentor(&mut state, &face, PlayerId(0), 1);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                mentor_id,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![mentor_id],
+                defending_player: PlayerId(1),
+                attacks: vec![(mentor_id, AttackTarget::Player(PlayerId(1)))],
+            }],
+        );
+
+        // CR 603.3d: when a triggered ability has a required target but no
+        // legal target can be chosen as it would be placed on the stack, the
+        // ability is removed from the stack — i.e. `process_triggers` drops
+        // it silently and nothing lands on the stack at all (mirroring
+        // `push_first_no_legal_targets_drops_trigger_silently` in
+        // `game::triggers`). Assert this disposition unconditionally so the
+        // test fails loudly if the engine ever starts parking the player in
+        // `TriggerTargetSelection` with an empty `legal_targets` list.
+        assert!(
+            state.stack.is_empty(),
+            "CR 603.3d: Mentor trigger with no legal targets must be dropped \
+             before reaching the stack; state.stack = {:?}",
+            state.stack
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
+            "CR 603.3d: engine must not park in TriggerTargetSelection when \
+             the only Mentor trigger has zero legal targets; waiting_for = {:?}",
+            state.waiting_for
+        );
+
+        // CR 702.134a self-exclusion via strict power LT comparison: even
+        // though the Mentor is the only attacker, its target filter excludes
+        // itself (its own power is not less than its own power). No +1/+1
+        // counter may end up on the Mentor.
+        let mentor_obj = state.objects.get(&mentor_id).expect("mentor still in play");
+        assert!(
+            mentor_obj
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+                == 0,
+            "Mentor must not place a counter on itself when no legal target exists (CR 702.134a self-exclusion via power LT comparison)"
+        );
+    }
+
+    /// CR 702.134b: multiple Mentor instances trigger separately. Two
+    /// `Keyword::Mentor` entries on the same creature must yield two
+    /// independent triggers when it attacks.
+    #[test]
+    fn two_mentor_instances_fire_two_triggers() {
+        let mut face = CardFace {
+            name: "Double Mentor".to_string(),
+            power: Some(PtValue::Fixed(4)),
+            toughness: Some(PtValue::Fixed(4)),
+            keywords: vec![Keyword::Mentor, Keyword::Mentor],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+
+        // Confirm at the face level: two Mentor keyword instances should
+        // synthesize two trigger definitions.
+        let mentor_trigger_count = face
+            .triggers
+            .iter()
+            .filter(|t| is_mentor_attack_trigger(t))
+            .count();
+        assert_eq!(
+            mentor_trigger_count, 2,
+            "two Mentor keyword instances must install two Attack triggers per CR 702.134b"
+        );
+    }
+
+    /// CR 702.134a strict less-than: an equal-power attacker is NOT a legal
+    /// target. A power-3 Mentor attacks alongside a friendly power-3
+    /// non-Mentor attacker — the only candidate attacker has power equal
+    /// (not less than) the Mentor's power, so the target filter rejects it.
+    /// Per CR 603.3d the trigger is dropped before reaching the stack and
+    /// no counter is placed anywhere.
+    #[test]
+    fn mentor_does_not_target_equal_power_attacker() {
+        let face = mentor_creature_face("Goblin Mentor", 3);
+
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let mentor_id = place_mentor(&mut state, &face, PlayerId(0), 3);
+        // Friendly power-3 non-Mentor attacker — EQUAL power, not lesser.
+        let equal = place_creature(&mut state, PlayerId(0), "Goblin Champion", 3, 3);
+
+        // Both creatures are attacking the opponent.
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::new(mentor_id, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
+                AttackerInfo::new(equal, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![mentor_id, equal],
+                defending_player: PlayerId(1),
+                attacks: vec![
+                    (mentor_id, AttackTarget::Player(PlayerId(1))),
+                    (equal, AttackTarget::Player(PlayerId(1))),
+                ],
+            }],
+        );
+
+        // CR 603.3d: zero legal targets → trigger dropped before stack push.
+        assert!(
+            state.stack.is_empty(),
+            "CR 603.3d: Mentor trigger must be dropped when the only other \
+             attacker has equal (not lesser) power; state.stack = {:?}",
+            state.stack
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
+            "CR 603.3d: engine must not park in TriggerTargetSelection when \
+             no candidate satisfies the strict power LT filter; waiting_for = {:?}",
+            state.waiting_for
+        );
+
+        // No counter on the equal-power attacker (filter rejects equal power).
+        let equal_p1p1 = state
+            .objects
+            .get(&equal)
+            .and_then(|o| o.counters.get(&CounterType::Plus1Plus1).copied())
+            .unwrap_or(0);
+        assert_eq!(
+            equal_p1p1, 0,
+            "CR 702.134a strict less-than: equal-power attacker must not receive a counter"
+        );
+
+        // No counter on the Mentor itself.
+        let mentor_p1p1 = state
+            .objects
+            .get(&mentor_id)
+            .and_then(|o| o.counters.get(&CounterType::Plus1Plus1).copied())
+            .unwrap_or(0);
+        assert_eq!(
+            mentor_p1p1, 0,
+            "CR 702.134a strict less-than: Mentor must not place a counter on itself"
+        );
     }
 }
 
