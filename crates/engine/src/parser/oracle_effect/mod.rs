@@ -21710,6 +21710,44 @@ mod tests {
     }
 
     #[test]
+    fn damage_to_any_target_and_itself_preserves_both_segments() {
+        let def = parse_effect_chain(
+            "This creature deals 2 damage to any target and 3 damage to itself.",
+            AbilityKind::Activated,
+        );
+
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                }
+            ),
+            "expected primary any-target damage, got {:?}",
+            def.effect
+        );
+
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected self-damage sub-ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::SelfRef,
+                    damage_source: None,
+                }
+            ),
+            "expected self-damage continuation, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
     fn self_subject_damage_equal_to_its_power_uses_source_power() {
         let clause = parse_effect_clause(
             "~ deals damage equal to its power to target creature with flying",
