@@ -1403,8 +1403,18 @@ pub(super) fn match_countered(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::SpellCountered { object_id, .. } = event {
-        valid_card_matches(trigger, state, *object_id, source_id)
+    if let GameEvent::SpellCountered {
+        object_id,
+        countered_by,
+    } = event
+    {
+        // CR 701.6: Check the countered object against valid_card (type/name filter).
+        if !valid_card_matches(trigger, state, *object_id, source_id) {
+            return false;
+        }
+        // CR 701.6 + CR 603.2: Check the countering source against valid_source
+        // ("a spell or ability you control counters a spell" → controller gate).
+        valid_source_matches(trigger, state, *countered_by, source_id)
     } else {
         false
     }

@@ -7856,6 +7856,19 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::LifeLost, def));
     }
 
+    // CR 701.6 + CR 603.2: "Whenever a spell or ability you control counters a spell"
+    // — fires on `SpellCountered` events where the countering source is controlled
+    // by the trigger's controller. `valid_source` carries the controller constraint
+    // so `match_countered` can gate on `countered_by`.
+    if scan_contains(lower, "you control counters a spell") {
+        let mut def = make_base();
+        def.mode = TriggerMode::Countered;
+        def.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+        return Some((TriggerMode::Countered, def));
+    }
+
     // CR 601.2: "Whenever you cast a/an [type] spell [post-spell modifier]" — extract
     // the spell filter. Handles pre-spell type qualifier, post-spell modifier
     // (e.g. "with {X} in its mana cost", CR 107.3 + CR 202.1), or both.
@@ -14707,6 +14720,21 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::LifeLost);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    #[test]
+    fn trigger_spell_or_ability_you_control_counters_a_spell() {
+        let def = parse_trigger_line(
+            "Whenever a spell or ability you control counters a spell, you may tap or untap target permanent.",
+            "Lullmage Mentor",
+        );
+        assert_eq!(def.mode, TriggerMode::Countered);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            ))
+        );
     }
 
     #[test]
