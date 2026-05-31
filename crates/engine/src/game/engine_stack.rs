@@ -123,11 +123,12 @@ pub(super) fn handle_trigger_target_selection_choose_target(
     target: Option<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (player, target_slots, target_constraints, selection, source_id, description) =
+    let (player, target_slots, mode_labels, target_constraints, selection, source_id, description) =
         match waiting_for {
             WaitingFor::TriggerTargetSelection {
                 player,
                 target_slots,
+                mode_labels,
                 target_constraints,
                 selection,
                 source_id,
@@ -135,6 +136,7 @@ pub(super) fn handle_trigger_target_selection_choose_target(
             } => (
                 player,
                 target_slots,
+                mode_labels,
                 target_constraints,
                 selection,
                 source_id,
@@ -159,9 +161,12 @@ pub(super) fn handle_trigger_target_selection_choose_target(
         &selection,
         target,
     )? {
+        // CR 700.2b: preserve the inbound mode labels unchanged across the
+        // step-by-step walk — the slot→mode mapping does not change.
         TargetSelectionAdvance::InProgress(selection) => Ok(WaitingFor::TriggerTargetSelection {
             player,
             target_slots,
+            mode_labels,
             target_constraints,
             selection,
             source_id,

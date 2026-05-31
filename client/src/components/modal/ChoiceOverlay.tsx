@@ -49,7 +49,15 @@ export function ChoiceOverlay({
               </p>
             </div>
           </div>
-          <div ref={contentRef} className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2 pt-3 pb-2 lg:px-5 lg:pt-5 lg:pb-5">
+          {/* When the peek tab is mounted it overlaps the card's right edge (~24px),
+              so reserve right clearance to keep edge-aligned interactive content
+              (e.g. the rightmost color symbol) selectable instead of under the tab. */}
+          <div
+            ref={contentRef}
+            className={`flex min-h-0 flex-1 flex-col overflow-y-auto pl-2 pt-3 pb-2 lg:pl-5 lg:pt-5 lg:pb-5 ${
+              peek ? "pr-10 lg:pr-12" : "pr-2 lg:pr-5"
+            }`}
+          >
             {children}
           </div>
           {footer && (

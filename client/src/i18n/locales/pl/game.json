@@ -6,7 +6,8 @@
     "faceDownName": "Karta zakryta",
     "loading": "Wczytywanie {{name}}",
     "unimplemented": "Niezaimplementowane: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Obrócona"
   },
   "preview": {
     "holdCtrlBack": "Przytrzymaj Ctrl, aby zobaczyć tylną stronę",
@@ -214,6 +215,9 @@
     "radAriaLabel_one": "{{count}} znacznik promieniowania",
     "radAriaLabel_other": "{{count}} znaczników promieniowania",
     "radTooltip": "Znaczniki promieniowania: {{count}}",
+    "experienceAriaLabel_one": "{{count}} znacznik doświadczenia",
+    "experienceAriaLabel_other": "{{count}} znaczniki doświadczenia",
+    "experienceTooltip": "Znaczniki doświadczenia: {{count}}",
     "speedAriaLabel": "Prędkość {{value}}",
     "speedTooltip": "Prędkość: {{value}}",
     "companion": "Towarzysz"
@@ -390,6 +394,7 @@
     "chooseTargetOf": "Wybierz cel {{current}} z {{total}}",
     "chooseTarget": "Wybierz cel",
     "noLegalTargets": "Brak dostępnych dozwolonych celów",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "do jednego {{target}}",
     "one": "{{target}}",
     "nounPlayer": "gracz",
@@ -1279,7 +1284,9 @@
     "searchSubtitle": "Pisz, aby przeszukać wszystkie karty",
     "searchPlaceholder": "Szukaj po nazwie...",
     "noCardsFound": "Nie znaleziono kart",
-    "buttonSubtitle": "Wybierz jedną opcję"
+    "buttonSubtitle": "Wybierz jedną opcję",
+    "filterPlaceholder": "Filtruj opcje...",
+    "noOptionsMatch": "Brak pasujących opcji"
   },
   "nonFatalPanic": {
     "heading": "Ostrzeżenie silnika (niekrytyczne)",

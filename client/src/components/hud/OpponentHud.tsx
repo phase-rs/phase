@@ -230,6 +230,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     const opponentSpeed = gameState?.players[opponentId]?.speed ?? 0;
     const opponentPoisonCounters = gameState?.players[opponentId]?.poison_counters ?? 0;
     const opponentRadCounters = gameState?.players[opponentId]?.player_counters?.Rad ?? 0;
+    const opponentExperienceCounters = gameState?.players[opponentId]?.player_counters?.Experience ?? 0;
     const opponentDesignations = primaryOpponentDesignations;
     const isDisconnected = isOnline && disconnectedPlayers.has(opponentId);
     const isOpponentPhasedOut =
@@ -283,6 +284,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
               {opponentDesignations.energy > 0 ? <CounterBadge kind="energy" value={opponentDesignations.energy} /> : null}
               {opponentPoisonCounters > 0 ? <CounterBadge kind="poison" value={opponentPoisonCounters} /> : null}
               {opponentRadCounters > 0 ? <CounterBadge kind="rad" value={opponentRadCounters} /> : null}
+              {opponentExperienceCounters > 0 ? <CounterBadge kind="experience" value={opponentExperienceCounters} /> : null}
               {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
               {opponentCompanion ? <StatusBadge label={t("badges.companion")} /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
@@ -614,6 +616,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   const speed = player.speed ?? 0;
   const poisonCounters = player.poison_counters;
   const radCounters = player.player_counters?.Rad ?? 0;
+  const experienceCounters = player.player_counters?.Experience ?? 0;
   const isPhasedOut = player.status?.type === "PhasedOut";
 
   const label = ally ? t("opponentHud.ally") : getOpponentDisplayName(playerId);
@@ -690,6 +693,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
       {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
       {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
+      {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
       {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
       {isOnline && <ConnectionDotInline disconnected={isDisconnected} />}
       {onKick && !isEliminated && (
