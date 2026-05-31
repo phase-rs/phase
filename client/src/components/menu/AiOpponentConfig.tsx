@@ -71,10 +71,24 @@ export function AiOpponentConfig({
   const bracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
   const setBracketFilter = usePreferencesStore((s) => s.setAiBracketFilter);
 
+  // cEDH (competitive EDH, bracket 5) is a Commander-only concept, so the
+  // table-wide toggle only applies to the Commander variants.
+  const isCedhFormat = selectedFormat === "Commander" || selectedFormat === "DuelCommander";
+
   // Keep the persisted seat list in sync with the setup page's player count.
   useEffect(() => {
     ensureAiSeatCount(opponentCount);
   }, [opponentCount, ensureAiSeatCount]);
+
+  // cEDH mode is a persisted preference read directly at game start
+  // (GameProvider → effectiveAiDifficulty). When the format is known to be a
+  // non-Commander variant the toggle is hidden, so clear any stale enabled
+  // state to stop it silently forcing cEDH difficulty on non-Commander tables.
+  // Guard on a defined format so the brief `formatConfig === null` window while
+  // the setup page resolves its format doesn't clobber a legitimate flag.
+  useEffect(() => {
+    if (selectedFormat !== undefined && !isCedhFormat && cedhMode) setCedhMode(false);
+  }, [selectedFormat, isCedhFormat, cedhMode, setCedhMode]);
 
   const { candidates, loading, error } = useAiDeckCatalog({ selectedFormat, selectedMatchType });
 
@@ -136,29 +150,31 @@ export function AiOpponentConfig({
 
       {/* Table-wide cEDH toggle. cEDH is a table property (every deck bracket 5),
           not a per-seat difficulty — enabling it makes all AI play cEDH without
-          touching each opponent's remembered difficulty. */}
-      <div className="flex items-center justify-between gap-3 rounded-lg border border-rose-500/25 bg-rose-500/5 px-3 py-2">
-        <div className="flex min-w-0 flex-col">
-          <span className="text-xs font-semibold text-rose-200">{t("aiOpponent.cedhToggle.label")}</span>
-          <span className="text-[10px] text-slate-400">{t("aiOpponent.cedhToggle.hint")}</span>
-        </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={cedhMode}
-          aria-label={t("aiOpponent.cedhToggle.label")}
-          onClick={() => setCedhMode(!cedhMode)}
-          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300/60 ${
-            cedhMode ? "bg-rose-500" : "bg-white/15"
-          }`}
-        >
-          <span
-            className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
-              cedhMode ? "translate-x-5" : "translate-x-0.5"
+          touching each opponent's remembered difficulty. Commander-only. */}
+      {isCedhFormat && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-rose-500/25 bg-rose-500/5 px-3 py-2">
+          <div className="flex min-w-0 flex-col">
+            <span className="text-xs font-semibold text-rose-200">{t("aiOpponent.cedhToggle.label")}</span>
+            <span className="text-[10px] text-slate-400">{t("aiOpponent.cedhToggle.hint")}</span>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={cedhMode}
+            aria-label={t("aiOpponent.cedhToggle.label")}
+            onClick={() => setCedhMode(!cedhMode)}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300/60 ${
+              cedhMode ? "bg-rose-500" : "bg-white/15"
             }`}
-          />
-        </button>
-      </div>
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                cedhMode ? "translate-x-5" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+        </div>
+      )}
 
       <div className="flex flex-col gap-1.5">
         {seatsToRender.map((seat, i) => (

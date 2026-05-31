@@ -273,7 +273,7 @@ fn temur_mode_grants_plus_one_zero_trample_haste_to_creatures_you_control() {
     // explicitly so we read post-choice characteristics regardless.
     {
         let s = runner.state_mut();
-        s.layers_dirty = true;
+        s.layers_dirty.mark_full();
         evaluate_layers(s);
     }
 
@@ -348,7 +348,7 @@ fn no_choice_persisted_means_neither_linked_ability_functions() {
     // permissive when the label is absent.
     {
         let s = runner.state_mut();
-        s.layers_dirty = true;
+        s.layers_dirty.mark_full();
         evaluate_layers(s);
     }
 
@@ -409,7 +409,7 @@ fn jeskai_mode_does_not_grant_temur_anthem() {
 
     {
         let s = runner.state_mut();
-        s.layers_dirty = true;
+        s.layers_dirty.mark_full();
         evaluate_layers(s);
     }
 

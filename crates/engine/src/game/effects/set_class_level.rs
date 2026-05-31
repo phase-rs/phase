@@ -22,7 +22,7 @@ pub fn resolve(
             level,
         });
         // CR 716.2a: New abilities become active at the new level — recompute layers.
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -86,7 +86,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.get_mut(&obj_id).unwrap().class_level = Some(1);
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
 
         let ability = ResolvedAbility::new(
             Effect::SetClassLevel { level: 2 },
@@ -99,7 +99,7 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(state.objects.get(&obj_id).unwrap().class_level, Some(2));
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
         assert!(events.iter().any(|e| matches!(
             e,
             GameEvent::ClassLevelGained {

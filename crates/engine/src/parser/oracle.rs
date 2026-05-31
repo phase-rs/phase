@@ -1262,7 +1262,66 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
         }
     }
     result.parse_warnings = ir.diagnostics.clone();
+    // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis. Cards like
+    // Journey to Nowhere and Oblivion Ring use a two-trigger design:
+    //   Line 1 (ETB): "When ~ enters, exile target creature."
+    //   Line 2 (LTB): "When ~ leaves the battlefield, return the exiled card
+    //                  to the battlefield under its owner's control."
+    // The ETB exile produces no duration (the oracle text has no "until" clause),
+    // so no ExileLink::UntilSourceLeaves is created and the exiled card is
+    // never returned. Fix: when we detect this paired pattern, set
+    // Duration::UntilHostLeavesPlay on the ETB exile's execute ability so the
+    // existing exile-link mechanism handles the return correctly. The LTB
+    // trigger stays registered as-is (its TrackedSet target gracefully resolves
+    // to nothing when the exile link has already returned the card).
+    synthesize_etb_exile_ltb_return_pair(&mut result.triggers);
     result
+}
+
+/// CR 607.1 + CR 610.3: Detect an (ETB exile, LTB return) trigger pair and
+/// upgrade the ETB exile to `Duration::UntilHostLeavesPlay` so the
+/// `ExileLink::UntilSourceLeaves` mechanism returns the exiled card when the
+/// source leaves. Covers Journey to Nowhere, Oblivion Ring, and the broader
+/// "exile target X … LTB return" two-trigger class.
+fn synthesize_etb_exile_ltb_return_pair(triggers: &mut [TriggerDefinition]) {
+    let has_ltb_return = triggers.iter().any(|t| {
+        t.mode == TriggerMode::LeavesBattlefield
+            && t.execute.as_deref().is_some_and(|ex| {
+                matches!(
+                    ex.effect.as_ref(),
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::TrackedSet { .. },
+                        ..
+                    }
+                )
+            })
+    });
+
+    if !has_ltb_return {
+        return;
+    }
+
+    for trig in triggers.iter_mut() {
+        if trig.mode != TriggerMode::ChangesZone || trig.destination != Some(Zone::Battlefield) {
+            continue;
+        }
+        let Some(execute) = trig.execute.as_deref_mut() else {
+            continue;
+        };
+        if !matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ) {
+            continue;
+        }
+        if execute.duration.is_none() {
+            execute.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+        }
+    }
 }
 
 /// Produce an `OracleDocIr` from Oracle text — the IR-production half of the
@@ -4057,11 +4116,11 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-        FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, ObjectScope,
-        ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue,
-        PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode, SharedQuality,
-        SharedQualityRelation, ShieldKind, StaticCondition, TargetFilter, TriggerCondition,
-        TypeFilter, TypedFilter,
+        Duration, FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
+        MultiTargetSpec, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount,
+        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+        RoundingMode, SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition,
+        TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -4567,6 +4626,32 @@ mod tests {
             }
             other => panic!("expected all-creature -X/-X pump, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn immoral_bargain_full_oracle_parses_exact_x_targets_and_required_x_sacrifice() {
+        let r = parse(
+            "As an additional cost to cast this spell, sacrifice X creatures.\nDestroy X target nonland permanents.",
+            "Immoral Bargain",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+
+        assert_eq!(
+            r.additional_cost,
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                count: u32::MAX,
+            }))
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        assert_eq!(r.abilities[0].multi_target, Some(MultiTargetSpec::exact(x)));
     }
 
     #[test]
@@ -5941,6 +6026,43 @@ mod tests {
     }
 
     #[test]
+    fn spell_targets_attacking_or_blocking_creature_as_disjunction() {
+        let r = parse(
+            "Joust Through deals 3 damage to target attacking or blocking creature. You gain 1 life.",
+            "Joust Through",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::DealDamage { target, .. } = &*r.abilities[0].effect else {
+            panic!("expected DealDamage, got {:?}", r.abilities[0].effect);
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected Or target, got {target:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        for (filter, property) in [
+            (&filters[0], FilterProp::Attacking),
+            (&filters[1], FilterProp::Blocking),
+        ] {
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("expected Typed branch, got {filter:?}");
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Creature));
+            assert!(typed.properties.contains(&property));
+        }
+        assert!(matches!(
+            r.abilities[0]
+                .sub_ability
+                .as_deref()
+                .map(|def| &*def.effect),
+            Some(Effect::GainLife { .. })
+        ));
+    }
+
+    #[test]
     fn quoted_granted_ability_is_not_misclassified_as_activated() {
         let r = parse(
             "White creatures you control have \"{T}: You gain 1 life.\"",
@@ -5951,6 +6073,49 @@ mod tests {
         );
         assert!(r.abilities.is_empty());
         assert_eq!(r.statics.len(), 1);
+    }
+
+    #[test]
+    fn spell_grants_quoted_ability_to_outlaw_creatures() {
+        let r = parse(
+            "Until end of turn, outlaw creatures you control get +1/+0 and gain \"{T}: This creature deals damage equal to its power to target creature.\"",
+            "Dead Before Sunrise",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        assert_eq!(r.abilities[0].duration, Some(Duration::UntilEndOfTurn));
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*r.abilities[0].effect
+        else {
+            panic!("expected GenericEffect, got {:?}", r.abilities[0].effect);
+        };
+        assert_eq!(static_abilities.len(), 1);
+        let static_def = &static_abilities[0];
+        let Some(TargetFilter::Typed(affected)) = &static_def.affected else {
+            panic!(
+                "expected typed affected filter, got {:?}",
+                static_def.affected
+            );
+        };
+        assert_eq!(affected.controller, Some(ControllerRef::You));
+        assert!(affected.type_filters.contains(&TypeFilter::Creature));
+        assert!(affected.type_filters.iter().any(|type_filter| {
+            matches!(type_filter, TypeFilter::AnyOf(filters) if filters.len() == 5)
+        }));
+        assert!(static_def.modifications.iter().any(|modification| {
+            matches!(modification, ContinuousModification::AddPower { value: 1 })
+        }));
+        assert!(static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::GrantAbility { definition }
+                    if matches!(&*definition.effect, Effect::DealDamage { .. })
+            )
+        }));
     }
 
     #[test]
@@ -6437,6 +6602,96 @@ mod tests {
         for ab in r.abilities.iter() {
             assert_eq!(ab.kind, AbilityKind::Activated);
         }
+    }
+
+    /// Issue #878: loyalty lines must stay separate activated abilities; the +1
+    /// must not require targets (otherwise the UI auto-dispatches the sole legal
+    /// -3 when the player clicks Teferi).
+    ///
+    /// PR #1441 re-seam: the flash-timing grant must be PLAYER-scoped
+    /// (`target: Controller` + `UntilNextTurnOf { Controller }`), not
+    /// object-scoped (`target: SelfRef`). The object seam was pruned the instant
+    /// Teferi left play, violating CR 611.2a/c. The inner static must still grant
+    /// `CastWithKeyword { Flash }` against a Sorcery-typed `affected` filter.
+    #[test]
+    fn teferi_time_raveler_loyalty_abilities_parse() {
+        let r = parse(
+            "Each opponent can cast spells only any time they could cast a sorcery.\n\
+             [+1]: Until your next turn, you may cast sorcery spells as though they had flash.\n\
+             [\u{2212}3]: Return up to one target artifact, creature, or enchantment to its owner's hand. Draw a card.",
+            "Teferi, Time Raveler",
+            &[],
+            &["Planeswalker"],
+            &["Teferi"],
+        );
+        assert_eq!(r.abilities.len(), 2, "abilities: {:?}", r.abilities);
+        assert!(matches!(
+            r.abilities[0].cost,
+            Some(AbilityCost::Loyalty { amount: 1 })
+        ));
+        assert!(matches!(
+            r.abilities[1].cost,
+            Some(AbilityCost::Loyalty { amount: -3 })
+        ));
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*r.abilities[0].effect
+        else {
+            panic!(
+                "+1 must grant flash timing via GenericEffect, got {:?}",
+                r.abilities[0].effect
+            );
+        };
+
+        // CR 611.2c: player-scoped grant — resolves to SpecificPlayer at effect.rs.
+        assert_eq!(
+            *target,
+            Some(TargetFilter::Controller),
+            "+1 grant must be player-scoped (Controller), not object-scoped (SelfRef)"
+        );
+        // CR 611.2a: lifetime governed by duration, expiring at the controller's next turn.
+        assert_eq!(
+            *duration,
+            Some(crate::types::ability::Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            }),
+            "+1 grant must expire 'until your next turn'"
+        );
+
+        // The inner static grants Flash to Sorcery spells the controller casts.
+        let inner = match &static_abilities[0].modifications[0] {
+            ContinuousModification::GrantStaticAbility { definition } => definition,
+            other => panic!("expected GrantStaticAbility, got {other:?}"),
+        };
+        assert!(
+            matches!(
+                &inner.mode,
+                StaticMode::CastWithKeyword {
+                    keyword: Keyword::Flash
+                }
+            ),
+            "inner static must be CastWithKeyword(Flash), got {:?}",
+            inner.mode
+        );
+        let Some(TargetFilter::Typed(tf)) = &inner.affected else {
+            panic!(
+                "inner static affected must be a Typed sorcery filter, got {:?}",
+                inner.affected
+            );
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Sorcery),
+            "inner affected filter must constrain to Sorcery, got {:?}",
+            tf.type_filters
+        );
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "inner affected filter must scope to spells you cast"
+        );
     }
 
     #[test]
@@ -7297,6 +7552,82 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn assert_shared_creature_type_max(expr: &QuantityExpr) {
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCountBySharedQuality {
+                    filter:
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            controller,
+                            properties,
+                        }),
+                    quality,
+                    aggregate,
+                },
+        } = expr
+        else {
+            panic!("expected ObjectCountBySharedQuality quantity, got {expr:?}");
+        };
+        assert_eq!(type_filters.as_slice(), &[TypeFilter::Creature]);
+        assert_eq!(controller, &Some(ControllerRef::You));
+        assert!(properties.is_empty());
+        assert_eq!(quality, &SharedQuality::CreatureType);
+        assert_eq!(aggregate, &AggregateFunction::Max);
+    }
+
+    #[test]
+    fn skemfar_shadowsage_gain_mode_parses_shared_creature_type_count() {
+        let r = parse(
+            "You gain X life, where X is the greatest number of creatures you control that have a creature type in common.",
+            "Skemfar Shadowsage",
+            &[],
+            &["Creature"],
+            &["Elf", "Cleric"],
+        );
+        let Effect::GainLife { amount, .. } = &*r.abilities[0].effect else {
+            panic!("expected GainLife, got {:?}", r.abilities[0].effect);
+        };
+        assert_shared_creature_type_max(amount);
+    }
+
+    #[test]
+    fn basalt_ravager_damage_parses_shared_creature_type_count() {
+        let r = parse(
+            "Basalt Ravager deals X damage to any target, where X is the greatest number of creatures you control that have a creature type in common.",
+            "Basalt Ravager",
+            &[],
+            &["Creature"],
+            &["Giant", "Wizard"],
+        );
+        let Effect::DealDamage { amount, .. } = &*r.abilities[0].effect else {
+            panic!("expected DealDamage, got {:?}", r.abilities[0].effect);
+        };
+        assert_shared_creature_type_max(amount);
+    }
+
+    #[test]
+    fn white_lotus_tile_mana_parses_shared_creature_type_count() {
+        let r = parse(
+            "{T}: Add X mana of any one color, where X is the greatest number of creatures you control that have a creature type in common.",
+            "White Lotus Tile",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        let Effect::Mana {
+            produced: ManaProduction::AnyOneColor { count, .. },
+            ..
+        } = &*r.abilities[0].effect
+        else {
+            panic!(
+                "expected AnyOneColor mana ability, got {:?}",
+                r.abilities[0].effect
+            );
+        };
+        assert_shared_creature_type_max(count);
     }
 
     #[test]
@@ -13734,7 +14065,6 @@ mod tests {
             ("Equip creature token {1}", 1),
             ("Equip legendary creature {3}", 3),
             ("Equip commander {3}", 3),
-            ("Equip {2} or {B}", 2),
         ] {
             let ability = super::try_parse_equip(line).expect("restricted equip should parse");
             assert!(
@@ -13747,6 +14077,31 @@ mod tests {
                 "{line} parsed unexpected cost: {:?}",
                 ability.cost
             );
+        }
+
+        // CR 118.12a: "Equip {2} or {B}" is a disjunctive cost — OneOf([Mana({2}), Mana({B})]).
+        let ability =
+            super::try_parse_equip("Equip {2} or {B}").expect("disjunctive equip should parse");
+        match ability.cost {
+            Some(AbilityCost::OneOf { ref costs }) => {
+                assert_eq!(costs.len(), 2, "expected 2 alternatives, got {:?}", costs);
+                assert!(
+                    matches!(
+                        &costs[0],
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost { generic: 2, .. }
+                        }
+                    ),
+                    "left alternative should be Mana({{2}}), got {:?}",
+                    costs[0]
+                );
+                assert!(
+                    matches!(&costs[1], AbilityCost::Mana { cost: ManaCost::Cost { shards, generic: 0 } } if shards.len() == 1),
+                    "right alternative should be Mana({{B}}), got {:?}",
+                    costs[1]
+                );
+            }
+            other => panic!("Expected OneOf for 'Equip {{2}} or {{B}}', got {:?}", other),
         }
     }
 
@@ -14182,6 +14537,44 @@ mod tests {
             card_face_gaps(&face).is_empty(),
             "Vizier of Remedies must have zero coverage gaps, got: {:?}",
             card_face_gaps(&face)
+        );
+    }
+
+    /// CR 607.1 + CR 610.3 + #1320: Journey to Nowhere / Oblivion Ring class —
+    /// two-trigger exile-return synthesis. The ETB exile ("exile target creature")
+    /// has no "until" language, but it's paired with an LTB return trigger. The
+    /// synthesis pass must set `Duration::UntilHostLeavesPlay` on the ETB exile
+    /// so the engine's ExileLink mechanism returns the card when the source leaves.
+    #[test]
+    fn journey_to_nowhere_etb_exile_gets_until_host_leaves_duration() {
+        let oracle = "When this enchantment enters, exile target creature.\n\
+                      When this enchantment leaves the battlefield, return the exiled card \
+                      to the battlefield under its owner's control.";
+        let result = parse(oracle, "Journey to Nowhere", &[], &["Enchantment"], &[]);
+
+        let etb = result
+            .triggers
+            .iter()
+            .find(|t| {
+                t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield)
+            })
+            .expect("must have ETB trigger");
+
+        let execute = etb.execute.as_deref().expect("ETB must have execute");
+        assert_eq!(
+            execute.duration,
+            Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+            "ETB exile must carry UntilHostLeavesPlay so the engine returns the card"
+        );
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "ETB execute must be ChangeZone→Exile"
         );
     }
 }

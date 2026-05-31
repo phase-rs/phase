@@ -22,6 +22,10 @@ interface UiStoreState {
   inspectedObjectId: ObjectId | null;
   inspectedFaceIndex: number;
   altHeld: boolean;
+  /** Whether the Shift key is currently held. Drives the "shift" card-preview
+   *  mode (preview shows only while Shift is down). Tracked as held-state via
+   *  keydown/keyup (unlike altHeld, which press-toggles). */
+  shiftHeld: boolean;
   selectedCardIds: ObjectId[];
   fullControl: boolean;
   autoPass: boolean;
@@ -70,8 +74,10 @@ interface UiStoreActions {
   inspectObject: (id: ObjectId | null, faceIndex?: number) => void;
   dismissPreview: () => void;
   setAltHeld: (held: boolean) => void;
+  setShiftHeld: (held: boolean) => void;
   addSelectedCard: (cardId: ObjectId) => void;
   toggleSelectedCard: (cardId: ObjectId) => void;
+  cycleSelectedCard: (cardId: ObjectId, max: number) => void;
   setGroupSelectedCards: (groupIds: ObjectId[], selectedIds: ObjectId[]) => void;
   clearSelectedCards: () => void;
   toggleFullControl: () => void;
@@ -116,6 +122,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   inspectedObjectId: null,
   inspectedFaceIndex: 0,
   altHeld: false,
+  shiftHeld: false,
   selectedCardIds: [],
   fullControl: false,
   autoPass: false,
@@ -146,6 +153,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   setDebugHighlightedObjectId: (id) => set({ debugHighlightedObjectId: id }),
   setDebugHighlightedPlayerId: (id) => set({ debugHighlightedPlayerId: id }),
   setAltHeld: (held) => set({ altHeld: held }),
+  setShiftHeld: (held) => set({ shiftHeld: held }),
   inspectObject: (id, faceIndex) => {
     if (id != null) {
       // Setting a new inspection target: cancel any pending clear and apply immediately
@@ -190,6 +198,23 @@ export const useUiStore = create<UiStore>()((set) => ({
         ? state.selectedCardIds.filter((id) => id !== cardId)
         : [...state.selectedCardIds, cardId],
     })),
+
+  // Capped multi-select for "choose exactly N" prompts (e.g. London mulligan
+  // bottoming). Clicking a selected card deselects it; clicking an unselected
+  // card adds it while under `max`; clicking an unselected card at `max` evicts
+  // the oldest selection so the click swaps the choice instead of being ignored
+  // (a straight swap when max === 1).
+  cycleSelectedCard: (cardId, max) =>
+    set((state) => {
+      const selected = state.selectedCardIds;
+      if (selected.includes(cardId)) {
+        return { selectedCardIds: selected.filter((id) => id !== cardId) };
+      }
+      if (selected.length < max) {
+        return { selectedCardIds: [...selected, cardId] };
+      }
+      return { selectedCardIds: [...selected.slice(1), cardId] };
+    }),
 
   setGroupSelectedCards: (groupIds, selectedIds) =>
     set((state) => {

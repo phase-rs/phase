@@ -33,6 +33,12 @@ interface PermanentCardProps {
   objectId: number;
   attachmentsLiftedByAncestor?: boolean;
   onPrimaryClickOverride?: () => void;
+  /** When this card is the visible representative of a collapsed identical-permanent
+   *  group (see GroupedPermanent collapsed mode), the full list of object ids it
+   *  stands in for. Rendered as `data-grouped-ids` so DOM-driven animations
+   *  (card slam, position lookup) can resolve a non-rendered swarm member to this
+   *  visible card instead of silently no-op'ing. */
+  coveredIds?: number[];
 }
 
 const EXILE_GHOST_OFFSET_PX = 20;
@@ -101,7 +107,7 @@ function objectIdFromRelatedTarget(target: EventTarget | null): number | null {
   return Number.isFinite(objectId) ? objectId : null;
 }
 
-export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride }: PermanentCardProps) {
+export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride, coveredIds }: PermanentCardProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
@@ -458,6 +464,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     <motion.div
       ref={cardRef}
       data-object-id={objectId}
+      data-grouped-ids={coveredIds && coveredIds.length > 1 ? coveredIds.join(" ") : undefined}
       data-card-hover
       layoutId={`permanent-${objectId}`}
       className="relative inline-flex w-fit cursor-pointer overflow-visible rounded-lg self-end select-none"

@@ -272,6 +272,17 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // boundary — "is also a " does not subsume "is also an X".
     "is also a ",
     "is also an ",
+    // CR 702.73a + CR 205.3: "[subject] {is|are} every creature type" —
+    // Changeling-class type grant (Mistform Ultimus / Dr. Julius Jumblemorph
+    // self-ref CDA, Maskwood Nexus / Omo filter-subject grant, and the
+    // Aura/Equipment conjunctive form on Arachnoform / Runed Stalactite /
+    // Amorphous Axe). Both articles are listed because subject number
+    // ("creature" vs "creatures") drives copula choice — neither subsumes the
+    // other. The phrase is unique to creature-type grants (no other CR 205.3
+    // construction uses "every creature type"), so the contains-scan cannot
+    // false-positive into other pattern classes.
+    "is every creature type",
+    "are every creature type",
 ];
 
 const STATIC_PREFIX_PATTERNS: &[&str] = &[
