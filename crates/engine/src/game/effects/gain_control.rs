@@ -1,11 +1,12 @@
 use crate::types::ability::{
-    ContinuousModification, Duration, EffectError, EffectKind, ResolvedAbility, TargetFilter,
-    TargetRef,
+    ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
+use crate::types::player::PlayerId;
 
 /// CR 613.3: GainControl creates a transient continuous effect that changes the
 /// target permanent's controller through the layer system (Layer 2).
@@ -60,18 +61,26 @@ pub fn resolve_give(
 ) -> Result<(), EffectError> {
     let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
 
-    // The recipient is the player target; the object is the object target.
-    let recipient_id = ability
-        .targets
-        .iter()
-        .find_map(|t| {
-            if let TargetRef::Player(pid) = t {
-                Some(*pid)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(ability.controller);
+    // CR 110.2 + CR 613.3: The recipient is the player target when one is
+    // explicitly in ability.targets (normal targeting path). When no player
+    // target is present — e.g. a post-replacement continuation whose target
+    // list only carries the damaged object — resolve the effect's `recipient`
+    // filter only if it identifies exactly one legal player. CR 608.2d choices
+    // are made while applying the effect; arbitrary first-match selection would
+    // be wrong in multiplayer when several opponents are legal.
+    let recipient_id = if let Some(pid) = ability.targets.iter().find_map(|t| {
+        if let TargetRef::Player(pid) = t {
+            Some(*pid)
+        } else {
+            None
+        }
+    }) {
+        pid
+    } else if let Effect::GiveControl { recipient, .. } = &ability.effect {
+        unique_recipient_from_filter(state, recipient, ability.controller)?
+    } else {
+        ability.controller
+    };
 
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
@@ -101,6 +110,47 @@ pub fn resolve_give(
     Ok(())
 }
 
+fn unique_recipient_from_filter(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+) -> Result<PlayerId, EffectError> {
+    if let TargetFilter::SpecificPlayer { id } = filter {
+        return state
+            .players
+            .iter()
+            .find(|p| p.id == *id && !p.is_eliminated)
+            .map(|p| p.id)
+            .ok_or_else(|| EffectError::MissingParam("GiveControl recipient".to_string()));
+    }
+
+    let mut matching = state
+        .players
+        .iter()
+        .filter(|p| {
+            !p.is_eliminated
+                && crate::game::filter::player_matches_target_filter(
+                    filter,
+                    p.id,
+                    Some(source_controller),
+                )
+        })
+        .map(|p| p.id);
+
+    let Some(recipient) = matching.next() else {
+        return Err(EffectError::MissingParam(
+            "GiveControl recipient".to_string(),
+        ));
+    };
+
+    if matching.next().is_some() {
+        return Err(EffectError::MissingParam(
+            "ambiguous GiveControl recipient".to_string(),
+        ));
+    }
+    Ok(recipient)
+}
+
 fn mark_echo_due_for_new_controller(state: &mut GameState, obj_id: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         if obj.keywords.iter().any(|kw| matches!(kw, Keyword::Echo(_))) {
@@ -113,9 +163,9 @@ fn mark_echo_due_for_new_controller(state: &mut GameState, obj_id: ObjectId) {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, TargetFilter, TargetRef};
+    use crate::types::ability::{ControllerRef, Effect, TargetFilter, TargetRef, TypedFilter};
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
     fn make_gain_control_ability(target: ObjectId) -> ResolvedAbility {
@@ -250,6 +300,92 @@ mod tests {
             recipient,
             "target should now be controlled by the recipient, not the caster or source.controller"
         );
+    }
+
+    /// CR 608.2d + CR 613.1b: When an untargeted "opponent gains control"
+    /// effect has exactly one legal recipient, the resolver may derive that
+    /// recipient from game state. This covers two-player Khârn continuations,
+    /// whose inherited target list carries only the damaged object.
+    #[test]
+    fn give_control_derives_single_opponent_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Kharn the Betrayer".to_string(),
+            Zone::Battlefield,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Kharn Trigger".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::ParentTarget,
+                recipient: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            },
+            vec![TargetRef::Object(target_id)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_give(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&target_id).unwrap().controller,
+            PlayerId(1)
+        );
+    }
+
+    /// CR 608.2d: If several opponents are legal for an untargeted recipient
+    /// choice, resolving by iteration order would make a choice the player never
+    /// made. The resolver fails closed until a proper resolution-time choice is
+    /// available.
+    #[test]
+    fn give_control_rejects_ambiguous_opponent_recipient() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Kharn the Betrayer".to_string(),
+            Zone::Battlefield,
+        );
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Kharn Trigger".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::ParentTarget,
+                recipient: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            },
+            vec![TargetRef::Object(target_id)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        let result = resolve_give(&mut state, &ability, &mut events);
+
+        assert!(matches!(
+            result,
+            Err(EffectError::MissingParam(message)) if message == "ambiguous GiveControl recipient"
+        ));
+        assert!(events.is_empty());
     }
 
     /// CR 611.2b + CR 110.5d + CR 613.1b: Callous Oppressor regression (issue
