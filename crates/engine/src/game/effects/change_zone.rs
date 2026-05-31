@@ -503,7 +503,17 @@ pub fn resolve(
         // across every library in the game and let the player pick any card.
         // Hand/Graveyard/Exile zone-scan semantics (Show-and-Tell, Regrowth,
         // etc.) are unaffected.
-        if origin == Some(Zone::Library) && matches!(target_filter, TargetFilter::Any) {
+        //
+        // CR 701.23a: A multi-zone tutor's put-step carries `origin: None`
+        // (the found card may come from graveyard/hand/library, so the move
+        // reads the card's actual zone) with `target: Any`. The same fail-to-find
+        // no-op applies: empty targets means the search found nothing, so the
+        // put-step must do nothing rather than fall through to an `origin=None,
+        // Any` battlefield wildcard scan. Untargeted `None + Any` is never a
+        // real standalone effect — it only arises as this continuation artifact.
+        if (origin == Some(Zone::Library) || origin.is_none())
+            && matches!(target_filter, TargetFilter::Any)
+        {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,

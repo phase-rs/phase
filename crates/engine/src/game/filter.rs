@@ -5031,6 +5031,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![TargetRef::Object(entered)],
             source,
@@ -6119,6 +6120,7 @@ mod tests {
             target_player: None,
             selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![crate::types::zones::Zone::Library],
         };
         let json = serde_json::to_string(&search).unwrap();
         let restored: Effect = serde_json::from_str(&json).unwrap();

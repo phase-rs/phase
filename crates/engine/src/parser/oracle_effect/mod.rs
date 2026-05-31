@@ -78,7 +78,10 @@ use self::imperative::{
     lower_zone_counter_ast, parse_imperative_family_ast, parse_shuffle_ast,
 };
 use self::search::parse_search_filter;
-use self::search::{parse_search_destination, parse_search_library_details, parse_seek_details};
+use self::search::{
+    parse_multi_search_zones, parse_search_destination, parse_search_library_details,
+    parse_seek_details,
+};
 use self::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, continuation_absorbs_current,
     parse_followup_continuation_ast, parse_intrinsic_continuation_ast, split_clause_sequence,

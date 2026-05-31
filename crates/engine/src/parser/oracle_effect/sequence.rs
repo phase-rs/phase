@@ -1663,20 +1663,33 @@ pub(super) fn apply_clause_continuation(
             reveal,
             attach_to_source,
         } => {
+            // CR 701.23a: A multi-zone tutor ("graveyard, hand, and/or library")
+            // finds the card in any searched zone, so the put-step must move it
+            // from wherever it actually is (`origin: None`). A library-only
+            // search keeps `origin: Some(Library)` — that origin doubles as the
+            // CR 701.23b fail-to-find signal for the change-zone resolver.
+            let mut multi_zone_search = false;
             if let Some(previous) = defs.last_mut() {
                 if let Effect::SearchLibrary {
                     reveal: existing_reveal,
+                    source_zones,
                     ..
                 } = &mut *previous.effect
                 {
                     *existing_reveal |= reveal;
+                    multi_zone_search = source_zones.iter().any(|zone| *zone != Zone::Library);
                 }
                 apply_search_destination_to_ability_chain(previous, destination, enter_tapped);
             }
+            let put_origin = if multi_zone_search {
+                None
+            } else {
+                Some(Zone::Library)
+            };
             let mut change_zone = AbilityDefinition::new(
                 kind,
                 Effect::ChangeZone {
-                    origin: Some(Zone::Library),
+                    origin: put_origin,
                     destination,
                     target: TargetFilter::Any,
                     owner_library: false,

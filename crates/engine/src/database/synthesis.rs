@@ -1208,6 +1208,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
                         split: None,
+                        source_zones: vec![crate::types::zones::Zone::Library],
                     },
                 )
                 .cost(composite_cost);
