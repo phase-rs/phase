@@ -358,6 +358,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::ParentTargetOwner => "parent target's owner".into(),
+        TargetFilter::SourceChosenPlayer => "source's chosen player".into(),
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
         }
@@ -2521,6 +2522,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         }
         ContinuousModification::AddAllCreatureTypes => "all creature types".into(),
         ContinuousModification::AddAllBasicLandTypes => "all basic land types".into(),
+        ContinuousModification::AddAllLandTypes => "all land types".into(),
         ContinuousModification::AddChosenSubtype { .. } => "add chosen subtype".into(),
         ContinuousModification::AddChosenColor => "add chosen color".into(),
         // CR 608.2d + CR 613.1f: Urborg / Walking Sponge — strip the

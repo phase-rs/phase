@@ -123,8 +123,8 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
       }
     }
 
-    if (waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost") {
-      for (const objectId of waitingFor.data.creatures) {
+    if (waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures") {
+      for (const objectId of waitingFor.data.choices) {
         selectableManaCostCreatureIds.add(objectId);
       }
     }

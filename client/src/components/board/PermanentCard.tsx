@@ -193,7 +193,9 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   const canTapForMana = manaTappableObjectIds.has(objectId);
   const isActivatable = hasActivatableAbility || canTapForMana;
   const tapCreatureCostChoice = useGameStore((s) =>
-    (s.waitingFor?.type === "TapCreaturesForManaAbility" || s.waitingFor?.type === "TapCreaturesForSpellCost") && s.waitingFor.data.player === playerId
+    s.waitingFor?.type === "PayCost"
+    && s.waitingFor.data.kind.type === "TapCreatures"
+    && s.waitingFor.data.player === playerId
       ? s.waitingFor.data
       : null,
   );
@@ -371,8 +373,8 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     // to activate Equip and reattach it. Stop the bubble so the attachment's
     // own intent (target / activate / select) wins cleanly.
     if (obj.attached_to !== null) e.stopPropagation();
-    // TapCreaturesForManaAbility is mid-cost resolution — check before combat mode
-    // so clicks land even when DeclareAttackers combat mode is active.
+    // A PayCost TapCreatures prompt is mid-cost resolution — check before combat
+    // mode so clicks land even when DeclareAttackers combat mode is active.
     if (isSelectableForManaCost && tapCreatureCostChoice) {
       if (
         isSelectedForManaCost

@@ -1,14 +1,16 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, Duration, Effect,
-    GameRestriction, ModalSelectionCondition, ProhibitedActivity, QuantityExpr, ResolvedAbility,
-    RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
+    GameRestriction, ModalSelectionCondition, ObjectScope, PlayerScope, ProhibitedActivity,
+    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, StaticDefinition,
+    TargetFilter, TargetRef,
 };
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastPaymentMode, CastingVariant, CastingVariantChoiceOption, ConvokeMode, GameState,
-    PendingCast, SneakPlacement, SpellCastRecord, StackEntry, StackEntryKind, WaitingFor,
+    CastPaymentMode, CastingVariant, CastingVariantChoiceOption, ConvokeMode, CostResume,
+    GameState, PayCostKind, PendingCast, SneakPlacement, SpellCastRecord, StackEntry,
+    StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -28,7 +30,8 @@ use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_targets_in_chain, auto_select_targets,
     auto_select_targets_for_ability, begin_target_selection, begin_target_selection_for_ability,
     build_resolved_from_def, build_target_slots, compute_unavailable_modes,
-    flatten_targets_in_chain, has_legal_target_assignment_for_ability, modal_choice_for_player,
+    filter_references_target_player, flatten_targets_in_chain,
+    has_legal_target_assignment_for_ability, modal_choice_for_player,
     target_constraints_from_modal,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
@@ -8247,6 +8250,96 @@ pub fn can_activate_ability_now(
     }
 }
 
+/// CR 608.2c: Evaluate an activated ability's intervening-if `condition` against
+/// the CURRENT game state, as it would be evaluated at resolution. Returns `None`
+/// when the ability has no condition (nothing is gated) or when the condition
+/// depends on resolution-time context that does not exist before activation
+/// (chosen targets, the cast/trigger event, mana spent, prior-effect amounts), so
+/// callers must treat only `Some(false)` as "the payoff is gated off right now".
+///
+/// This is a decision aid for AI value heuristics — e.g. to avoid paying a cost
+/// for a hideaway land's "play the exiled card if your creatures' total power is
+/// 10 or greater" when the threshold is unmet. The engine deliberately does NOT
+/// gate activation legality on this condition (CR 602.5 + the Shelldock Isle
+/// ruling: the ability is legal to activate regardless; only the effect is gated
+/// at resolution), so this must never be used as a legality gate.
+pub fn ability_condition_currently_met(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> Option<bool> {
+    let obj = state.objects.get(&source_id)?;
+    let def = obj.abilities.get(ability_index)?;
+    let condition = def.condition.as_ref()?;
+    if !ability_condition_is_board_state_evaluable(condition) {
+        return None;
+    }
+    let resolved = build_resolved_from_def(def, source_id, obj.controller);
+    Some(crate::game::effects::evaluate_condition(
+        condition, state, &resolved,
+    ))
+}
+
+/// True when `condition` resolves purely from persistent board/controller state,
+/// so evaluating it before the ability is activated is meaningful (no chosen
+/// targets, no cast/trigger event, no spell context). Conservative by design: any
+/// shape not positively known to be board-state-only returns `false`, so callers
+/// decline to judge it rather than read uninitialized resolution context. Covers
+/// the hideaway / "Cost: do X if [board condition]" class (a `QuantityCheck` whose
+/// operands are board/controller-relative); extend the allowlist as new
+/// board-state condition shapes need pre-activation evaluation.
+fn ability_condition_is_board_state_evaluable(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            quantity_expr_is_board_state_relative(lhs) && quantity_expr_is_board_state_relative(rhs)
+        }
+        _ => false,
+    }
+}
+
+fn quantity_expr_is_board_state_relative(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => true,
+        QuantityExpr::Ref { qty } => quantity_ref_is_board_state_relative(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_is_board_state_relative(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().all(quantity_expr_is_board_state_relative),
+        _ => false,
+    }
+}
+
+fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
+    // A player axis is concrete (resolvable now) unless it needs a chosen target
+    // or an outer scoped-player iteration context.
+    let player_is_concrete =
+        |p: &PlayerScope| !matches!(p, PlayerScope::Target | PlayerScope::ScopedPlayer);
+    match qty {
+        QuantityRef::HandSize { player }
+        | QuantityRef::LifeTotal { player }
+        | QuantityRef::GraveyardSize { player }
+        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::PartySize { player }
+        | QuantityRef::Speed { player } => player_is_concrete(player),
+        QuantityRef::LifeAboveStarting | QuantityRef::StartingLifeTotal => true,
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::Aggregate { filter, .. } => !filter_references_target_player(filter),
+        QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::Power { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope } => matches!(scope, ObjectScope::Source),
+        // Conservative default: any ref not positively known to be
+        // board/controller-relative (Variable/X, target-relative scopes,
+        // cast/trigger-event context, etc.) makes the condition non-evaluable
+        // before activation, so the helper returns `None`.
+        _ => false,
+    }
+}
+
 /// CR 602.2: To activate an ability is to put it onto the stack and pay its costs.
 /// CR 602.2a: Only an object's controller can activate its activated ability unless
 /// the object specifically says otherwise.
@@ -8361,14 +8454,29 @@ pub fn handle_activate_ability(
             }
         }
         let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
-        super::ability_utils::filter_modes_by_target_legality(
-            state,
-            source_id,
-            player,
-            &ability_def.mode_abilities,
-            &modal,
-            &mut unavailable_modes,
-        );
+        let x_dependent_modal_targets = ability_def.cost.as_ref().is_some_and(|cost| {
+            casting_costs::extract_x_mana_cost(cost).is_some()
+                && ability_def.mode_abilities.iter().any(|mode| {
+                    ability_target_legality_needs_chosen_x(&build_resolved_from_def(
+                        mode, source_id, player,
+                    ))
+                })
+        });
+        // CR 602.2b + CR 601.2b/c: When modal activated ability target legality
+        // depends on an {X} activation cost, legality is not knowable until the
+        // player chooses X after mode selection. Do not pre-disable those modes
+        // using the unchosen-X target filter; the deferred target-selection path
+        // validates the chosen X before targets are committed.
+        if !x_dependent_modal_targets {
+            super::ability_utils::filter_modes_by_target_legality(
+                state,
+                source_id,
+                player,
+                &ability_def.mode_abilities,
+                &modal,
+                &mut unavailable_modes,
+            );
+        }
         // CR 700.2a: The controller chooses modes while activating a modal
         // ability. If every mode is illegal due to unavailable selections or
         // unsatisfied targeting requirements, the ability cannot be activated.
@@ -8425,12 +8533,15 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_sac.activation_cost = Some(cost.clone());
             pending_sac.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::SacrificeForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Sacrifice,
+                choices: eligible,
                 count: max_count,
                 min_count,
-                permanents: eligible,
-                pending_cast: Box::new(pending_sac),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_sac),
+                },
             });
         }
 
@@ -8447,11 +8558,15 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_discard.activation_cost = Some(cost.clone());
             pending_discard.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::DiscardForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Discard,
+                choices: eligible,
                 count,
-                cards: eligible,
-                pending_cast: Box::new(pending_discard),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_discard),
+                },
             });
         }
 
@@ -8475,12 +8590,15 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_exile.activation_cost = Some(cost.clone());
             pending_exile.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::ExileForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
-                zone: narrow_zone,
+                kind: PayCostKind::ExileFromZone { zone: narrow_zone },
+                choices: eligible,
                 count: count as usize,
-                cards: eligible,
-                pending_cast: Box::new(pending_exile),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_exile),
+                },
             });
         }
 
@@ -8511,11 +8629,15 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_return.activation_cost = Some(cost.clone());
             pending_return.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::ReturnToHandForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::ReturnToHand,
+                choices: eligible,
                 count: count as usize,
-                permanents: eligible,
-                pending_cast: Box::new(pending_return),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_return),
+                },
             });
         }
 
@@ -8541,12 +8663,17 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_counter.activation_cost = Some(cost.clone());
             pending_counter.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::RemoveCounterForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
-                count,
-                counter_type: counter_type.clone(),
-                permanents: eligible,
-                pending_cast: Box::new(pending_counter),
+                kind: PayCostKind::RemoveCounter {
+                    counter_type: counter_type.clone(),
+                },
+                choices: eligible,
+                count: count as usize,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_counter),
+                },
             });
         }
 
@@ -8565,11 +8692,15 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_tap.activation_cost = Some(cost.clone());
             pending_tap.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::TapCreaturesForSpellCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::TapCreatures,
+                choices: eligible,
                 count: count as usize,
-                creatures: eligible,
-                pending_cast: Box::new(pending_tap),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_tap),
+                },
             });
         }
 
@@ -9474,6 +9605,104 @@ mod tests {
             .cost(AbilityCost::Tap),
         );
         source
+    }
+
+    #[test]
+    fn ability_condition_currently_met_gates_on_board_relative_quantity() {
+        let mut state = GameState::new_two_player(42);
+        // Hideaway-shaped source: a {T}-cost ability gated by "creatures you
+        // control have total power 10 or greater" (Mosswort's condition shape).
+        let source = create_object(
+            &mut state,
+            CardId(80),
+            PlayerId(0),
+            "Hideaway".to_string(),
+            Zone::Battlefield,
+        );
+        let your_power_ge_10 = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: crate::types::ability::AggregateFunction::Sum,
+                    property: crate::types::ability::ObjectProperty::Power,
+                    filter: TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::default()
+                            .with_type(crate::types::ability::TypeFilter::Creature)
+                            .controller(crate::types::ability::ControllerRef::You),
+                    ),
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 10 },
+        };
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+                .cost(AbilityCost::Tap)
+                .condition(your_power_ge_10),
+        );
+
+        // No creatures → total power 0 < 10 → board-relative, gated off.
+        assert_eq!(
+            ability_condition_currently_met(&state, source, 0),
+            Some(false)
+        );
+
+        // A 12-power creature → condition now met.
+        let big = create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Giant".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let c = state.objects.get_mut(&big).unwrap();
+            c.card_types.core_types.push(CoreType::Creature);
+            c.base_power = Some(12);
+            c.power = Some(12);
+        }
+        assert_eq!(
+            ability_condition_currently_met(&state, source, 0),
+            Some(true)
+        );
+
+        // An ability with no condition → nothing gated → None.
+        let plain = create_object(
+            &mut state,
+            CardId(82),
+            PlayerId(0),
+            "Plain".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&plain).unwrap().abilities).push(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+                .cost(AbilityCost::Tap),
+        );
+        assert_eq!(ability_condition_currently_met(&state, plain, 0), None);
+
+        // A target-relative condition can't be evaluated before targets exist →
+        // the allowlist declines it (None), so the policy never penalizes it.
+        let targeter = create_object(
+            &mut state,
+            CardId(83),
+            PlayerId(0),
+            "Targeter".to_string(),
+            Zone::Battlefield,
+        );
+        let target_life_ge_5 = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Target,
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 5 },
+        };
+        Arc::make_mut(&mut state.objects.get_mut(&targeter).unwrap().abilities).push(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+                .cost(AbilityCost::Tap)
+                .condition(target_life_ge_5),
+        );
+        assert_eq!(ability_condition_currently_met(&state, targeter, 0), None);
     }
 
     #[test]
@@ -10704,11 +10933,14 @@ mod tests {
         let waiting = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
             .expect("activation should ask for the token sacrifice cost first");
         state.waiting_for = waiting;
-        let WaitingFor::SacrificeForCost {
-            permanents, count, ..
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            choices: permanents,
+            count,
+            ..
         } = &state.waiting_for
         else {
-            panic!("expected SacrificeForCost, got {:?}", state.waiting_for);
+            panic!("expected PayCost Sacrifice, got {:?}", state.waiting_for);
         };
         assert_eq!(*count, 1);
         assert_eq!(permanents, &vec![token]);
@@ -11620,8 +11852,11 @@ mod tests {
         )
         .unwrap();
         match state.waiting_for {
-            WaitingFor::SacrificeForCost {
-                count, min_count, ..
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                count,
+                min_count,
+                ..
             } => {
                 assert_eq!(count, 2);
                 assert_eq!(min_count, 2);
@@ -12502,11 +12737,16 @@ mod tests {
         .unwrap();
 
         match &state.waiting_for {
-            WaitingFor::DiscardForCost { cards, count, .. } => {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                choices: cards,
+                count,
+                ..
+            } => {
                 assert_eq!(*count, 1);
                 assert_eq!(cards, &vec![discarded]);
             }
-            other => panic!("expected DiscardForCost, got {other:?}"),
+            other => panic!("expected PayCost Discard, got {other:?}"),
         }
         assert!(
             state.objects[&blood].zone == Zone::Battlefield,
@@ -12604,10 +12844,13 @@ mod tests {
         // CR 118.3 + CR 602.2b: the activation detours to ExileForCost, and
         // only the nonland card is an eligible choice.
         match &state.waiting_for {
-            WaitingFor::ExileForCost {
-                zone: ExileCostSourceZone::Hand,
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::ExileFromZone {
+                        zone: ExileCostSourceZone::Hand,
+                    },
                 count,
-                cards,
+                choices: cards,
                 ..
             } => {
                 assert_eq!(*count, 1, "Jhoira exiles exactly one card");
@@ -12617,7 +12860,7 @@ mod tests {
                     "the land must be excluded by the Non:Land cost filter"
                 );
             }
-            other => panic!("expected WaitingFor::ExileForCost, got {other:?}"),
+            other => panic!("expected WaitingFor::PayCost ExileFromZone, got {other:?}"),
         }
         assert_eq!(
             state.objects[&nonland].zone,
@@ -14583,17 +14826,18 @@ mod tests {
         state.waiting_for = waiting;
 
         match &state.waiting_for {
-            WaitingFor::SacrificeForCost {
+            WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Sacrifice,
                 count,
-                permanents,
+                choices: permanents,
                 ..
             } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(*count, 1);
                 assert_eq!(permanents, &vec![land]);
             }
-            other => panic!("expected SacrificeForCost, got {other:?}"),
+            other => panic!("expected PayCost Sacrifice, got {other:?}"),
         }
 
         crate::game::engine::apply_as_current(
@@ -14845,8 +15089,13 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("spell should still be castable by sacrificing a land");
-        let WaitingFor::SacrificeForCost { permanents, .. } = waiting else {
-            panic!("expected SacrificeForCost");
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            choices: permanents,
+            ..
+        } = waiting
+        else {
+            panic!("expected PayCost Sacrifice");
         };
 
         assert_eq!(permanents, vec![land]);
@@ -16564,7 +16813,13 @@ mod tests {
 
         let waiting =
             handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
-        assert!(matches!(waiting, WaitingFor::ReturnToHandForCost { .. }));
+        assert!(matches!(
+            waiting,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ReturnToHand,
+                ..
+            }
+        ));
         state.waiting_for = waiting;
 
         apply_as_current(
@@ -16632,11 +16887,15 @@ mod tests {
         let waiting =
             handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
         match waiting {
-            WaitingFor::ReturnToHandForCost { permanents, .. } => {
+            WaitingFor::PayCost {
+                kind: PayCostKind::ReturnToHand,
+                choices: permanents,
+                ..
+            } => {
                 assert_eq!(permanents, vec![source]);
                 assert!(!permanents.contains(&other_land));
             }
-            other => panic!("expected ReturnToHandForCost, got {other:?}"),
+            other => panic!("expected PayCost ReturnToHand, got {other:?}"),
         }
     }
 
@@ -16896,6 +17155,170 @@ mod tests {
         );
         assert!(state.objects[&safe_land].tapped);
         assert_eq!(state.players[0].life, 20);
+    }
+
+    /// Auto-tap should spend a free colorless land row (card_tier 0) on the
+    /// generic part of a cost, preserving a pain-free colored dual whose
+    /// production a later shard might need. Cost {1}{G}: phase 1 taps the
+    /// Forest for {G} (fewest rows); phase 2's generic taps the brushland's
+    /// free {C} row (tier 0) rather than the dual (tier 1), leaving the dual
+    /// untapped.
+    #[test]
+    fn auto_tap_uses_colorless_row_for_generic_preserving_dual() {
+        let mut state = setup_game_at_main_phase();
+
+        // Spell costing {1}{G}.
+        let spell_id = create_single_color_spell_in_hand(
+            &mut state,
+            CardId(40),
+            "Test Generic Plus Green",
+            ManaCostShard::Green,
+        );
+        state.objects.get_mut(&spell_id).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+
+        // 1. Basic Forest — single {G} row.
+        let forest = add_basic_land(&mut state, CardId(41), "Forest", "Forest");
+
+        // 2. Pain-free dual producing {B} and {G} (penalty None) — inserted
+        //    BEFORE the brushland.
+        let dual = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Pain-Free Dual".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dual).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![ManaColor::Black, ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // 3. Brushland-shape land (free {C} row + AnyOneColor{Green,White}),
+        //    penalty None — inserted AFTER the dual.
+        let brushland = add_brushland_like_land(&mut state, CardId(43), "Llanowar Wastes", false);
+
+        let mut events = Vec::new();
+        handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(40), &mut events).unwrap();
+
+        assert!(
+            !state.objects[&dual].tapped,
+            "auto-tap should preserve the pain-free dual by spending the free colorless row on generic"
+        );
+        assert!(
+            state.objects[&forest].tapped,
+            "Forest should pay the {{G}} shard"
+        );
+        assert!(
+            state.objects[&brushland].tapped,
+            "brushland's free colorless row should pay the generic"
+        );
+    }
+
+    /// Auto-tap should preserve a non-land creature mana dork (card_tier 3) as
+    /// a potential blocker (CR 509.1a) by spending an equivalent non-creature
+    /// rock (card_tier 2) instead. Cost {G}: the rock taps, the dork stays
+    /// untapped.
+    #[test]
+    fn auto_tap_prefers_rock_over_creature_dork() {
+        let mut state = setup_game_at_main_phase();
+
+        let spell_id = create_single_color_spell_in_hand(
+            &mut state,
+            CardId(44),
+            "Test Mono Green",
+            ManaCostShard::Green,
+        );
+
+        // 1. Mono-green creature dork (T: Add {G}) — inserted BEFORE the rock.
+        let dork = create_object(
+            &mut state,
+            CardId(45),
+            PlayerId(0),
+            "Green Dork".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dork).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.summoning_sick = false;
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // 2. Mono-green non-creature non-land rock (T: Add {G}).
+        let rock = create_object(
+            &mut state,
+            CardId(46),
+            PlayerId(0),
+            "Green Rock".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&rock).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let mut events = Vec::new();
+        handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(44), &mut events).unwrap();
+
+        assert!(
+            state.objects[&rock].tapped,
+            "auto-tap should spend the rock for {{G}}"
+        );
+        assert!(
+            !state.objects[&dork].tapped,
+            "auto-tap should preserve the creature dork as a blocker"
+        );
     }
 
     #[test]
@@ -18678,13 +19101,17 @@ mod tests {
             handle_select_modes(&mut state, PlayerId(0), vec![1, 2], &mut events).unwrap();
 
         match &state.waiting_for {
-            WaitingFor::TapCreaturesForSpellCost {
-                count, creatures, ..
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures,
+                count,
+                choices: creatures,
+                resume: CostResume::Spell { .. },
+                ..
             } => {
                 assert_eq!(*count, 1);
                 assert_eq!(creatures, &vec![helper]);
             }
-            other => panic!("expected TapCreaturesForSpellCost, got {other:?}"),
+            other => panic!("expected PayCost TapCreatures (spell), got {other:?}"),
         }
 
         crate::game::engine::apply_as_current(
@@ -19424,7 +19851,11 @@ mod tests {
             .unwrap()
             .waiting_for;
         match &state.waiting_for {
-            WaitingFor::TargetSelection { target_slots, .. } => {
+            WaitingFor::TargetSelection {
+                target_slots,
+                mode_labels,
+                ..
+            } => {
                 assert_eq!(target_slots.len(), 1);
                 assert!(target_slots[0]
                     .legal_targets
@@ -19432,6 +19863,30 @@ mod tests {
                 assert!(target_slots[0]
                     .legal_targets
                     .contains(&TargetRef::Object(other_creature)));
+                // CR 700.2 / CR 601.2c: the deferred-target path must surface the
+                // per-mode label for the targeting UI (regression for issue #1543:
+                // Kozilek's Command's mode-2 banner went blank after X was chosen
+                // because `chosen_modes` wasn't persisted across the X round-trip).
+                assert_eq!(
+                    mode_labels.len(),
+                    target_slots.len(),
+                    "mode_labels must align 1:1 with target_slots after deferred target selection"
+                );
+                // Exact content match (not just `is_some()`): guards against a
+                // future bug that swaps label *order* between target slots —
+                // mode 0 ("Create X Eldrazi Spawn tokens.") has no target, so
+                // the sole target slot must carry mode 1's description string,
+                // not merely *some* non-None label.
+                assert_eq!(
+                    mode_labels[0].as_deref(),
+                    Some("Exile target creature with mana value X or less."),
+                    "first target slot must surface the second mode's description"
+                );
+                assert_ne!(
+                    mode_labels[0].as_deref(),
+                    Some("Create X Eldrazi Spawn tokens."),
+                    "first target slot must not carry mode 0's label (mode 0 has no target)"
+                );
             }
             other => panic!("expected target selection after choosing X, got {other:?}"),
         }
@@ -19453,6 +19908,374 @@ mod tests {
             .filter(|id| state.objects[id].name == "Eldrazi Spawn")
             .count();
         assert_eq!(spawn_count, 2);
+    }
+
+    /// CR 700.2 + CR 601.2c: When both chosen modes of an X-cost modal spell
+    /// require targets, the deferred target-selection step (after `ChooseX`)
+    /// must surface per-slot mode labels so the targeting UI can disambiguate
+    /// which mode each slot belongs to. Regression for issue #1543 — the
+    /// `mode_labels` list was previously dropped on the X round-trip, leaving
+    /// every banner blank for spells like Kozilek's Command.
+    #[test]
+    fn modal_x_target_selection_carries_per_mode_labels() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Two-Mode Test Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Colorless],
+                generic: 0,
+            };
+            // Mode 0: exile target creature with mana value X or less.
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                        },
+                    ])),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            ));
+            // Mode 1: return target creature with mana value X or less to its owner's hand.
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Hand,
+                    target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                        },
+                    ])),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            ));
+            obj.modal = Some(crate::types::ability::ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 2,
+                mode_descriptions: vec![
+                    "Exile target creature with mana value X or less.".to_string(),
+                    "Return target creature with mana value X or less to its owner's hand."
+                        .to_string(),
+                ],
+                ..Default::default()
+            });
+        }
+
+        let creature_a = create_object(
+            &mut state,
+            CardId(82),
+            PlayerId(1),
+            "Two Drop A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_a).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        let creature_b = create_object(
+            &mut state,
+            CardId(83),
+            PlayerId(1),
+            "Two Drop B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(81), &mut events).unwrap();
+        state.waiting_for =
+            handle_select_modes(&mut state, PlayerId(0), vec![0, 1], &mut events).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "X must be chosen before building target slots whose legality depends on X"
+        );
+
+        state.waiting_for = apply_as_current(&mut state, GameAction::ChooseX { value: 2 })
+            .unwrap()
+            .waiting_for;
+        match &state.waiting_for {
+            WaitingFor::TargetSelection {
+                target_slots,
+                mode_labels,
+                ..
+            } => {
+                assert_eq!(target_slots.len(), 2, "both chosen modes contribute a slot");
+                assert_eq!(
+                    mode_labels.len(),
+                    target_slots.len(),
+                    "mode_labels must align 1:1 with target_slots when both modes need targets"
+                );
+                assert_eq!(
+                    mode_labels[0].as_deref(),
+                    Some("Exile target creature with mana value X or less."),
+                    "first slot must surface mode 0's description"
+                );
+                assert_eq!(
+                    mode_labels[1].as_deref(),
+                    Some("Return target creature with mana value X or less to its owner's hand."),
+                    "second slot must surface mode 1's description"
+                );
+            }
+            other => panic!("expected target selection after choosing X, got {other:?}"),
+        }
+    }
+
+    /// CR 602.2b + CR 601.2b/c: Activated abilities follow the same mode/X/target
+    /// announcement ordering as spells. A modal activated ability with {X} in its
+    /// activation cost must choose X before building target slots whose legality
+    /// references X, while still preserving per-mode target labels.
+    #[test]
+    fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(84),
+            PlayerId(0),
+            "Modal X Relic".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let x_or_less = || {
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                }]))
+            };
+            let mode0 = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: x_or_less(),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            );
+            let mode1 = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Hand,
+                    target: x_or_less(),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            );
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Unimplemented {
+                        name: "modal_x_placeholder".to_string(),
+                        description: None,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                })
+                .with_modal(
+                    crate::types::ability::ModalChoice {
+                        min_choices: 2,
+                        max_choices: 2,
+                        mode_count: 2,
+                        mode_descriptions: vec![
+                            "Exile target creature with mana value X or less.".to_string(),
+                            "Return target creature with mana value X or less to its owner's hand."
+                                .to_string(),
+                        ],
+                        ..Default::default()
+                    },
+                    vec![mode0, mode1],
+                ),
+            );
+        }
+
+        let creature_a = create_object(
+            &mut state,
+            CardId(85),
+            PlayerId(1),
+            "Two Drop A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_a).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        let creature_b = create_object(
+            &mut state,
+            CardId(86),
+            PlayerId(1),
+            "Two Drop B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        let creature_too_large = create_object(
+            &mut state,
+            CardId(87),
+            PlayerId(1),
+            "Four Drop".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_too_large).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            obj.mana_cost = ManaCost::generic(4);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::AbilityModeChoice { .. }),
+            "activation should choose modes before choosing X"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectModes {
+                indices: vec![0, 1],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "mode selection must route to ChooseX before X-dependent target selection"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
+        match &state.waiting_for {
+            WaitingFor::TargetSelection {
+                target_slots,
+                mode_labels,
+                ..
+            } => {
+                assert_eq!(target_slots.len(), 2);
+                assert_eq!(
+                    mode_labels.len(),
+                    target_slots.len(),
+                    "mode labels must align with activated ability target slots"
+                );
+                assert_eq!(
+                    mode_labels[0].as_deref(),
+                    Some("Exile target creature with mana value X or less.")
+                );
+                assert_eq!(
+                    mode_labels[1].as_deref(),
+                    Some("Return target creature with mana value X or less to its owner's hand.")
+                );
+                for slot in target_slots {
+                    assert!(slot.legal_targets.contains(&TargetRef::Object(creature_a)));
+                    assert!(slot.legal_targets.contains(&TargetRef::Object(creature_b)));
+                    assert!(
+                        !slot
+                            .legal_targets
+                            .contains(&TargetRef::Object(creature_too_large)),
+                        "X=2 must exclude mana value 4 targets"
+                    );
+                }
+            }
+            other => panic!("expected target selection after choosing X, got {other:?}"),
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(creature_a), TargetRef::Object(creature_b)],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.players[0].mana_pool.mana.len(),
+            1,
+            "the {{X}} activation mana cost should be paid after target selection"
+        );
+        let StackEntryKind::ActivatedAbility { ability, .. } = &state.stack[0].kind else {
+            panic!("expected activated ability on stack");
+        };
+        assert_eq!(ability.chosen_x, Some(2));
     }
 
     #[test]
@@ -21357,7 +22180,10 @@ mod tests {
 
         assert!(matches!(
             result.waiting_for,
-            WaitingFor::DiscardForCost { .. }
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                ..
+            }
         ));
     }
 
@@ -21373,16 +22199,21 @@ mod tests {
         let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut Vec::new())
             .expect("retrace cast should request land discard");
         let (cards, pending_cast) = match waiting {
-            WaitingFor::DiscardForCost {
+            WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Discard,
+                choices: cards,
                 count: 1,
-                cards,
-                pending_cast,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
+                ..
             } => {
                 assert_eq!(player, PlayerId(0));
                 (cards, pending_cast)
             }
-            other => panic!("expected DiscardForCost, got {other:?}"),
+            other => panic!("expected PayCost Discard, got {other:?}"),
         };
         assert_eq!(cards, vec![land]);
         assert!(!cards.contains(&nonland));
@@ -21453,12 +22284,16 @@ mod tests {
         let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut Vec::new())
             .expect("retrace cast should start");
         let (cards, pending_cast) = match waiting {
-            WaitingFor::DiscardForCost {
-                cards,
-                pending_cast,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                choices: cards,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 ..
             } => (cards, pending_cast),
-            other => panic!("expected DiscardForCost, got {other:?}"),
+            other => panic!("expected PayCost Discard, got {other:?}"),
         };
         super::casting_costs::handle_discard_for_cost(
             &mut state,
@@ -21982,10 +22817,13 @@ mod tests {
         // The escape additional cost (exile five other graveyard cards) is
         // enforced — the cast pauses for the exile selection.
         let (legal_cards, count) = match result.waiting_for {
-            WaitingFor::ExileForCost {
-                zone: ExileCostSourceZone::Graveyard,
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::ExileFromZone {
+                        zone: ExileCostSourceZone::Graveyard,
+                    },
                 count,
-                ref cards,
+                choices: ref cards,
                 ..
             } => (cards.clone(), count),
             other => {
@@ -22091,8 +22929,10 @@ mod tests {
             .expect("granted escape should start cost payment");
         assert!(matches!(
             waiting,
-            WaitingFor::ExileForCost {
-                zone: ExileCostSourceZone::Graveyard,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Graveyard,
+                },
                 count: 3,
                 ..
             }
@@ -22168,13 +23008,17 @@ mod tests {
         let waiting = handle_cast_spell(&mut state, PlayerId(0), obj_id, card_id, &mut events)
             .expect("escape cast should begin");
         let (exile_cards, pending_cast) = match waiting {
-            WaitingFor::ExileForCost {
-                cards,
-                pending_cast,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone { .. },
+                choices: cards,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 count: 3,
                 ..
             } => (cards, pending_cast),
-            other => panic!("expected ExileForCost, got {other:?}"),
+            other => panic!("expected PayCost ExileFromZone, got {other:?}"),
         };
 
         let chosen: Vec<ObjectId> = exile_cards.iter().copied().take(3).collect();
@@ -25032,11 +25876,11 @@ mod tests {
                 handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
                     .unwrap();
             match &waiting {
-                WaitingFor::RemoveCounterForCost {
+                WaitingFor::PayCost {
                     player,
+                    kind: PayCostKind::RemoveCounter { counter_type },
                     count,
-                    counter_type,
-                    permanents,
+                    choices: permanents,
                     ..
                 } => {
                     assert_eq!(*player, PlayerId(0));
@@ -25044,7 +25888,7 @@ mod tests {
                     assert_eq!(*counter_type, CounterMatch::Any);
                     assert_eq!(permanents, &vec![saga]);
                 }
-                other => panic!("Expected RemoveCounterForCost, got {other:?}"),
+                other => panic!("Expected PayCost RemoveCounter, got {other:?}"),
             }
             state.waiting_for = waiting;
 

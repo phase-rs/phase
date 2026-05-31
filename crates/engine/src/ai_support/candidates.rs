@@ -15,7 +15,7 @@ use crate::types::actions::{
 use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{
-    ConvokeMode, CounterMoveChoice, GameState, TargetSelectionSlot, WaitingFor,
+    ConvokeMode, CounterMoveChoice, GameState, PayCostKind, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -714,28 +714,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             saddle_power,
             eligible_creatures,
         } => saddle_mount_candidates(state, *player, *mount_id, *saddle_power, eligible_creatures),
-        WaitingFor::TapCreaturesForManaAbility {
-            player,
-            count,
-            creatures,
-            ..
-        } => select_cards_variants(*player, creatures, Some(*count)),
-        // CR 117.1 + CR 118.3 + CR 605.3b: Pick which object(s) to exile to
-        // pay the mana ability cost.
-        WaitingFor::ExileForManaAbility {
-            player,
-            count,
-            cards,
-            ..
-        } => select_cards_variants(*player, cards, Some(*count)),
-        // CR 117.1 + CR 118.3 + CR 605.3b: Phyrexian Altar class — pick which
-        // permanent(s) to sacrifice to pay the mana ability cost.
-        WaitingFor::SacrificeForManaAbility {
-            player,
-            count,
-            permanents,
-            ..
-        } => select_cards_variants(*player, permanents, Some(*count)),
         WaitingFor::PayManaAbilityMana {
             player, options, ..
         } => options
@@ -1360,26 +1338,39 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
-        WaitingFor::DiscardForCost {
+        // CR 118.3 + CR 601.2b + CR 605.3b: AI selects objects to pay a cost.
+        // RemoveCounter chooses exactly one source (one permanent per
+        // candidate); Sacrifice honors the [min, max] range; every other kind
+        // selects exactly `count` objects.
+        WaitingFor::PayCost {
             player,
-            count,
-            cards,
+            kind: PayCostKind::RemoveCounter { .. },
+            choices,
             ..
-        } => bounded_select_card_candidates(*player, cards, [*count]),
-        WaitingFor::DiscardForManaAbility {
+        } => choices
+            .iter()
+            .map(|id| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![*id] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        WaitingFor::PayCost {
             player,
-            count,
-            cards,
-            ..
-        } => bounded_select_card_candidates(*player, cards, [*count]),
-        // CR 118.3: AI selects permanents to sacrifice as cost
-        WaitingFor::SacrificeForCost {
-            player,
+            kind: PayCostKind::Sacrifice,
+            choices,
             count,
             min_count,
-            permanents,
             ..
-        } => bounded_select_card_candidates(*player, permanents, *min_count..=*count),
+        } => bounded_select_card_candidates(*player, choices, *min_count..=*count),
+        WaitingFor::PayCost {
+            player,
+            choices,
+            count,
+            ..
+        } => bounded_select_card_candidates(*player, choices, [*count]),
         // CR 118.12a: AI selects a branch of a disjunctive activation cost.
         WaitingFor::ActivationCostOneOfChoice {
             player,
@@ -1392,24 +1383,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             .map(|(i, _)| {
                 candidate(
                     GameAction::ChooseActivationCostBranch { index: i },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
-        WaitingFor::ReturnToHandForCost {
-            player,
-            count,
-            permanents,
-            ..
-        } => bounded_select_card_candidates(*player, permanents, [*count]),
-        WaitingFor::RemoveCounterForCost {
-            player, permanents, ..
-        } => permanents
-            .iter()
-            .map(|id| {
-                candidate(
-                    GameAction::SelectCards { cards: vec![*id] },
                     TacticalClass::Selection,
                     Some(*player),
                 )
@@ -1428,28 +1401,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
-        WaitingFor::BeholdForCost {
-            player,
-            count,
-            choices,
-            ..
-        } => bounded_select_card_candidates(*player, choices, [*count]),
-        // CR 702.34a: AI selects creatures to tap as part of paying flashback tap cost.
-        WaitingFor::TapCreaturesForSpellCost {
-            player,
-            count,
-            creatures,
-            ..
-        } => bounded_select_card_candidates(*player, creatures, [*count]),
-        // CR 118.9a + CR 601.2b + CR 601.2h: AI selects cards to exile as part
-        // of paying an alternative or additional casting cost — escape
-        // (CR 702.138a, graveyard) or pitch spells (hand).
-        WaitingFor::ExileForCost {
-            player,
-            count,
-            cards,
-            ..
-        } => bounded_select_card_candidates(*player, cards, [*count]),
         WaitingFor::CollectEvidenceChoice {
             player,
             minimum_mana_value,

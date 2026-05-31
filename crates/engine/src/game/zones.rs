@@ -93,6 +93,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                 supertypes: obj.card_types.supertypes.clone(),
                 keywords: obj.keywords.clone(),
                 colors: obj.color.clone(),
+                chosen_attributes: obj.chosen_attributes.clone(),
                 // CR 400.7: Capture counters for "if it had counters on it" patterns.
                 counters: obj.counters.clone(),
             };

@@ -88,14 +88,16 @@ describe("adapter boundary guardrails", () => {
     expect(new Set(tsVariants)).toEqual(new Set(rustVariants));
   });
 
-  it("handles the discard-for-mana-ability waiting payload", () => {
+  it("handles the discard-for-mana-ability pay-cost waiting payload", () => {
     const waitingFor: WaitingFor = {
-      type: "DiscardForManaAbility",
+      type: "PayCost",
       data: {
         player: 0,
+        kind: { type: "Discard" },
+        choices: [42],
         count: 1,
-        cards: [42],
-        pending_mana_ability: {},
+        min_count: 0,
+        resume: { type: "ManaAbility", ManaAbility: {} },
       },
     };
 

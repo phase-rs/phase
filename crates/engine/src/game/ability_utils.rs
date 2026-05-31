@@ -311,6 +311,14 @@ pub fn build_target_slots(
 ///
 /// Indices are sorted (printed order, CR 608.2c) to match
 /// `build_chained_resolved`; duplicate indices (CR 700.2d) repeat the mode.
+// CR 700.2 + CR 601.2b/c: Each parameter encodes a distinct, irreducible piece
+// of the modal slot-build context (game state, ability definitions, chosen mode
+// indices, per-mode display text, source identity, controller, spell context,
+// announced X). Grouping any pair would either fabricate a transient struct
+// with no other use site or hide a real semantic axis (e.g. `chosen_x` is
+// timing-dependent — `None` before the X round-trip, `Some(x)` after — and
+// must remain visible at every call site).
+#[allow(clippy::too_many_arguments)]
 pub fn build_target_slots_labelled(
     state: &GameState,
     abilities: &[AbilityDefinition],
@@ -319,6 +327,14 @@ pub fn build_target_slots_labelled(
     source_id: ObjectId,
     controller: PlayerId,
     context: &SpellContext,
+    // CR 107.1b + CR 700.2: When the slot build runs AFTER the X round-trip
+    // (deferred target selection — see `casting_costs::begin_deferred_target_selection`),
+    // each freshly-built per-mode resolved ability needs the chosen X value
+    // propagated so target legality filters referencing `X` (e.g. Kozilek's
+    // Command mode 2: "mana value X or less") resolve against the announced
+    // value rather than the default `0`. `None` for callers that build slots
+    // BEFORE X is chosen (the common non-deferred modal path).
+    chosen_x: Option<u32>,
 ) -> Result<(Vec<TargetSelectionSlot>, Vec<Option<String>>), EngineError> {
     let mut ordered: Vec<usize> = indices.to_vec();
     ordered.sort();
@@ -330,6 +346,9 @@ pub fn build_target_slots_labelled(
             .ok_or_else(|| EngineError::InvalidAction(format!("Mode index {idx} out of range")))?;
         let mut resolved = build_resolved_from_def(def, source_id, controller);
         resolved.set_context_recursive(context.clone());
+        if let Some(x) = chosen_x {
+            resolved.set_chosen_x_recursive(x);
+        }
         acc.current_label = mode_descriptions.get(idx).cloned();
         collect_target_slots(state, &resolved, &mut acc)?;
         acc.current_label = None;
@@ -350,6 +369,9 @@ pub fn build_target_slots_labelled(
         if let Ok(mut combined) = build_chained_resolved(abilities, indices, source_id, controller)
         {
             combined.set_context_recursive(context.clone());
+            if let Some(x) = chosen_x {
+                combined.set_chosen_x_recursive(x);
+            }
             if let Ok(combined_slots) = build_target_slots(state, &combined) {
                 debug_assert_eq!(
                     acc.slots.len(),
@@ -2238,20 +2260,26 @@ fn collect_per_opponent_target_fanout_slots(
     };
 
     for opponent in per_opponent_fanout_players(state, ability.controller) {
+        let legal_targets =
+            targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id);
+        if legal_targets.is_empty() {
+            if ability.targeting_is_optional() {
+                // CR 115.1 + CR 603.3d: "Up to one" per-opponent fanout — an
+                // opponent with no legal targets contributes no slots. Omitting
+                // both the player slot and the creature slot avoids presenting
+                // the player with an empty selection step they cannot act on.
+                continue;
+            }
+            return Err(EngineError::ActionNotAllowed(
+                "No legal targets available".to_string(),
+            ));
+        }
         let player_targets =
             per_opponent_fanout_constraint_targets(state, ability.controller, opponent);
         acc.push(TargetSelectionSlot {
             legal_targets: player_targets,
             optional: false,
         });
-
-        let legal_targets =
-            targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id);
-        if legal_targets.is_empty() && !ability.targeting_is_optional() {
-            return Err(EngineError::ActionNotAllowed(
-                "No legal targets available".to_string(),
-            ));
-        }
         acc.push(TargetSelectionSlot {
             legal_targets,
             optional: ability.targeting_is_optional(),
@@ -2271,6 +2299,15 @@ fn collect_per_opponent_target_fanout_specs(
     };
 
     for opponent in per_opponent_fanout_players(state, ability.controller) {
+        // CR 115.1 + CR 603.3d: Mirror the slot-builder: skip opponents whose
+        // creature pool is empty when targeting is optional so specs and slots
+        // stay in lockstep.
+        if ability.targeting_is_optional()
+            && targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id)
+                .is_empty()
+        {
+            continue;
+        }
         specs.push(TargetSlotSpec {
             filter: TargetFilter::SpecificPlayer { id: opponent },
             optional: false,
@@ -3898,7 +3935,8 @@ mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        GameState, StackEntryKind, TargetSelectionConstraint, TargetSelectionSlot, WaitingFor,
+        GameState, PayCostKind, StackEntryKind, TargetSelectionConstraint, TargetSelectionSlot,
+        WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -4030,7 +4068,13 @@ mod tests {
         )
         .expect("Maze's End activation should begin");
         assert!(
-            matches!(waiting, WaitingFor::ReturnToHandForCost { .. }),
+            matches!(
+                waiting,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::ReturnToHand,
+                    ..
+                }
+            ),
             "self-bounce cost should request a return-to-hand selection"
         );
         state.waiting_for = waiting;
@@ -5688,9 +5732,14 @@ mod tests {
     }
 
     #[test]
-    fn per_opponent_gain_control_auto_select_defers_when_optional_skip_needs_slot_position() {
+    fn per_opponent_fanout_optional_skips_opponent_with_no_legal_targets() {
+        // Regression: Haytham Kenway crash — "for each opponent, exile up to
+        // one target creature that player controls." When one opponent has no
+        // creatures the slot-builder must skip that opponent entirely so the
+        // player is never shown an empty selection step.
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
-        create_creature(&mut state, PlayerId(2), CardId(1), "Opp Two");
+        // Player 1 has no creatures. Player 2 has one.
+        let opp_two_creature = create_creature(&mut state, PlayerId(2), CardId(1), "Opp Two");
         let mut ability = per_opponent_gain_control_ability();
         ability.multi_target = Some(MultiTargetSpec::bounded(
             0,
@@ -5702,16 +5751,51 @@ mod tests {
         ));
         let slots = build_target_slots(&state, &ability).expect("target slots should build");
 
-        assert_eq!(slots.len(), 4);
-        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
-        assert!(slots[1].legal_targets.is_empty());
+        // Player 1's slots are omitted — only Player 2's pair is present.
+        assert_eq!(slots.len(), 2, "Player 1 (no creatures) must be skipped");
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(2))]);
+        assert!(!slots[0].optional);
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(opp_two_creature)]
+        );
         assert!(slots[1].optional);
-        assert_eq!(slots[2].legal_targets, vec![TargetRef::Player(PlayerId(2))]);
 
+        // Multiple valid assignments (skip or take opp-two creature) — no
+        // single forced choice, so auto_select defers to the player.
         assert_eq!(
             auto_select_targets_for_ability(&state, &ability, &slots, &[])
-                .expect("legal skip-plus-target assignment should not be rejected"),
+                .expect("legal assignment exists"),
             None
+        );
+        assert!(has_legal_target_assignment_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn per_opponent_fanout_optional_all_opponents_no_creatures_yields_empty_slots() {
+        // Regression: 2-player game, Haytham Kenway enters, opponent has no
+        // creatures. Slot list must be empty so the trigger auto-pushes with
+        // no targets and resolves doing nothing — no UI crash, no spurious
+        // cost_payment_failed_flag.
+        let state = GameState::new_two_player(42);
+        let mut ability = per_opponent_gain_control_ability();
+        ability.multi_target = Some(MultiTargetSpec::bounded(
+            0,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ));
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert!(
+            slots.is_empty(),
+            "no legal creature targets for any opponent → slots must be empty"
         );
         assert!(has_legal_target_assignment_for_ability(
             &state,
@@ -7460,6 +7544,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("labelled modal slots build");
 
@@ -7495,6 +7580,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("multi-clause single mode builds");
 
@@ -7529,6 +7615,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("fan-out modal slots build");
 
@@ -7560,6 +7647,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("missing-description modal slots build");
 

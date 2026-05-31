@@ -7,8 +7,8 @@ use crate::types::ability::{
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CastPaymentMode, CastingVariant, ConvokeMode, DistributionUnit, GameState, PendingCast,
-    StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
+    CastPaymentMode, CastingVariant, ConvokeMode, CostResume, DistributionUnit, GameState,
+    PayCostKind, PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -27,8 +27,8 @@ use super::stack;
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, flatten_targets_in_chain, modal_choice_for_player,
-    random_select_targets_for_ability, target_constraints_from_modal,
+    build_target_slots, build_target_slots_labelled, flatten_targets_in_chain,
+    modal_choice_for_player, random_select_targets_for_ability, target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
 
@@ -637,7 +637,64 @@ fn begin_deferred_target_selection(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     pending.deferred_target_selection = false;
-    let target_slots = build_target_slots(state, &pending.ability)?;
+    // CR 700.2 + CR 601.2b: For modal casts whose target legality depended on
+    // X (or any deferred cost), the mode-choice step recorded the chosen mode
+    // indices on `pending.chosen_modes`. Rebuild slots with the labelled
+    // builder so the per-mode banner survives the X round-trip — passing
+    // `pending.ability.chosen_x` so per-mode legality filters that reference
+    // `X` (e.g. Kozilek's Command mode 2: "mana value X or less") resolve
+    // against the announced value. Non-modal casts fall back to the unlabelled
+    // builder.
+    // CR 601.2b + CR 601.2c: modes/X are announced (601.2b) before targets are
+    // chosen (601.2c), since target legality (e.g. "mana value X or less") can
+    // depend on the chosen X.
+    let (target_slots, mode_labels) = if pending.chosen_modes.is_empty() {
+        (build_target_slots(state, &pending.ability)?, Vec::new())
+    } else {
+        let obj = state.objects.get(&pending.object_id).ok_or_else(|| {
+            EngineError::InvalidAction(
+                "Modal spell object missing for deferred target labels".into(),
+            )
+        })?;
+        let (abilities, mode_descriptions) =
+            if let Some(ability_index) = pending.activation_ability_index {
+                let def = obj.abilities.get(ability_index).ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Modal activated ability missing for deferred target labels".into(),
+                    )
+                })?;
+                (
+                    def.mode_abilities.clone(),
+                    def.modal
+                        .as_ref()
+                        .map(|m| m.mode_descriptions.clone())
+                        .unwrap_or_default(),
+                )
+            } else {
+                (
+                    obj.abilities.to_vec(),
+                    obj.modal
+                        .as_ref()
+                        .map(|m| m.mode_descriptions.clone())
+                        .unwrap_or_default(),
+                )
+            };
+        debug_assert!(
+            !mode_descriptions.is_empty(),
+            "begin_deferred_target_selection: chosen_modes is non-empty but the source object has no modal descriptions (object {:?}); per-mode target labels would silently degrade",
+            pending.object_id,
+        );
+        build_target_slots_labelled(
+            state,
+            &abilities,
+            &pending.chosen_modes,
+            &mode_descriptions,
+            pending.object_id,
+            pending.ability.controller,
+            &pending.ability.context,
+            pending.ability.chosen_x,
+        )?
+    };
     if target_slots.is_empty() {
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
@@ -648,28 +705,36 @@ fn begin_deferred_target_selection(
         pending.ability.target_selection_mode,
         crate::types::ability::TargetSelectionMode::Random
     ) {
-        let targets = random_select_targets_for_ability(state, &target_slots, &[])?;
+        let targets =
+            random_select_targets_for_ability(state, &target_slots, &pending.target_constraints)?;
         let mut ability = pending.ability.clone();
         assign_targets_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
-    if let Some(targets) =
-        auto_select_targets_for_ability(state, &pending.ability, &target_slots, &[])?
-    {
+    if let Some(targets) = auto_select_targets_for_ability(
+        state,
+        &pending.ability,
+        &target_slots,
+        &pending.target_constraints,
+    )? {
         let mut ability = pending.ability.clone();
         assign_targets_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
-    let selection =
-        begin_target_selection_for_ability(state, &pending.ability, &target_slots, &[])?;
+    let selection = begin_target_selection_for_ability(
+        state,
+        &pending.ability,
+        &target_slots,
+        &pending.target_constraints,
+    )?;
     Ok(WaitingFor::TargetSelection {
         player,
         pending_cast: Box::new(pending),
         target_slots,
-        mode_labels: Vec::new(),
+        mode_labels,
         selection,
     })
 }
@@ -2370,12 +2435,15 @@ fn pay_additional_cost(
                     "No eligible object to behold".to_string(),
                 ));
             }
-            return Ok(WaitingFor::BeholdForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
-                count: count as usize,
+                kind: PayCostKind::Behold { action },
                 choices,
-                action,
-                pending_cast: Box::new(pending),
+                count: count as usize,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::Discard { count, filter, .. } => {
@@ -2394,11 +2462,15 @@ fn pay_additional_cost(
                     "Not enough cards in hand to discard".to_string(),
                 ));
             }
-            return Ok(WaitingFor::DiscardForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Discard,
+                choices: eligible,
                 count,
-                cards: eligible,
-                pending_cast: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::Mana { cost: mana_cost } => {
@@ -2446,12 +2518,15 @@ fn pay_additional_cost(
                         "Not enough eligible permanents to sacrifice".into(),
                     ));
                 }
-                return Ok(WaitingFor::SacrificeForCost {
+                return Ok(WaitingFor::PayCost {
                     player,
+                    kind: PayCostKind::Sacrifice,
+                    choices: eligible,
                     count: max_count,
                     min_count,
-                    permanents: eligible,
-                    pending_cast: Box::new(pending),
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending),
+                    },
                 });
             }
         }
@@ -2471,11 +2546,15 @@ fn pay_additional_cost(
                     "Not enough eligible permanents to return".into(),
                 ));
             }
-            return Ok(WaitingFor::ReturnToHandForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::ReturnToHand,
+                choices: eligible,
                 count: count as usize,
-                permanents: eligible,
-                pending_cast: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::RemoveCounter {
@@ -2496,12 +2575,17 @@ fn pay_additional_cost(
                     "No eligible permanents with counters".into(),
                 ));
             }
-            return Ok(WaitingFor::RemoveCounterForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
-                count,
-                counter_type: counter_type.clone(),
-                permanents: eligible,
-                pending_cast: Box::new(pending),
+                kind: PayCostKind::RemoveCounter {
+                    counter_type: counter_type.clone(),
+                },
+                choices: eligible,
+                count: count as usize,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::PayEnergy { amount } => {
@@ -2573,12 +2657,15 @@ fn pay_additional_cost(
                     "Not enough eligible cards in {zone:?} to exile"
                 )));
             }
-            return Ok(WaitingFor::ExileForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
-                zone: narrow_zone,
+                kind: PayCostKind::ExileFromZone { zone: narrow_zone },
+                choices: eligible,
                 count: count as usize,
-                cards: eligible,
-                pending_cast: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::CollectEvidence { amount } => {
@@ -2616,11 +2703,15 @@ fn pay_additional_cost(
                     "Not enough eligible creatures to tap".into(),
                 ));
             }
-            return Ok(WaitingFor::TapCreaturesForSpellCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::TapCreatures,
+                choices: eligible,
                 count: count as usize,
-                creatures: eligible,
-                pending_cast: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         _ => {
@@ -3736,13 +3827,15 @@ fn auto_tap_mana_sources_inner(
         .flatten()
         .collect();
 
-    // CR 605.3b: Auto-tap sort key. Tier layout (preserved from the
-    // pre-refactor sort; the enum factors the two scattered bool flags):
+    // CR 605.3b: Auto-tap sort key. Tier layout (the enum factors the two
+    // scattered bool flags):
     //   outer (tier_byte): 0 = non-sacrifice mana source; 1 = sacrifice-for-mana
     //     (source will not come back — always last).
-    //   middle (card_tier): 0 = pure land, 1 = non-land mana dork,
-    //     2 = land-creature (preserve for combat), 3 = deprioritized source
-    //     (spell's own source).
+    //   middle (card_tier): 0 = free-colorless land row (ideal generic filler);
+    //     1 = other land row; 2 = non-land non-creature rock (Signet);
+    //     3 = non-land creature dork (preserve as blocker); 4 = land-creature
+    //     manland (preserve as blocker); 5 = deprioritized source (spell's own
+    //     source).
     //   inner (priority_amount): penalty sub-tier + fixed-amount tiebreak
     //     (e.g. painland-1 < painland-2 < painland-None). Replaces the
     //     collapsed `harms_controller` bool — amounts now rank.
@@ -3754,14 +3847,29 @@ fn auto_tap_mana_sources_inner(
         let is_land = obj.is_some_and(|o| o.card_types.core_types.contains(&CoreType::Land));
         let is_creature =
             obj.is_some_and(|o| o.card_types.core_types.contains(&CoreType::Creature));
+        let row_is_free_colorless =
+            option.atomic_combination.is_none() && option.mana_type == ManaType::Colorless;
         let card_tier: u32 = if deprioritize_source == Some(option.object_id) {
-            3
+            5
         } else if is_land && is_creature {
-            2
-        } else if is_land {
+            // CR 509.1a: a chosen blocker must be untapped. An animated manland
+            // is a creature body — preserve it (and after a 1/1 dork: it is
+            // usually the bigger blocker, so it sorts after the dork).
+            4
+        } else if is_creature {
+            // CR 509.1a: preserve a non-land creature mana source (dork) as a
+            // blocker.
+            3
+        } else if is_land && row_is_free_colorless {
+            // Heuristic (no CR): a free colorless row is the ideal generic
+            // filler — it commits no colored production a later shard in this
+            // same payment needs.
             0
-        } else {
+        } else if is_land {
             1
+        } else {
+            // non-land non-creature mana source (rock / Signet)
+            2
         };
         (
             option.penalty.tier_byte() as u32,
@@ -4974,6 +5082,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -5097,13 +5206,16 @@ mod tests {
 
         // Park at the cost-sacrifice prompt for two creatures, then drive the
         // real `apply_action` resolution by selecting both.
-        state.waiting_for = WaitingFor::SacrificeForCost {
+        state.waiting_for = WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::Sacrifice,
+            choices: vec![observer, plain],
             count: 2,
             // Fixed (non-variable) sacrifice cost of exactly 2 — min == count.
             min_count: 2,
-            permanents: vec![observer, plain],
-            pending_cast: Box::new(pending),
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
         };
 
         apply_as_current(
@@ -5281,13 +5393,16 @@ mod tests {
             },
         });
 
-        state.waiting_for = WaitingFor::SacrificeForCost {
+        state.waiting_for = WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::Sacrifice,
+            choices: vec![observer, plain],
             count: 2,
             // Fixed (non-variable) sacrifice cost of exactly 2 — min == count.
             min_count: 2,
-            permanents: vec![observer, plain],
-            pending_cast: Box::new(pending),
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
         };
 
         apply_as_current(
@@ -8274,6 +8389,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8302,11 +8418,11 @@ mod tests {
         .expect("pitch cost should produce ExileForCost");
 
         match result {
-            WaitingFor::ExileForCost {
+            WaitingFor::PayCost {
                 player,
-                zone,
+                kind: PayCostKind::ExileFromZone { zone },
+                choices: cards,
                 count,
-                cards,
                 ..
             } => {
                 assert_eq!(player, caster);
@@ -8325,7 +8441,7 @@ mod tests {
                     "cast source itself must never be eligible: {cards:?}"
                 );
             }
-            other => panic!("expected ExileForCost, got {other:?}"),
+            other => panic!("expected PayCost ExileFromZone, got {other:?}"),
         }
     }
 
@@ -8392,6 +8508,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8479,6 +8596,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8555,6 +8673,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8664,6 +8783,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8692,11 +8812,11 @@ mod tests {
         .expect("graveyard exile cost should produce ExileForCost");
 
         match result {
-            WaitingFor::ExileForCost {
+            WaitingFor::PayCost {
                 player,
-                zone,
+                kind: PayCostKind::ExileFromZone { zone },
+                choices: cards,
                 count,
-                cards,
                 ..
             } => {
                 assert_eq!(player, caster);
@@ -8715,7 +8835,7 @@ mod tests {
                     "cast source itself must never be eligible: {cards:?}"
                 );
             }
-            other => panic!("expected ExileForCost, got {other:?}"),
+            other => panic!("expected PayCost ExileFromZone, got {other:?}"),
         }
     }
 
