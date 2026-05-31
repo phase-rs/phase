@@ -1263,7 +1263,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let lower = text.to_lowercase();
     let mut pos = 0;
     let mut properties = Vec::new();
-    let mut keyword_disjunction_range: Option<(usize, usize)> = None;
+    let mut property_disjunction_range: Option<(usize, usize)> = None;
     let lower_trimmed = lower.trim_start();
     let offset = lower.len() - lower_trimmed.len();
     pos += offset;
@@ -1303,14 +1303,17 @@ pub fn parse_type_phrase_with_ctx<'a>(
     }
 
     // CR 509.1h: Consume combat status prefixes (unblocked, attacking, blocking).
-    // Handles "or" compound: "attacking or blocking creature" → [Attacking, Blocking].
+    // Handles "or" compound as a property disjunction: "attacking or blocking
+    // creature" means attacking creature OR blocking creature, not both.
     while let Some((prop, consumed)) = parse_combat_status_prefix(&lower[pos..]) {
+        let disjunction_start = properties.len();
         properties.push(prop);
         pos += consumed;
         // Check for "or " followed by another combat status prefix
         if let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(&lower[pos..]) {
             if let Some((next_prop, next_consumed)) = parse_combat_status_prefix(after_or) {
                 properties.push(next_prop);
+                property_disjunction_range = Some((disjunction_start, 2));
                 pos += "or ".len() + next_consumed;
             }
         }
@@ -1730,7 +1733,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     } else if let Some((suffix, consumed)) = parse_keyword_suffix(&lower[pos..]) {
         if suffix.disjunctive && suffix.properties.len() > 1 {
-            keyword_disjunction_range = Some((properties.len(), suffix.properties.len()));
+            property_disjunction_range = Some((properties.len(), suffix.properties.len()));
         }
         properties.extend(suffix.properties);
         pos += consumed;
@@ -1959,19 +1962,19 @@ pub fn parse_type_phrase_with_ctx<'a>(
         neg_type_filters,
     ]
     .concat();
-    let filter = if let Some((start, len)) = keyword_disjunction_range {
-        let keyword_props = properties[start..start + len].to_vec();
+    let filter = if let Some((start, len)) = property_disjunction_range {
+        let disjunctive_props = properties[start..start + len].to_vec();
         let common_props = properties[..start]
             .iter()
             .chain(properties[start + len..].iter())
             .cloned()
             .collect::<Vec<_>>();
         TargetFilter::Or {
-            filters: keyword_props
+            filters: disjunctive_props
                 .into_iter()
-                .map(|keyword_prop| {
+                .map(|disjunctive_prop| {
                     let mut branch_props = common_props.clone();
-                    branch_props.push(keyword_prop);
+                    branch_props.push(disjunctive_prop);
                     TargetFilter::Typed(TypedFilter {
                         type_filters: type_filters.clone(),
                         controller: controller.clone(),
@@ -8085,6 +8088,22 @@ mod tests {
         } else {
             panic!("Expected Typed filter, got {filter:?}");
         }
+    }
+
+    #[test]
+    fn parse_type_phrase_attacking_or_blocking_creature() {
+        let (filter, remainder) = parse_type_phrase("attacking or blocking creature");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        let first = typed_leg(&filters[0]).expect("first branch should be typed");
+        let second = typed_leg(&filters[1]).expect("second branch should be typed");
+        assert!(first.type_filters.contains(&TypeFilter::Creature));
+        assert!(second.type_filters.contains(&TypeFilter::Creature));
+        assert!(first.properties.contains(&FilterProp::Attacking));
+        assert!(second.properties.contains(&FilterProp::Blocking));
     }
 
     #[test]

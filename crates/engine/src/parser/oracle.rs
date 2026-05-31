@@ -5941,6 +5941,43 @@ mod tests {
     }
 
     #[test]
+    fn spell_targets_attacking_or_blocking_creature_as_disjunction() {
+        let r = parse(
+            "Joust Through deals 3 damage to target attacking or blocking creature. You gain 1 life.",
+            "Joust Through",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::DealDamage { target, .. } = &*r.abilities[0].effect else {
+            panic!("expected DealDamage, got {:?}", r.abilities[0].effect);
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected Or target, got {target:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        for (filter, property) in [
+            (&filters[0], FilterProp::Attacking),
+            (&filters[1], FilterProp::Blocking),
+        ] {
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("expected Typed branch, got {filter:?}");
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Creature));
+            assert!(typed.properties.contains(&property));
+        }
+        assert!(matches!(
+            r.abilities[0]
+                .sub_ability
+                .as_deref()
+                .map(|def| &*def.effect),
+            Some(Effect::GainLife { .. })
+        ));
+    }
+
+    #[test]
     fn quoted_granted_ability_is_not_misclassified_as_activated() {
         let r = parse(
             "White creatures you control have \"{T}: You gain 1 life.\"",
