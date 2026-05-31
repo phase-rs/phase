@@ -581,21 +581,20 @@ fn parent_target_controller_player(
 /// CR 608.2h + CR 400.7: The effective controller of `obj` for filter
 /// predicates that look back at non-battlefield objects.
 ///
-/// On the battlefield, `obj.controller` is the live value maintained by Layer
-/// 2 of the layer system. Once an object leaves the battlefield, it ceases
-/// to have a controller (CR 109.4: "Objects that are neither on the stack
-/// nor on the battlefield aren't controlled by any player"), and the
-/// at-departure controller is preserved in `state.lki_cache` by `change_zone`
-/// (`game/zones.rs:65-92`). Filters such as "creatures they controlled that
-/// were exiled this way" (Oversimplify) must read the at-exile controller,
-/// not the post-reset owner; the LKI cache holds exactly that value.
+/// On the stack and battlefield, `obj.controller` is the live value. Once an
+/// object leaves those zones, it ceases to have a controller (CR 109.4: "Objects
+/// that are neither on the stack nor on the battlefield aren't controlled by
+/// any player"), and the at-departure controller is preserved in
+/// `state.lki_cache` by `change_zone` (`game/zones.rs:65-92`). Filters such as
+/// "creatures they controlled that were exiled this way" (Oversimplify) must
+/// read the at-exile controller, not the post-reset owner; the LKI cache holds
+/// exactly that value.
 ///
-/// Returns the LKI controller when the object is off battlefield AND an LKI
-/// snapshot exists; otherwise the live `obj.controller`. Battlefield objects
-/// always use the live value — no LKI write happens until they leave the
-/// battlefield in the first place.
+/// Returns the LKI controller when the object is outside the stack/battlefield
+/// AND an LKI snapshot exists; otherwise the live `obj.controller`. Stack and
+/// battlefield objects always use the live value.
 fn effective_controller(state: &GameState, obj: &GameObject, object_id: ObjectId) -> PlayerId {
-    if obj.zone != crate::types::zones::Zone::Battlefield {
+    if !matches!(obj.zone, Zone::Battlefield | Zone::Stack) {
         if let Some(lki) = state.lki_cache.get(&object_id) {
             return lki.controller;
         }
@@ -974,13 +973,14 @@ fn filter_inner_for_object(
             }
             // Controller check
             //
-            // CR 608.2h + CR 400.7: All ControllerRef arms compare against the
-            // object's *effective* controller, which falls back to the LKI
-            // snapshot for non-battlefield objects (Oversimplify class:
+            // CR 109.4 + CR 608.2h + CR 400.7: All ControllerRef arms compare
+            // against the object's *effective* controller, which falls back to
+            // the LKI snapshot only for zones without controllers (Oversimplify class:
             // "creatures they controlled that were exiled this way" must
             // match the at-exile controller, not the post-exile owner). On
-            // the battlefield, `effective_controller` returns `obj.controller`
-            // unchanged. See the helper for the LKI-fallback rationale.
+            // the stack and battlefield, `effective_controller` returns
+            // `obj.controller` unchanged. See the helper for the LKI-fallback
+            // rationale.
             if let Some(ctrl) = controller {
                 let obj_ctrl = effective_controller(state, obj, object_id);
                 match ctrl {
@@ -7890,6 +7890,57 @@ mod tests {
         assert!(
             !matches_target_filter(&state, stolen, &opp_filter, source),
             "Opponent filter must NOT match — at-exile controller is the source's controller"
+        );
+    }
+
+    /// CR 109.4: Stack objects have controllers, so a stale LKI snapshot must
+    /// not override the live spell controller when evaluating controller
+    /// filters.
+    #[test]
+    fn stack_object_controller_uses_live_controller_even_with_lki() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let spell = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(1),
+            "Cast From Exile".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.controller = PlayerId(0);
+        }
+        state.lki_cache.insert(
+            spell,
+            LKISnapshot {
+                name: "Cast From Exile".to_string(),
+                power: None,
+                toughness: None,
+                base_power: None,
+                base_toughness: None,
+                mana_value: 2,
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                card_types: vec![],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                counters: Default::default(),
+            },
+        );
+
+        let filter = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+        assert!(
+            matches_target_filter(&state, spell, &filter, source),
+            "stack objects have a live controller; stale LKI must not make the spell look opponent-controlled"
         );
     }
 }
