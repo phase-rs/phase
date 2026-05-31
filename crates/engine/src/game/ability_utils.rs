@@ -311,6 +311,14 @@ pub fn build_target_slots(
 ///
 /// Indices are sorted (printed order, CR 608.2c) to match
 /// `build_chained_resolved`; duplicate indices (CR 700.2d) repeat the mode.
+// CR 700.2 + CR 601.2b/c: Each parameter encodes a distinct, irreducible piece
+// of the modal slot-build context (game state, ability definitions, chosen mode
+// indices, per-mode display text, source identity, controller, spell context,
+// announced X). Grouping any pair would either fabricate a transient struct
+// with no other use site or hide a real semantic axis (e.g. `chosen_x` is
+// timing-dependent — `None` before the X round-trip, `Some(x)` after — and
+// must remain visible at every call site).
+#[allow(clippy::too_many_arguments)]
 pub fn build_target_slots_labelled(
     state: &GameState,
     abilities: &[AbilityDefinition],
@@ -319,6 +327,14 @@ pub fn build_target_slots_labelled(
     source_id: ObjectId,
     controller: PlayerId,
     context: &SpellContext,
+    // CR 107.1b + CR 700.2: When the slot build runs AFTER the X round-trip
+    // (deferred target selection — see `casting_costs::begin_deferred_target_selection`),
+    // each freshly-built per-mode resolved ability needs the chosen X value
+    // propagated so target legality filters referencing `X` (e.g. Kozilek's
+    // Command mode 2: "mana value X or less") resolve against the announced
+    // value rather than the default `0`. `None` for callers that build slots
+    // BEFORE X is chosen (the common non-deferred modal path).
+    chosen_x: Option<u32>,
 ) -> Result<(Vec<TargetSelectionSlot>, Vec<Option<String>>), EngineError> {
     let mut ordered: Vec<usize> = indices.to_vec();
     ordered.sort();
@@ -330,6 +346,9 @@ pub fn build_target_slots_labelled(
             .ok_or_else(|| EngineError::InvalidAction(format!("Mode index {idx} out of range")))?;
         let mut resolved = build_resolved_from_def(def, source_id, controller);
         resolved.set_context_recursive(context.clone());
+        if let Some(x) = chosen_x {
+            resolved.set_chosen_x_recursive(x);
+        }
         acc.current_label = mode_descriptions.get(idx).cloned();
         collect_target_slots(state, &resolved, &mut acc)?;
         acc.current_label = None;
@@ -350,6 +369,9 @@ pub fn build_target_slots_labelled(
         if let Ok(mut combined) = build_chained_resolved(abilities, indices, source_id, controller)
         {
             combined.set_context_recursive(context.clone());
+            if let Some(x) = chosen_x {
+                combined.set_chosen_x_recursive(x);
+            }
             if let Ok(combined_slots) = build_target_slots(state, &combined) {
                 debug_assert_eq!(
                     acc.slots.len(),
@@ -7522,6 +7544,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("labelled modal slots build");
 
@@ -7557,6 +7580,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("multi-clause single mode builds");
 
@@ -7591,6 +7615,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("fan-out modal slots build");
 
@@ -7622,6 +7647,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
             &SpellContext::default(),
+            None,
         )
         .expect("missing-description modal slots build");
 

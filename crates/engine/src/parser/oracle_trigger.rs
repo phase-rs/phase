@@ -7644,12 +7644,27 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     let phase_text = stripped.trim();
     let mut def = make_base();
     def.mode = TriggerMode::Phase;
-    def.phase = scan_for_phase(phase_text);
+    let phase = scan_for_phase(phase_text);
+    let is_generic_main_phase = phase.is_none() && scan_for_generic_main_phase(phase_text);
+    def.phase = phase;
 
     // CR 503.1a / CR 507.1: Parse possessive qualifier and trailing suffix for turn constraint.
     // Uses nom prefix dispatch: opponent possessives checked before bare "your" to avoid
     // "your opponent's" matching as "your".
-    def.constraint = parse_turn_constraint(phase_text);
+    let turn_constraint = parse_turn_constraint(phase_text);
+    def.constraint = if is_generic_main_phase {
+        match turn_constraint {
+            // CR 505.1 + CR 603.2b: "each of your main phases" is not one
+            // concrete phase; it triggers at the start of either main phase
+            // on the source controller's turn.
+            Some(TriggerConstraint::OnlyDuringYourTurn) => {
+                Some(TriggerConstraint::OnlyDuringYourMainPhase)
+            }
+            other => other,
+        }
+    } else {
+        turn_constraint
+    };
     if scan_contains(phase_text, "enchanted player's") {
         def.valid_target = Some(TargetFilter::AttachedTo);
     }
@@ -10034,9 +10049,20 @@ fn parse_phase_keyword(input: &str) -> nom::IResult<&str, Phase, OracleError<'_>
     .parse(input)
 }
 
+/// CR 505.1: "main phase" collectively names the precombat and postcombat
+/// main phases without selecting one concrete `Phase` value.
+fn parse_generic_main_phase_keyword(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    value((), pair(tag("main phase"), opt(tag("s")))).parse(input)
+}
+
 /// Scan phase_text for a phase keyword at each word boundary using nom combinators.
 fn scan_for_phase(text: &str) -> Option<Phase> {
     super::oracle_nom::primitives::scan_at_word_boundaries(text, parse_phase_keyword)
+}
+
+fn scan_for_generic_main_phase(text: &str) -> bool {
+    super::oracle_nom::primitives::scan_at_word_boundaries(text, parse_generic_main_phase_keyword)
+        .is_some()
 }
 
 /// CR 503.1a / CR 507.1: Parse turn constraint from phase text using nom prefix dispatch.
@@ -10053,13 +10079,15 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
         tag("your opponent's "),
         tag("your opponents\u{2019} "),
         tag("your opponents' "),
+        tag("each of your opponents\u{2019} "),
+        tag("each of your opponents' "),
     ))
     .parse(phase_text)
     .is_ok()
     {
         return Some(TriggerConstraint::OnlyDuringOpponentsTurn);
     }
-    if tag::<_, _, OracleError<'_>>("your ")
+    if alt((tag::<_, _, OracleError<'_>>("each of your "), tag("your ")))
         .parse(phase_text)
         .is_ok()
     {
@@ -19167,6 +19195,7 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::PostCombatMain));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
         assert!(def.optional, "trigger should be optional ('you may')");
 
         let bound_qty = QuantityExpr::Ref {
@@ -19213,6 +19242,21 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::PreCombatMain));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    #[test]
+    fn trigger_each_of_your_main_phases_uses_main_phase_constraint() {
+        let def = parse_trigger_line(
+            "At the beginning of each of your main phases, if you haven't added mana with this ability this turn, you may add X mana of any one color, where X is the number of Islands target opponent controls.",
+            "Carpet of Flowers",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, None);
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OnlyDuringYourMainPhase)
+        );
+        assert!(def.optional, "trigger should be optional ('you may')");
     }
 
     /// Coalition Relic, third ability — Future Sight artifact, issue #130.

@@ -27,8 +27,8 @@ use super::stack;
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, flatten_targets_in_chain, modal_choice_for_player,
-    random_select_targets_for_ability, target_constraints_from_modal,
+    build_target_slots, build_target_slots_labelled, flatten_targets_in_chain,
+    modal_choice_for_player, random_select_targets_for_ability, target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
 
@@ -637,7 +637,64 @@ fn begin_deferred_target_selection(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     pending.deferred_target_selection = false;
-    let target_slots = build_target_slots(state, &pending.ability)?;
+    // CR 700.2 + CR 601.2b: For modal casts whose target legality depended on
+    // X (or any deferred cost), the mode-choice step recorded the chosen mode
+    // indices on `pending.chosen_modes`. Rebuild slots with the labelled
+    // builder so the per-mode banner survives the X round-trip — passing
+    // `pending.ability.chosen_x` so per-mode legality filters that reference
+    // `X` (e.g. Kozilek's Command mode 2: "mana value X or less") resolve
+    // against the announced value. Non-modal casts fall back to the unlabelled
+    // builder.
+    // CR 601.2b + CR 601.2c: modes/X are announced (601.2b) before targets are
+    // chosen (601.2c), since target legality (e.g. "mana value X or less") can
+    // depend on the chosen X.
+    let (target_slots, mode_labels) = if pending.chosen_modes.is_empty() {
+        (build_target_slots(state, &pending.ability)?, Vec::new())
+    } else {
+        let obj = state.objects.get(&pending.object_id).ok_or_else(|| {
+            EngineError::InvalidAction(
+                "Modal spell object missing for deferred target labels".into(),
+            )
+        })?;
+        let (abilities, mode_descriptions) =
+            if let Some(ability_index) = pending.activation_ability_index {
+                let def = obj.abilities.get(ability_index).ok_or_else(|| {
+                    EngineError::InvalidAction(
+                        "Modal activated ability missing for deferred target labels".into(),
+                    )
+                })?;
+                (
+                    def.mode_abilities.clone(),
+                    def.modal
+                        .as_ref()
+                        .map(|m| m.mode_descriptions.clone())
+                        .unwrap_or_default(),
+                )
+            } else {
+                (
+                    obj.abilities.to_vec(),
+                    obj.modal
+                        .as_ref()
+                        .map(|m| m.mode_descriptions.clone())
+                        .unwrap_or_default(),
+                )
+            };
+        debug_assert!(
+            !mode_descriptions.is_empty(),
+            "begin_deferred_target_selection: chosen_modes is non-empty but the source object has no modal descriptions (object {:?}); per-mode target labels would silently degrade",
+            pending.object_id,
+        );
+        build_target_slots_labelled(
+            state,
+            &abilities,
+            &pending.chosen_modes,
+            &mode_descriptions,
+            pending.object_id,
+            pending.ability.controller,
+            &pending.ability.context,
+            pending.ability.chosen_x,
+        )?
+    };
     if target_slots.is_empty() {
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
@@ -648,28 +705,36 @@ fn begin_deferred_target_selection(
         pending.ability.target_selection_mode,
         crate::types::ability::TargetSelectionMode::Random
     ) {
-        let targets = random_select_targets_for_ability(state, &target_slots, &[])?;
+        let targets =
+            random_select_targets_for_ability(state, &target_slots, &pending.target_constraints)?;
         let mut ability = pending.ability.clone();
         assign_targets_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
-    if let Some(targets) =
-        auto_select_targets_for_ability(state, &pending.ability, &target_slots, &[])?
-    {
+    if let Some(targets) = auto_select_targets_for_ability(
+        state,
+        &pending.ability,
+        &target_slots,
+        &pending.target_constraints,
+    )? {
         let mut ability = pending.ability.clone();
         assign_targets_in_chain(state, &mut ability, &targets)?;
         pending.ability = ability;
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
-    let selection =
-        begin_target_selection_for_ability(state, &pending.ability, &target_slots, &[])?;
+    let selection = begin_target_selection_for_ability(
+        state,
+        &pending.ability,
+        &target_slots,
+        &pending.target_constraints,
+    )?;
     Ok(WaitingFor::TargetSelection {
         player,
         pending_cast: Box::new(pending),
         target_slots,
-        mode_labels: Vec::new(),
+        mode_labels,
         selection,
     })
 }
@@ -5017,6 +5082,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8323,6 +8389,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8441,6 +8508,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8528,6 +8596,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8604,6 +8673,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -8713,6 +8783,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),

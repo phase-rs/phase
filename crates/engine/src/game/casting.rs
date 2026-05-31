@@ -8456,14 +8456,29 @@ pub fn handle_activate_ability(
             }
         }
         let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
-        super::ability_utils::filter_modes_by_target_legality(
-            state,
-            source_id,
-            player,
-            &ability_def.mode_abilities,
-            &modal,
-            &mut unavailable_modes,
-        );
+        let x_dependent_modal_targets = ability_def.cost.as_ref().is_some_and(|cost| {
+            casting_costs::extract_x_mana_cost(cost).is_some()
+                && ability_def.mode_abilities.iter().any(|mode| {
+                    ability_target_legality_needs_chosen_x(&build_resolved_from_def(
+                        mode, source_id, player,
+                    ))
+                })
+        });
+        // CR 602.2b + CR 601.2b/c: When modal activated ability target legality
+        // depends on an {X} activation cost, legality is not knowable until the
+        // player chooses X after mode selection. Do not pre-disable those modes
+        // using the unchosen-X target filter; the deferred target-selection path
+        // validates the chosen X before targets are committed.
+        if !x_dependent_modal_targets {
+            super::ability_utils::filter_modes_by_target_legality(
+                state,
+                source_id,
+                player,
+                &ability_def.mode_abilities,
+                &modal,
+                &mut unavailable_modes,
+            );
+        }
         // CR 700.2a: The controller chooses modes while activating a modal
         // ability. If every mode is illegal due to unavailable selections or
         // unsatisfied targeting requirements, the ability cannot be activated.
@@ -19838,7 +19853,11 @@ mod tests {
             .unwrap()
             .waiting_for;
         match &state.waiting_for {
-            WaitingFor::TargetSelection { target_slots, .. } => {
+            WaitingFor::TargetSelection {
+                target_slots,
+                mode_labels,
+                ..
+            } => {
                 assert_eq!(target_slots.len(), 1);
                 assert!(target_slots[0]
                     .legal_targets
@@ -19846,6 +19865,30 @@ mod tests {
                 assert!(target_slots[0]
                     .legal_targets
                     .contains(&TargetRef::Object(other_creature)));
+                // CR 700.2 / CR 601.2c: the deferred-target path must surface the
+                // per-mode label for the targeting UI (regression for issue #1543:
+                // Kozilek's Command's mode-2 banner went blank after X was chosen
+                // because `chosen_modes` wasn't persisted across the X round-trip).
+                assert_eq!(
+                    mode_labels.len(),
+                    target_slots.len(),
+                    "mode_labels must align 1:1 with target_slots after deferred target selection"
+                );
+                // Exact content match (not just `is_some()`): guards against a
+                // future bug that swaps label *order* between target slots —
+                // mode 0 ("Create X Eldrazi Spawn tokens.") has no target, so
+                // the sole target slot must carry mode 1's description string,
+                // not merely *some* non-None label.
+                assert_eq!(
+                    mode_labels[0].as_deref(),
+                    Some("Exile target creature with mana value X or less."),
+                    "first target slot must surface the second mode's description"
+                );
+                assert_ne!(
+                    mode_labels[0].as_deref(),
+                    Some("Create X Eldrazi Spawn tokens."),
+                    "first target slot must not carry mode 0's label (mode 0 has no target)"
+                );
             }
             other => panic!("expected target selection after choosing X, got {other:?}"),
         }
@@ -19867,6 +19910,374 @@ mod tests {
             .filter(|id| state.objects[id].name == "Eldrazi Spawn")
             .count();
         assert_eq!(spawn_count, 2);
+    }
+
+    /// CR 700.2 + CR 601.2c: When both chosen modes of an X-cost modal spell
+    /// require targets, the deferred target-selection step (after `ChooseX`)
+    /// must surface per-slot mode labels so the targeting UI can disambiguate
+    /// which mode each slot belongs to. Regression for issue #1543 — the
+    /// `mode_labels` list was previously dropped on the X round-trip, leaving
+    /// every banner blank for spells like Kozilek's Command.
+    #[test]
+    fn modal_x_target_selection_carries_per_mode_labels() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Two-Mode Test Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Colorless],
+                generic: 0,
+            };
+            // Mode 0: exile target creature with mana value X or less.
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                        },
+                    ])),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            ));
+            // Mode 1: return target creature with mana value X or less to its owner's hand.
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Hand,
+                    target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable {
+                                    name: "X".to_string(),
+                                },
+                            },
+                        },
+                    ])),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            ));
+            obj.modal = Some(crate::types::ability::ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 2,
+                mode_descriptions: vec![
+                    "Exile target creature with mana value X or less.".to_string(),
+                    "Return target creature with mana value X or less to its owner's hand."
+                        .to_string(),
+                ],
+                ..Default::default()
+            });
+        }
+
+        let creature_a = create_object(
+            &mut state,
+            CardId(82),
+            PlayerId(1),
+            "Two Drop A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_a).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        let creature_b = create_object(
+            &mut state,
+            CardId(83),
+            PlayerId(1),
+            "Two Drop B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(81), &mut events).unwrap();
+        state.waiting_for =
+            handle_select_modes(&mut state, PlayerId(0), vec![0, 1], &mut events).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "X must be chosen before building target slots whose legality depends on X"
+        );
+
+        state.waiting_for = apply_as_current(&mut state, GameAction::ChooseX { value: 2 })
+            .unwrap()
+            .waiting_for;
+        match &state.waiting_for {
+            WaitingFor::TargetSelection {
+                target_slots,
+                mode_labels,
+                ..
+            } => {
+                assert_eq!(target_slots.len(), 2, "both chosen modes contribute a slot");
+                assert_eq!(
+                    mode_labels.len(),
+                    target_slots.len(),
+                    "mode_labels must align 1:1 with target_slots when both modes need targets"
+                );
+                assert_eq!(
+                    mode_labels[0].as_deref(),
+                    Some("Exile target creature with mana value X or less."),
+                    "first slot must surface mode 0's description"
+                );
+                assert_eq!(
+                    mode_labels[1].as_deref(),
+                    Some("Return target creature with mana value X or less to its owner's hand."),
+                    "second slot must surface mode 1's description"
+                );
+            }
+            other => panic!("expected target selection after choosing X, got {other:?}"),
+        }
+    }
+
+    /// CR 602.2b + CR 601.2b/c: Activated abilities follow the same mode/X/target
+    /// announcement ordering as spells. A modal activated ability with {X} in its
+    /// activation cost must choose X before building target slots whose legality
+    /// references X, while still preserving per-mode target labels.
+    #[test]
+    fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(84),
+            PlayerId(0),
+            "Modal X Relic".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            let x_or_less = || {
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                }]))
+            };
+            let mode0 = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: x_or_less(),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            );
+            let mode1 = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Hand,
+                    target: x_or_less(),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            );
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Unimplemented {
+                        name: "modal_x_placeholder".to_string(),
+                        description: None,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                })
+                .with_modal(
+                    crate::types::ability::ModalChoice {
+                        min_choices: 2,
+                        max_choices: 2,
+                        mode_count: 2,
+                        mode_descriptions: vec![
+                            "Exile target creature with mana value X or less.".to_string(),
+                            "Return target creature with mana value X or less to its owner's hand."
+                                .to_string(),
+                        ],
+                        ..Default::default()
+                    },
+                    vec![mode0, mode1],
+                ),
+            );
+        }
+
+        let creature_a = create_object(
+            &mut state,
+            CardId(85),
+            PlayerId(1),
+            "Two Drop A".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_a).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        let creature_b = create_object(
+            &mut state,
+            CardId(86),
+            PlayerId(1),
+            "Two Drop B".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_b).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = ManaCost::generic(2);
+        }
+        let creature_too_large = create_object(
+            &mut state,
+            CardId(87),
+            PlayerId(1),
+            "Four Drop".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_too_large).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            obj.mana_cost = ManaCost::generic(4);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::AbilityModeChoice { .. }),
+            "activation should choose modes before choosing X"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectModes {
+                indices: vec![0, 1],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "mode selection must route to ChooseX before X-dependent target selection"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
+        match &state.waiting_for {
+            WaitingFor::TargetSelection {
+                target_slots,
+                mode_labels,
+                ..
+            } => {
+                assert_eq!(target_slots.len(), 2);
+                assert_eq!(
+                    mode_labels.len(),
+                    target_slots.len(),
+                    "mode labels must align with activated ability target slots"
+                );
+                assert_eq!(
+                    mode_labels[0].as_deref(),
+                    Some("Exile target creature with mana value X or less.")
+                );
+                assert_eq!(
+                    mode_labels[1].as_deref(),
+                    Some("Return target creature with mana value X or less to its owner's hand.")
+                );
+                for slot in target_slots {
+                    assert!(slot.legal_targets.contains(&TargetRef::Object(creature_a)));
+                    assert!(slot.legal_targets.contains(&TargetRef::Object(creature_b)));
+                    assert!(
+                        !slot
+                            .legal_targets
+                            .contains(&TargetRef::Object(creature_too_large)),
+                        "X=2 must exclude mana value 4 targets"
+                    );
+                }
+            }
+            other => panic!("expected target selection after choosing X, got {other:?}"),
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(creature_a), TargetRef::Object(creature_b)],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.players[0].mana_pool.mana.len(),
+            1,
+            "the {{X}} activation mana cost should be paid after target selection"
+        );
+        let StackEntryKind::ActivatedAbility { ability, .. } = &state.stack[0].kind else {
+            panic!("expected activated ability on stack");
+        };
+        assert_eq!(ability.chosen_x, Some(2));
     }
 
     #[test]

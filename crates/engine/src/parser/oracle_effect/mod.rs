@@ -56,7 +56,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{anychar, multispace1};
-use nom::combinator::{all_consuming, eof, map, not, opt, recognize, rest, value};
+use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value};
 use nom::multi::{many1, separated_list1};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -2151,6 +2151,78 @@ fn try_parse_create_token_choice(
     }))
 }
 
+/// CR 111.2 + CR 608.2c: Shared-verb token sequences such as "create a ...
+/// token with deathtouch and a ... token with lifelink" carry two token noun
+/// phrases in written order, not one token with a long keyword suffix. Parse
+/// both noun phrases through the normal token grammar and chain the second.
+fn try_parse_create_token_sequence(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let ((), after_create_original) = nom_on_lower(tp.original, tp.lower, |i| {
+        value((), tag("create ")).parse(i)
+    })?;
+    let consumed = tp.original.len() - after_create_original.len();
+    let after_create = TextPair::new(after_create_original, &tp.lower[consumed..]);
+
+    let (left_original, left_lower, right_original, right_lower) =
+        split_create_token_sequence(after_create)?;
+    let left_effect = token::try_parse_token(left_lower, left_original.trim(), ctx)?;
+    let right_effect = token::try_parse_token(right_lower, right_original.trim(), ctx)?;
+
+    if !matches!(left_effect, Effect::Token { .. }) || !matches!(right_effect, Effect::Token { .. })
+    {
+        return None;
+    }
+
+    let mut right_def = AbilityDefinition::new(AbilityKind::Spell, right_effect);
+    right_def.description = Some(format!("create {}", right_original.trim()));
+
+    let mut clause = parsed_clause(left_effect);
+    clause.sub_ability = Some(Box::new(right_def));
+    Some(clause)
+}
+
+fn split_create_token_sequence<'a>(
+    after_create: TextPair<'a>,
+) -> Option<(&'a str, &'a str, &'a str, &'a str)> {
+    let mut search_lower = after_create.lower;
+    while let Some((before_lower, (), right_lower)) =
+        nom_primitives::scan_preceded(search_lower, parse_token_sequence_conjunction)
+    {
+        let split_offset = after_create.lower.len() - search_lower.len() + before_lower.len();
+        let right_offset = after_create.lower.len() - right_lower.len();
+        let left_original = &after_create.original[..split_offset];
+        let left_lower = &after_create.lower[..split_offset];
+        let right_original = &after_create.original[right_offset..];
+
+        if token::parse_token_description(left_original.trim()).is_some()
+            && token::parse_token_description(right_original.trim()).is_some()
+        {
+            return Some((left_original, left_lower, right_original, right_lower));
+        }
+
+        search_lower = right_lower;
+    }
+    None
+}
+
+fn parse_token_sequence_conjunction(input: &str) -> OracleResult<'_, ()> {
+    preceded(tag("and "), peek(parse_token_noun_start)).parse(input)
+}
+
+fn parse_token_noun_start(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag("a ")),
+        value((), tag("an ")),
+        value((), tag("one ")),
+        value((), tag("x ")),
+        value((), tag("that many ")),
+        value((), terminated(nom_primitives::parse_number, tag(" "))),
+    ))
+    .parse(input)
+}
+
 /// CR 115.1 + CR 608.2d + CR 701.26a-b: "tap or untap target <object>" (and the
 /// "untap or tap" ordering) declares a single target as the trigger/spell is put
 /// on the stack, then the controller chooses the tap or untap instruction while
@@ -3602,6 +3674,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // "unless that player" pattern is matched before the left half is misread as
     // just the default consequence (losing the avoidance alternative).
     if let Some(clause) = try_parse_unless_three_branch_choice(tp, ctx) {
+        return clause;
+    }
+
+    // CR 111.2 + CR 608.2c: Shared-verb token sequences — checked before the
+    // choice splitter and single-token dispatch so the second token noun phrase
+    // is preserved in the effect chain.
+    if let Some(clause) = try_parse_create_token_sequence(tp, ctx) {
         return clause;
     }
 
@@ -21660,6 +21739,67 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn effect_chain_create_distinct_token_sequence_preserves_second_token() {
+        let def = parse_effect_chain(
+            "Create a 3/3 colorless Phyrexian Wurm artifact creature token with deathtouch and a 3/3 colorless Phyrexian Wurm artifact creature token with lifelink.",
+            AbilityKind::Spell,
+        );
+
+        match &*def.effect {
+            Effect::Token { name, keywords, .. } => {
+                assert_eq!(name, "Phyrexian Wurm");
+                assert_eq!(keywords, &vec![Keyword::Deathtouch]);
+            }
+            other => panic!("expected first Token effect, got {other:?}"),
+        }
+
+        let sub = def.sub_ability.as_ref().expect("second token sub-ability");
+        match &*sub.effect {
+            Effect::Token { name, keywords, .. } => {
+                assert_eq!(name, "Phyrexian Wurm");
+                assert_eq!(keywords, &vec![Keyword::Lifelink]);
+            }
+            other => panic!("expected second Token effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_chain_create_generic_token_sequence() {
+        let def = parse_effect_chain(
+            "Create a Food token and a Treasure token.",
+            AbilityKind::Spell,
+        );
+
+        match &*def.effect {
+            Effect::Token { name, .. } => assert_eq!(name, "Food"),
+            other => panic!("expected first Token effect, got {other:?}"),
+        }
+
+        let sub = def.sub_ability.as_ref().expect("second token sub-ability");
+        match &*sub.effect {
+            Effect::Token { name, .. } => assert_eq!(name, "Treasure"),
+            other => panic!("expected second Token effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_chain_create_single_token_with_keyword_conjunction_does_not_split() {
+        let def = parse_effect_chain(
+            "Create a 4/4 white Angel creature token with flying and vigilance.",
+            AbilityKind::Spell,
+        );
+
+        assert!(def.sub_ability.is_none());
+        match &*def.effect {
+            Effect::Token { name, keywords, .. } => {
+                assert_eq!(name, "Angel");
+                assert_eq!(keywords, &vec![Keyword::Flying, Keyword::Vigilance]);
+            }
+            other => panic!("expected Token effect, got {other:?}"),
+        }
     }
 
     #[test]

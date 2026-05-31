@@ -4,16 +4,16 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaCost;
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_chained_resolved, build_target_slots_labelled, flatten_targets_in_chain,
-    random_select_targets_for_ability, record_modal_mode_choices, target_constraints_from_modal,
-    validate_modal_indices,
+    ability_target_legality_needs_chosen_x, assign_targets_in_chain,
+    auto_select_targets_for_ability, begin_target_selection_for_ability, build_chained_resolved,
+    build_target_slots_labelled, flatten_targets_in_chain, random_select_targets_for_ability,
+    record_modal_mode_choices, target_constraints_from_modal, validate_modal_indices,
 };
-use super::casting;
 use super::engine::EngineError;
 use super::engine_stack;
 use super::restrictions;
 use super::triggers;
+use super::{casting, casting_costs};
 
 pub(super) fn handle_ability_mode_choice(
     state: &mut GameState,
@@ -104,6 +104,30 @@ fn handle_activated_mode_choice(
         indices,
     } = choice;
 
+    let target_constraints = target_constraints_from_modal(&modal);
+
+    // CR 602.2b + CR 601.2b/c: Activating an ability follows the spell
+    // announcement steps. If an activated modal ability's target legality depends
+    // on an {X} activation cost, choose X after modes and before targets, then
+    // resume through the same deferred target-selection path modal spells use so
+    // per-mode labels and X-dependent legality stay in sync.
+    if ability_target_legality_needs_chosen_x(&resolved) {
+        if let Some(cost) = ability_cost.as_ref() {
+            if let Some((mana_cost, remaining)) = casting_costs::extract_x_mana_cost(cost) {
+                let mut pending_x = PendingCast::new(source_id, CardId(0), resolved, mana_cost);
+                pending_x.activation_cost = remaining;
+                pending_x.activation_ability_index = ability_index;
+                pending_x.target_constraints = target_constraints;
+                pending_x.deferred_target_selection = true;
+                let mut chosen_modes = indices.clone();
+                chosen_modes.sort_unstable();
+                pending_x.chosen_modes = chosen_modes;
+                state.pending_cast = Some(Box::new(pending_x));
+                return casting_costs::enter_payment_step(state, player, None, events);
+            }
+        }
+    }
+
     super::layers::flush_layers(state);
 
     // CR 700.2 / CR 601.2b: Build slots and per-mode labels together against the
@@ -118,8 +142,8 @@ fn handle_activated_mode_choice(
         source_id,
         player,
         &resolved.context,
+        resolved.chosen_x,
     )?;
-    let target_constraints = target_constraints_from_modal(&modal);
 
     if !target_slots.is_empty() {
         // CR 115.1 + CR 701.9b: Random-target modal activated abilities — the
@@ -282,6 +306,8 @@ fn handle_triggered_mode_choice(
         source_id,
         player,
         &resolved.context,
+        // CR 107.1b: Triggered abilities don't use a chosen X here.
+        None,
     )?;
     let target_constraints = target_constraints_from_modal(&modal);
 

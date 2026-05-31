@@ -10579,6 +10579,40 @@ pub mod tests {
         ));
     }
 
+    #[test]
+    fn parsed_each_of_your_main_phases_fires_only_on_controller_main_phases() {
+        fn run(active_player: PlayerId, phase: Phase) -> usize {
+            let mut state = setup();
+            state.active_player = active_player;
+            state.priority_player = active_player;
+            state.phase = phase;
+
+            let source = make_creature(&mut state, PlayerId(0), "Carpet of Flowers", 0, 1);
+            let mut trig_def = crate::parser::oracle_trigger::parse_trigger_line(
+                "At the beginning of each of your main phases, if you haven't added mana with this ability this turn, you may add X mana of any one color, where X is the number of Islands target opponent controls.",
+                "Carpet of Flowers",
+            );
+            trig_def.execute = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )));
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.trigger_definitions.push(trig_def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+
+            process_triggers(&mut state, &[GameEvent::PhaseChanged { phase }]);
+            state.stack.len()
+        }
+
+        assert_eq!(run(PlayerId(0), Phase::PreCombatMain), 1);
+        assert_eq!(run(PlayerId(0), Phase::PostCombatMain), 1);
+        assert_eq!(run(PlayerId(0), Phase::Upkeep), 0);
+        assert_eq!(run(PlayerId(1), Phase::PreCombatMain), 0);
+    }
+
     /// CR 601.2h + CR 603.4: Increment intervening-if gates the counter-placement
     /// trigger on the amount of mana spent to cast the triggering spell exceeding
     /// either the source creature's power or its toughness. This is the regression
