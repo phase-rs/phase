@@ -967,6 +967,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             target_player: None,
             selection_constraint: SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![crate::types::zones::Zone::Library],
         },
         source_id,
         controller,
