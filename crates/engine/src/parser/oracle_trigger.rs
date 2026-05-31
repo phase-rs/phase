@@ -3176,14 +3176,58 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
 
     // Object noun phrase: the "ability" being activated. Decomposed into
     // article + optional modifier + noun so the grammar accepts both "an
-    // ability" and "an activated ability". This is also the clean extension
-    // point for the source-object filter axis ("an ability **of an artifact**",
-    // "of a creature or land", "of a permanent"). The matcher already consults
-    // `def.valid_card` via `valid_card_matches`, so adding source-object filters
-    // here unlocks Crackdown Construct, Wizened Mentor, Runic Armasaur, Ceaseless
-    // Searblades, and similar cards.
-    fn parse_ability_object(input: &str) -> OracleResult<'_, ()> {
-        value((), (tag("an "), opt(tag("activated ")), tag("ability"))).parse(input)
+    // ability" and "an activated ability". An optional "of <source>" suffix
+    // narrows the trigger to abilities whose source matches a type filter.
+    // The matcher already consults `def.valid_card` via `valid_card_matches`,
+    // so the source-object filter is propagated directly.
+    // Cards: Crackdown Construct, Ashnod the Uncaring, Wizened Mentor,
+    // Runic Armasaur, Ceaseless Searblades.
+    fn parse_ability_object(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+        let (rest, _) = (tag("an "), opt(tag("activated ")), tag("ability")).parse(input)?;
+        // CR 602.1a: Optional source-object filter narrows the trigger to
+        // abilities whose source matches a type filter ("of an artifact or
+        // creature", "of a creature or land", "of a permanent").
+        opt(preceded(
+            tag(" of "),
+            preceded(alt((tag("a "), tag("an "))), parse_source_type_disjunction),
+        ))
+        .map(|filter| {
+            filter.map(|types| {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters: types,
+                    ..TypedFilter::default()
+                })
+            })
+        })
+        .parse(rest)
+    }
+
+    /// CR 602.1a: Parse a disjunction of card types for the source-object
+    /// filter: "artifact or creature", "creature or land", "permanent", etc.
+    /// Uses `separated_list1` per R1 (nom combinators on the first pass).
+    fn parse_source_type_disjunction(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+        separated_list1(tag(" or "), parse_single_source_type)
+            .map(|types| {
+                if types.len() == 1 {
+                    types
+                } else {
+                    vec![TypeFilter::AnyOf(types)]
+                }
+            })
+            .parse(input)
+    }
+
+    /// CR 205: Match a single card type keyword for source-object filters.
+    fn parse_single_source_type(input: &str) -> OracleResult<'_, TypeFilter> {
+        alt((
+            value(TypeFilter::Artifact, tag("artifact")),
+            value(TypeFilter::Creature, tag("creature")),
+            value(TypeFilter::Land, tag("land")),
+            value(TypeFilter::Enchantment, tag("enchantment")),
+            value(TypeFilter::Planeswalker, tag("planeswalker")),
+            value(TypeFilter::Permanent, tag("permanent")),
+        ))
+        .parse(input)
     }
 
     fn parse_qualifier(input: &str) -> OracleResult<'_, Option<TriggerCondition>> {
@@ -3209,10 +3253,11 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         ),
     );
 
-    if let Ok((_, (subject, _, qualifier))) = all_consuming(parse_line).parse(lower) {
+    if let Ok((_, (subject, source_filter, qualifier))) = all_consuming(parse_line).parse(lower) {
         let mut def = make_base();
         def.mode = TriggerMode::AbilityActivated;
         def.valid_target = subject;
+        def.valid_card = source_filter;
         def.condition = qualifier;
         return Some((TriggerMode::AbilityActivated, def));
     }
@@ -23072,6 +23117,34 @@ mod snapshot_tests {
                 .map(|ability| ability.effect.as_ref()),
             Some(Effect::CopySpell { .. })
         ));
+    }
+
+    /// CR 602.1: "Whenever you activate an ability of an artifact or creature
+    /// that isn't a mana ability" — source-object filter with type disjunction.
+    /// Cards: Crackdown Construct, Ashnod the Uncaring.
+    #[test]
+    fn trigger_activate_ability_of_artifact_or_creature() {
+        let def = parse_trigger_line(
+            "Whenever you activate an ability of an artifact or creature that isn't a mana ability, ~ gets +1/+1 until end of turn.",
+            "Crackdown Construct",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+        // Source-object filter: artifact or creature.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Artifact,
+                    TypeFilter::Creature,
+                ])],
+                ..TypedFilter::default()
+            }))
+        );
     }
 
     #[test]
