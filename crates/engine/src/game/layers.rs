@@ -1565,6 +1565,10 @@ fn refresh_static_gate_truth(state: &mut GameState) {
     state.static_gate_truth = next;
 }
 
+/// CR 613.1: Continuous effects are applied in layers to determine object characteristics.
+/// CR 122.1: Counters can modify object characteristics.
+/// CR 301.5: Equipment attachments can affect equipped creatures.
+/// CR 303.4: Aura attachments can affect enchanted objects.
 /// True when the entered object cannot be handled by the incremental fast path
 /// and the flush must escalate to a full re-evaluation. Conservative: any entry
 /// kind whose layer contribution cannot be cheaply proven empty fails closed.
@@ -2241,6 +2245,8 @@ fn apply_combat_assignment_rule_effects(state: &mut GameState) {
     apply_combat_assignment_rule_effects_filtered(state, None);
 }
 
+/// CR 613.11: Continuous effects that affect game rules are applied after
+/// object-affecting continuous effects.
 fn apply_combat_assignment_rule_effects_filtered(
     state: &mut GameState,
     restrict_to: Option<&HashSet<ObjectId>>,
@@ -2742,6 +2748,8 @@ fn record_attribution(
 /// also carries a `QuantityExpr` but is resolution-time-consumed by the
 /// BecomeCopy / CopyTokenOf resolvers and never reaches `apply_continuous_effect`
 /// (see its doc comment), so it is excluded.
+/// CR 613.1: Dynamic continuous modifications are evaluated while applying
+/// continuous effects through the layer system.
 fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&QuantityExpr> {
     match m {
         ContinuousModification::SetDynamicPower { value }
@@ -2804,6 +2812,8 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
 /// without re-applying to (and thus without needing to reset) the rest of the
 /// battlefield. Shares the entire apply body with `apply_continuous_effect` —
 /// no duplicated per-recipient logic.
+/// CR 613.1: Applies continuous effects through the layer system to the
+/// restricted recipient set.
 fn apply_continuous_effect_to(
     state: &mut GameState,
     effect: &ActiveContinuousEffect,

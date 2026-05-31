@@ -1916,23 +1916,24 @@ fn batch_eligible_siblings(
     // restriction) while a later identical copy is ready, so test whether *any*
     // matching ability index is ready.
     let mut siblings: Vec<ObjectId> = state
-        .objects
+        .battlefield
         .iter()
-        .filter_map(|(id, obj)| {
-            (*id != exclude
+        .copied()
+        .filter_map(|id| {
+            let obj = state.objects.get(&id)?;
+            (id != exclude
                 && obj.controller == player
-                && obj.zone == Zone::Battlefield
                 && obj.abilities.iter().enumerate().any(|(index, ability)| {
                     ability == ability_def
                         && mana_ability_ready_without_simulation(
                             state,
                             player,
-                            *id,
+                            id,
                             index,
                             ability_def,
                         )
                 }))
-            .then_some(*id)
+            .then_some(id)
         })
         .collect();
     siblings.sort_unstable_by_key(|id| id.0);

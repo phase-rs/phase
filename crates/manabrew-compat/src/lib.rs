@@ -10,7 +10,7 @@ use engine::game::game_object::{AttachTarget, GameObject};
 use engine::types::ability::{ChoiceType, TargetRef};
 use engine::types::card::CardFace;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use engine::types::game_state::{GameState, ManaChoicePrompt, StackEntryKind, WaitingFor};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::{PlayerCounterKind, PlayerId};
@@ -638,7 +638,7 @@ pub fn build_prompt(
         }
         WaitingFor::ManaPayment { .. } => "payManaCost",
         WaitingFor::ChooseManaColor { choice, .. } => {
-            insert_json(&mut fields, "availableColors", format!("{choice:?}"));
+            insert_json(&mut fields, "availableColors", mana_choice_options(choice));
             "specifyManaCombo"
         }
         WaitingFor::PayManaAbilityMana { options, .. } => {
@@ -1218,12 +1218,16 @@ fn playable_objects(actions: &[GameAction]) -> HashSet<ObjectId> {
             | GameAction::CastSpellAsMiracleWithPaymentMode { object_id, .. }
             | GameAction::CastSpellAsMadness { object_id, .. }
             | GameAction::CastSpellAsMadnessWithPaymentMode { object_id, .. }
+            | GameAction::PlayFaceDown { object_id, .. }
             | GameAction::Foretell { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsSneak { hand_object, .. }
             | GameAction::CastSpellAsSneakWithPaymentMode { hand_object, .. }
             | GameAction::CastSpellAsWebSlinging { hand_object, .. }
             | GameAction::CastSpellAsWebSlingingWithPaymentMode { hand_object, .. } => {
                 Some(*hand_object)
+            }
+            GameAction::CastPreparedCopy { source } | GameAction::CastParadigmCopy { source } => {
+                Some(*source)
             }
             _ => None,
         })
@@ -1246,10 +1250,61 @@ fn choosable_objects(waiting_for: &WaitingFor, viewer: PlayerId) -> HashSet<Obje
         | WaitingFor::SurveilChoice { player, cards }
         | WaitingFor::DigChoice { player, cards, .. }
         | WaitingFor::DiscardChoice { player, cards, .. }
+        | WaitingFor::ChooseFromZoneChoice { player, cards, .. }
+        | WaitingFor::EffectZoneChoice { player, cards, .. }
+        | WaitingFor::DrawnThisTurnTopdeckChoice { player, cards, .. }
+        | WaitingFor::ManifestDreadChoice { player, cards }
+        | WaitingFor::WardDiscardChoice { player, cards, .. }
+        | WaitingFor::ConniveDiscard { player, cards, .. }
             if *player == viewer =>
         {
             cards.iter().copied().collect()
         }
+        WaitingFor::LearnChoice { player, hand_cards } if *player == viewer => {
+            hand_cards.iter().copied().collect()
+        }
+        WaitingFor::WardSacrificeChoice {
+            player, permanents, ..
+        }
+        | WaitingFor::UnlessBounceChoice {
+            player, permanents, ..
+        }
+        | WaitingFor::ChooseRingBearer {
+            player,
+            candidates: permanents,
+        }
+        | WaitingFor::PopulateChoice {
+            player,
+            valid_tokens: permanents,
+            ..
+        }
+        | WaitingFor::ChooseLegend {
+            player,
+            candidates: permanents,
+            ..
+        } if *player == viewer => permanents.iter().copied().collect(),
+        WaitingFor::CategoryChoice {
+            player,
+            eligible_per_category,
+            ..
+        } if *player == viewer => eligible_per_category
+            .iter()
+            .flat_map(|ids| ids.iter().copied())
+            .collect(),
+        WaitingFor::MoveCountersDistribution {
+            player,
+            destinations,
+            ..
+        } if *player == viewer => destinations.iter().copied().collect(),
+        WaitingFor::CopyRetarget {
+            player,
+            target_slots,
+            ..
+        } if *player == viewer => target_slots
+            .iter()
+            .flat_map(|slot| slot.legal_alternatives.iter())
+            .filter_map(target_ref_object_id)
+            .collect(),
         WaitingFor::TargetSelection {
             player,
             target_slots,
@@ -1272,6 +1327,29 @@ fn target_ref_object_id(target: &TargetRef) -> Option<ObjectId> {
     match target {
         TargetRef::Object(id) => Some(*id),
         TargetRef::Player(_) => None,
+    }
+}
+
+fn mana_choice_options(choice: &ManaChoicePrompt) -> Vec<String> {
+    match choice {
+        ManaChoicePrompt::SingleColor { options }
+        | ManaChoicePrompt::AnyCombination { options, .. } => options
+            .iter()
+            .copied()
+            .map(mana_type_symbol)
+            .map(str::to_string)
+            .collect(),
+        ManaChoicePrompt::Combination { options } => options
+            .iter()
+            .map(|combo| {
+                combo
+                    .iter()
+                    .copied()
+                    .map(mana_type_symbol)
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect(),
     }
 }
 
@@ -1534,9 +1612,12 @@ fn waiting_for_type(waiting_for: &WaitingFor) -> &'static str {
 mod tests {
     use super::*;
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityCost, Effect, ModalChoice, ResolvedAbility};
+    use engine::types::ability::{
+        AbilityCost, CategoryChooserScope, Effect, ModalChoice, ResolvedAbility, TargetFilter,
+    };
+    use engine::types::card_type::CoreType;
     use engine::types::game_state::{
-        CombatTaxPending, ManaAbilityResume, ManaChoiceContext, ManaChoicePrompt,
+        CombatTaxPending, CopyTargetSlot, ManaAbilityResume, ManaChoiceContext, ManaChoicePrompt,
         MulliganBottomEntry, MulliganDecisionEntry, PendingCast, PendingManaAbility,
         TargetSelectionProgress, TargetSelectionSlot,
     };
@@ -1716,6 +1797,129 @@ mod tests {
             ),
             Err(AdapterError::StaleOrInvalidActionIndex { action_index: 1 })
         ));
+    }
+
+    #[test]
+    fn playable_objects_includes_casting_action_siblings() {
+        let playable = playable_objects(&[
+            GameAction::PlayFaceDown {
+                object_id: ObjectId(11),
+                card_id: CardId(11),
+            },
+            GameAction::CastPreparedCopy {
+                source: ObjectId(12),
+            },
+            GameAction::CastParadigmCopy {
+                source: ObjectId(13),
+            },
+        ]);
+
+        assert!(playable.contains(&ObjectId(11)));
+        assert!(playable.contains(&ObjectId(12)));
+        assert!(playable.contains(&ObjectId(13)));
+    }
+
+    #[test]
+    fn choosable_objects_includes_resolution_choice_siblings() {
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::ChooseFromZoneChoice {
+                    player: PlayerId(0),
+                    cards: vec![ObjectId(21)],
+                    count: 1,
+                    up_to: false,
+                    constraint: None,
+                    source_id: ObjectId(1),
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(21)])
+        );
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::WardSacrificeChoice {
+                    player: PlayerId(0),
+                    permanents: vec![ObjectId(22)],
+                    pending_effect: Box::new(dummy_ability()),
+                    remaining: 1,
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(22)])
+        );
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::CategoryChoice {
+                    player: PlayerId(0),
+                    target_player: PlayerId(0),
+                    categories: vec![CoreType::Creature],
+                    chooser_scope: CategoryChooserScope::ControllerForAll,
+                    choose_filter: TargetFilter::Any,
+                    sacrifice_filter: TargetFilter::Any,
+                    source_controller: PlayerId(0),
+                    eligible_per_category: vec![vec![ObjectId(23)], vec![ObjectId(24)]],
+                    source_id: ObjectId(1),
+                    remaining_players: vec![],
+                    all_kept: vec![],
+                    scoped_players: vec![PlayerId(0)],
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(23), ObjectId(24)])
+        );
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::CopyRetarget {
+                    player: PlayerId(0),
+                    copy_id: ObjectId(1),
+                    target_slots: vec![CopyTargetSlot {
+                        current: None,
+                        legal_alternatives: vec![
+                            TargetRef::Object(ObjectId(25)),
+                            TargetRef::Player(PlayerId(1)),
+                        ],
+                    }],
+                    current_slot: 0,
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(25)])
+        );
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::MoveCountersDistribution {
+                    player: PlayerId(0),
+                    source_id: ObjectId(1),
+                    counter_type: Some(CounterType::Plus1Plus1),
+                    available: vec![(CounterType::Plus1Plus1, 1)],
+                    destinations: vec![ObjectId(26)],
+                    pending_effect: Box::new(dummy_ability()),
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(26)])
+        );
+    }
+
+    #[test]
+    fn mana_choice_prompt_uses_symbol_lists_not_debug_strings() {
+        let prompt = prompt_for(WaitingFor::ChooseManaColor {
+            player: PlayerId(0),
+            choice: ManaChoicePrompt::Combination {
+                options: vec![
+                    vec![ManaType::White, ManaType::Blue],
+                    vec![ManaType::Black, ManaType::Red],
+                ],
+            },
+            context: ManaChoiceContext::ResolvingEffect(Box::new(dummy_ability())),
+        })
+        .unwrap();
+
+        assert_eq!(prompt.prompt_type, "specifyManaCombo");
+        assert_eq!(
+            prompt.fields["availableColors"],
+            serde_json::json!(["WU", "BR"])
+        );
     }
 
     #[test]
