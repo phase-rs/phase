@@ -2701,9 +2701,12 @@ fn parse_self_chosen_type_static(input: &str) -> OracleResult<'_, ChosenSubtypeK
         value(ChosenSubtypeKind::BasicLandType, tag("this permanent is")),
     ))
     .parse(input)?;
-    let (input, _) = tag(" the chosen type in addition to ").parse(input)?;
-    let (input, _) = alt((tag("its"), tag("their"))).parse(input)?;
-    let (input, _) = tag(" other types").parse(input)?;
+    let (input, _) = tag(" the chosen type").parse(input)?;
+    let (input, _) = opt(preceded(
+        tag(" in addition to "),
+        terminated(alt((tag("its"), tag("their"))), tag(" other types")),
+    ))
+    .parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
     eof.parse(input)?;
     Ok((input, kind))
