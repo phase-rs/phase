@@ -131,6 +131,8 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::BecomesPlotted => match_becomes_plotted,
         // CR 104.3a: "Whenever a player loses the game" — dedicated matcher.
         TriggerMode::LosesGame => match_loses_game,
+        // CR 702.26c: Phasing triggers fire when a permanent phases in.
+        TriggerMode::PhaseIn => match_phase_in,
         TriggerMode::DamagePreventedOnce
         | TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
@@ -140,7 +142,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll
         | TriggerMode::PayLife
-        | TriggerMode::PhaseIn
         | TriggerMode::PhaseOut
         | TriggerMode::PhaseOutAll
         | TriggerMode::NewGame
@@ -373,6 +374,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // Compound: attacks or blocks — fires on attack or block events
     r.insert(TriggerMode::AttacksOrBlocks, match_attacks_or_blocks);
 
+    // CR 702.26c: Phasing triggers fire when a permanent phases in.
+    r.insert(TriggerMode::PhaseIn, match_phase_in);
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -384,7 +388,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::CounterPlayerAddedAll,
         TriggerMode::CounterTypeAddedAll,
         TriggerMode::PayLife,
-        TriggerMode::PhaseIn,
         TriggerMode::PhaseOut,
         TriggerMode::PhaseOutAll,
         TriggerMode::NewGame,
@@ -3021,6 +3024,23 @@ pub(super) fn match_ability_activated(
         && valid_card_matches(trigger, state, *activated_id, source_id)
 }
 
+/// CR 702.26c: Matches when a permanent phases in.
+pub(super) fn match_phase_in(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::PermanentPhasedIn { object_id } = event {
+        if trigger.valid_card.is_some() {
+            valid_card_matches(trigger, state, *object_id, source_id)
+        } else {
+            *object_id == source_id
+        }
+    } else {
+        false
+    }
+}
 pub(super) fn match_unimplemented(
     _event: &GameEvent,
     _trigger: &TriggerDefinition,

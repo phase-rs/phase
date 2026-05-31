@@ -3870,6 +3870,9 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_phrase("become the target of a spell or ability"),
         parse_event_phrase("becomes the target of an aura spell"),
         parse_event_phrase("becomes the target of a spell"),
+        // CR 702.26c: "phases in" / "phase in" — phasing trigger verb.
+        parse_event_phrase("phases in"),
+        parse_event_phrase("phase in"),
     ));
     let player_actions = alt((
         passive_player_actions,
@@ -5513,6 +5516,8 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
+        /// CR 702.26c: Permanent phases in from phased-out state.
+        PhasesIn,
         /// CR 701.3d: Equipment/Aura becomes unattached from a permanent.
         BecomesUnattached(Option<TargetFilter>),
         // CR 701.3a: Equipment/Aura becomes attached to a permanent.
@@ -5624,6 +5629,11 @@ fn try_parse_event(
             // CR 702.171c: Actor-side saddle trigger (reserved — no cards today without
             // the compound, but the arm is ready for future printings).
             value(SimpleEvent::Saddles, tag("saddles a mount")),
+        )))
+        .or(alt((
+            // CR 702.26c: "phases in" / "phase in" — phasing trigger.
+            value(SimpleEvent::PhasesIn, tag("phases in")),
+            value(SimpleEvent::PhasesIn, tag("phase in")),
             // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
             parse_becomes_unattached,
             // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
@@ -5757,6 +5767,11 @@ fn try_parse_event(
                 // CR 702.122 + CR 702.171c: Compound actor-side trigger. Fires on
                 // either saddling a Mount or crewing a Vehicle.
                 def.mode = TriggerMode::SaddlesOrCrews;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::PhasesIn => {
+                // CR 702.26c: Permanent phases in from phased-out state.
+                def.mode = TriggerMode::PhaseIn;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::BecomesUnattached(host_filter) => {

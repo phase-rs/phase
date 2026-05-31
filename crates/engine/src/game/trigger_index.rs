@@ -263,7 +263,9 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
             // unrecognized (CR 603.2b fallback). Stay safe via unclassified.
             None => return (keys, true),
         },
-        TriggerMode::PhaseIn | TriggerMode::PhaseOut | TriggerMode::PhaseOutAll => {
+        // CR 702.26c: Phasing triggers fire when a permanent phases in.
+        TriggerMode::PhaseIn => push(TriggerEventKey::PhaseIn),
+        TriggerMode::PhaseOut | TriggerMode::PhaseOutAll => {
             return (keys, true);
         }
         TriggerMode::TurnBegin => push(TriggerEventKey::TurnStarted),
@@ -509,8 +511,9 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             push(TriggerEventKey::CardsDrawn);
         }
         GameEvent::PermanentUntapped { .. } => push(TriggerEventKey::Untaps),
+        // CR 702.26c: Phasing triggers fire when a permanent phases in.
+        GameEvent::PermanentPhasedIn { .. } => push(TriggerEventKey::PhaseIn),
         GameEvent::PermanentPhasedOut { .. }
-        | GameEvent::PermanentPhasedIn { .. }
         | GameEvent::PlayerPhasedOut { .. }
         | GameEvent::PlayerPhasedIn { .. } => {}
         GameEvent::LandPlayed { .. } => {}
