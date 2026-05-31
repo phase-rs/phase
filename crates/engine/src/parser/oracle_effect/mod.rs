@@ -10003,6 +10003,61 @@ fn apply_cast_target_suffixes(filter: &mut TargetFilter, rest: &str) {
     }
 }
 
+/// CR 610.3 + CR 608.2c: Parse the `"from among (the|those) [TYPED]
+/// (card|cards) exiled this way"` anchor and lift its optional typed leg
+/// into a `TargetFilter`.
+///
+/// Returns:
+/// * `Some(And { ExiledBySource, Typed(tf) })` — typed leg present
+///   (Etali: "the nonland cards exiled this way" → AND with Non(Land)).
+/// * `Some(ExiledBySource)` — bare "the cards exiled this way".
+/// * `None` — anchor or "exiled this way" suffix not present.
+///
+/// Composition mirrors `has_from_among_cards_exiled_with_self` (anchor
+/// strip) and `parse_cast_type_disjunction` / `parse_type_phrase` (typed
+/// leg extraction).
+fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
+    type E<'a> = OracleError<'a>;
+    let (after_anchor, _) = take_until::<_, _, E>("from among ").parse(rest).ok()?;
+    let (after_anchor, _) = tag::<_, _, E>("from among ").parse(after_anchor).ok()?;
+    let (after_article, _) = opt(alt((tag::<_, _, E>("the "), tag("those "))))
+        .parse(after_anchor)
+        .ok()?;
+
+    // Require the literal suffix anchor before lifting anything so we
+    // don't shadow the bare anaphor arm below.
+    if !scan_contains_phrase(after_article, "cards exiled this way")
+        && !scan_contains_phrase(after_article, "card exiled this way")
+    {
+        return None;
+    }
+
+    // Try disjunctive typed leg first ("instant or sorcery cards"); fall
+    // back to parse_type_phrase ("nonland cards", "creature cards").
+    let typed_filter = parse_cast_type_disjunction(after_article)
+        .map(TargetFilter::Typed)
+        .unwrap_or_else(|| super::oracle_target::parse_type_phrase(after_article).0);
+
+    // "the cards exiled this way" lifts a bare `Typed(Card)` leaf with no
+    // further constraint — that's the structural "cards" anchor, not a
+    // meaningful type filter, so degrade to bare `ExiledBySource`.
+    // `cast_filter_has_typed_leaf` would treat `[Card]` as non-empty;
+    // `TypedFilter::has_meaningful_type_constraint` is the canonical
+    // accessor that excludes Card/Any noise.
+    let meaningful = match &typed_filter {
+        TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+        _ => cast_filter_has_typed_leaf(&typed_filter),
+    };
+
+    Some(if meaningful {
+        TargetFilter::And {
+            filters: vec![TargetFilter::ExiledBySource, typed_filter],
+        }
+    } else {
+        TargetFilter::ExiledBySource
+    })
+}
+
 /// CR 406.6 + CR 603.10a: Detect the `"from among cards exiled with [self-ref]"`
 /// anchor — the persistent per-source exile-link anaphor used by cards that
 /// reference their own tracked exile set from a later, independent ability
@@ -10185,6 +10240,26 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
                     ),
                 ],
             },
+            without_paying_mana_cost: without_paying,
+            mode,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint,
+        });
+    }
+    // CR 610.3 + CR 118.9 + CR 608.2c + CR 701.13a: "Cast [quantifier] [filter]
+    // from among [the|those] [typed] cards exiled this way" — the article-`the`
+    // + "exiled this way" surface form of the per-resolution exile-set anaphor.
+    // Mirrors the "from among those nonland cards" arm above; suffix
+    // "exiled this way" keeps the anchor disjoint from the bare anaphor arm
+    // below ("from among the exiled cards" lacks this suffix and falls through).
+    //
+    // Unlocks the WotC-templated "exiled this way" family: Etali Primal
+    // Conqueror, Etali Primal Storm, Crabomination, Gix Yawgmoth Praetor,
+    // Hellcarver Demon, and similar.
+    if let Some(target) = parse_from_among_exiled_this_way(rest) {
+        return Some(Effect::CastFromZone {
+            target,
             without_paying_mana_cost: without_paying,
             mode,
             cast_transformed: false,
@@ -40158,6 +40233,106 @@ mod tests {
                 |filter| matches!(filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land)
             ),
             "expected Non(Land), got {:?}",
+            typed.type_filters
+        );
+    }
+
+    /// CR 610.3 + CR 608.2c + CR 118.9: Etali, Primal Conqueror's ETB cast
+    /// surface — "cast any number of spells from among the nonland cards
+    /// exiled this way without paying their mana costs". Article-`the` +
+    /// `exiled this way` suffix variant of the per-resolution exile-set
+    /// anaphor; must bind to `And { ExiledBySource, Typed(Non(Land)) }`
+    /// identically to the `"those nonland cards"` sibling above.
+    #[test]
+    fn cast_from_among_the_nonland_cards_exiled_this_way_binds_to_exiled_by_source_and_nonland() {
+        let e = parse_effect(
+            "cast any number of spells from among the nonland cards exiled this way without paying their mana costs",
+        );
+        let Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            ..
+        } = e
+        else {
+            panic!("expected CastFromZone, got {:?}", e);
+        };
+        assert!(without_paying_mana_cost);
+        let TargetFilter::And { filters } = target else {
+            panic!("expected AND target filter, got {:?}", target);
+        };
+        assert!(
+            filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::ExiledBySource)),
+            "expected ExiledBySource leg in {:?}",
+            filters
+        );
+        let typed = filters
+            .iter()
+            .find_map(|f| match f {
+                TargetFilter::Typed(tf) => Some(tf),
+                _ => None,
+            })
+            .expect("expected typed-filter leg");
+        assert!(
+            typed
+                .type_filters
+                .iter()
+                .any(|f| matches!(f, TypeFilter::Non(inner) if **inner == TypeFilter::Land)),
+            "expected Non(Land), got {:?}",
+            typed.type_filters
+        );
+    }
+
+    /// CR 610.3: Bare suffix-only — "cast spells from among the cards exiled
+    /// this way" — degrades to `ExiledBySource` alone (no typed leg).
+    #[test]
+    fn cast_from_among_the_cards_exiled_this_way_binds_to_exiled_by_source() {
+        let e = parse_effect("cast spells from among the cards exiled this way");
+        let Effect::CastFromZone { target, .. } = e else {
+            panic!("expected CastFromZone, got {:?}", e);
+        };
+        assert_eq!(target, TargetFilter::ExiledBySource);
+    }
+
+    /// CR 610.3 + CR 608.2c: Disjunctive typed leg via
+    /// `parse_cast_type_disjunction` — "from among the instant or sorcery
+    /// cards exiled this way" must bind to `And { ExiledBySource, Typed(...) }`
+    /// with the disjunctive type set.
+    #[test]
+    fn cast_from_among_the_instant_or_sorcery_cards_exiled_this_way_binds_to_exiled_by_source_and_types(
+    ) {
+        let e = parse_effect(
+            "cast any number of spells from among the instant or sorcery cards exiled this way without paying their mana costs",
+        );
+        let Effect::CastFromZone { target, .. } = e else {
+            panic!("expected CastFromZone, got {:?}", e);
+        };
+        let TargetFilter::And { filters } = target else {
+            panic!("expected AND target filter, got {:?}", target);
+        };
+        assert!(
+            filters
+                .iter()
+                .any(|f| matches!(f, TargetFilter::ExiledBySource)),
+            "expected ExiledBySource leg in {:?}",
+            filters
+        );
+        let typed = filters
+            .iter()
+            .find_map(|f| match f {
+                TargetFilter::Typed(tf) => Some(tf),
+                _ => None,
+            })
+            .expect("expected typed-filter leg");
+        assert!(
+            typed.type_filters.iter().any(|tf| matches!(
+                tf,
+                TypeFilter::AnyOf(types)
+                    if types.contains(&TypeFilter::Instant)
+                        && types.contains(&TypeFilter::Sorcery)
+            )),
+            "expected AnyOf[Instant, Sorcery], got {:?}",
             typed.type_filters
         );
     }

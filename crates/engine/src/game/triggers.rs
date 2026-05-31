@@ -387,10 +387,17 @@ fn collect_matching_triggers(
             if !check_trigger_constraint(state, trig_def, obj_id, trig_idx, controller, event) {
                 continue;
             }
-            if let Some(ref condition) = trig_def.condition {
-                if !check_trigger_condition(state, condition, controller, Some(obj_id), Some(event))
-                {
-                    continue;
+            if !trig_def.batched {
+                if let Some(ref condition) = trig_def.condition {
+                    if !check_trigger_condition(
+                        state,
+                        condition,
+                        controller,
+                        Some(obj_id),
+                        Some(event),
+                    ) {
+                        continue;
+                    }
                 }
             }
             let mut ability = build_triggered_ability(state, trig_def, obj_id, controller);
@@ -1424,7 +1431,7 @@ fn collect_pending_triggers(
                     storm_ability.repeat_for = Some(QuantityExpr::Fixed { value: copy_count });
                     let storm_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
                         .description("Storm".to_string())
-                        .condition(TriggerCondition::WasCast);
+                        .condition(TriggerCondition::WasCast { zone: None });
                     let timestamp = state.next_timestamp() as u32;
                     pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: *cast_obj_id,
@@ -1463,7 +1470,7 @@ fn collect_pending_triggers(
                 // the SpellCast event itself).
                 let cascade_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
                     .description("Cascade".to_string())
-                    .condition(TriggerCondition::WasCast);
+                    .condition(TriggerCondition::WasCast { zone: None });
                 let cascade_ability =
                     ResolvedAbility::new(Effect::Cascade, Vec::new(), *cast_obj_id, controller);
                 let timestamp = state.next_timestamp() as u32;
@@ -3488,7 +3495,11 @@ pub(crate) fn check_trigger_condition(
         // with CR 603.4's intervening-if being permissive when source state is
         // indeterminate; the ability is removed from the stack at resolution
         // anyway per CR 603.4 if the source has left the relevant zone).
-        TriggerCondition::WasCast => {
+        // CR 601.2 + CR 603.4: cast-origin check. zone=None → cast from anywhere
+        // (Discover/Wedding Ring/Satoru back-compat). zone=Some(z) → cast specifically
+        // from zone z (Twilight Diviner: graveyard). Reads the ENTERING object's
+        // cast_from_zone, never the trigger source.
+        TriggerCondition::WasCast { zone } => {
             let checked_id = trigger_event
                 .and_then(|e| match e {
                     GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
@@ -3497,7 +3508,8 @@ pub(crate) fn check_trigger_condition(
                 .or(source_id);
             checked_id
                 .and_then(|id| state.objects.get(&id))
-                .is_some_and(|obj| obj.cast_from_zone.is_some())
+                .and_then(|obj| obj.cast_from_zone)
+                .is_some_and(|cz| zone.is_none_or(|z| cz == z))
         }
         // CR 603.4 + CR 603.6a: "put onto the battlefield with this ability" —
         // the entering object was placed by THIS trigger's source ability.
@@ -11606,7 +11618,7 @@ pub mod tests {
         // WasCast must read the Aura's cast_from_zone, not Light-Paws's.
         assert!(check_trigger_condition(
             &state,
-            &TriggerCondition::WasCast,
+            &TriggerCondition::WasCast { zone: None },
             PlayerId(0),
             Some(light_paws),
             Some(&event),
@@ -11644,7 +11656,7 @@ pub mod tests {
 
         assert!(!check_trigger_condition(
             &state,
-            &TriggerCondition::WasCast,
+            &TriggerCondition::WasCast { zone: None },
             PlayerId(0),
             Some(light_paws),
             Some(&event),
@@ -11668,7 +11680,7 @@ pub mod tests {
 
         assert!(check_trigger_condition(
             &state,
-            &TriggerCondition::WasCast,
+            &TriggerCondition::WasCast { zone: None },
             PlayerId(0),
             Some(cast_spell),
             None,
@@ -11678,11 +11690,95 @@ pub mod tests {
         state.objects.get_mut(&cast_spell).unwrap().cast_from_zone = None;
         assert!(!check_trigger_condition(
             &state,
-            &TriggerCondition::WasCast,
+            &TriggerCondition::WasCast { zone: None },
             PlayerId(0),
             Some(cast_spell),
             None,
         ));
+    }
+
+    /// CR 603.2c + CR 603.4: Twilight Diviner's batched intervening-if trigger
+    /// must be gated by the entering creatures' graveyard origin/cast origin.
+    /// This exercises the runtime trigger collection path, not just parser shape.
+    #[test]
+    fn twilight_diviner_batched_graveyard_origin_condition_gates_trigger_runtime() {
+        let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+            "Whenever one or more other creatures you control enter, if they entered or were cast from a graveyard, create a token that's a copy of one of them. This ability triggers only once each turn.",
+            "Twilight Diviner",
+        );
+
+        let mut hand_state = setup();
+        let hand_source = install_twilight_diviner_trigger(&mut hand_state, trigger.clone());
+        let hand_creature = create_entering_creature(&mut hand_state, "Hand Creature", Zone::Hand);
+        hand_state
+            .objects
+            .get_mut(&hand_creature)
+            .unwrap()
+            .cast_from_zone = Some(Zone::Hand);
+        process_triggers(
+            &mut hand_state,
+            &[zone_changed_event(
+                hand_creature,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                Vec::new(),
+            )],
+        );
+        assert!(
+            hand_state.stack.is_empty() && hand_state.pending_trigger.is_none(),
+            "Twilight Diviner must not trigger for a creature cast from hand; source={hand_source:?}"
+        );
+
+        let mut graveyard_state = setup();
+        let _graveyard_source = install_twilight_diviner_trigger(&mut graveyard_state, trigger);
+        let graveyard_creature =
+            create_entering_creature(&mut graveyard_state, "Graveyard Creature", Zone::Graveyard);
+        process_triggers(
+            &mut graveyard_state,
+            &[zone_changed_event(
+                graveyard_creature,
+                Zone::Graveyard,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                Vec::new(),
+            )],
+        );
+        assert!(
+            !graveyard_state.stack.is_empty() || graveyard_state.pending_trigger.is_some(),
+            "Twilight Diviner must trigger when a creature enters from a graveyard"
+        );
+    }
+
+    fn install_twilight_diviner_trigger(
+        state: &mut GameState,
+        trigger: TriggerDefinition,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Twilight Diviner".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.trigger_definitions.push(trigger);
+        source
+    }
+
+    fn create_entering_creature(state: &mut GameState, name: &str, from: Zone) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.cast_from_zone = (from == Zone::Stack).then_some(Zone::Hand);
+        id
     }
 
     #[test]
