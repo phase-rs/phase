@@ -100,7 +100,7 @@ fn power_fist_static_parses_trample_and_granted_trigger() {
     );
     assert!(
         def.modifications.iter().any(|m| {
-            matches!(m, ContinuousModification::AddKeyword { keyword } if *keyword == Keyword::Trample)
+            matches!(m, ContinuousModification::AddKeyword { keyword } if keyword == &Keyword::Trample)
         }),
         "expected AddKeyword(Trample), got {:?}",
         def.modifications
