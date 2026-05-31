@@ -1922,7 +1922,7 @@ function MulliganBottomCardsPrompt({
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
-  const addSelectedCard = useUiStore((s) => s.addSelectedCard);
+  const cycleSelectedCard = useUiStore((s) => s.cycleSelectedCard);
   const hoverProps = useInspectHoverProps();
 
   if (!player || !objects) return null;
@@ -1990,11 +1990,7 @@ function MulliganBottomCardsPrompt({
               return (
                 <motion.button
                   key={obj.id}
-                  onClick={() => {
-                    if (!isSelected && selectedCardIds.length < count) {
-                      addSelectedCard(obj.id);
-                    }
-                  }}
+                  onClick={() => cycleSelectedCard(obj.id, count)}
                   className={`flex-shrink-0 rounded-[18px] p-1 transition hover:z-50 ${
                     isSelected
                       ? "z-40 ring-2 ring-cyan-300 shadow-[0_0_0_1px_rgba(103,232,249,0.55)] opacity-75"
