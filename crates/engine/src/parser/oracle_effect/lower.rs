@@ -3717,9 +3717,12 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
 /// preserves selected-set and resolution-scoped chosen-player meanings.
 fn parse_source_chosen_player_damage_target(input: &str) -> bool {
     let lower = input.trim().trim_end_matches('.').to_lowercase();
-    let parsed = all_consuming(value((), tag::<_, _, OracleError<'_>>("the chosen player")))
-        .parse(lower.as_str())
-        .is_ok();
+    let parsed = nom::combinator::all_consuming(value(
+        (),
+        tag::<_, _, OracleError<'_>>("the chosen player"),
+    ))
+    .parse(lower.as_str())
+    .is_ok();
     parsed
 }
 
