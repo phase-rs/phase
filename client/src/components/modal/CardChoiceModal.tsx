@@ -46,7 +46,6 @@ type OutsideGameChoice = Extract<WaitingFor, { type: "OutsideGameChoice" }>;
 type ChooseFromZoneChoice = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
 type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
 type DrawnThisTurnTopdeckChoice = Extract<WaitingFor, { type: "DrawnThisTurnTopdeckChoice" }>;
-type _DiscardToHandSize = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
 type PayCost = Extract<WaitingFor, { type: "PayCost" }>;
 type MultiTargetSelection = Extract<WaitingFor, { type: "MultiTargetSelection" }>;
 type ParadigmCastOffer = Extract<WaitingFor, { type: "ParadigmCastOffer" }>;
