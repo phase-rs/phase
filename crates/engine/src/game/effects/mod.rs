@@ -4320,12 +4320,7 @@ pub(crate) fn evaluate_condition(
             let type_matches = state
                 .last_revealed_ids
                 .first()
-                .and_then(|id| {
-                    state
-                        .objects
-                        .get(id)
-                        .map(|obj| obj.card_types.core_types.contains(card_type))
-                })
+                .map(|id| super::printed_cards::object_has_core_type(state, *id, *card_type))
                 .unwrap_or(false);
             let filter_matches = match additional_filter {
                 // CR 205.3m: "of the chosen type" — check the revealed card's subtype
