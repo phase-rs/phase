@@ -90,6 +90,7 @@ pub enum PolicyId {
     ComboLineProgress,
     CedhKeepablesMulligan,
     PlaneswalkerLoyalty,
+    EquipmentPriority,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -214,6 +215,7 @@ impl Default for PolicyRegistry {
             Box::new(ReactiveSelfProtectionPolicy),
             Box::new(super::combo_line::ComboLinePolicy::new()),
             Box::new(super::planeswalker_loyalty::PlaneswalkerLoyaltyPolicy),
+            Box::new(super::equipment_priority::EquipmentPriorityPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
