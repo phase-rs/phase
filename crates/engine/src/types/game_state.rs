@@ -3387,6 +3387,21 @@ impl WaitingFor {
     pub fn accepts_freeform_counter_move_distribution(&self) -> bool {
         matches!(self, WaitingFor::MoveCountersDistribution { .. })
     }
+
+    /// Combat-damage assignment whose legal divisions cannot be captured by the
+    /// candidate enumerator. `candidates.rs` lists exactly one
+    /// `AssignCombatDamage` candidate (the greedy trample-through split), so the
+    /// multiplayer legality gate would wrongly reject every other legal division
+    /// — e.g. keeping excess on the blocker instead of trampling it through
+    /// (CR 702.19b), or any of the freely-chosen splits across multiple blockers
+    /// (CR 510.1c/d). The combinatorial space of legal divisions is too large to
+    /// enumerate, so `apply()` (handle_assign_combat_damage) is the real
+    /// validation boundary: it enforces total conservation, blocker membership,
+    /// and the CR 702.19b lethal-before-excess precondition, and rejects illegal
+    /// submissions. The server bypasses its enumeration gate for these.
+    pub fn accepts_freeform_combat_damage_assignment(&self) -> bool {
+        matches!(self, WaitingFor::AssignCombatDamage { .. })
+    }
 }
 
 /// What the frontend requests for auto-pass (no internal state).
@@ -5589,6 +5604,39 @@ mod tests {
             cards: vec![],
         }
         .accepts_freeform_card_selection());
+    }
+
+    #[test]
+    fn accepts_freeform_combat_damage_assignment_for_assign_combat_damage() {
+        // CR 510.1c/d + CR 702.19b: legal damage divisions (e.g. keeping excess
+        // on the blocker rather than trampling through) cannot be enumerated as
+        // candidate actions, so the multiplayer gate must bypass exact-match and
+        // let apply() validate the submitted division.
+        assert!(WaitingFor::AssignCombatDamage {
+            player: PlayerId(0),
+            attacker_id: ObjectId(1),
+            total_damage: 3,
+            blockers: vec![],
+            assignment_modes: vec![],
+            trample: None,
+            defending_player: PlayerId(1),
+            attack_target: crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            pw_loyalty: None,
+            pw_controller: None,
+        }
+        .accepts_freeform_combat_damage_assignment());
+
+        // Other states must NOT be freeform for combat damage — they remain
+        // validated by candidate enumeration.
+        assert!(!WaitingFor::Priority {
+            player: PlayerId(0),
+        }
+        .accepts_freeform_combat_damage_assignment());
+        assert!(!WaitingFor::ScryChoice {
+            player: PlayerId(0),
+            cards: vec![],
+        }
+        .accepts_freeform_combat_damage_assignment());
     }
 
     #[test]

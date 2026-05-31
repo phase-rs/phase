@@ -200,8 +200,17 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
             None
         };
 
-        // CR 510.1c: Check if interactive assignment is needed (2+ blockers).
-        if needs_interactive_assignment(obj, &combat, attacker_info) {
+        // CR 510.1c + CR 702.19b: Check if interactive assignment is needed
+        // (2+ blockers, or a single-blocker trample attacker with excess damage).
+        if needs_interactive_assignment(
+            state,
+            obj,
+            &combat,
+            attacker_info,
+            power,
+            has_deathtouch,
+            trample,
+        ) {
             // Pause iteration — player must choose damage division.
             if let Some(c) = &mut state.combat {
                 c.damage_step_index = Some(i);
@@ -362,11 +371,16 @@ fn distribute_blocker_damage(
 
 /// CR 510.1c: Check if an attacker needs interactive damage assignment.
 /// Returns true when there are 2+ blockers — the attacking player should choose
-/// how to divide damage. Single-blocker and unblocked scenarios are auto-assigned.
+/// how to divide damage. Single-blocker and unblocked scenarios are auto-assigned,
+/// except a single-blocker trample attacker with excess damage (see CR 702.19b below).
 pub(crate) fn needs_interactive_assignment(
+    state: &GameState,
     obj: &GameObject,
     combat: &CombatState,
     attacker_info: &crate::game::combat::AttackerInfo,
+    power: u32,
+    has_deathtouch: bool,
+    trample: Option<TrampleKind>,
 ) -> bool {
     let blocker_count = combat
         .blocker_assignments
@@ -377,6 +391,21 @@ pub(crate) fn needs_interactive_assignment(
         let has_trample = obj.has_keyword(&Keyword::Trample)
             || obj.has_keyword(&Keyword::TrampleOverPlaneswalkers);
         return blocker_count > 0 || !has_trample;
+    }
+
+    // CR 702.19b: A trample attacker blocked by exactly one creature still gets an
+    // interactive choice when it has excess damage — the controller may keep the
+    // excess on the blocker or assign it to the player (assigning none to the player
+    // is legal). With no excess (power <= lethal) all damage goes to the blocker
+    // (CR 510.1c), so there is no choice → auto-assign.
+    if trample.is_some() && blocker_count == 1 {
+        if let Some(&blocker_id) = combat
+            .blocker_assignments
+            .get(&attacker_info.object_id)
+            .and_then(|b| b.first())
+        {
+            return power > lethal_damage_needed(state, blocker_id, has_deathtouch);
+        }
     }
 
     blocker_count >= 2
@@ -541,6 +570,11 @@ fn assign_attacker_damage(
         Some(blockers) => {
             if blockers.len() == 1 {
                 if let Some(trample_kind) = trample {
+                    // CR 702.19b: Single-blocker trample with excess is now routed to the
+                    // interactive WaitingFor::AssignCombatDamage prompt by
+                    // needs_interactive_assignment, so this auto-assign branch is reached only
+                    // when power <= lethal (excess == 0). The excess sub-block below stays as
+                    // the shared lethal-then-excess logic used by the no-blockers and PW paths.
                     // CR 702.19b: Trample — assign lethal to blocker, excess to attack target.
                     let lethal = lethal_damage_needed(state, blockers[0], has_deathtouch);
                     let to_blocker = power.min(lethal);
@@ -936,6 +970,67 @@ mod tests {
         state.combat = Some(combat);
     }
 
+    /// Drive `resolve_combat_damage` and, whenever it pauses on an
+    /// `AssignCombatDamage` prompt (now reachable for single-blocker trample with
+    /// excess per CR 702.19b, as well as the existing 2+ blocker case), submit the
+    /// canonical greedy split through the real apply path: lethal to each blocker
+    /// in order, then trample the remainder to the attack target (splitting
+    /// loyalty-worth to the PW and the rest to its controller for trample-over-PW).
+    /// This mirrors `run_combat` in the integration harness and the AI default, so
+    /// tests that previously relied on auto-assignment keep asserting that split.
+    fn resolve_combat_with_greedy_assignment(state: &mut GameState, events: &mut Vec<GameEvent>) {
+        if let Some(waiting) = resolve_combat_damage(state, events) {
+            state.waiting_for = waiting;
+        } else {
+            return;
+        }
+        while let WaitingFor::AssignCombatDamage {
+            attacker_id,
+            total_damage,
+            ref blockers,
+            ref trample,
+            pw_loyalty,
+            ref attack_target,
+            ..
+        } = state.waiting_for
+        {
+            let _ = attacker_id;
+            let mut remaining = total_damage;
+            let mut assignments: Vec<(ObjectId, u32)> = Vec::new();
+            for slot in blockers {
+                let assign = remaining.min(slot.lethal_minimum);
+                assignments.push((slot.blocker_id, assign));
+                remaining = remaining.saturating_sub(assign);
+            }
+            if trample.is_none() && remaining > 0 {
+                if let Some(last) = assignments.last_mut() {
+                    last.1 += remaining;
+                    remaining = 0;
+                }
+            }
+            let (trample_damage, controller_damage) = if *trample
+                == Some(TrampleKind::OverPlaneswalkers)
+                && matches!(attack_target, AttackTarget::Planeswalker(_))
+            {
+                let loyalty = pw_loyalty.unwrap_or(0);
+                let to_pw = remaining.min(loyalty);
+                (to_pw, remaining.saturating_sub(to_pw))
+            } else {
+                (if trample.is_some() { remaining } else { 0 }, 0)
+            };
+            crate::game::engine::apply_as_current(
+                state,
+                crate::types::actions::GameAction::AssignCombatDamage {
+                    mode: CombatDamageAssignmentMode::Normal,
+                    assignments,
+                    trample_damage,
+                    controller_damage,
+                },
+            )
+            .expect("greedy combat damage assignment must be legal");
+        }
+    }
+
     #[test]
     fn unblocked_attacker_deals_damage_to_player() {
         let mut state = setup();
@@ -1182,10 +1277,24 @@ mod tests {
         setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        // CR 702.19b: 5/5 trample vs a single 2/2 has excess → interactive prompt
+        // (the controller may keep the excess on the blocker or trample it through).
+        let waiting = resolve_combat_damage(&mut state, &mut events)
+            .expect("single-blocker trample with excess prompts for assignment");
+        state.waiting_for = waiting;
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(blocker, 2)],
+                trample_damage: 3,
+                controller_damage: 0,
+            },
+        )
+        .expect("lethal-to-blocker + trample-through is legal");
 
-        // 2 to blocker (lethal), 3 to player (trample excess)
-        assert_eq!(state.objects[&blocker].damage_marked, 2);
+        // 2 lethal to blocker (dies via SBA), 3 trample excess to player.
+        assert!(!state.battlefield.contains(&blocker));
         assert_eq!(state.players[1].life, 17);
     }
 
@@ -2018,7 +2127,7 @@ mod tests {
         state.combat = Some(combat);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // Blocker has 2 toughness: 2 damage lethal, 3 excess to PW (not player)
         let pw_obj = state.objects.get(&pw).unwrap();
@@ -2104,7 +2213,7 @@ mod tests {
         state.combat = Some(combat);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // 7 power: 2 lethal to blocker, 3 to PW (loyalty), 2 to PW controller
         assert_eq!(
@@ -2154,7 +2263,7 @@ mod tests {
         state.combat = Some(combat);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // CR 702.19f: All 5 excess (7 - 2 lethal) goes to PW, not player
         assert_eq!(
@@ -2225,7 +2334,7 @@ mod tests {
         setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // 5 power: 2 lethal to blocker, 3 trample to player (same as standard trample)
         assert_eq!(
@@ -2357,7 +2466,7 @@ mod tests {
         state.combat = Some(combat);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // 6 power: 1 deathtouch lethal to blocker, 3 to PW (loyalty), 2 to controller
         assert_eq!(
@@ -2535,12 +2644,14 @@ mod tests {
         setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        resolve_combat_with_greedy_assignment(&mut state, &mut events);
 
         // 2 lethal to the blocker, 3 trample over to the shielded player.
-        assert_eq!(
-            state.objects[&blocker].damage_marked, 2,
-            "blocker takes its lethal portion — to-creature damage is not prevented"
+        // The 0/2 Wall takes its lethal portion and dies via SBA (CR 704.5g) —
+        // to-creature damage is not prevented by the player-scoped shield.
+        assert!(
+            !state.battlefield.contains(&blocker),
+            "blocker takes its lethal portion (not prevented) and dies"
         );
         assert_eq!(state.players[1].life, 20, "trample-over damage prevented");
         // CR 615.7: only the 3 player-targeted damage is aggregated.
@@ -2713,5 +2824,241 @@ mod tests {
             Some(5),
             "unprevented commander accrues 5 combat damage"
         );
+    }
+
+    // === CR 702.19b: single-blocker trample interactive-assignment truth table ===
+    //
+    // Build a REAL combat state with the blocker present in state.objects so
+    // lethal_damage_needed reads its real toughness, then exercise
+    // needs_interactive_assignment directly.
+    fn needs_interactive(
+        power: i32,
+        blocker_toughness: i32,
+        trample: Option<TrampleKind>,
+        deathtouch: bool,
+        extra_blocker_toughness: Option<i32>,
+    ) -> bool {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", power, power);
+        if let Some(kind) = trample {
+            let kw = match kind {
+                TrampleKind::Standard => Keyword::Trample,
+                TrampleKind::OverPlaneswalkers => Keyword::TrampleOverPlaneswalkers,
+            };
+            state.objects.get_mut(&attacker).unwrap().keywords.push(kw);
+        }
+        if deathtouch {
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .keywords
+                .push(Keyword::Deathtouch);
+        }
+        let blocker = create_creature(&mut state, PlayerId(1), "Blocker", 1, blocker_toughness);
+        let mut blockers = vec![blocker];
+        if let Some(t) = extra_blocker_toughness {
+            let blocker2 = create_creature(&mut state, PlayerId(1), "Blocker2", 1, t);
+            blockers.push(blocker2);
+        }
+        setup_combat(&mut state, vec![attacker], vec![(attacker, blockers)]);
+
+        let combat = state.combat.as_ref().unwrap().clone();
+        let attacker_info = combat
+            .attackers
+            .iter()
+            .find(|a| a.object_id == attacker)
+            .unwrap()
+            .clone();
+        let obj = state.objects.get(&attacker).unwrap().clone();
+        needs_interactive_assignment(
+            &state,
+            &obj,
+            &combat,
+            &attacker_info,
+            power.max(0) as u32,
+            deathtouch,
+            trample,
+        )
+    }
+
+    #[test]
+    fn single_blocker_trample_with_excess_needs_interactive() {
+        // CR 702.19b: 5/5 trample vs 2/2 → 3 excess → controller chooses.
+        assert!(needs_interactive(
+            5,
+            2,
+            Some(TrampleKind::Standard),
+            false,
+            None
+        ));
+    }
+
+    #[test]
+    fn single_blocker_trample_no_excess_auto_assigns() {
+        // CR 510.1c: 2/2 trample vs 2/2 → power == lethal → no choice.
+        assert!(!needs_interactive(
+            2,
+            2,
+            Some(TrampleKind::Standard),
+            false,
+            None
+        ));
+    }
+
+    #[test]
+    fn single_blocker_no_trample_auto_assigns() {
+        // CR 510.1c: single blocker without trample → all damage to blocker.
+        assert!(!needs_interactive(5, 2, None, false, None));
+    }
+
+    #[test]
+    fn two_blockers_need_interactive() {
+        // CR 510.1c: 2+ blockers → controller divides.
+        assert!(needs_interactive(5, 2, None, false, Some(2)));
+    }
+
+    #[test]
+    fn single_blocker_trample_deathtouch_with_excess_needs_interactive() {
+        // CR 702.2c + CR 702.19b: deathtouch makes lethal 1; power 5 > 1 → excess.
+        assert!(needs_interactive(
+            5,
+            2,
+            Some(TrampleKind::Standard),
+            true,
+            None
+        ));
+    }
+
+    #[test]
+    fn single_blocker_trample_deathtouch_no_excess_auto_assigns() {
+        // CR 702.2c: deathtouch lethal is 1; power 1 == lethal → no choice.
+        assert!(!needs_interactive(
+            1,
+            2,
+            Some(TrampleKind::Standard),
+            true,
+            None
+        ));
+    }
+
+    // === CR 702.19b: single-blocker trample runtime, driven through the pipeline ===
+
+    #[test]
+    fn single_blocker_trample_excess_prompts_assignment() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Fatty", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        let waiting = resolve_combat_damage(&mut state, &mut events);
+
+        // CR 702.19b: single-blocker trample with excess → interactive prompt.
+        match waiting {
+            Some(WaitingFor::AssignCombatDamage {
+                ref blockers,
+                trample,
+                total_damage,
+                ..
+            }) => {
+                assert_eq!(blockers.len(), 1);
+                assert_eq!(blockers[0].lethal_minimum, 2);
+                assert_eq!(trample, Some(TrampleKind::Standard));
+                assert_eq!(total_damage, 5);
+            }
+            other => panic!("Expected AssignCombatDamage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_blocker_trample_outcome_a_trample_through() {
+        // Outcome A: keep lethal on blocker, trample excess to player.
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Fatty", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        let waiting = resolve_combat_damage(&mut state, &mut events)
+            .expect("single-blocker trample with excess must prompt");
+        // A bare return from resolve_combat_damage does not write state.waiting_for;
+        // the apply path requires it, so set it from the returned WaitingFor.
+        state.waiting_for = waiting;
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(blocker, 2)],
+                trample_damage: 3,
+                controller_damage: 0,
+            },
+        )
+        .expect("trample-through assignment is legal");
+
+        // CR 702.19b: 2 lethal to blocker (it dies via SBA → off battlefield, so
+        // damage_marked is cleared on the zone change), 3 excess tramples to the
+        // defending player. Player life is the discriminator vs Outcome B.
+        assert!(
+            !state.battlefield.contains(&blocker),
+            "blocker took lethal (2) and should have died"
+        );
+        assert_eq!(state.players[1].life, 17);
+    }
+
+    #[test]
+    fn single_blocker_trample_outcome_b_keep_on_blocker() {
+        // Outcome B (the user's case): controller keeps ALL 5 on the blocker and
+        // tramples nothing through. CR 702.19b: assigning no excess to the player
+        // is legal (need not assign lethal to blocker before keeping excess there).
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Fatty", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        let waiting = resolve_combat_damage(&mut state, &mut events)
+            .expect("single-blocker trample with excess must prompt");
+        state.waiting_for = waiting;
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(blocker, 5)],
+                trample_damage: 0,
+                controller_damage: 0,
+            },
+        )
+        .expect("keeping all damage on the blocker is legal (CR 702.19b)");
+
+        // CR 702.19b: all 5 stay on the blocker (it dies via SBA → off battlefield),
+        // and NONE tramples through — the defending player is untouched. The
+        // unchanged player life (20) is the proof the controller may decline to
+        // assign excess to the player (the user's reported case).
+        assert!(
+            !state.battlefield.contains(&blocker),
+            "blocker took 5 (>= lethal) and should have died"
+        );
+        assert_eq!(state.players[1].life, 20);
     }
 }
