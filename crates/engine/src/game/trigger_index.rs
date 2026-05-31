@@ -970,4 +970,21 @@ mod tests {
             crate::types::phase::Phase::Upkeep
         )));
     }
+
+    #[test]
+    fn phase_in_uses_narrow_trigger_key_for_def_and_event() {
+        let def = TriggerDefinition::new(TriggerMode::PhaseIn);
+        let (keys, route) = keys_from_trigger_def(&def);
+        assert!(keys.contains(&TriggerEventKey::PhaseIn));
+        assert!(!route);
+
+        let state = GameState::new_two_player(42);
+        let event_keys = keys_from_event(
+            &GameEvent::PermanentPhasedIn {
+                object_id: crate::types::identifiers::ObjectId(1),
+            },
+            &state,
+        );
+        assert!(event_keys.contains(&TriggerEventKey::PhaseIn));
+    }
 }

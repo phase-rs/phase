@@ -10149,6 +10149,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_phases_in_trigger_as_phase_in_mode() {
+        let def = parse_trigger_line(
+            "Whenever Warping Wurm phases in, put a +1/+1 counter on it.",
+            "Warping Wurm",
+        );
+
+        assert_eq!(def.mode, TriggerMode::PhaseIn);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
     fn static_condition_to_trigger_condition_source_in_battlefield() {
         // SUB-FIX B regression: the existing SourceInZone mapper must pass
         // Zone::Battlefield through unchanged so the new battlefield condition
