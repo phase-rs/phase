@@ -1207,6 +1207,18 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // exceeds the 2-word cap.
     .or(value((), tag("reveal ")))
     .or(value((), tag("returns ")))
+    // CR 122.1 + CR 608.2c: third-person "puts" conjugation. Oversimplify
+    // class: "Each player creates a … token and puts a number of +1/+1
+    // counters on it equal to …" — the subject ("Each player") iterates and
+    // the followup must split as its own clause so the Token effect's
+    // continuation absorber (`try_parse_put_counters_on_token_followup`)
+    // sees the counter-placement on its own and lifts it onto
+    // `Token.enter_with_counters`. Mirrors the imperative `put ` axis above
+    // — same verb, different conjugation. Sits in the `.or()` chain rather
+    // than the first `alt()` tuple because the tuple is already at nom's
+    // 21-arm limit; adding it inline would push the cluster over and trip
+    // the `Choice<...>` trait-bound check at compile time.
+    .or(value((), tag("puts ")))
     .or(alt((
         // CR 608.2c: Subject-prefixed verb patterns — "you [verb]" is always a clause start.
         value((), tag("you gain ")),
@@ -3506,29 +3518,63 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
 }
 
 /// CR 122.6a + CR 614.1c: Parse the imperative followup form
-/// "put N [counter type] counter(s) on it[, where X is ...]" that follows a
-/// `create a [token]` clause. "It" refers to the just-created token; the
-/// counters must be lifted onto `Token.enter_with_counters` so they apply as
-/// the token enters the battlefield (CR 122.6a) rather than as a post-ETB
-/// PutCounter effect targeting the ability source.
+/// "put N [counter type] counter(s) on it[, where X is ...]" /
+/// "put[s] a number of [counter type] counter(s) on it equal to <quantity>"
+/// that follows a `create a [token]` clause. "It" refers to the just-created
+/// token; the counters must be lifted onto `Token.enter_with_counters` so they
+/// apply as the token enters the battlefield (CR 614.1c) rather than as a
+/// post-ETB PutCounter effect targeting the ability source.
 ///
-/// Mirrors `try_parse_token_enters_with_counters` but matches the imperative
-/// "put ..." prefix produced by clause-splitting on " and ". Returns
-/// `TokenEntersWithCounters` so it shares the same continuation absorption.
+/// Verb axis: `put ` (imperative, "create a token and put …") or `puts `
+/// (third-person, "Each player creates a token and puts …" — Oversimplify
+/// class). The verb is a single `alt()` over the two conjugations — adding
+/// a third form means extending the `alt()`, not duplicating the function.
+///
+/// Quantity axis: three forms in priority order —
+///   1. `"a number of <type> counter(s) on it equal to <quantity>"` →
+///      delegated to the shared `parse_dynamic_counter_suffix_body` building
+///      block (single source of truth for "enters with N counters equal to
+///      X"; also used by `Effect::ChangeZone.enter_with_counters`).
+///   2. `"N <type> counter(s) on it, where x is <quantity>"` → fixed N with
+///      a deferred X-binding (Fractal Anomaly class).
+///   3. `"N <type> counter(s) on it"` → fixed N.
+///
+/// Returns `TokenEntersWithCounters` so it shares the continuation absorption
+/// path with `try_parse_token_enters_with_counters` (declarative form).
 fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationAst> {
     // Optional leading "and " (rare — usually consumed by the splitter),
-    // then the imperative "put " verb.
+    // then the verb. Both `put ` (imperative) and `puts ` (third-person,
+    // "Each player … puts a number of counters on it …") feed the same
+    // counter-suffix grammar — the verb is a single `alt()` axis.
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("and "))
         .parse(lower)
         .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("put ").parse(rest).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("puts "),
+        tag::<_, _, OracleError<'_>>("put "),
+    ))
+    .parse(rest)
+    .ok()?;
 
-    // Parse count: "x ", "a ", "an ", "a number of ", or a literal number.
-    // Word "a"/"an" is a singular article (count = 1).
+    // Form 1 (priority): dynamic "a number of <type> counters on it equal to
+    // <quantity>". Delegates to the shared building block in `oracle_effect/
+    // mod.rs`. The body consumes the full clause (including trailing period),
+    // so on success we're done — emit the continuation directly.
+    if let Ok((_, (counter_type, count))) =
+        super::parse_dynamic_counter_suffix_body(rest.trim_end_matches('.').trim_end())
+    {
+        return Some(ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        });
+    }
+
+    // Forms 2 + 3 (fixed N with optional "where x is" rebind): the original
+    // grammar, retained for the Fractal Anomaly / G'raha Tia class. Counter
+    // count is `x` (deferred), an article (1), or a literal number.
     let (rest, count_prefix) = alt((
         // "x " — variable resolved later via "where X is" or by caller payment
         value(None, tag::<_, _, OracleError<'_>>("x ")),
-        value(None, tag("a number of ")),
         value(Some(1u32), tag("a ")),
         value(Some(1u32), tag("an ")),
     ))
@@ -5140,6 +5186,70 @@ mod tests {
         // Other verbs that happen to mention counters must not match.
         let result = try_parse_put_counters_on_token_followup("remove a +1/+1 counter on it");
         assert!(result.is_none());
+    }
+
+    /// CR 122.1 + CR 614.1c + CR 607.2a: Oversimplify's third-person
+    /// dynamic followup. "Each player creates ... and puts a number of +1/+1
+    /// counters on it equal to the total power of creatures they controlled
+    /// that were exiled this way." After clause splitting the followup is
+    /// "puts a number of +1/+1 counters on it equal to <quantity>". Must
+    /// lower to `TokenEntersWithCounters{Plus1Plus1, Aggregate{Sum,Power,
+    /// And[Typed{Creature,ScopedPlayer}, ExiledBySource]}}`.
+    ///
+    /// This is the building-block test for the "puts" (third-person) verb
+    /// axis AND the dynamic "a number of … equal to …" quantity axis. Any
+    /// future card with the same shape lights up through these axes; the
+    /// test deliberately exercises both new axes simultaneously to lock in
+    /// the Oversimplify-class repair.
+    #[test]
+    fn put_counters_on_it_followup_third_person_dynamic_quantity() {
+        use crate::types::ability::{
+            AggregateFunction, ControllerRef, ObjectProperty, QuantityRef, TargetFilter,
+            TypedFilter,
+        };
+
+        let result = try_parse_put_counters_on_token_followup(
+            "puts a number of +1/+1 counters on it equal to the total power of creatures they controlled that were exiled this way",
+        )
+        .expect("third-person dynamic followup must parse");
+        let ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        } = result
+        else {
+            panic!("expected TokenEntersWithCounters, got {result:?}");
+        };
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
+        let expected_qty = QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                filter: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                        ),
+                        TargetFilter::ExiledBySource,
+                    ],
+                },
+            },
+        };
+        assert_eq!(count, expected_qty);
+    }
+
+    /// CR 122.1 + CR 614.1c: The same dynamic-counter combinator also accepts
+    /// the imperative "put a number of ..." form (no third-person -s). This
+    /// guards the verb-axis `alt()` against future regressions.
+    #[test]
+    fn put_counters_on_it_followup_imperative_dynamic_quantity() {
+        let result = try_parse_put_counters_on_token_followup(
+            "put a number of +1/+1 counters on it equal to the number of creatures you control",
+        )
+        .expect("imperative dynamic followup must parse");
+        let ContinuationAst::TokenEntersWithCounters { counter_type, .. } = result else {
+            panic!("expected TokenEntersWithCounters, got {result:?}");
+        };
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
     }
 
     #[test]

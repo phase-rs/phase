@@ -578,6 +578,30 @@ fn parent_target_controller_player(
     })
 }
 
+/// CR 608.2h + CR 400.7: The effective controller of `obj` for filter
+/// predicates that look back at non-battlefield objects.
+///
+/// On the stack and battlefield, `obj.controller` is the live value. Once an
+/// object leaves those zones, it ceases to have a controller (CR 109.4: "Objects
+/// that are neither on the stack nor on the battlefield aren't controlled by
+/// any player"), and the at-departure controller is preserved in
+/// `state.lki_cache` by `change_zone` (`game/zones.rs:65-92`). Filters such as
+/// "creatures they controlled that were exiled this way" (Oversimplify) must
+/// read the at-exile controller, not the post-reset owner; the LKI cache holds
+/// exactly that value.
+///
+/// Returns the LKI controller when the object is outside the stack/battlefield
+/// AND an LKI snapshot exists; otherwise the live `obj.controller`. Stack and
+/// battlefield objects always use the live value.
+fn effective_controller(state: &GameState, obj: &GameObject, object_id: ObjectId) -> PlayerId {
+    if !matches!(obj.zone, Zone::Battlefield | Zone::Stack) {
+        if let Some(lki) = state.lki_cache.get(&object_id) {
+            return lki.controller;
+        }
+    }
+    obj.controller
+}
+
 fn controller_ref_player(
     state: &GameState,
     source_id: ObjectId,
@@ -948,21 +972,31 @@ fn filter_inner_for_object(
                 }
             }
             // Controller check
+            //
+            // CR 109.4 + CR 608.2h + CR 400.7: All ControllerRef arms compare
+            // against the object's *effective* controller, which falls back to
+            // the LKI snapshot only for zones without controllers (Oversimplify class:
+            // "creatures they controlled that were exiled this way" must
+            // match the at-exile controller, not the post-exile owner). On
+            // the stack and battlefield, `effective_controller` returns
+            // `obj.controller` unchanged. See the helper for the LKI-fallback
+            // rationale.
             if let Some(ctrl) = controller {
+                let obj_ctrl = effective_controller(state, obj, object_id);
                 match ctrl {
                     ControllerRef::You => {
-                        if source_controller != Some(obj.controller) {
+                        if source_controller != Some(obj_ctrl) {
                             return false;
                         }
                     }
                     ControllerRef::Opponent => {
-                        if source_controller == Some(obj.controller) {
+                        if source_controller == Some(obj_ctrl) {
                             return false;
                         }
                     }
                     ControllerRef::ScopedPlayer => {
                         match scoped_player_or_controller(state, ability, source_controller) {
-                            Some(pid) if pid == obj.controller => {}
+                            Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
                     }
@@ -980,20 +1014,20 @@ fn filter_inner_for_object(
                             })
                         });
                         match target_player {
-                            Some(pid) if pid == obj.controller => {}
+                            Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
                     }
                     ControllerRef::ParentTargetController => {
                         let target_player = parent_target_controller_player(state, ability);
                         match target_player {
-                            Some(pid) if pid == obj.controller => {}
+                            Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
                     }
                     ControllerRef::DefendingPlayer => {
                         match crate::game::combat::defending_player_for_attacker(state, source_id) {
-                            Some(pid) if pid == obj.controller => {}
+                            Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
                     }
@@ -1002,7 +1036,7 @@ fn filter_inner_for_object(
                     // resolution-scoped chosen player.
                     ControllerRef::ChosenPlayer { index } => {
                         match ability.and_then(|a| a.chosen_players.get(*index as usize).copied()) {
-                            Some(pid) if pid == obj.controller => {}
+                            Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
                     }
@@ -1010,7 +1044,7 @@ fn filter_inner_for_object(
                     // the object's controller against the triggering player.
                     ControllerRef::TriggeringPlayer => {
                         match crate::game::quantity::triggering_event_player(state) {
-                            Some(pid) if pid == obj.controller => {}
+                            Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
                     }
@@ -7775,6 +7809,138 @@ mod tests {
                 &FilterContext::from_ability(&stale),
             ),
             "stale target id must fall through to the effect-context snapshot rung"
+        );
+    }
+
+    /// CR 608.2h + CR 400.7: A `Typed{controller: ScopedPlayer}` filter
+    /// against an exiled object must consult the LKI snapshot for the
+    /// at-exile controller, not the live `obj.controller` (which has been
+    /// reset to owner per CR 109.4 / CR 400.7 when the object left the
+    /// battlefield).
+    ///
+    /// Scenario: player 0 controlled a creature owned by player 1 (e.g.,
+    /// stolen with `Threaten`). The creature is exiled. The live
+    /// `obj.controller` resets to owner (player 1). A look-back filter scoped
+    /// to player 0 (`ScopedPlayer == 0`) must still match the exiled object
+    /// — `effective_controller` reads the LKI's at-exile controller (player 0).
+    #[test]
+    fn scoped_player_controller_uses_lki_for_exiled_objects() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        // Stolen-then-exiled creature: owner = P1, at-exile controller = P0.
+        let stolen = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(1),
+            "Stolen Bear".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&stolen).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            // Post-exile controller reset: per CR 109.4 / CR 400.7, the
+            // controller reverts to the owner. The live `obj.controller`
+            // is the post-reset value.
+            obj.controller = PlayerId(1);
+        }
+        state.lki_cache.insert(
+            stolen,
+            LKISnapshot {
+                name: "Stolen Bear".to_string(),
+                power: Some(2),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                // The pre-exile (at-departure) controller is P0 — what the
+                // look-back filter must read.
+                controller: PlayerId(0),
+                owner: PlayerId(1),
+                card_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                counters: Default::default(),
+            },
+        );
+
+        // Filter: creature controlled by ScopedPlayer, with no explicit
+        // ability scope set → ScopedPlayer falls back to source_controller
+        // (P0). The exiled creature must match because its LKI controller
+        // is P0, even though `obj.controller` is now P1 (the owner).
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::ScopedPlayer));
+        assert!(
+            matches_target_filter(&state, stolen, &filter, source),
+            "ScopedPlayer filter must match the exiled creature via LKI \
+             (at-exile controller=P0), not the post-exile owner=P1"
+        );
+
+        // Sanity: an OpponentRef filter from P0's source must NOT match the
+        // same object (because the at-exile controller IS P0 = "you").
+        let opp_filter =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        assert!(
+            !matches_target_filter(&state, stolen, &opp_filter, source),
+            "Opponent filter must NOT match — at-exile controller is the source's controller"
+        );
+    }
+
+    /// CR 109.4: Stack objects have controllers, so a stale LKI snapshot must
+    /// not override the live spell controller when evaluating controller
+    /// filters.
+    #[test]
+    fn stack_object_controller_uses_live_controller_even_with_lki() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let spell = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(1),
+            "Cast From Exile".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.controller = PlayerId(0);
+        }
+        state.lki_cache.insert(
+            spell,
+            LKISnapshot {
+                name: "Cast From Exile".to_string(),
+                power: None,
+                toughness: None,
+                base_power: None,
+                base_toughness: None,
+                mana_value: 2,
+                controller: PlayerId(1),
+                owner: PlayerId(1),
+                card_types: vec![],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                counters: Default::default(),
+            },
+        );
+
+        let filter = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+        assert!(
+            matches_target_filter(&state, spell, &filter, source),
+            "stack objects have a live controller; stale LKI must not make the spell look opponent-controlled"
         );
     }
 }
