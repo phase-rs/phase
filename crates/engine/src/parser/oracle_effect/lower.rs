@@ -1333,7 +1333,9 @@ pub(super) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
     let lower = text.to_lowercase();
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("for each ")).parse(i)) {
         let rest_lower = &lower[text.len() - rest.len()..];
-        if let Some((clause, remainder)) = rest_lower.split_once(", ") {
+        if let Ok((remainder, clause)) =
+            terminated(take_until(", "), tag::<_, _, OracleError<'_>>(", ")).parse(rest_lower)
+        {
             if let Some(qty) = parse_for_each_clause(clause) {
                 // CR 106.1: "for each color among [X], add one mana of that color"
                 // must NOT be split into (repeat_for, "add one mana of that color").
@@ -1494,14 +1496,24 @@ pub(super) fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, St
         (" five times", 5),
     ];
     for &(suffix, count) in suffixes {
-        if let Some(base) = lower.strip_suffix(suffix) {
+        if let Ok((_, base)) = terminated(
+            take_until::<_, _, OracleError<'_>>(suffix),
+            nom::combinator::all_consuming(tag(suffix)),
+        )
+        .parse(lower.as_str())
+        {
             return (
                 Some(QuantityExpr::Fixed { value: count }),
                 text[..base.len()].to_string(),
             );
         }
     }
-    if let Some(base) = lower.strip_suffix(" times") {
+    if let Ok((_, base)) = terminated(
+        take_until::<_, _, OracleError<'_>>(" times"),
+        nom::combinator::all_consuming(tag(" times")),
+    )
+    .parse(lower.as_str())
+    {
         if let Some(space_idx) = base.rfind(' ') {
             let qty_text = text[space_idx + 1..text.len() - " times".len()].trim();
             if let Some((qty, remainder)) = parse_count_expr(qty_text) {
@@ -2096,13 +2108,15 @@ pub(super) fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
 
     // CR 611.2b: "For as long as [condition], [effect]" — leading duration prefix.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("for as long as ").parse(lower.as_str()) {
-        // Find the comma that separates the condition from the effect body.
-        if let Some(comma_pos) = rest.find(", ") {
-            let condition_text = &rest[..comma_pos];
+        // Split "condition, effect_body" on the first ", " delimiter.
+        if let Ok((effect_body, condition_text)) =
+            terminated(take_until(", "), tag::<_, _, OracleError<'_>>(", ")).parse(rest)
+        {
             if let Some(dur) = parse_for_as_long_as_condition(condition_text) {
-                let effect_start = "for as long as ".len() + comma_pos + ", ".len();
-                return Some((dur, text[effect_start..].trim()));
+                let prefix_len = "for as long as ".len() + condition_text.len() + ", ".len();
+                return Some((dur, text[prefix_len..].trim()));
             }
+            let _ = effect_body; // consumed by combinator; unused here
         }
     }
 
@@ -2206,9 +2220,11 @@ fn parse_for_as_long_as_condition(condition: &str) -> Option<Duration> {
     let condition = condition.trim().trim_end_matches('.');
 
     // Compound: "you control ~ and it remains tapped"
-    if let Some(and_pos) = condition.find(" and ") {
-        let left = condition[..and_pos].trim();
-        let right = condition[and_pos + " and ".len()..].trim();
+    if let Ok((right, left)) =
+        terminated(take_until(" and "), tag::<_, _, OracleError<'_>>(" and ")).parse(condition)
+    {
+        let left = left.trim();
+        let right = right.trim();
         let left_dur = parse_for_as_long_as_condition(left)?;
         let right_dur = parse_for_as_long_as_condition(right)?;
         let left_cond = duration_to_condition(left_dur);
@@ -3096,14 +3112,22 @@ fn parse_leading_command_return_destination(input: &str) -> OracleResult<'_, Ret
 /// the same Effect but signals even-split (the engine treats this as a pre-set distribution).
 pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectClause> {
     let tp = TextPair::new(text, lower);
-    let pos = tp.find("deals ").or_else(|| tp.find("deal "))?;
-    let verb_len = if tag::<_, _, OracleError<'_>>("deals ")
-        .parse(&lower[pos..])
-        .is_ok()
-    {
-        6
-    } else {
-        5
+    // Scan word-by-word for "deals " or "deal " verb.
+    let (pos, verb_len) = {
+        let mut scan = lower;
+        let mut offset = 0usize;
+        loop {
+            if tag::<_, _, OracleError<'_>>("deals ").parse(scan).is_ok() {
+                break (offset, 6usize);
+            }
+            if tag::<_, _, OracleError<'_>>("deal ").parse(scan).is_ok() {
+                break (offset, 5usize);
+            }
+            // allow-noncombinator: word-boundary advance in scan loop (Pattern 5)
+            let i = scan.find(' ')?;
+            offset += i + 1;
+            scan = &scan[i + 1..];
+        }
     };
     let (_, after_tp) = tp.split_at(pos + verb_len);
 
@@ -3287,14 +3311,22 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
     // Match: "~ deals N damage to {target}" / "deal N damage to {target}"
     // and variable forms like "deal that much damage" or
     // "deal damage equal to its power".
-    let pos = lower.find("deals ").or_else(|| lower.find("deal "))?;
-    let verb_len = if tag::<_, _, OracleError<'_>>("deals ")
-        .parse(&lower[pos..])
-        .is_ok()
-    {
-        6
-    } else {
-        5
+    // Scan word-by-word for "deals " or "deal " verb.
+    let (pos, verb_len) = {
+        let mut scan = lower;
+        let mut offset = 0usize;
+        loop {
+            if tag::<_, _, OracleError<'_>>("deals ").parse(scan).is_ok() {
+                break (offset, 6usize);
+            }
+            if tag::<_, _, OracleError<'_>>("deal ").parse(scan).is_ok() {
+                break (offset, 5usize);
+            }
+            // allow-noncombinator: word-boundary advance in scan loop (Pattern 5)
+            let i = scan.find(' ')?;
+            offset += i + 1;
+            scan = &scan[i + 1..];
+        }
     };
     let after = &text[pos + verb_len..];
     let after_lower = &lower[pos + verb_len..];
@@ -3328,7 +3360,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             },
             &after[consumed..],
         )
-    } else if let Some(rest) = after_lower.strip_prefix("damage to ") {
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("damage to ").parse(after_lower) {
         // Pattern: "damage to [target] equal to [amount]"
         // Used by: "deals damage to itself equal to its power",
         //          "deals damage to each player equal to the number of ...",
@@ -3526,11 +3558,11 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
     // qualifier never reaches the inner combinator.
     let (amount, after_target) = absorb_trailing_rounding_suffix(amount, after_target);
 
-    let after_to = after_target
-        .trim()
-        .strip_prefix("to ")
-        .unwrap_or(after_target)
-        .trim();
+    let after_to = {
+        let s = after_target.trim();
+        let (rest, _) = opt(tag::<_, _, OracleError<'_>>("to ")).parse(s).unwrap();
+        rest.trim()
+    };
     // CR 107.3i + CR 120.3: Trim a trailing "where X is <expr>" binding from
     // the recipient phrase before classification. The binding has already been
     // captured at chunk-build time and re-applied via
