@@ -1325,8 +1325,10 @@ mod tests {
 
         // "up to one" encodes optional targeting as a MultiTargetSpec with
         // min == 0 (CR 601.2c). The parsed clauses carry it via `multi_target`.
-        let is_optional =
-            |spec: &Option<MultiTargetSpec>| spec.as_ref().is_some_and(|s| s.min == 0);
+        let is_optional = |spec: &Option<MultiTargetSpec>| {
+            spec.as_ref()
+                .is_some_and(|s| matches!(s.min, QuantityExpr::Fixed { value: 0 }))
+        };
 
         // Primary clause: land target, up to one, optional.
         let Effect::PutCounter {
