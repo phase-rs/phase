@@ -281,10 +281,28 @@ export type LibraryPosition =
   | { type: "Bottom" }
   | { type: "NthFromTop"; n: number };
 
-// Narrow source-zone type for `WaitingFor::ExileForCost` — only `Hand` (pitch
-// spells) and `Graveyard` (escape) are valid (mirrors the engine's
-// `ExileCostSourceZone`).
+// Narrow source-zone type for a `PayCost` exile-from-hand/graveyard cost —
+// only `Hand` (pitch spells) and `Graveyard` (escape) are valid (mirrors the
+// engine's `ExileCostSourceZone`).
 export type ExileCostSourceZone = "Hand" | "Graveyard";
+
+// CR 118.3 + CR 601.2b + CR 605.3b: which action a `PayCost` selection applies
+// to the chosen objects. Internally tagged (`#[serde(tag = "type")]`).
+export type PayCostKind =
+  | { type: "Discard" }
+  | { type: "Sacrifice" }
+  | { type: "ReturnToHand" }
+  | { type: "ExileFromZone"; zone: ExileCostSourceZone }
+  | { type: "ExileFromManaZone"; zone: Zone }
+  | { type: "RemoveCounter"; counter_type: CounterMatch }
+  | { type: "TapCreatures" }
+  | { type: "Behold"; action: "ChooseOrReveal" | "ExileChosen" };
+
+// CR 601.2b + CR 605.3b: resumption context after a `PayCost` choice. The
+// frontend treats the inner pending payload as opaque pass-through.
+export type CostResume =
+  | { type: "Spell"; Spell: PendingCast }
+  | { type: "ManaAbility"; ManaAbility: unknown };
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";
 
@@ -1039,19 +1057,22 @@ export type WaitingFor =
   | { type: "MiracleReveal"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
   | { type: "MiracleCastOffer"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
   | { type: "MadnessCastOffer"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
-  | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
+  // CR 118.3 + CR 601.2b + CR 605.3b: unified cost-payment selection. Replaces
+  // DiscardForCost, SacrificeForCost, ReturnToHandForCost, ExileForCost,
+  // RemoveCounterForCost, TapCreaturesForSpellCost, BeholdForCost, and the four
+  // mana-ability cost variants.
   | {
-      type: "SacrificeForCost";
-      data: { player: PlayerId; count: number; min_count: number; permanents: ObjectId[]; pending_cast: PendingCast };
+      type: "PayCost";
+      data: {
+        player: PlayerId;
+        kind: PayCostKind;
+        choices: ObjectId[];
+        count: number;
+        min_count: number;
+        resume: CostResume;
+      };
     }
-  | { type: "ReturnToHandForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "RemoveCounterForCost"; data: { player: PlayerId; count: number; counter_type: CounterMatch; permanents: ObjectId[]; pending_cast: PendingCast } }
   | { type: "BlightChoice"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "BeholdForCost"; data: { player: PlayerId; count: number; choices: ObjectId[]; action: "ChooseOrReveal" | "ExileChosen"; pending_cast: PendingCast } }
-  | { type: "TapCreaturesForManaAbility"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_mana_ability: unknown } }
-  | { type: "DiscardForManaAbility"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_mana_ability: unknown } }
-  | { type: "ExileForManaAbility"; data: { player: PlayerId; count: number; zone: Zone; cards: ObjectId[]; pending_mana_ability: unknown } }
-  | { type: "SacrificeForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "PayManaAbilityMana"; data: { player: PlayerId; options: ManaType[][]; pending_mana_ability: unknown } }
   | {
       type: "ChooseManaColor";
@@ -1066,8 +1087,6 @@ export type WaitingFor =
           | { type: "ResolvingEffect"; data: unknown };
       };
     }
-  | { type: "TapCreaturesForSpellCost"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "ExileForCost"; data: { player: PlayerId; zone: ExileCostSourceZone; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
   | { type: "HarmonizeTapChoice"; data: { player: PlayerId; eligible_creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey } }

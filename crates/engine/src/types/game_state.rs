@@ -1615,6 +1615,41 @@ pub struct CastingVariantChoiceOption {
     pub mana_cost: ManaCost,
 }
 
+/// CR 118.3 + CR 601.2b + CR 605.3b: Identifies the specific action to take
+/// on the objects a player selects while paying a cost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PayCostKind {
+    Discard,
+    Sacrifice,
+    ReturnToHand,
+    /// Exile objects from the specified zone.
+    ExileFromZone {
+        zone: ExileCostSourceZone,
+    },
+    /// Exile objects from any zone (mana-ability exile costs).
+    ExileFromManaZone {
+        zone: Zone,
+    },
+    RemoveCounter {
+        counter_type: CounterMatch,
+    },
+    TapCreatures,
+    Behold {
+        action: BeholdCostAction,
+    },
+}
+
+/// CR 601.2b + CR 605.3b: Resumption context after a PayCost choice completes.
+/// Determines whether the engine re-enters the spell-casting pipeline or the
+/// mana-ability pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CostResume {
+    Spell(Box<PendingCast>),
+    ManaAbility(Box<PendingManaAbility>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -2477,55 +2512,29 @@ pub enum WaitingFor {
         options: Vec<u8>,
         option_names: Vec<String>,
     },
-    /// CR 601.2b: Player must choose a card to discard as part of an additional casting cost.
-    /// After selection, the card is discarded and casting continues via `pay_and_push`.
-    DiscardForCost {
+    /// CR 118.3 + CR 601.2b + CR 605.3b: Player must select `count` objects
+    /// from `choices` to pay a cost, then the engine resumes via `resume`.
+    /// Replaces: DiscardForCost, SacrificeForCost, ReturnToHandForCost,
+    /// ExileForCost, RemoveCounterForCost, TapCreaturesForSpellCost,
+    /// BeholdForCost, TapCreaturesForManaAbility, DiscardForManaAbility,
+    /// ExileForManaAbility, SacrificeForManaAbility.
+    PayCost {
         player: PlayerId,
-        /// How many cards to discard.
+        kind: PayCostKind,
+        /// Pre-filtered eligible objects. The player chooses `count` of these.
+        choices: Vec<ObjectId>,
         count: usize,
-        /// Eligible cards in hand (excludes the spell being cast).
-        cards: Vec<ObjectId>,
-        /// The pending cast to resume after the discard is complete.
-        pending_cast: Box<PendingCast>,
-    },
-    /// CR 118.3 / CR 601.2b: Player must choose permanent(s) to sacrifice as cost.
-    SacrificeForCost {
-        player: PlayerId,
-        /// Maximum number of permanents the player may sacrifice for this cost.
-        count: usize,
-        /// Minimum number of permanents the player must sacrifice.
+        /// Minimum to choose (0 for exact-count costs; > 0 for at-least-N costs
+        /// like SacrificeForCost's `min_count`).
         #[serde(default)]
         min_count: usize,
-        /// Pre-filtered eligible permanents on the battlefield.
-        permanents: Vec<ObjectId>,
-        /// The pending cast to resume after the sacrifice is complete.
-        pending_cast: Box<PendingCast>,
-    },
-    /// CR 118.3 / CR 601.2b: Player must choose permanent(s) to return to hand as cost.
-    ReturnToHandForCost {
-        player: PlayerId,
-        count: usize,
-        /// Pre-filtered eligible permanents on the battlefield.
-        permanents: Vec<ObjectId>,
-        /// The pending cast to resume after the return is complete.
-        pending_cast: Box<PendingCast>,
+        resume: CostResume,
     },
     /// CR 118.12a: Player must choose which branch of a disjunctive activation cost
     /// (`AbilityCost::OneOf`) to pay.
     ActivationCostOneOfChoice {
         player: PlayerId,
         costs: Vec<AbilityCost>,
-        pending_cast: Box<PendingCast>,
-    },
-    /// CR 118.3 / CR 122.1 / CR 601.2b: Player must choose a permanent to
-    /// remove counters from as a cost.
-    RemoveCounterForCost {
-        player: PlayerId,
-        count: u32,
-        counter_type: CounterMatch,
-        /// Pre-filtered eligible permanents on the battlefield.
-        permanents: Vec<ObjectId>,
-        /// The pending cast or activated ability to resume after the counter is removed.
         pending_cast: Box<PendingCast>,
     },
     /// Blight N — player must choose one creature to put N -1/-1 counters on as cost.
@@ -2537,60 +2546,6 @@ pub enum WaitingFor {
         creatures: Vec<ObjectId>,
         /// The pending cast to resume after blight is complete.
         pending_cast: Box<PendingCast>,
-    },
-    /// CR 702.34a / CR 601.2b: Player must choose untapped creatures to tap as a spell cost
-    /// (e.g., "Flashback—Tap three untapped white creatures you control").
-    TapCreaturesForSpellCost {
-        player: PlayerId,
-        count: usize,
-        creatures: Vec<ObjectId>,
-        pending_cast: Box<PendingCast>,
-    },
-    /// Player must choose a matching permanent they control or matching card
-    /// from hand to pay a behold casting cost.
-    BeholdForCost {
-        player: PlayerId,
-        count: usize,
-        choices: Vec<ObjectId>,
-        action: BeholdCostAction,
-        pending_cast: Box<PendingCast>,
-    },
-    /// CR 118.3 / CR 605.3b: Player must choose untapped creatures to pay a mana ability cost.
-    TapCreaturesForManaAbility {
-        player: PlayerId,
-        count: usize,
-        creatures: Vec<ObjectId>,
-        pending_mana_ability: Box<PendingManaAbility>,
-    },
-    /// CR 118.3 / CR 605.3b: Player must choose cards to discard to pay a mana ability cost.
-    DiscardForManaAbility {
-        player: PlayerId,
-        count: usize,
-        /// Eligible cards in hand (excludes the mana ability source).
-        cards: Vec<ObjectId>,
-        pending_mana_ability: Box<PendingManaAbility>,
-    },
-    /// CR 117.1 + CR 118.3 + CR 605.3b: Player must choose object(s) from the
-    /// specified zone to exile to pay a mana ability cost. Used by Food Chain's
-    /// battlefield exile cost and Titans' Nest's graveyard exile cost.
-    ExileForManaAbility {
-        player: PlayerId,
-        count: usize,
-        zone: Zone,
-        /// Pre-filtered eligible objects in `zone` (excludes the mana ability source).
-        cards: Vec<ObjectId>,
-        pending_mana_ability: Box<PendingManaAbility>,
-    },
-    /// CR 117.1 + CR 118.3 + CR 605.3b: Player must choose battlefield
-    /// permanent(s) to sacrifice to pay a mana ability cost. Used by
-    /// Phyrexian Altar ("Sacrifice a creature: Add one mana of any color.")
-    /// and the broader sacrifice-for-mana-by-property class.
-    SacrificeForManaAbility {
-        player: PlayerId,
-        count: usize,
-        /// Pre-filtered eligible battlefield permanents (excludes the mana ability source).
-        permanents: Vec<ObjectId>,
-        pending_mana_ability: Box<PendingManaAbility>,
     },
     /// CR 605.3a + CR 601.2h + CR 107.4e: A mana ability whose cost is
     /// `Composite { Mana(..), Tap, .. }` (filter lands, Cabal Coffers-style
@@ -2615,27 +2570,6 @@ pub enum WaitingFor {
         player: PlayerId,
         choice: ManaChoicePrompt,
         context: ManaChoiceContext,
-    },
-    /// CR 118.9a + CR 601.2b + CR 601.2h: Player must choose cards to exile from
-    /// `zone` as part of an alternative or additional casting cost. Used by both
-    /// escape (CR 702.138a, `zone = Graveyard`) and pitch spells such as Force
-    /// of Will, Force of Negation, Force of Vigor, Misdirection, Unmask, and
-    /// Mindbreak Trap (CR 118.9a, `zone = Hand`). CR 118.9a authorizes
-    /// alternative costs; CR 601.2b covers cost announcement; CR 601.2h covers
-    /// payment. Eligibility is pre-filtered against the cost's `TargetFilter`;
-    /// the spell being cast is excluded.
-    ExileForCost {
-        player: PlayerId,
-        /// Source zone for the exile cost — `Hand` (pitch spells) or
-        /// `Graveyard` (escape). Narrow type makes invalid zones
-        /// unrepresentable; see `ExileCostSourceZone`.
-        zone: ExileCostSourceZone,
-        /// How many cards to exile.
-        count: usize,
-        /// Eligible cards in `zone` — excludes the spell being cast.
-        cards: Vec<ObjectId>,
-        /// The pending cast to resume after the exile is complete.
-        pending_cast: Box<PendingCast>,
     },
     /// CR 701.59a / CR 702.163a: Choose graveyard cards with combined mana value
     /// at least the required threshold, then resume casting or effect resolution.
@@ -3214,21 +3148,11 @@ impl WaitingFor {
             | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }
             | WaitingFor::ChooseDungeonRoom { player, .. }
-            | WaitingFor::DiscardForCost { player, .. }
-            | WaitingFor::SacrificeForCost { player, .. }
-            | WaitingFor::ReturnToHandForCost { player, .. }
+            | WaitingFor::PayCost { player, .. }
             | WaitingFor::ActivationCostOneOfChoice { player, .. }
-            | WaitingFor::RemoveCounterForCost { player, .. }
             | WaitingFor::BlightChoice { player, .. }
-            | WaitingFor::TapCreaturesForSpellCost { player, .. }
-            | WaitingFor::BeholdForCost { player, .. }
-            | WaitingFor::TapCreaturesForManaAbility { player, .. }
-            | WaitingFor::DiscardForManaAbility { player, .. }
-            | WaitingFor::ExileForManaAbility { player, .. }
-            | WaitingFor::SacrificeForManaAbility { player, .. }
             | WaitingFor::PayManaAbilityMana { player, .. }
             | WaitingFor::ChooseManaColor { player, .. }
-            | WaitingFor::ExileForCost { player, .. }
             | WaitingFor::CollectEvidenceChoice { player, .. }
             | WaitingFor::HarmonizeTapChoice { player, .. }
             | WaitingFor::OptionalEffectChoice { player, .. }
@@ -3326,16 +3250,13 @@ impl WaitingFor {
             | WaitingFor::ModeChoice { pending_cast, .. }
             | WaitingFor::OptionalCostChoice { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
-            | WaitingFor::DiscardForCost { pending_cast, .. }
-            | WaitingFor::SacrificeForCost { pending_cast, .. }
-            | WaitingFor::ReturnToHandForCost { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
-            | WaitingFor::RemoveCounterForCost { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
-            | WaitingFor::TapCreaturesForSpellCost { pending_cast, .. }
-            | WaitingFor::BeholdForCost { pending_cast, .. }
-            | WaitingFor::ExileForCost { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
+            WaitingFor::PayCost { resume, .. } => match resume {
+                CostResume::Spell(pending_cast) => Some(pending_cast),
+                CostResume::ManaAbility(_) => None,
+            },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
                 CollectEvidenceResume::Effect { .. } => None,
@@ -3353,16 +3274,13 @@ impl WaitingFor {
             | WaitingFor::ModeChoice { pending_cast, .. }
             | WaitingFor::OptionalCostChoice { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
-            | WaitingFor::DiscardForCost { pending_cast, .. }
-            | WaitingFor::SacrificeForCost { pending_cast, .. }
-            | WaitingFor::ReturnToHandForCost { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
-            | WaitingFor::RemoveCounterForCost { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
-            | WaitingFor::TapCreaturesForSpellCost { pending_cast, .. }
-            | WaitingFor::BeholdForCost { pending_cast, .. }
-            | WaitingFor::ExileForCost { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
+            WaitingFor::PayCost { resume, .. } => match resume {
+                CostResume::Spell(pending_cast) => Some(pending_cast),
+                CostResume::ManaAbility(_) => None,
+            },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
                 CollectEvidenceResume::Effect { .. } => None,
@@ -5951,38 +5869,49 @@ mod tests {
             ability_cost: None,
             unavailable_modes: vec![],
         }));
-        variants.push(Box::new(WaitingFor::DiscardForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::Discard,
+            choices: vec![ObjectId(1)],
             count: 1,
-            cards: vec![ObjectId(1)],
-            pending_cast: dummy_pending(),
+            min_count: 0,
+            resume: CostResume::Spell(dummy_pending()),
         }));
-        variants.push(Box::new(WaitingFor::ExileForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
-            zone: ExileCostSourceZone::Hand,
+            kind: PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Hand,
+            },
+            choices: vec![ObjectId(1)],
             count: 1,
-            cards: vec![ObjectId(1)],
-            pending_cast: dummy_pending(),
+            min_count: 0,
+            resume: CostResume::Spell(dummy_pending()),
         }));
-        variants.push(Box::new(WaitingFor::ExileForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
-            zone: ExileCostSourceZone::Graveyard,
+            kind: PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Graveyard,
+            },
+            choices: vec![ObjectId(1)],
             count: 1,
-            cards: vec![ObjectId(1)],
-            pending_cast: dummy_pending(),
+            min_count: 0,
+            resume: CostResume::Spell(dummy_pending()),
         }));
-        variants.push(Box::new(WaitingFor::SacrificeForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::Sacrifice,
+            choices: vec![ObjectId(1)],
             count: 1,
             min_count: 1,
-            permanents: vec![ObjectId(1)],
-            pending_cast: dummy_pending(),
+            resume: CostResume::Spell(dummy_pending()),
         }));
-        variants.push(Box::new(WaitingFor::ReturnToHandForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::ReturnToHand,
+            choices: vec![ObjectId(1)],
             count: 1,
-            permanents: vec![ObjectId(1)],
-            pending_cast: dummy_pending(),
+            min_count: 0,
+            resume: CostResume::Spell(dummy_pending()),
         }));
         variants.push(Box::new(WaitingFor::BlightChoice {
             player: PlayerId(0),
@@ -5995,12 +5924,15 @@ mod tests {
             eligible_creatures: vec![ObjectId(1)],
             pending_cast: dummy_pending(),
         }));
-        variants.push(Box::new(WaitingFor::BeholdForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
-            count: 1,
+            kind: PayCostKind::Behold {
+                action: BeholdCostAction::ChooseOrReveal,
+            },
             choices: vec![ObjectId(1)],
-            action: BeholdCostAction::ChooseOrReveal,
-            pending_cast: dummy_pending(),
+            count: 1,
+            min_count: 0,
+            resume: CostResume::Spell(dummy_pending()),
         }));
         variants.push(Box::new(WaitingFor::ConniveDiscard {
             player: PlayerId(0),
@@ -6117,15 +6049,17 @@ mod tests {
         assert!(!priority.has_pending_cast());
         assert!(priority.pending_cast_ref().is_none());
 
-        // TapCreaturesForManaAbility carries PendingManaAbility, not PendingCast.
-        // A mana ability activated inside a spell cast still routes the cast
-        // through the outer ManaPayment state, so excluding this variant here
-        // does not lose mid-cast tracking.
-        let tap_mana = WaitingFor::TapCreaturesForManaAbility {
+        // A PayCost with a ManaAbility resume carries PendingManaAbility, not
+        // PendingCast. A mana ability activated inside a spell cast still routes
+        // the cast through the outer ManaPayment state, so excluding this
+        // variant here does not lose mid-cast tracking.
+        let tap_mana = WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::TapCreatures,
+            choices: vec![ObjectId(1)],
             count: 1,
-            creatures: vec![ObjectId(1)],
-            pending_mana_ability: Box::new(PendingManaAbility {
+            min_count: 0,
+            resume: CostResume::ManaAbility(Box::new(PendingManaAbility {
                 player: PlayerId(0),
                 source_id: ObjectId(1),
                 ability_index: 0,
@@ -6138,7 +6072,7 @@ mod tests {
                 chosen_sacrificed_battlefield: Vec::new(),
                 cost_paid_object: None,
                 batch_siblings: Vec::new(),
-            }),
+            })),
         };
         assert!(!tap_mana.has_pending_cast());
         assert!(tap_mana.pending_cast_ref().is_none());

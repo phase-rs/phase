@@ -6,8 +6,8 @@ use crate::types::ability::{
 use crate::types::counter::CounterMatch;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    GameState, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
-    PendingManaAbility, ProductionOverride, WaitingFor,
+    CostResume, GameState, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
+    PayCostKind, PendingManaAbility, ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
@@ -1009,11 +1009,13 @@ fn advance_mana_ability_activation(
                     "Not enough cards in hand to discard for mana ability".to_string(),
                 ));
             }
-            return Ok(WaitingFor::DiscardForManaAbility {
+            return Ok(WaitingFor::PayCost {
                 player: pending.player,
+                kind: PayCostKind::Discard,
+                choices: cards,
                 count,
-                cards,
-                pending_mana_ability: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::ManaAbility(Box::new(pending)),
             });
         }
     }
@@ -1027,11 +1029,13 @@ fn advance_mana_ability_activation(
                     "Not enough untapped creatures to pay mana ability cost".to_string(),
                 ));
             }
-            return Ok(WaitingFor::TapCreaturesForManaAbility {
+            return Ok(WaitingFor::PayCost {
                 player: pending.player,
+                kind: PayCostKind::TapCreatures,
+                choices: creatures,
                 count,
-                creatures,
-                pending_mana_ability: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::ManaAbility(Box::new(pending)),
             });
         }
     }
@@ -1059,12 +1063,13 @@ fn advance_mana_ability_activation(
                     "Not enough eligible cards to exile for mana ability cost".to_string(),
                 ));
             }
-            return Ok(WaitingFor::ExileForManaAbility {
+            return Ok(WaitingFor::PayCost {
                 player: pending.player,
+                kind: PayCostKind::ExileFromManaZone { zone },
+                choices: cards,
                 count,
-                zone,
-                cards,
-                pending_mana_ability: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::ManaAbility(Box::new(pending)),
             });
         }
     }
@@ -1081,11 +1086,13 @@ fn advance_mana_ability_activation(
                     "Not enough eligible permanents to sacrifice for mana ability cost".to_string(),
                 ));
             }
-            return Ok(WaitingFor::SacrificeForManaAbility {
+            return Ok(WaitingFor::PayCost {
                 player: pending.player,
+                kind: PayCostKind::Sacrifice,
+                choices: permanents,
                 count,
-                permanents,
-                pending_mana_ability: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::ManaAbility(Box::new(pending)),
             });
         }
     }
@@ -3999,18 +4006,20 @@ mod tests {
         .unwrap();
 
         let pending = match waiting {
-            WaitingFor::DiscardForManaAbility {
+            WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Discard,
                 count,
-                cards,
-                pending_mana_ability,
+                choices: cards,
+                resume: CostResume::ManaAbility(pending_mana_ability),
+                ..
             } => {
                 assert_eq!(player, PlayerId(0));
                 assert_eq!(count, 2);
                 assert_eq!(cards.len(), 2);
                 *pending_mana_ability
             }
-            other => panic!("expected DiscardForManaAbility, got {other:?}"),
+            other => panic!("expected PayCost Discard (mana ability), got {other:?}"),
         };
 
         let waiting = handle_discard_for_mana_ability(
@@ -6881,11 +6890,13 @@ mod tests {
         .expect("activation should surface the sacrifice choice");
 
         let pending = match waiting {
-            WaitingFor::SacrificeForManaAbility {
+            WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Sacrifice,
                 count,
-                permanents,
-                pending_mana_ability,
+                choices: permanents,
+                resume: CostResume::ManaAbility(pending_mana_ability),
+                ..
             } => {
                 assert_eq!(player, PlayerId(0));
                 assert_eq!(count, 1);
@@ -6893,7 +6904,7 @@ mod tests {
                 assert!(!permanents.contains(&opponent_creature));
                 pending_mana_ability
             }
-            other => panic!("expected SacrificeForManaAbility, got {other:?}"),
+            other => panic!("expected PayCost Sacrifice (mana ability), got {other:?}"),
         };
 
         let result = handle_sacrifice_for_mana_ability(
@@ -6973,12 +6984,13 @@ mod tests {
         .expect("Titans' Nest should ask which graveyard card pays the cost");
 
         let pending = match waiting {
-            WaitingFor::ExileForManaAbility {
+            WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::ExileFromManaZone { zone },
                 count,
-                zone,
-                cards,
-                pending_mana_ability,
+                choices: cards,
+                resume: CostResume::ManaAbility(pending_mana_ability),
+                ..
             } => {
                 assert_eq!(player, PlayerId(0));
                 assert_eq!(count, 1);
@@ -6989,7 +7001,7 @@ mod tests {
                 assert!(!cards.contains(&opponent_card));
                 pending_mana_ability
             }
-            other => panic!("expected ExileForManaAbility, got {other:?}"),
+            other => panic!("expected PayCost ExileFromManaZone (mana ability), got {other:?}"),
         };
 
         let result = handle_exile_for_mana_ability(
@@ -7168,17 +7180,18 @@ mod tests {
         .expect("creature source should be eligible to pay its own sacrifice-a-creature cost");
 
         let pending = match waiting {
-            WaitingFor::SacrificeForManaAbility {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
                 count,
-                permanents,
-                pending_mana_ability,
+                choices: permanents,
+                resume: CostResume::ManaAbility(pending_mana_ability),
                 ..
             } => {
                 assert_eq!(count, 1);
                 assert_eq!(permanents, vec![source]);
                 pending_mana_ability
             }
-            other => panic!("expected SacrificeForManaAbility, got {other:?}"),
+            other => panic!("expected PayCost Sacrifice (mana ability), got {other:?}"),
         };
 
         let result = handle_sacrifice_for_mana_ability(
