@@ -714,6 +714,74 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
     ))
 }
 
+fn parse_leave_battlefield_rider_ref(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("it"),
+            tag("the card"),
+            tag("the creature"),
+            tag("the permanent"),
+            tag("that card"),
+            tag("that creature"),
+            tag("that land"),
+            tag("that permanent"),
+            tag("this card"),
+            tag("this creature"),
+            tag("this land"),
+            tag("this permanent"),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 614.1a + CR 614.6: Detect "If it would leave the battlefield, exile it
+/// instead of putting it anywhere else." riders attached to a previously
+/// selected object. The carried `ReplacementDefinition` is installed on the
+/// parent target, where `valid_card: SelfRef` binds to that host object.
+fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> {
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("if "))
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = parse_leave_battlefield_rider_ref(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" would leave the battlefield, ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("exile ").parse(rest).ok()?;
+    let (rest, _) = parse_leave_battlefield_rider_ref(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" instead of putting ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = parse_leave_battlefield_rider_ref(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" anywhere else")
+        .parse(rest)
+        .ok()?;
+    parse_optional_period_and_end(rest)?;
+
+    let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        ));
+
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(replacement),
+        target: TargetFilter::Any,
+    })
+}
+
 fn parse_optional_period_and_end(input: &str) -> Option<()> {
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("."))
         .parse(input)
@@ -3448,6 +3516,9 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
     if let Some(effect) = try_parse_next_time_source_damage_replacement(&lower) {
+        return parsed_clause(effect);
+    }
+    if let Some(effect) = try_parse_leave_battlefield_exile_replacement(&lower) {
         return parsed_clause(effect);
     }
     // CR 614.1a + CR 514.2: Global "If [source] would deal damage this turn,
@@ -40003,6 +40074,79 @@ mod tests {
             TargetFilter::LastCreated,
             "ChangeZone target must be rewritten from ParentTarget to LastCreated"
         );
+    }
+
+    /// CR 614.1a + CR 614.6: Whip-style "If it would leave the battlefield,
+    /// exile it instead of putting it anywhere else" is a replacement effect
+    /// installed on the returned object, not an immediate follow-up exile.
+    #[test]
+    fn leave_battlefield_exile_rider_adds_replacement() {
+        fn contains_direct_parent_target_exile(def: &AbilityDefinition) -> bool {
+            if matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ) {
+                return true;
+            }
+            def.sub_ability
+                .as_deref()
+                .is_some_and(contains_direct_parent_target_exile)
+        }
+
+        fn find_added_replacement(def: &AbilityDefinition) -> Option<&ReplacementDefinition> {
+            if let Effect::AddTargetReplacement {
+                replacement,
+                target,
+            } = &*def.effect
+            {
+                assert_eq!(*target, TargetFilter::Any);
+                return Some(replacement);
+            }
+            def.sub_ability.as_deref().and_then(find_added_replacement)
+        }
+
+        for rider in [
+            "if it would leave the battlefield, exile it instead of putting it anywhere else",
+            "if that creature would leave the battlefield, exile that creature instead of putting that creature anywhere else",
+            "if this permanent would leave the battlefield, exile this permanent instead of putting this permanent anywhere else",
+        ] {
+            let text = format!(
+                "return target creature card from your graveyard to the battlefield. it gains haste. exile it at the beginning of the next end step. {rider}"
+            );
+            let ability = parse_effect_chain(&text, AbilityKind::Activated);
+
+            assert!(
+                !contains_direct_parent_target_exile(&ability),
+                "{rider} must not parse as an immediate exile"
+            );
+            let replacement =
+                find_added_replacement(&ability).expect("expected exile replacement");
+            assert_eq!(replacement.event, ReplacementEvent::Moved);
+            assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
+            assert_eq!(replacement.destination_zone, None);
+
+            let execute = replacement
+                .execute
+                .as_deref()
+                .expect("replacement should carry redirect effect");
+            match &*execute.effect {
+                Effect::ChangeZone {
+                    origin,
+                    destination,
+                    target,
+                    ..
+                } => {
+                    assert_eq!(*origin, Some(Zone::Battlefield));
+                    assert_eq!(*destination, Zone::Exile);
+                    assert_eq!(*target, TargetFilter::SelfRef);
+                }
+                other => panic!("expected ChangeZone redirect, got {other:?}"),
+            }
+        }
     }
 
     /// CR 701.57a + CR 702.85a: `Effect::ExileFromTopUntil` must accept the
