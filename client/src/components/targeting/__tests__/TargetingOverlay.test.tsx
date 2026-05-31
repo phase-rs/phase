@@ -368,4 +368,60 @@ describe("TargetingOverlay", () => {
     expect(screen.getByText("up to one player")).toBeInTheDocument();
     expect(screen.getAllByAltText("U")).toHaveLength(2);
   });
+
+  it("prefixes the prompt with the active slot's mode label when present", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      waiting_for: {
+        type: "TriggerTargetSelection",
+        data: {
+          player: 0,
+          target_slots: [{ legal_targets: [{ Player: 1 }], optional: false }],
+          mode_labels: ["Deal 2 damage to any target."],
+          selection: { current_slot: 0, current_legal_targets: [{ Player: 1 }] },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(
+      screen.getByText("Deal 2 damage to any target. — a player"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the plain prompt when no mode label is present", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      waiting_for: {
+        type: "TriggerTargetSelection",
+        data: {
+          player: 0,
+          target_slots: [{ legal_targets: [{ Player: 1 }], optional: false }],
+          selection: { current_slot: 0, current_legal_targets: [{ Player: 1 }] },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText("a player")).toBeInTheDocument();
+    expect(screen.queryByText(/—/)).toBeNull();
+  });
 });

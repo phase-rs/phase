@@ -5672,6 +5672,7 @@ fn continue_with_prepared(
                     player,
                     pending_cast: Box::new(pending_aura),
                     target_slots,
+                    mode_labels: Vec::new(),
                     selection,
                 });
             }
@@ -5833,6 +5834,7 @@ fn continue_with_prepared(
             player,
             pending_cast: Box::new(pending_targets),
             target_slots,
+            mode_labels: Vec::new(),
             selection,
         });
     }
@@ -8682,6 +8684,7 @@ pub fn handle_activate_ability(
             player,
             pending_cast: Box::new(pending_target),
             target_slots,
+            mode_labels: Vec::new(),
             selection,
         });
     }
@@ -18204,6 +18207,111 @@ mod tests {
             matches!(result, WaitingFor::ModeChoice { .. }),
             "expected ModeChoice, got {result:?}"
         );
+    }
+
+    /// CR 700.2 / CR 601.2b: A "Choose two —" modal spell whose chosen modes
+    /// each target must, after `SelectModes`, surface a `WaitingFor::
+    /// TargetSelection` whose `mode_labels` align with the chosen modes in
+    /// sorted printed order and whose length matches `target_slots`. Drives the
+    /// real pipeline (`apply` → `handle_select_modes` → labelled slot build).
+    #[test]
+    fn modal_spell_target_selection_carries_per_mode_labels() {
+        let mut state = setup_game_at_main_phase();
+        // A creature for the Destroy mode to target.
+        let creature = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(0),
+            "Two-Mode Charm".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            // Mode 0: Deal 2 damage to any target (targets).
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                },
+            ));
+            // Mode 1: Destroy target creature (targets).
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            ));
+            obj.mana_cost = ManaCost::zero();
+            obj.modal = Some(crate::types::ability::ModalChoice {
+                min_choices: 2,
+                max_choices: 2,
+                mode_count: 2,
+                mode_descriptions: vec![
+                    "Deal 2 damage to any target.".to_string(),
+                    "Destroy target creature.".to_string(),
+                ],
+                ..Default::default()
+            });
+        }
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(60), &mut events).unwrap();
+        assert!(
+            matches!(result, WaitingFor::ModeChoice { .. }),
+            "expected ModeChoice, got {result:?}"
+        );
+        state.waiting_for = result;
+
+        // Submit both modes in reversed order to exercise sorted-printed-order.
+        let after = apply_as_current(
+            &mut state,
+            GameAction::SelectModes {
+                indices: vec![1, 0],
+            },
+        )
+        .expect("mode submission resolves")
+        .waiting_for;
+
+        match after {
+            WaitingFor::TargetSelection {
+                target_slots,
+                mode_labels,
+                ..
+            } => {
+                assert_eq!(
+                    mode_labels.len(),
+                    target_slots.len(),
+                    "mode_labels must be index-parallel to target_slots"
+                );
+                // Sorted printed order [0, 1]: damage slot first, destroy slot second.
+                assert_eq!(
+                    mode_labels[0].as_deref(),
+                    Some("Deal 2 damage to any target.")
+                );
+                assert_eq!(mode_labels[1].as_deref(), Some("Destroy target creature."));
+            }
+            other => panic!("expected TargetSelection with mode labels, got {other:?}"),
+        }
     }
 
     #[test]

@@ -6,7 +6,8 @@
     "faceDownName": "Verdeckte Karte",
     "loading": "{{name}} wird geladen",
     "unimplemented": "Nicht implementiert: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Getappt"
   },
   "preview": {
     "holdCtrlBack": "Strg halten für Rückseite",
@@ -214,6 +215,9 @@
     "radAriaLabel_one": "{{count}} Strahlungsmarke",
     "radAriaLabel_other": "{{count}} Strahlungsmarken",
     "radTooltip": "Strahlungsmarken: {{count}}",
+    "experienceAriaLabel_one": "{{count}} Erfahrungsmarke",
+    "experienceAriaLabel_other": "{{count}} Erfahrungsmarken",
+    "experienceTooltip": "Erfahrungsmarken: {{count}}",
     "speedAriaLabel": "Tempo {{value}}",
     "speedTooltip": "Tempo: {{value}}",
     "companion": "Gefährte"
@@ -388,6 +392,7 @@
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",
     "chooseTarget": "Wähle ein Ziel",
     "noLegalTargets": "Keine legalen Ziele verfügbar",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "bis zu eine {{target}}",
     "one": "eine {{target}}",
     "nounPlayer": "Spieler",
@@ -1279,7 +1284,9 @@
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",
     "searchPlaceholder": "Nach Name suchen...",
     "noCardsFound": "Keine Karten gefunden",
-    "buttonSubtitle": "Wähle eine Option"
+    "buttonSubtitle": "Wähle eine Option",
+    "filterPlaceholder": "Optionen filtern...",
+    "noOptionsMatch": "Keine Option passt"
   },
   "nonFatalPanic": {
     "heading": "Engine-Warnung (nicht fatal)",

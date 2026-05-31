@@ -49,6 +49,17 @@
     "showKeywords": "Mostrar palabras clave en las cartas del campo de batalla",
     "opponentHoverPreview": "Vista previa al pasar el cursor sobre el oponente",
     "showOpponentBoard": "Mostrar el tablero del oponente al pasar el cursor sobre el HUD",
+    "cardPreview": "Vista previa de la carta al pasar el cursor",
+    "cardPreviewOptions": {
+      "follow": "Seguir el cursor",
+      "side": "Anclar al lateral",
+      "shift": "Mantén Shift"
+    },
+    "cardPreviewHint": {
+      "follow": "La vista previa ampliada sigue al cursor mientras pasas sobre una carta.",
+      "side": "La vista previa se ancla al borde de la pantalla para que nunca tape el tablero.",
+      "shift": "La vista previa solo aparece mientras mantienes pulsada la tecla Shift, como en Tabletop Simulator."
+    },
     "cardArtPreferences": "Preferencias de ilustración de cartas",
     "clearArtOverrides_one": "Borrar todas las anulaciones de ilustración ({{count}})",
     "clearArtOverrides_other": "Borrar todas las anulaciones de ilustración ({{count}})",

@@ -6,7 +6,8 @@
     "faceDownName": "Face-down card",
     "loading": "Loading {{name}}",
     "unimplemented": "Unimplemented: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Tapped"
   },
   "preview": {
     "holdCtrlBack": "Hold Ctrl for back face",
@@ -214,6 +215,9 @@
     "radAriaLabel_one": "{{count}} rad counter",
     "radAriaLabel_other": "{{count}} rad counters",
     "radTooltip": "Rad counters: {{count}}",
+    "experienceAriaLabel_one": "{{count}} experience counter",
+    "experienceAriaLabel_other": "{{count}} experience counters",
+    "experienceTooltip": "Experience counters: {{count}}",
     "speedAriaLabel": "Speed {{value}}",
     "speedTooltip": "Speed: {{value}}",
     "companion": "Companion"
@@ -390,6 +394,7 @@
     "chooseTargetOf": "Choose target {{current}} of {{total}}",
     "chooseTarget": "Choose a target",
     "noLegalTargets": "No legal targets available",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "up to one {{target}}",
     "one": "a {{target}}",
     "nounPlayer": "player",
@@ -1279,7 +1284,9 @@
     "searchSubtitle": "Type to search all cards",
     "searchPlaceholder": "Search by name...",
     "noCardsFound": "No cards found",
-    "buttonSubtitle": "Select one option"
+    "buttonSubtitle": "Select one option",
+    "filterPlaceholder": "Filter options...",
+    "noOptionsMatch": "No options match"
   },
   "nonFatalPanic": {
     "heading": "Engine warning (non-fatal)",
