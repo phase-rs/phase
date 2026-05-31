@@ -14,7 +14,7 @@ use super::oracle_effect::{
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
-use super::oracle_nom::condition::parse_typed_counter_noun;
+use super::oracle_nom::condition::parse_source_has_counters;
 use super::oracle_nom::error::{oracle_err, OracleResult};
 use super::oracle_nom::filter::{parse_enters_origin_zone, parse_with_property};
 use super::oracle_nom::primitives::{
@@ -39,7 +39,7 @@ use crate::types::ability::{
     TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::CoreType;
-use crate::types::counter::{parse_counter_type, CounterMatch};
+use crate::types::counter::parse_counter_type;
 use crate::types::events::PlayerActionKind;
 use crate::types::mana::ManaColor;
 use crate::types::phase::Phase;
@@ -6733,49 +6733,37 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
 
 /// CR 603.8: Parse "when ~ has no [type] counters on it" as a state trigger.
 ///
-/// Uses nom combinators exclusively:
-/// - `alt((tag("when "), tag("whenever ")))` for the trigger keyword
-/// - `alt((tag("~ "), tag("this permanent "), ...))` for the self-referential subject
-/// - `tag("has no ")` for the zero-quantity predicate
-/// - `parse_typed_counter_noun` / bare `tag("counters")` for the counter type axis
-/// - `tag(" on it")` for the locative tail
+/// Delegates the subject × quantity × counter-type × "on it" grammar to the
+/// shared `parse_source_has_counters` combinator and bridges its
+/// `StaticCondition::HasCounters` to a `TriggerCondition` via
+/// `static_condition_to_trigger_condition` — the same path intervening-if
+/// counter conditions already use. Only the zero/depletion form (Dark Depths,
+/// Afiya Grove, vanishing-style "has no … counters") is accepted: a state
+/// trigger re-checks every SBA cycle and re-fires once off the stack, so a
+/// non-zero threshold would loop for any effect that doesn't itself remove the
+/// counters.
 fn try_parse_has_no_counters_state_trigger(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when ")))
         .parse(lower)
         .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("~ "),
-        tag("this creature "),
-        tag("this permanent "),
-        tag("this land "),
-        tag("this artifact "),
-        tag("this enchantment "),
-    ))
-    .parse(rest)
-    .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("has no ").parse(rest).ok()?;
-    // Counter type axis: typed first ("ice counters"), then bare ("counters").
-    let (rest, counters) = alt((
-        parse_typed_counter_noun,
-        value(
-            CounterMatch::Any,
-            alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter"))),
-        ),
-    ))
-    .parse(rest)
-    .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" on it").parse(rest).ok()?;
-    // Allow optional trailing punctuation/text (the effect clause follows after ", ").
-    let _ = rest;
+    let (_, static_cond) = parse_source_has_counters(rest).ok()?;
+    // CR 603.8: restrict to the self-limiting "has no … counters" depletion form.
+    if !matches!(
+        static_cond,
+        StaticCondition::HasCounters {
+            minimum: 0,
+            maximum: Some(0),
+            ..
+        }
+    ) {
+        return None;
+    }
+    let condition = static_condition_to_trigger_condition(&static_cond)?;
     let mut def = make_base();
     def.mode = TriggerMode::StateCondition;
-    def.condition = Some(TriggerCondition::HasCounters {
-        counters,
-        minimum: 0,
-        maximum: Some(0),
-    });
+    def.condition = Some(condition);
     def.valid_card = Some(TargetFilter::SelfRef);
     Some((TriggerMode::StateCondition, def))
 }
