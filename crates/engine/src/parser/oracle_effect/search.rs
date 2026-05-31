@@ -446,6 +446,7 @@ fn parse_filter_region_terminator(input: &str) -> Option<&str> {
         ", then ",
         ", shuffle ",
         ", exile ",
+        " and exile ",
         " and reveal ",
         " with different names",
         " with different powers",
@@ -905,6 +906,7 @@ fn parse_search_filter_color_disjunction(
                 &SearchSuffixConstraints {
                     properties: vec![FilterProp::HasColor { color }],
                     type_filters: Vec::new(),
+                    filters: Vec::new(),
                 },
             )
         })
@@ -933,6 +935,7 @@ fn parse_search_filter_leading_property_stack(
             &SearchSuffixConstraints {
                 properties,
                 type_filters: Vec::new(),
+                filters: Vec::new(),
             },
         )
     })
@@ -1295,6 +1298,7 @@ fn parse_search_specialized_type_word(type_word: &str, ctx: &mut ParseContext) -
 struct SearchSuffixConstraints {
     properties: Vec<FilterProp>,
     type_filters: Vec<TypeFilter>,
+    filters: Vec<TargetFilter>,
 }
 
 fn strip_search_card_suffix(text: &str) -> &str {
@@ -1372,11 +1376,17 @@ fn apply_search_suffix_constraints(
     filter: TargetFilter,
     suffix: &SearchSuffixConstraints,
 ) -> TargetFilter {
-    if suffix.properties.is_empty() && suffix.type_filters.is_empty() {
+    if suffix.properties.is_empty() && suffix.type_filters.is_empty() && suffix.filters.is_empty() {
         return filter;
     }
 
-    match filter {
+    let branch_suffix = SearchSuffixConstraints {
+        properties: suffix.properties.clone(),
+        type_filters: suffix.type_filters.clone(),
+        filters: Vec::new(),
+    };
+
+    let filter = match filter {
         TargetFilter::Any => {
             TargetFilter::Typed(apply_search_suffix_to_typed(TypedFilter::default(), suffix))
         }
@@ -1386,16 +1396,28 @@ fn apply_search_suffix_constraints(
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters
                 .into_iter()
-                .map(|branch| apply_search_suffix_constraints(branch, suffix))
+                .map(|branch| apply_search_suffix_constraints(branch, &branch_suffix))
                 .collect(),
         },
         TargetFilter::And { filters } => TargetFilter::And {
             filters: filters
                 .into_iter()
-                .map(|branch| apply_search_suffix_constraints(branch, suffix))
+                .map(|branch| apply_search_suffix_constraints(branch, &branch_suffix))
                 .collect(),
         },
         other => other,
+    };
+
+    if suffix.filters.is_empty() {
+        filter
+    } else {
+        let mut filters = vec![filter];
+        for suffix_filter in &suffix.filters {
+            if !filters.contains(suffix_filter) {
+                filters.push(suffix_filter.clone());
+            }
+        }
+        TargetFilter::And { filters }
     }
 }
 
@@ -1658,6 +1680,17 @@ fn parse_chosen_name_reference_suffix(
         tag("that have the same name as the chosen "),
         tag("that has the same name as the chosen "),
         tag("with the same name as the chosen "),
+    ))
+    .parse(input)?;
+    let (rest, _) =
+        take_till1::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.').parse(rest)?;
+    Ok((rest, ()))
+}
+
+fn parse_noted_name_search_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("with a name noted as "),
+        tag("with a name you noted for "),
     ))
     .parse(input)?;
     let (rest, _) =
@@ -1965,6 +1998,9 @@ fn parse_search_filter_suffixes(
             || tag::<_, _, OracleError<'_>>("puts ")
                 .parse(remaining)
                 .is_ok()
+            || tag::<_, _, OracleError<'_>>("exile ")
+                .parse(remaining)
+                .is_ok()
             || tag::<_, _, OracleError<'_>>("instead")
                 .parse(remaining)
                 .is_ok()
@@ -1982,8 +2018,25 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with that name").parse(remaining) {
-            suffix.properties.push(FilterProp::SameName);
+        // CR 201.2 + CR 608.2c: "with that/the chosen name" in search filters
+        // refers to a resolving card-name choice stored on the source, not the
+        // source object's own name.
+        if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("with that name"),
+            tag("with the chosen name"),
+        ))
+        .parse(remaining)
+        {
+            suffix.filters.push(TargetFilter::HasChosenName);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        // Draft-note search filters (Aether Searcher / Smuggler Captain) are
+        // already unsupported by their draft-note abilities. Consume the suffix
+        // here so the search filter does not add a misleading target-fallback
+        // warning on top of the real unsupported draft mechanic.
+        if let Ok((rest, _)) = parse_noted_name_search_suffix(remaining) {
             remaining = rest.trim_start();
             continue;
         }
@@ -2330,6 +2383,7 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
     if scan_contains_phrase(lower, "onto the battlefield") {
         Zone::Battlefield
     } else if scan_contains_phrase(lower, "exile it")
+        || scan_contains_phrase(lower, "exile them")
         || scan_contains_phrase(lower, "exile that card")
         || scan_contains_phrase(lower, "exile the card")
     {
@@ -2444,6 +2498,31 @@ mod tests {
         let single =
             parse_search_library_details("search your library for a creature card", &mut ctx);
         assert_eq!(single.source_zones, vec![Zone::Library]);
+    }
+
+    #[test]
+    fn multi_zone_chosen_name_exile_search_has_exile_destination() {
+        // CR 201.2 + CR 701.23a + CR 701.18a: Unmoored Ego / The Stone Brain
+        // search multiple hidden zones for cards matching the chosen name, then
+        // exile the found cards. "and exile them" is the continuation action,
+        // not an unmatched search-filter suffix.
+        let lower = "choose a card name. search target opponent's graveyard, hand, and library for up to four cards with that name and exile them";
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(lower, &mut ctx);
+
+        assert_eq!(
+            details.source_zones,
+            vec![Zone::Graveyard, Zone::Hand, Zone::Library]
+        );
+        assert!(details.up_to);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 4 });
+        assert_filter_contains(&details.filter, &TargetFilter::HasChosenName);
+        assert_eq!(parse_search_destination(lower), Zone::Exile);
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
     }
 
     #[test]
@@ -2641,7 +2720,7 @@ mod tests {
     }
 
     #[test]
-    fn build_search_suffix_constraints_includes_basic_and_same_name() {
+    fn build_search_suffix_constraints_includes_basic_and_chosen_name() {
         let suffix =
             build_search_suffix_constraints(" with that name", true, &mut ParseContext::default());
         assert!(suffix.properties.iter().any(|property| matches!(
@@ -2650,10 +2729,7 @@ mod tests {
                 value: crate::types::card_type::Supertype::Basic
             }
         )));
-        assert!(suffix
-            .properties
-            .iter()
-            .any(|property| matches!(property, FilterProp::SameName)));
+        assert!(suffix.filters.contains(&TargetFilter::HasChosenName));
     }
 
     #[test]
@@ -2693,19 +2769,20 @@ mod tests {
             true,
             &mut ParseContext::default(),
         );
-        let TargetFilter::Typed(typed) = filter else {
-            panic!("expected Typed filter, got {filter:?}");
+        let TargetFilter::And { filters } = filter else {
+            panic!("expected And filter, got {filter:?}");
         };
-        assert!(typed.properties.iter().any(|property| matches!(
-            property,
-            FilterProp::HasSupertype {
-                value: crate::types::card_type::Supertype::Basic
-            }
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(typed)
+                if typed.properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic
+                    }
+                ))
         )));
-        assert!(typed
-            .properties
-            .iter()
-            .any(|property| matches!(property, FilterProp::SameName)));
+        assert!(filters.contains(&TargetFilter::HasChosenName));
     }
 
     #[test]
@@ -3837,6 +3914,29 @@ mod tests {
             ),
             "expected {expected:?} color filter, got {tf:?}"
         );
+    }
+
+    fn assert_filter_contains(filter: &TargetFilter, expected: &TargetFilter) {
+        match filter {
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                assert!(
+                    filters
+                        .iter()
+                        .any(|filter| filter == expected || filter_contains(filter, expected)),
+                    "expected {expected:?} in {filter:?}"
+                );
+            }
+            other => assert_eq!(other, expected),
+        }
+    }
+
+    fn filter_contains(filter: &TargetFilter, expected: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+                .iter()
+                .any(|filter| filter == expected || filter_contains(filter, expected)),
+            other => other == expected,
+        }
     }
 
     /// CR 608.2c + CR 701.23: Gifts Ungiven — "search your library for up to
