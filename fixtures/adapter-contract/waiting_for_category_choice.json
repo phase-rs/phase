@@ -1,0 +1,27 @@
+{
+  "type": "CategoryChoice",
+    "data": {
+      "player": 0,
+    "target_player": 0,
+    "categories": ["Artifact", "Creature"],
+    "chooser_scope": "ControllerForAll",
+    "choose_filter": {
+      "type": "Typed",
+      "type_filters": ["Permanent", { "Non": "Land" }],
+      "controller": null,
+      "properties": []
+    },
+    "sacrifice_filter": {
+      "type": "Typed",
+      "type_filters": ["Permanent", { "Non": "Land" }],
+      "controller": null,
+      "properties": []
+    },
+    "source_controller": 0,
+    "eligible_per_category": [[10], [10, 11]],
+    "source_id": 99,
+    "remaining_players": [1],
+    "all_kept": [],
+    "scoped_players": [0, 1]
+  }
+}

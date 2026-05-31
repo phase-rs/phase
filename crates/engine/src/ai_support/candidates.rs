@@ -1038,25 +1038,8 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 };
                 for existing in &all_combos {
                     for opt in &options {
-                        // Skip if this object was already chosen in a prior category.
-                        if let Some(_id) = opt {
-                            if existing.iter().any(|prev| prev == opt) {
-                                // Allow None duplicates, but not object duplicates.
-                                // However, also need None as fallback if all are taken.
-                                continue;
-                            }
-                        }
                         let mut combo = existing.clone();
                         combo.push(*opt);
-                        new_combos.push(combo);
-                    }
-                    // If all options for this category conflict, allow None.
-                    if category_eligible
-                        .iter()
-                        .all(|id| existing.contains(&Some(*id)))
-                    {
-                        let mut combo = existing.clone();
-                        combo.push(None);
                         new_combos.push(combo);
                     }
                 }

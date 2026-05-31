@@ -1179,8 +1179,8 @@
   },
   "categoryChoice": {
     "title": "Scegli i permanenti da tenere",
-    "subtitleOpponent": "Scegli un permanente di ciascun tipo tra i permanenti non Terra che {{name}} controlla; il resto viene sacrificato.",
-    "subtitleSelf": "Scegli un permanente di ciascun tipo tra i permanenti non Terra che controlli; il resto viene sacrificato.",
+    "subtitleOpponent": "Scegli un permanente per ogni categoria per {{name}}.",
+    "subtitleSelf": "Scegli un permanente per ogni categoria.",
     "noneToKeep": "Nessuna {{category}} — niente da tenere",
     "objectFallback": "Oggetto {{id}}"
   },

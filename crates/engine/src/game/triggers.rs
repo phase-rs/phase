@@ -14951,6 +14951,12 @@ pub mod tests {
             Effect::ChooseAndSacrificeRest {
                 categories: vec![CoreType::Creature],
                 chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
+                choose_filter: crate::types::ability::TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::permanent(),
+                ),
+                sacrifice_filter: crate::types::ability::TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::permanent(),
+                ),
             },
         );
         let trigger = TriggerDefinition::new(TriggerMode::Phase).execute(ability);
@@ -15508,6 +15514,14 @@ pub mod tests {
             player: PlayerId(0),
             target_player: PlayerId(0),
             categories: vec![CoreType::Creature],
+            chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
+            choose_filter: crate::types::ability::TargetFilter::Typed(
+                crate::types::ability::TypedFilter::permanent(),
+            ),
+            sacrifice_filter: crate::types::ability::TargetFilter::Typed(
+                crate::types::ability::TypedFilter::permanent(),
+            ),
+            source_controller: PlayerId(0),
             eligible_per_category: vec![vec![observer, keeper, other]],
             source_id: source,
             remaining_players: vec![],

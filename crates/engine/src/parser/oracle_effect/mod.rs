@@ -19968,6 +19968,20 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaExpiry};
     use crate::types::player::PlayerCounterKind;
 
+    fn target_filter_contains_nonland(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(typed) => typed
+                .type_filters
+                .iter()
+                .any(|type_filter| matches!(type_filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land)),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(target_filter_contains_nonland)
+            }
+            TargetFilter::Not { filter } => target_filter_contains_nonland(filter),
+            _ => false,
+        }
+    }
+
     /// Build a typed Cat trigger subject ("one or more other Cats you
     /// control") for anaphor-resolution tests.
     fn cat_subject_ctx() -> ParseContext {
@@ -25381,6 +25395,57 @@ mod tests {
             def.sub_ability.is_some(),
             "should have sub_ability after ', then sacrifices'"
         );
+    }
+
+    #[test]
+    fn cataclysmic_gearhulk_absorbs_sacrifice_rest_into_filter() {
+        let def = parse_effect_chain(
+            "Each player chooses an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control, then sacrifices the rest.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChooseAndSacrificeRest {
+            categories,
+            choose_filter,
+            sacrifice_filter,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected ChooseAndSacrificeRest, got {:?}", def.effect);
+        };
+        assert_eq!(categories.len(), 4);
+        assert!(
+            def.sub_ability.is_none(),
+            "unexpected sub_ability: {:?}",
+            def.sub_ability
+        );
+        assert_eq!(choose_filter, sacrifice_filter);
+        assert!(target_filter_contains_nonland(choose_filter));
+    }
+
+    #[test]
+    fn tragic_arrogance_absorbs_explicit_nonland_sacrifice_filter() {
+        let def = parse_effect_chain(
+            "For each player, you choose from among the permanents that player controls an artifact, a creature, an enchantment, and a planeswalker. Then each player sacrifices all other nonland permanents they control.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChooseAndSacrificeRest {
+            choose_filter,
+            sacrifice_filter,
+            chooser_scope,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected ChooseAndSacrificeRest, got {:?}", def.effect);
+        };
+        assert!(def.sub_ability.is_none());
+        assert!(matches!(
+            chooser_scope,
+            crate::types::ability::CategoryChooserScope::ControllerForAll
+        ));
+        assert!(!target_filter_contains_nonland(choose_filter));
+        assert!(target_filter_contains_nonland(sacrifice_filter));
     }
 
     #[test]

@@ -1179,8 +1179,8 @@
   },
   "categoryChoice": {
     "title": "Escolher Permanentes para Manter",
-    "subtitleOpponent": "Escolha um permanente de cada tipo dentre os permanentes que não são terrenos que {{name}} controla; o restante é sacrificado.",
-    "subtitleSelf": "Escolha um permanente de cada tipo dentre os permanentes que não são terrenos que você controla; o restante é sacrificado.",
+    "subtitleOpponent": "Escolha um permanente para cada categoria para {{name}}.",
+    "subtitleSelf": "Escolha um permanente para cada categoria.",
     "noneToKeep": "Nenhum {{category}} — nenhum para manter",
     "objectFallback": "Objeto {{id}}"
   },

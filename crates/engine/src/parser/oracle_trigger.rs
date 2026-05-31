@@ -7930,6 +7930,34 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::LifeLost, def));
     }
 
+    fn parse_countering_spell_or_ability_line(i: &str) -> OracleResult<'_, ControllerRef> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            delimited(
+                tag("a spell or ability "),
+                alt((
+                    value(ControllerRef::You, tag("you control")),
+                    value(ControllerRef::Opponent, tag("an opponent controls")),
+                )),
+                tag(" counters a spell"),
+            ),
+        )
+        .parse(i)
+    }
+    if let Ok((rem, controller)) = parse_countering_spell_or_ability_line(lower) {
+        if rem.trim().is_empty() {
+            // CR 109.5 + CR 701.6 + CR 603.2: "Whenever a spell or ability you
+            // control counters a spell" fires on `SpellCountered` events where the
+            // countering spell/ability controller matches this controller filter.
+            let mut def = make_base();
+            def.mode = TriggerMode::Countered;
+            def.valid_source = Some(TargetFilter::Typed(
+                TypedFilter::default().controller(controller),
+            ));
+            return Some((TriggerMode::Countered, def));
+        }
+    }
+
     // CR 601.2: "Whenever you cast a/an [type] spell [post-spell modifier]" — extract
     // the spell filter. Handles pre-spell type qualifier, post-spell modifier
     // (e.g. "with {X} in its mana cost", CR 107.3 + CR 202.1), or both.
@@ -14781,6 +14809,36 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::LifeLost);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    #[test]
+    fn trigger_spell_or_ability_you_control_counters_a_spell() {
+        let def = parse_trigger_line(
+            "Whenever a spell or ability you control counters a spell, you may tap or untap target permanent.",
+            "Lullmage Mentor",
+        );
+        assert_eq!(def.mode, TriggerMode::Countered);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_spell_or_ability_opponent_controls_counters_a_spell() {
+        let def = parse_trigger_line(
+            "Whenever a spell or ability an opponent controls counters a spell, draw a card.",
+            "Hypothetical Counter Watcher",
+        );
+        assert_eq!(def.mode, TriggerMode::Countered);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
     }
 
     #[test]

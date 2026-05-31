@@ -1179,8 +1179,8 @@
   },
   "categoryChoice": {
     "title": "Choisir les permanents à garder",
-    "subtitleOpponent": "Choisissez un permanent de chaque type parmi les permanents non-terrain que {{name}} contrôle ; le reste est sacrifié.",
-    "subtitleSelf": "Choisissez un permanent de chaque type parmi les permanents non-terrain que vous contrôlez ; le reste est sacrifié.",
+    "subtitleOpponent": "Choisissez un permanent pour chaque catégorie pour {{name}}.",
+    "subtitleSelf": "Choisissez un permanent pour chaque catégorie.",
     "noneToKeep": "Aucun {{category}} — rien à garder",
     "objectFallback": "Objet {{id}}"
   },

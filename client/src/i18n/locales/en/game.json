@@ -1179,8 +1179,8 @@
   },
   "categoryChoice": {
     "title": "Choose Permanents to Keep",
-    "subtitleOpponent": "Choose one permanent of each type from among the nonland permanents {{name}} controls; the rest are sacrificed.",
-    "subtitleSelf": "Choose one permanent of each type from among the nonland permanents you control; the rest are sacrificed.",
+    "subtitleOpponent": "Choose a permanent for each category for {{name}}.",
+    "subtitleSelf": "Choose a permanent for each category.",
     "noneToKeep": "No {{category}} — none to keep",
     "objectFallback": "Object {{id}}"
   },

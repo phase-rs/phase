@@ -333,6 +333,12 @@ pub(crate) enum ContinuationAst {
         count: QuantityExpr,
         face_down: bool,
     },
+    /// CR 608.2c + CR 701.21a: absorbs the explicit/bare sacrifice-rest clause
+    /// following a choose-and-sacrifice-rest effect, optionally narrowing the
+    /// final sacrifice sweep ("all other nonland permanents they control").
+    ChooseAndSacrificeRestFilter {
+        sacrifice_filter: Option<TargetFilter>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -884,6 +890,8 @@ pub(crate) enum ChooseImperativeAst {
     CategoryAndSacrificeRest {
         categories: Vec<crate::types::card_type::CoreType>,
         chooser_scope: crate::types::ability::CategoryChooserScope,
+        choose_filter: crate::types::ability::TargetFilter,
+        sacrifice_filter: crate::types::ability::TargetFilter,
     },
     /// CR 115.1c + CR 601.2c: "choose target X and target Y" — two independent
     /// target slots declared in a single targeting clause (Goblin Welder shape).

@@ -1179,8 +1179,8 @@
   },
   "categoryChoice": {
     "title": "Wybierz trwałe do zatrzymania",
-    "subtitleOpponent": "Wybierz po jednym trwałym każdego typu spośród trwałych niebędących ziemiami, które kontroluje {{name}}; reszta zostaje poświęcona.",
-    "subtitleSelf": "Wybierz po jednym trwałym każdego typu spośród trwałych niebędących ziemiami, które kontrolujesz; reszta zostaje poświęcona.",
+    "subtitleOpponent": "Wybierz trwały dla każdej kategorii dla {{name}}.",
+    "subtitleSelf": "Wybierz trwały dla każdej kategorii.",
     "noneToKeep": "Brak {{category}} — nic do zatrzymania",
     "objectFallback": "Obiekt {{id}}"
   },

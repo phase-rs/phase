@@ -834,29 +834,18 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
 
-        // CR 101.4 + CR 701.21a: Category choice — pick one distinct permanent
+        // CR 101.4 + CR 701.21a: Category choice — pick one permanent
         // per type category, the rest are sacrificed. A permanent that belongs
         // to multiple categories (e.g. an artifact creature) is eligible in
-        // each, but the engine rejects choosing the same object for more than
-        // one category (`engine_resolution_choices.rs` SelectCategoryPermanents
-        // duplicate guard). Greedily pick the first not-yet-used eligible
-        // object per category, mirroring the `used`-vec algorithm in
-        // `choose_and_sacrifice_rest::try_auto_resolve` so the two stay
-        // consistent. `None` for empty/exhausted categories is a legal choice.
+        // each and may be chosen in each eligible slot. `None` is legal only
+        // for an empty category.
         WaitingFor::CategoryChoice {
             eligible_per_category,
             ..
         } => {
-            let mut used: Vec<engine::types::identifiers::ObjectId> = Vec::new();
             let choices = eligible_per_category
                 .iter()
-                .map(|eligible| {
-                    let pick = eligible.iter().copied().find(|id| !used.contains(id));
-                    if let Some(id) = pick {
-                        used.push(id);
-                    }
-                    pick
-                })
+                .map(|eligible| eligible.first().copied())
                 .collect();
             Some(GameAction::SelectCategoryPermanents { choices })
         }
@@ -1804,7 +1793,7 @@ mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::TargetRef;
+    use engine::types::ability::{CategoryChooserScope, TargetFilter, TargetRef, TypedFilter};
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
@@ -2640,15 +2629,12 @@ mod tests {
         );
     }
 
-    /// Regression for #447: when a permanent belongs to multiple type
-    /// categories (an artifact creature), the `CategoryChoice` fallback must
-    /// pick *distinct* objects per category. Picking the same object twice is
-    /// rejected by the engine (`engine_resolution_choices.rs`
-    /// SelectCategoryPermanents duplicate guard), which would softlock the AI
-    /// seat. The greedy `used`-vec algorithm mirrors
-    /// `choose_and_sacrifice_rest::try_auto_resolve`.
+    /// Regression for #1591: when a permanent belongs to multiple type
+    /// categories (an artifact creature), the `CategoryChoice` fallback may
+    /// choose that same object for every eligible category slot. The engine
+    /// dedupes only the protected set before sacrificing the rest.
     #[test]
-    fn category_choice_fallback_picks_distinct_objects_and_applies() {
+    fn category_choice_fallback_allows_duplicate_object_slots_and_applies() {
         let mut state = make_state();
         // Source of the ChooseAndSacrificeRest ability.
         let source_card = CardId(state.next_object_id);
@@ -2674,13 +2660,16 @@ mod tests {
             obj.card_types.core_types = vec![CoreType::Artifact, CoreType::Creature];
         }
 
-        // `[[X],[X]]` — X shared across both categories. The fallback must
-        // resolve this to distinct objects (X for the first, None for the
-        // second once X is used).
+        // `[[X],[X]]` — X shared across both categories. The fallback may use
+        // X for both slots because each slot asks a separate category question.
         state.waiting_for = WaitingFor::CategoryChoice {
             player: PlayerId(0),
             target_player: PlayerId(0),
             categories: vec![CoreType::Artifact, CoreType::Creature],
+            chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            source_controller: PlayerId(0),
             eligible_per_category: vec![vec![artifact_creature], vec![artifact_creature]],
             source_id: source,
             remaining_players: Vec::new(),
@@ -2694,19 +2683,13 @@ mod tests {
             other => panic!("expected SelectCategoryPermanents, got {other:?}"),
         };
 
-        // No object may be repeated across categories.
-        let picked: Vec<ObjectId> = choices.iter().filter_map(|c| *c).collect();
-        for (i, id) in picked.iter().enumerate() {
-            assert!(
-                !picked[i + 1..].contains(id),
-                "fallback must not repeat an object across categories: {choices:?}"
-            );
-        }
+        assert_eq!(
+            choices,
+            vec![Some(artifact_creature), Some(artifact_creature)]
+        );
 
-        // Driving the chosen action through the real engine must succeed —
-        // the duplicate guard would reject a repeated object.
         engine::game::engine::apply(&mut state, PlayerId(0), action)
-            .expect("engine must accept the distinct-object category choice");
+            .expect("engine must accept duplicate-object category choices");
     }
 
     // --- Multikicker mana-budget guard (issue #454) ---

@@ -3,7 +3,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
@@ -18,7 +18,7 @@ use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CastingPermission, Chooser, CopyRetargetPermission,
     CounterSourceRider, Effect, LibraryPosition, PermissionGrantee, QuantityExpr, QuantityRef,
-    StaticDefinition, TargetFilter,
+    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -591,6 +591,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             && (opt(tag::<_, _, OracleError<'_>>("put ")), tag("the rest"))
                                 .parse(remainder_trimmed)
                                 .is_ok();
+                    let sacrifice_rest_remainder = preceded(
+                        opt(tag::<_, _, OracleError<'_>>("then ")),
+                        alt((
+                            tag::<_, _, OracleError<'_>>("sacrifices the rest"),
+                            tag("sacrifice the rest"),
+                        )),
+                    )
+                    .parse(remainder_trimmed)
+                    .is_ok();
                     // CR 109.5 + CR 608.2c + CR 800.4g: "you and that player each <body>"
                     // (and analogous "you and <player-noun> each <body>" compound
                     // subjects) is a SINGLE compound subject distributing the body
@@ -679,7 +688,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         && alt((tag::<_, _, OracleError<'_>>("add "), tag("subtract ")))
                             .parse(remainder_trimmed)
                             .is_ok();
-                    let suppress = nom_primitives::scan_contains(&before_lower, "from among")
+                    let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
+                        && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
                         || prevent_then_put_continuation
@@ -2212,6 +2222,21 @@ pub(super) fn apply_clause_continuation(
                 face_down,
             };
         }
+        ContinuationAst::ChooseAndSacrificeRestFilter { sacrifice_filter } => {
+            let Some(filter) = sacrifice_filter else {
+                return;
+            };
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::ChooseAndSacrificeRest {
+                sacrifice_filter: existing,
+                ..
+            } = &mut *previous.effect
+            {
+                *existing = filter;
+            }
+        }
     }
 }
 
@@ -2309,6 +2334,7 @@ pub(super) fn continuation_absorbs_current(
         // parse_followup_continuation_ast; the "exile it [face down]" clause is
         // folded into that Dig (rewritten to ExileTop) and emits no sibling def.
         ContinuationAst::ExileLookedAtCard { .. } => true,
+        ContinuationAst::ChooseAndSacrificeRestFilter { .. } => true,
     }
 }
 
@@ -2867,6 +2893,7 @@ pub(super) fn parse_followup_continuation_ast(
     let lower = text.to_lowercase();
 
     match previous_effect {
+        Effect::ChooseAndSacrificeRest { .. } => parse_choose_and_sacrifice_rest_followup(&lower),
         Effect::SearchLibrary { .. } if is_search_result_reveal_clause(&lower) => {
             Some(ContinuationAst::SearchRevealResult)
         }
@@ -3431,6 +3458,66 @@ pub(super) fn parse_followup_continuation_ast(
             .or_else(|| try_parse_put_counters_on_token_followup(&lower)),
         _ => None,
     }
+}
+
+fn parse_choose_and_sacrifice_rest_followup(lower: &str) -> Option<ContinuationAst> {
+    type E<'a> = OracleError<'a>;
+    let lower = lower.trim();
+
+    all_consuming(terminated(
+        preceded(
+            opt(tag::<_, _, E>("then ")),
+            alt((
+                parse_bare_choose_and_sacrifice_rest_filter,
+                parse_explicit_choose_and_sacrifice_rest_filter,
+            )),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .ok()
+    .map(|(_, sacrifice_filter)| ContinuationAst::ChooseAndSacrificeRestFilter { sacrifice_filter })
+}
+
+fn parse_bare_choose_and_sacrifice_rest_filter(
+    input: &str,
+) -> Result<(&str, Option<TargetFilter>), nom::Err<OracleError<'_>>> {
+    let (input, _) =
+        alt((tag::<_, _, OracleError<'_>>("sacrifices"), tag("sacrifice"))).parse(input)?;
+    let (input, _) = tag(" the rest").parse(input)?;
+    Ok((input, None))
+}
+
+fn parse_explicit_choose_and_sacrifice_rest_filter(
+    input: &str,
+) -> Result<(&str, Option<TargetFilter>), nom::Err<OracleError<'_>>> {
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("each player ")).parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("sacrifices "),
+        tag("sacrifice "),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("all other ").parse(input)?;
+    let (input, filter) = parse_nonland_permanent_domain(input)?;
+    Ok((input, Some(filter)))
+}
+
+fn parse_nonland_permanent_domain(
+    input: &str,
+) -> Result<(&str, TargetFilter), nom::Err<OracleError<'_>>> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("nonland permanents ").parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("they control"),
+        tag("you control"),
+        tag("that player controls"),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        TargetFilter::Typed(
+            TypedFilter::permanent().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        ),
+    ))
 }
 
 /// CR 122.6a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
@@ -4163,6 +4250,38 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0], "you gain 1 life");
         assert!(chunks[1].starts_with("~ deals 1 damage"));
+    }
+
+    #[test]
+    fn from_among_sacrifice_rest_splits_for_absorption() {
+        let chunks = clause_texts(
+            "each player chooses an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control, then sacrifices the rest.",
+        );
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[1], "sacrifices the rest",
+            "sacrifice-rest continuation must be a separate chunk"
+        );
+    }
+
+    #[test]
+    fn choose_and_sacrifice_rest_followup_accepts_then_and_period() {
+        let effect = Effect::ChooseAndSacrificeRest {
+            categories: vec![crate::types::card_type::CoreType::Artifact],
+            chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
+            choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "then sacrifices the rest.",
+                &effect,
+                &mut ParseContext::default(),
+            ),
+            Some(ContinuationAst::ChooseAndSacrificeRestFilter {
+                sacrifice_filter: None,
+            })
+        );
     }
 
     #[test]
