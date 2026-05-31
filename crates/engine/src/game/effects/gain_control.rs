@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    ContinuousModification, Duration, EffectError, EffectKind, ResolvedAbility, TargetFilter,
-    TargetRef,
+    ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -60,7 +60,16 @@ pub fn resolve_give(
 ) -> Result<(), EffectError> {
     let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
 
-    // The recipient is the player target; the object is the object target.
+    // CR 110.2 + CR 613.3: The recipient is the player target when one is
+    // explicitly in ability.targets (normal targeting path). When no player
+    // target is present — e.g. a post-replacement continuation whose target
+    // list only carries the damaged object — fall back to resolving the
+    // effect's `recipient` filter against game state so "an opponent gains
+    // control of it" (Khârn the Betrayer) correctly selects the opponent.
+    let recipient_filter = match &ability.effect {
+        Effect::GiveControl { recipient, .. } => Some(recipient),
+        _ => None,
+    };
     let recipient_id = ability
         .targets
         .iter()
@@ -70,6 +79,22 @@ pub fn resolve_give(
             } else {
                 None
             }
+        })
+        .or_else(|| {
+            recipient_filter.and_then(|filter| {
+                state
+                    .players
+                    .iter()
+                    .find(|p| {
+                        !p.is_eliminated
+                            && crate::game::filter::player_matches_target_filter(
+                                filter,
+                                p.id,
+                                Some(ability.controller),
+                            )
+                    })
+                    .map(|p| p.id)
+            })
         })
         .unwrap_or(ability.controller);
 

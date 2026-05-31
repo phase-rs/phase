@@ -9598,6 +9598,25 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         } if *fight_subject == TargetFilter::SelfRef => {
             *fight_subject = subject_filter;
         }
+        // CR 613.3 + CR 110.2: "[Player] gains control of [object]" — when the
+        // acting subject is a non-controller player (e.g. "an opponent of your
+        // choice gains control of it"), the semantics are GIVE (the current
+        // controller transfers the object to that player), not TAKE (the
+        // current controller steals). Rewrite GainControl → GiveControl with
+        // the subject as the recipient and keep the original target intact.
+        // This covers Khârn the Betrayer's damage replacement and any other
+        // "opponent/player gains control of [target]" oracle text.
+        Effect::GainControl { target }
+            if !matches!(
+                subject_filter,
+                TargetFilter::Controller | TargetFilter::SelfRef
+            ) =>
+        {
+            *effect = Effect::GiveControl {
+                target: target.clone(),
+                recipient: subject_filter,
+            };
+        }
         // Object-targeting effects: inject subject filter only when the sentinel
         // is `TargetFilter::Any` (not Controller — these target objects, not players).
         // Note: DealDamage is intentionally excluded — the damage parser always parses
@@ -9615,7 +9634,6 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::Sacrifice { target, .. }
         | Effect::DiscardCard { target, .. }
         | Effect::ChangeZone { target, .. }
-        | Effect::GainControl { target, .. }
         | Effect::ControlNextTurn { target, .. }
         | Effect::Attach { target, .. }
         | Effect::UnattachAll { target, .. }
@@ -34428,6 +34446,39 @@ mod tests {
                 player: GainLifePlayer::Controller,
             },
         );
+    }
+
+    /// CR 613.3 + CR 110.2 + #1522: "an opponent of your choice gains control of it"
+    /// — Khârn the Betrayer's damage replacement. The subject is an opponent (player),
+    /// and the predicate "gains control of it" targets Khârn (ParentTarget/SelfRef).
+    /// The injector must recognise that a non-controller player subject means GIVE
+    /// (not TAKE) and rewrite GainControl → GiveControl with the subject as recipient.
+    #[test]
+    fn opponent_gains_control_rewrites_to_give_control() {
+        let def = parse_effect_chain(
+            "an opponent of your choice gains control of it",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GiveControl { target, recipient } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTarget,
+                    "target must be ParentTarget ('it' = the damaged object)"
+                );
+                match recipient {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(
+                            tf.controller,
+                            Some(ControllerRef::Opponent),
+                            "recipient must be an opponent"
+                        );
+                    }
+                    other => panic!("expected Typed(Opponent), got {other:?}"),
+                }
+            }
+            other => panic!("expected GiveControl, got {other:?}"),
+        }
     }
 
     #[test]
