@@ -12,7 +12,7 @@ import { isMultiplayerMode, useGameStore, legalResultState, saveGame, saveCheckp
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
-import { stackPressureFromLength } from "../utils/stackPressure";
+import { stackPressureFromLength, STACK_PRESSURE_ELEVATED } from "../utils/stackPressure";
 import { applySpellPaymentPreference } from "./castPaymentMode";
 
 /**
@@ -590,8 +590,12 @@ const BATCH_CHUNK_SIZE = 5;
 // drain in large chunks instead — the engine can resolve unboundedly in one
 // call, but a bounded chunk keeps each WASM call short enough that the main
 // thread yields between chunks (no "page unresponsive" freeze) while still
-// collapsing ~580 round-trips into a handful.
-const BATCH_CHUNK_INSTANT = 200;
+// collapsing ~580 round-trips into a few dozen. The value is an empirical
+// tradeoff: smaller chunks give visibly-advancing "resolving X of Y" progress
+// (the bar updates once per chunk) at the cost of more per-chunk `getState`
+// serialization; the rAF yield below — not this size — is what guarantees the
+// overlay repaints between chunks.
+const BATCH_CHUNK_INSTANT = 50;
 const BATCH_CHUNK_BASE_DELAY_MS = 150;
 let batchResolveInProgress = false;
 
@@ -608,6 +612,13 @@ export async function dispatchResolveAll(
 
   batchResolveInProgress = true;
   const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
+  const { setResolutionProgress } = useGameStore.getState();
+  // Storm-origin denominator: latched from the FIRST chunk's `total` because
+  // the engine reports the *remaining* stack per chunk (shrinks as it drains),
+  // so only the first chunk carries the true origin count.
+  let latchedTotal = 0;
+  // Engine-authoritative gross resolved count, accumulated across chunks.
+  let resolvedSoFar = 0;
 
   try {
     for (;;) {
@@ -620,6 +631,20 @@ export async function dispatchResolveAll(
       const batchResult: BatchResolveResult = await adapter.resolveAll(
         requester, aiSeats, chunkSize,
       );
+
+      if (latchedTotal === 0) latchedTotal = batchResult.total;
+      resolvedSoFar += batchResult.itemsResolved;
+      // Surface progress only for a genuine storm (trivial multi-item resolves
+      // drain too fast to render). Clamp to the latched total: `itemsResolved`
+      // is a net-shrink count that can lag the true gross when a resolution
+      // spawns triggers, so clamping keeps the bar monotonic and lets it
+      // complete. `resolved`/`total` are engine-provided — no frontend derivation.
+      if (latchedTotal >= STACK_PRESSURE_ELEVATED) {
+        setResolutionProgress({
+          resolved: Math.min(resolvedSoFar, latchedTotal),
+          total: latchedTotal,
+        });
+      }
 
       const newState = await adapter.getState();
       const legalResult = await adapter.getLegalActions();
@@ -637,9 +662,14 @@ export async function dispatchResolveAll(
         batchResult.waitingFor.type !== "Priority";
       if (done) break;
 
-      // Skip the inter-chunk pacing delay while draining a storm — the delay
-      // exists for visual countdown pacing, which Instant pressure forgoes.
-      if (instant) continue;
+      if (instant) {
+        // Yield one frame so the resolution-progress overlay repaints between
+        // chunks. This rAF is the load-bearing progress fix — without it,
+        // back-to-back Instant chunks never let the browser paint, producing
+        // the "wait, then N vanish at once" symptom.
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        continue;
+      }
 
       const chunkDelay = Math.round(BATCH_CHUNK_BASE_DELAY_MS * multiplier);
       if (chunkDelay > 0) {
@@ -654,5 +684,6 @@ export async function dispatchResolveAll(
     if (gameId && newState) saveGame(gameId, newState);
   } finally {
     batchResolveInProgress = false;
+    setResolutionProgress(null);
   }
 }

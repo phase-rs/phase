@@ -1,4 +1,7 @@
 {
+  "resolutionProgress": {
+    "label": "Risoluzione {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Carta coperta",
     "loading": "Caricamento {{name}}",
@@ -1105,6 +1108,14 @@
     "bestowNormalLabel": "Lancia come creatura",
     "bestowAltLabel": "Lancia con Conferire",
     "bestowSubtitle": "Lancia {{name}} normalmente come creatura, o paga il suo costo di Conferire per lanciarla come Aura.",
+    "awakenEyebrow": "Risveglio",
+    "awakenNormalLabel": "Lancia normalmente",
+    "awakenAltLabel": "Lancia con Risveglio",
+    "awakenSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Risveglio per mettere anche segnalini +1/+1 su una terra che controlli e trasformarla in una creatura Elementale 0/0 con rapidità.",
+    "cleaveEyebrow": "Fendere",
+    "cleaveNormalLabel": "Lancia normalmente",
+    "cleaveAltLabel": "Lancia con Fendere",
+    "cleaveSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Fendere per rimuovere le parole tra parentesi quadre.",
     "additionalExile": "+ Esilia una carta",
     "additionalSacrifice": "+ Sacrifica un permanente",
     "additionalPayLife": "+ Paga punti vita",

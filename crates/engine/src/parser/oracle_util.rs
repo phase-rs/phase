@@ -254,6 +254,84 @@ pub fn strip_reminder_text(text: &str) -> String {
     result.trim().to_string()
 }
 
+/// CR 702.148a: How a square-bracketed span in a cleave spell's rules text is
+/// rendered for a given casting mode.
+///
+/// Cleave's two text variants share the same Oracle text, distinguished only by
+/// the square brackets that mark the cleave-removable span:
+///   * The **base** (printed-cost) text keeps every bracketed clause but drops
+///     the bracket characters themselves (`KeepContent`).
+///   * The **cleave-cost** text removes every bracketed span in its entirety
+///     (`RemoveSpan`), per CR 702.148a "removing all text found within square
+///     brackets."
+///
+/// Modeled as a typed enum (not a `bool`) so the bracket transform is
+/// self-documenting at every call site and extensible if a future frame
+/// mechanic needs a third bracket disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BracketMode {
+    /// Keep the text inside each `[...]`, dropping only the bracket characters.
+    KeepContent,
+    /// Drop each `[...]` span (brackets and inner text) entirely.
+    RemoveSpan,
+}
+
+/// CR 702.148a: Apply a `BracketMode` to a cleave spell's rules text.
+///
+/// Mirrors `strip_reminder_text`'s single-pass char filter, but operates on
+/// square brackets and handles multiple/comma-separated spans (e.g. Dig Up's
+/// `[basic land]` ... `[reveal it,]`). After removal, collapses any double
+/// spaces and orphan ", " punctuation left by a removed span so the resulting
+/// sentence parses cleanly.
+///
+/// MUST only be applied to faces carrying `Keyword::Cleave(_)` — 362
+/// planeswalkers use `[+N]`/`[−N]`/`[0]` loyalty brackets that an unconditional
+/// strip would corrupt. The cleave keyword gate at the single call site
+/// provides this guarantee.
+pub fn apply_bracket_mode(text: &str, mode: BracketMode) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut depth = 0u32;
+    for ch in text.chars() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth = depth.saturating_sub(1);
+            }
+            // RemoveSpan drops everything between the brackets; KeepContent
+            // keeps inner characters but never the bracket characters themselves.
+            _ if depth == 0 => result.push(ch),
+            _ if mode == BracketMode::KeepContent => result.push(ch),
+            _ => {}
+        }
+    }
+    normalize_bracket_removal_whitespace(&result)
+}
+
+/// Collapse the whitespace/punctuation artifacts left after a `RemoveSpan`
+/// bracket strip (e.g. "discard a card[, then ...]." → "discard a card."):
+/// double spaces, a space before a comma/period, and a leading orphan comma.
+fn normalize_bracket_removal_whitespace(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut prev_space = false;
+    for ch in text.chars() {
+        if ch == ' ' {
+            if prev_space {
+                continue;
+            }
+            prev_space = true;
+            result.push(ch);
+        } else {
+            // Drop a space immediately preceding a comma or period.
+            if matches!(ch, ',' | '.') && result.ends_with(' ') {
+                result.pop();
+            }
+            prev_space = false;
+            result.push(ch);
+        }
+    }
+    result.trim().to_string()
+}
+
 /// Replace "~" and "CARDNAME" with the actual card name, then lowercase for matching.
 pub fn self_ref(text: &str, card_name: &str) -> String {
     text.replace('~', card_name).replace("CARDNAME", card_name)
@@ -770,6 +848,11 @@ const SUBTYPE_PLURALS: &[(&str, &str)] = &[
     ("harpies", "Harpy"),
     ("berserkers", "Berserker"),
 ];
+
+/// CR 700.12: An outlaw is an object with the Assassin, Mercenary, Pirate,
+/// Rogue, and/or Warlock creature type. Shared by every parser path that
+/// recognizes the "outlaw[s]" head noun.
+pub const OUTLAW_SUBTYPES: [&str; 5] = ["Assassin", "Mercenary", "Pirate", "Rogue", "Warlock"];
 
 /// Comprehensive list of MTG subtypes (creature types, land types, spell types, etc.).
 /// Case-insensitive matching is done by lowercasing the input.
@@ -2339,6 +2422,51 @@ mod tests {
         assert_eq!(
             strip_reminder_text("Destroy target creature."),
             "Destroy target creature."
+        );
+    }
+
+    #[test]
+    fn apply_bracket_mode_keep_content_drops_only_brackets() {
+        // CR 702.148a base text: keep the bracketed clause, drop the brackets.
+        assert_eq!(
+            apply_bracket_mode(
+                "You choose a nonland card from it [with mana value 2 or less].",
+                BracketMode::KeepContent
+            ),
+            "You choose a nonland card from it with mana value 2 or less."
+        );
+    }
+
+    #[test]
+    fn apply_bracket_mode_remove_span_drops_clause() {
+        // CR 702.148a cleave text: drop the entire bracketed span and tidy
+        // the trailing punctuation.
+        assert_eq!(
+            apply_bracket_mode(
+                "You choose a nonland card from it [with mana value 2 or less].",
+                BracketMode::RemoveSpan
+            ),
+            "You choose a nonland card from it."
+        );
+    }
+
+    #[test]
+    fn apply_bracket_mode_remove_span_handles_multiple_spans() {
+        // Dig Up shape: multiple bracketed spans, one ending in a comma
+        // (`[reveal it,]`). RemoveSpan drops both and collapses the artifacts.
+        assert_eq!(
+            apply_bracket_mode(
+                "Search your library for a [basic land] card, [reveal it,] put it into your hand, then shuffle.",
+                BracketMode::RemoveSpan
+            ),
+            "Search your library for a card, put it into your hand, then shuffle."
+        );
+        assert_eq!(
+            apply_bracket_mode(
+                "Search your library for a [basic land] card, [reveal it,] put it into your hand, then shuffle.",
+                BracketMode::KeepContent
+            ),
+            "Search your library for a basic land card, reveal it, put it into your hand, then shuffle."
         );
     }
 

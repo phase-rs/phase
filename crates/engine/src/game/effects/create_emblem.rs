@@ -42,7 +42,9 @@ pub fn resolve(
     obj.trigger_definitions = triggers.clone().into();
     obj.base_trigger_definitions = Arc::new(triggers.clone());
 
-    state.layers_dirty = true;
+    // CR 114.1 + CR 611.1: An emblem can source continuous effects; conservatively
+    // request a full layer re-evaluation.
+    crate::game::layers::mark_layers_full(state);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
@@ -115,7 +117,7 @@ mod tests {
     #[test]
     fn create_emblem_marks_layers_dirty() {
         let mut state = GameState::new_two_player(42);
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
         let ability = ResolvedAbility::new(
             Effect::CreateEmblem {
                 statics: vec![ninja_pump_static()],
@@ -129,7 +131,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
     }
 
     /// Helper: create an emblem and return its ObjectId

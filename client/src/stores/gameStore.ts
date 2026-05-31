@@ -82,6 +82,13 @@ interface GameStoreState {
    * game has started).
    */
   lobbyProgress: { joined: number; total: number } | null;
+  /**
+   * Live stack-resolution progress during a large auto-resolve / "Resolve All"
+   * drain, populated per chunk by `dispatchResolveAll` and cleared when the
+   * drain finishes. `null` when no resolution storm is in flight. Display-only:
+   * `resolved`/`total` are engine-provided counts, never frontend-derived.
+   */
+  resolutionProgress: { resolved: number; total: number } | null;
 }
 
 interface GameStoreActions {
@@ -112,6 +119,7 @@ interface GameStoreActions {
   setLegalActions: (actions: GameAction[]) => void;
   setGameMode: (mode: GameMode) => void;
   setLobbyProgress: (progress: { joined: number; total: number } | null) => void;
+  setResolutionProgress: (progress: { resolved: number; total: number } | null) => void;
 }
 
 export type GameStore = GameStoreState & GameStoreActions;
@@ -133,6 +141,7 @@ const initialState: GameStoreState = {
   stateHistory: [],
   turnCheckpoints: [],
   lobbyProgress: null,
+  resolutionProgress: null,
 };
 
 export const useGameStore = create<GameStore>()(
@@ -315,6 +324,10 @@ export const useGameStore = create<GameStore>()(
 
     setLobbyProgress: (progress) => {
       set({ lobbyProgress: progress });
+    },
+
+    setResolutionProgress: (progress) => {
+      set({ resolutionProgress: progress });
     },
   })),
 );

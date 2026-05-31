@@ -76,7 +76,7 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::{
     ContinuousModification, ObjectScope, QuantityExpr, QuantityRef, RoundingMode,
 };
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Supertype};
 
 /// CR 707.9a: "[,] except {except_body} [and {except_body}]*[.]"
 ///
@@ -340,14 +340,32 @@ fn parse_rounding_sentence(input: &str) -> Option<(&str, RoundingMode)> {
     rounding.map(|(_, rounding, _)| (rest, rounding))
 }
 
-/// CR 707.9b: "<subject> N/M {type list} in addition to its other types" where
-/// the subject is a pronoun-contraction ("he's" / "she's" / "it's" with either
-/// straight or curly apostrophes). Produces `SetPower` + `SetToughness`
-/// (overriding the copied P/T per CR 707.9b) and one `AddType`/`AddSubtype`
-/// per word in the type list. Layer placement is automatic from the variants'
-/// own `layer()` methods: SetPT at layer 7b, type additions at layer 4
-/// (CR 613.1d) — the layer system applies type additions after the copy's
-/// own types via timestamp order.
+/// CR 707.9d: which characteristic carve-out a copy exception declares. Drives
+/// whether color and/or creature subtypes REPLACE the copied values (no carve-out)
+/// or are ADDED. The "in addition to its other types" carve-out covers ONLY card
+/// type/supertype/subtype — color is NOT carved out, so color still replaces there.
+enum AdditiveSuffix {
+    None,
+    Types,
+    Colors,
+    ColorsAndTypes,
+}
+
+/// CR 707.9b: "<subject> N/M {type list} [in addition to {its|his|her} other
+/// [colors and] types]" where the subject is a pronoun-contraction ("he's" /
+/// "she's" / "it's" with either straight or curly apostrophes). Produces
+/// `SetPower` + `SetToughness` (overriding the copied P/T per CR 707.9b) plus
+/// color and type modifications.
+///
+/// CR 707.9d: a copy exception with no "in addition to its other types"
+/// carve-out (The Scarab God: "it's a 4/4 black Zombie") REPLACES color and
+/// creature subtypes — the copied object's color and creature-type CDAs are not
+/// copied. A carve-out limited to "types" still replaces color (color is not
+/// carved out); a carve-out naming "colors and types" adds both.
+///
+/// Layer placement is automatic from the variants' own `layer()` methods:
+/// SetPT at layer 7b, color at layer 5 (CR 613.1e), type additions and
+/// subtype removal at layer 4 (CR 613.1d).
 fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("he's a "),
@@ -364,37 +382,127 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
-    // Grab the type list up to " in addition to its/his/her other types".
-    let (type_text, rest) = split_on_first_of(
+    // Recognise the type list and which carve-out (if any) follows it. Try the
+    // carve-out variants longest-first so "colors and types" is not consumed as
+    // the shorter "colors" tail. First `Some` wins.
+    let (type_text, rest, suffix) = if let Some((type_text, rest)) = split_on_first_of(
+        rest,
+        &[
+            " in addition to its other colors and types",
+            " in addition to his other colors and types",
+            " in addition to her other colors and types",
+        ],
+    ) {
+        (type_text, rest, AdditiveSuffix::ColorsAndTypes)
+    } else if let Some((type_text, rest)) = split_on_first_of(
+        rest,
+        &[
+            " in addition to its other colors",
+            " in addition to his other colors",
+            " in addition to her other colors",
+        ],
+    ) {
+        (type_text, rest, AdditiveSuffix::Colors)
+    } else if let Some((type_text, rest)) = split_on_first_of(
         rest,
         &[
             " in addition to its other types",
             " in addition to his other types",
             " in addition to her other types",
         ],
-    )?;
+    ) {
+        (type_text, rest, AdditiveSuffix::Types)
+    } else {
+        let (type_text, rest) = split_at_body_boundary(rest);
+        (type_text, rest, AdditiveSuffix::None)
+    };
+
+    // CR 707.9d: derive the replace-vs-add axes from the carve-out. No carve-out
+    // replaces both; a "types"-only carve-out still replaces color; a "colors"
+    // carve-out still replaces creature subtypes; "colors and types" adds both.
+    let (replace_color, replace_types) = match suffix {
+        AdditiveSuffix::None => (true, true),
+        AdditiveSuffix::Types => (true, false),
+        AdditiveSuffix::Colors => (false, true),
+        AdditiveSuffix::ColorsAndTypes => (false, false),
+    };
 
     let mut mods = vec![
         ContinuousModification::SetPower { value: power },
         ContinuousModification::SetToughness { value: toughness },
     ];
 
-    // Type list is space-separated in the copy class ("Spider Human Hero").
-    // Reuse the shared core-type vs subtype dispatch from parse_its_a_type_in_addition.
+    append_color_and_type_modifications(type_text.trim(), replace_color, replace_types, &mut mods);
+
+    Some((rest, mods))
+}
+
+/// CR 707.9b + CR 707.9d: append the color and type modifications declared by a
+/// copy exception's type list. `replace_color` selects `SetColor` (no carve-out
+/// for color) vs per-color `AddColor`; `replace_types` selects whether an exact
+/// creature subtype REPLACES the copied creature types (via `RemoveAllSubtypes`
+/// plus `AddType { Creature }`) or is merely added. Color is applied at layer 5
+/// (CR 613.1e); type/subtype changes at layer 4 (CR 613.1d).
+fn append_color_and_type_modifications(
+    type_text: &str,
+    replace_color: bool,
+    replace_types: bool,
+    mods: &mut Vec<ContinuousModification>,
+) {
+    let mut colors = Vec::new();
+    let mut type_mods = Vec::new();
+    let mut has_exact_creature_subtype = false;
     for word in type_text.split_whitespace() {
-        if word.is_empty() {
+        if word.is_empty() || word == "and" || word == "token" {
+            continue;
+        }
+        if let Ok((rest, color)) = nom_primitives::parse_color(word) {
+            if rest.is_empty() {
+                if !colors.contains(&color) {
+                    colors.push(color);
+                }
+                continue;
+            }
+        }
+        if let Some((_, supertype)) = parse_supertype_word(word) {
+            type_mods.push(ContinuousModification::AddSupertype { supertype });
             continue;
         }
         let canonical = canonicalize_subtype_name(word);
-        let modification = if let Ok(core_type) = CoreType::from_str(&canonical) {
-            ContinuousModification::AddType { core_type }
+        if let Ok(core_type) = CoreType::from_str(&canonical) {
+            type_mods.push(ContinuousModification::AddType { core_type });
         } else {
-            ContinuousModification::AddSubtype { subtype: canonical }
-        };
-        mods.push(modification);
+            if noncreature_subtype_set(&canonical).is_none() {
+                has_exact_creature_subtype = true;
+            }
+            type_mods.push(ContinuousModification::AddSubtype { subtype: canonical });
+        }
     }
-
-    Some((rest, mods))
+    if !colors.is_empty() {
+        // CR 613.1e: color-changing modifications apply at layer 5.
+        if replace_color {
+            mods.push(ContinuousModification::SetColor { colors });
+        } else {
+            for color in colors {
+                mods.push(ContinuousModification::AddColor { color });
+            }
+        }
+    }
+    if replace_types && has_exact_creature_subtype {
+        // CR 707.9d + CR 205.1a: no "in addition" carve-out means the new
+        // creature subtypes replace the copied creature types. Re-add the
+        // Creature core type so the wipe doesn't strip it.
+        type_mods.insert(
+            0,
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+        );
+        mods.push(ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        });
+    }
+    mods.extend(type_mods);
 }
 
 /// CR 707.9a: "<subject pronoun> has this ability" — emit a
@@ -821,6 +929,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{ObjectScope, QuantityRef, RoundingMode};
     use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaColor;
 
     #[test]
     fn name_override_emits_set_name() {
@@ -1266,6 +1375,166 @@ mod tests {
                     | ContinuousModification::GrantAbility { .. }
             )),
             "missing granted ability (GrantTrigger or GrantAbility); got {mods:?}"
+        );
+    }
+
+    /// CR 707.9b + CR 707.9d: The Scarab God — "except it's a 4/4 black Zombie"
+    /// (no "in addition to its other types" suffix). With no carve-out, color
+    /// and creature subtypes REPLACE the copied values: `SetColor` (not
+    /// `AddColor`) and `RemoveAllSubtypes { Creature }` + `AddType { Creature }`
+    /// + `AddSubtype("Zombie")`.
+    #[test]
+    fn scarab_god_copy_token_except_sets_pt_color_and_zombie() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a 4/4 black Zombie",
+            "The Scarab God",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+            "missing SetPower(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+            "missing SetToughness(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetColor { colors } if colors == &vec![ManaColor::Black]
+            )),
+            "missing SetColor([Black]); got {mods:?}"
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddColor { .. })),
+            "Scarab class must REPLACE color, not add; got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveAllSubtypes {
+                    set: SubtypeSet::Creature
+                }
+            )),
+            "missing RemoveAllSubtypes(Creature); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                }
+            )),
+            "missing AddType(Creature); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Zombie"
+            )),
+            "missing AddSubtype(Zombie); got {mods:?}"
+        );
+    }
+
+    /// CR 707.9b + CR 707.9d: additive "...black zombie in addition to its
+    /// other colors and types" — both color and creature subtypes are ADDED,
+    /// not replaced. `AddColor` (not `SetColor`), `AddSubtype("Zombie")`, and no
+    /// `RemoveAllSubtypes`.
+    #[test]
+    fn additive_colors_and_types_suffix_adds_color_and_subtype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a 4/4 black zombie in addition to its other colors and types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+            "missing SetPower(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+            "missing SetToughness(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddColor {
+                    color: ManaColor::Black
+                }
+            )),
+            "missing AddColor(Black); got {mods:?}"
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::SetColor { .. })),
+            "additive class must ADD color, not replace; got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Zombie"
+            )),
+            "missing AddSubtype(Zombie); got {mods:?}"
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "additive class must NOT wipe subtypes; got {mods:?}"
+        );
+        // No suffix word leaked into the type list as a garbage subtype.
+        let garbage = [
+            "In", "Addition", "To", "Its", "Other", "Colors", "Types", "And", "Token",
+        ];
+        assert!(
+            !mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if garbage.contains(&subtype.as_str())
+            )),
+            "suffix word leaked as AddSubtype; got {mods:?}"
+        );
+    }
+
+    /// CR 707.9d: "...black spider in addition to its other types" — the
+    /// carve-out covers only card type/supertype/subtype, NOT color. So the
+    /// creature subtype is ADDED (no `RemoveAllSubtypes`) while color still
+    /// REPLACES (`SetColor`, not `AddColor`).
+    #[test]
+    fn additive_types_suffix_adds_subtype_but_replaces_color() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a 4/4 black spider in addition to its other types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Spider"
+            )),
+            "missing AddSubtype(Spider); got {mods:?}"
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "types-only carve-out must NOT wipe subtypes; got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetColor { colors } if colors == &vec![ManaColor::Black]
+            )),
+            "color must REPLACE under the types-only carve-out; got {mods:?}"
         );
     }
 

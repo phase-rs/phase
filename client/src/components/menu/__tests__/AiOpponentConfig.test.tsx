@@ -104,6 +104,39 @@ describe("AiOpponentConfig — cEDH toggle", () => {
   });
 });
 
+describe("AiOpponentConfig — cEDH toggle format gating", () => {
+  it("renders the toggle for Commander", () => {
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+    expect(screen.getByRole("switch", { name: /cEDH mode/i })).toBeInTheDocument();
+  });
+
+  it("renders the toggle for Duel Commander", () => {
+    render(<AiOpponentConfig selectedFormat="DuelCommander" opponentCount={1} />);
+    expect(screen.getByRole("switch", { name: /cEDH mode/i })).toBeInTheDocument();
+  });
+
+  it("hides the toggle for non-Commander formats", () => {
+    render(<AiOpponentConfig selectedFormat="Standard" opponentCount={1} />);
+    expect(screen.queryByRole("switch", { name: /cEDH mode/i })).not.toBeInTheDocument();
+  });
+
+  it("clears a stale cEDH flag when switching away from a Commander format", async () => {
+    act(() => {
+      usePreferencesStore.getState().setCedhMode(true);
+    });
+
+    const { rerender } = render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+    expect(usePreferencesStore.getState().cedhMode).toBe(true);
+
+    // Simulate the setup page re-passing a new format prop on dropdown change.
+    rerender(<AiOpponentConfig selectedFormat="Standard" opponentCount={1} />);
+
+    await waitFor(() => {
+      expect(usePreferencesStore.getState().cedhMode).toBe(false);
+    });
+  });
+});
+
 describe("AiOpponentConfig — cEDH badge + disabled difficulty", () => {
   it("badges the seat and disables the difficulty dropdown when cEDH mode is on", async () => {
     const user = userEvent.setup();

@@ -86,7 +86,7 @@ fn build_game_started_message(
                 Some(name.clone())
             }
         });
-    let derived = derive_views(&filtered);
+    let derived = derive_views(&filtered, Some(player));
 
     ServerMessage::GameStarted {
         state: filtered,
@@ -130,7 +130,7 @@ fn build_state_update_message(result: &ActionResult, player: PlayerId) -> Server
     ) = result;
     let is_actor = raw_state.waiting_for.acting_players().contains(&player);
     let filtered = server_core::filter_state_for_player(raw_state, player);
-    let derived = derive_views(&filtered);
+    let derived = derive_views(&filtered, Some(player));
 
     ServerMessage::StateUpdate {
         state: filtered,
@@ -2235,7 +2235,7 @@ async fn handle_client_message(
                                         log_entries: log_entries.clone(),
                                         spell_costs: p_spell_costs,
                                         legal_actions_by_object: p_by_object,
-                                        derived: derive_views(pstate),
+                                        derived: derive_views(pstate, Some(*pid)),
                                     });
                                 }
                             }
@@ -2299,7 +2299,7 @@ async fn handle_client_message(
                                         log_entries: ai_log_entries.clone(),
                                         spell_costs: p_spell_costs,
                                         legal_actions_by_object: p_by_object,
-                                        derived: derive_views(pstate),
+                                        derived: derive_views(pstate, Some(*pid)),
                                     });
                                 }
                             }
@@ -3314,7 +3314,7 @@ async fn handle_client_message(
                         .await;
                     }
 
-                    let derived = derive_views(&filtered_state);
+                    let derived = derive_views(&filtered_state, Some(joiner));
                     let msg = ServerMessage::StateUpdate {
                         state: filtered_state,
                         events: vec![],
