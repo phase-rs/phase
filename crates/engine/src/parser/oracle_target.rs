@@ -1778,20 +1778,13 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // omits the source permanent (Thundering Raiju: "modified creatures you
     // control other than this creature" — normalized to "~"). The trailing
     // self-reference is recognized via `nom_target::parse_self_reference`
-    // ("~"/"it"/"this creature"/…) plus an explicit "itself" alternative, which
-    // `parse_self_reference` does not cover.
+    // ("~"/"it"/"this creature"/"itself"/…).
     {
         let remaining_other_than = lower[pos..].trim_start();
         let other_than_offset = lower[pos..].len() - remaining_other_than.len();
         if let Ok((rest, _)) = (
             tag::<_, _, OracleError<'_>>("other than "),
-            alt((
-                nom_target::parse_self_reference,
-                value(
-                    TargetFilter::SelfRef,
-                    tag::<_, _, OracleError<'_>>("itself"),
-                ),
-            )),
+            nom_target::parse_self_reference,
         )
             .parse(remaining_other_than)
         {
