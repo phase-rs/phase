@@ -44,28 +44,6 @@ pub fn resolve(
     // Store revealed IDs for sub_ability condition/target injection
     state.last_revealed_ids = revealed_ids.clone();
 
-    // CR 205.3m + issue #1604: Library objects created without `CardFace` data
-    // (name-only helpers) still need accurate types for `RevealedHasCardType`.
-    for &id in &revealed_ids {
-        let name = state.objects.get(&id).map(|obj| obj.name.clone());
-        let Some(name) = name else {
-            continue;
-        };
-        if state
-            .objects
-            .get(&id)
-            .is_some_and(|obj| obj.card_types.core_types.is_empty())
-        {
-            if let Some(core_types) =
-                crate::game::printed_cards::printed_core_types_for_name(state, &name)
-            {
-                if let Some(obj) = state.objects.get_mut(&id) {
-                    obj.card_types.core_types = core_types;
-                }
-            }
-        }
-    }
-
     // Emit event with card names
     let card_names: Vec<String> = revealed_ids
         .iter()

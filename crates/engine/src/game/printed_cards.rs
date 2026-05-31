@@ -21,11 +21,11 @@ use super::public_state::{
 };
 
 /// CR 205.3m: Look up printed core types for a card name from deck-pool faces or
-/// the conjure registry when a runtime `GameObject` lacks characteristic data.
-pub fn printed_core_types_for_name(state: &GameState, name: &str) -> Option<Vec<CoreType>> {
+/// the card-face registry when a runtime `GameObject` lacks characteristic data.
+pub fn printed_core_types_for_name<'a>(state: &'a GameState, name: &str) -> Option<&'a [CoreType]> {
     let key = name.to_lowercase();
     if let Some(face) = state.card_face_registry.get(&key) {
-        return Some(face.card_type.core_types.clone());
+        return Some(&face.card_type.core_types);
     }
     for pool in &state.deck_pools {
         for entries in [
@@ -38,7 +38,7 @@ pub fn printed_core_types_for_name(state: &GameState, name: &str) -> Option<Vec<
         ] {
             for entry in entries {
                 if entry.card.name.eq_ignore_ascii_case(name) {
-                    return Some(entry.card.card_type.core_types.clone());
+                    return Some(&entry.card.card_type.core_types);
                 }
             }
         }
