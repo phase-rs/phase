@@ -2859,6 +2859,26 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
         },
 
+        // CR 400.7: "Exile target player's graveyard" — moves all cards owned by
+        // the player from their graveyard to exile.
+        Action::ExilePlayersGraveyard(player) => {
+            let ctrl = filter_mod::player_to_controller(player)?;
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(
+                    engine::types::ability::TypedFilter::default().controller(ctrl),
+                ),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            }
+        }
+
         // CR 701.18: Return to owner's hand (Bounce).
         Action::ReturnAnyNumberOfPermanentsToTheirOwnersHands(filter) => Effect::Bounce {
             target: convert_permanents(filter)?,
