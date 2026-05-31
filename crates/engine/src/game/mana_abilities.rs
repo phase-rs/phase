@@ -395,7 +395,7 @@ pub fn activate_mana_ability(
         .ok_or_else(|| EngineError::InvalidAction("Mana ability source not found".to_string()))?;
     // CR 702.26b: Phased-out permanents are treated as though they do not
     // exist, so they cannot activate abilities.
-    if source.zone == Zone::Battlefield && source.is_phased_out() {
+    if source.is_phased_out_permanent() {
         return Err(EngineError::ActionNotAllowed(
             "Phased-out permanents cannot activate abilities (CR 702.26b)".to_string(),
         ));
@@ -910,7 +910,7 @@ fn mana_ability_ready_without_simulation(
     };
     // CR 702.26b: Phased-out permanents are treated as though they do not
     // exist, so they cannot activate abilities.
-    if obj.zone == Zone::Battlefield && obj.is_phased_out() {
+    if obj.is_phased_out_permanent() {
         return false;
     }
     // CR 701.35a: Detained permanents' activated abilities can't be activated.
