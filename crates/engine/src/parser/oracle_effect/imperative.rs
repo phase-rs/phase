@@ -1674,6 +1674,11 @@ pub(super) fn parse_search_and_creation_ast(
         return Some(SearchCreationImperativeAst::MultiZoneSameNameExile);
     }
     if starts_with_possessive(lower, "search", "library")
+        // CR 701.23a: God-Pharaoh's-Gift-class multi-zone tutors ("search your
+        // graveyard, hand, and/or library for ...") — the word after the
+        // possessive is a non-library zone, so `starts_with_possessive` misses
+        // them; the zone-list detector routes them through the same lowering.
+        || super::parse_multi_search_zones(lower).is_some()
         || nom_on_lower(lower, lower, |i| {
             alt((
                 value((), tag("search target opponent's library")),
@@ -1697,6 +1702,7 @@ pub(super) fn parse_search_and_creation_ast(
             multi_destination: details.multi_destination,
             multi_enter_tapped: details.multi_enter_tapped,
             split: details.split,
+            source_zones: details.source_zones,
         });
     }
     // CR 701.16a + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
@@ -1906,6 +1912,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             multi_destination: _,
             multi_enter_tapped: _,
             split,
+            source_zones,
         } => Effect::SearchLibrary {
             filter,
             // CR 107.1c + CR 701.23d: Lower the AST `up_to: bool` into the
@@ -1919,6 +1926,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             target_player,
             selection_constraint,
             split,
+            source_zones,
         },
         SearchCreationImperativeAst::SearchOutsideGame {
             filter,
@@ -4007,6 +4015,7 @@ pub(super) fn lower_multi_filter_search_library(
             target_player,
             selection_constraint: SearchSelectionConstraint::MatchEachFilter { filters },
             split: None,
+            source_zones: vec![crate::types::zones::Zone::Library],
         });
     }
 
@@ -4048,6 +4057,7 @@ pub(super) fn lower_multi_filter_search_library(
                 target_player: target_player.clone(),
                 selection_constraint: selection_constraint.clone(),
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
         );
         search_def.sub_ability = tail;
@@ -4066,6 +4076,7 @@ pub(super) fn lower_multi_filter_search_library(
         target_player,
         selection_constraint,
         split: None,
+        source_zones: vec![crate::types::zones::Zone::Library],
     });
     clause.sub_ability = tail;
     clause
@@ -4131,6 +4142,7 @@ fn lower_target_referenced_search_library(
             target_player,
             selection_constraint,
             split: None,
+            source_zones: vec![crate::types::zones::Zone::Library],
         })
     } else {
         lower_multi_filter_search_library(
@@ -6216,6 +6228,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 multi_enter_tapped,
                 // Reference-target searches are not cultivate-class splits.
                 split: _,
+                // Reference-target searches are library-only (default).
+                source_zones: _,
             },
         )) => lower_target_referenced_search_library(
             reference_target,
@@ -6248,6 +6262,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 multi_enter_tapped,
                 // Multi-filter searches handle destinations per-filter, not via split.
                 split: _,
+                // Multi-filter searches are library-only (default).
+                source_zones: _,
             },
         )) if !extra_filters.is_empty() => lower_multi_filter_search_library(
             filter,

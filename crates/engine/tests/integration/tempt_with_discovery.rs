@@ -279,6 +279,7 @@ fn make_step_4_ability() -> ResolvedAbility {
             target_player: None, // searcher = controller (P0)
             selection_constraint: SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         vec![],
         ObjectId(9000),
@@ -314,6 +315,7 @@ fn searched_this_way_survives_search_choice_continuation() {
             target_player: None,
             selection_constraint: SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         vec![],
         ObjectId(9000),
@@ -336,6 +338,7 @@ fn searched_this_way_survives_search_choice_continuation() {
             target_player: None,
             selection_constraint: SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         vec![],
         ObjectId(9000),

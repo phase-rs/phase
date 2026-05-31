@@ -3991,6 +3991,7 @@ mod tests {
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
                         split: None,
+                        source_zones: vec![crate::types::zones::Zone::Library],
                     },
                 )
                 .cost(AbilityCost::Composite {
@@ -4592,6 +4593,7 @@ mod tests {
                 target_player: Some(TargetFilter::Player),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             source,

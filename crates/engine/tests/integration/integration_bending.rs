@@ -866,6 +866,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -882,6 +883,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
             vec![],
             source_id,
@@ -1197,6 +1199,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -1213,6 +1216,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
             vec![],
             enchantment_id,

@@ -78,7 +78,10 @@ use self::imperative::{
     lower_zone_counter_ast, parse_imperative_family_ast, parse_shuffle_ast,
 };
 use self::search::parse_search_filter;
-use self::search::{parse_search_destination, parse_search_library_details, parse_seek_details};
+use self::search::{
+    parse_multi_search_zones, parse_search_destination, parse_search_library_details,
+    parse_seek_details,
+};
 use self::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, continuation_absorbs_current,
     parse_followup_continuation_ast, parse_intrinsic_continuation_ast, split_clause_sequence,
@@ -32044,31 +32047,29 @@ mod tests {
     #[test]
     fn search_filter_card_with_that_name() {
         let filter = parse_search_filter("card with that name", &mut ParseContext::default());
-        let TargetFilter::Typed(tf) = filter else {
-            panic!("Expected Typed filter with SameName, got {filter:?}");
+        let TargetFilter::And { filters } = filter else {
+            panic!("Expected And filter with HasChosenName, got {filter:?}");
         };
-        assert!(tf
-            .properties
-            .iter()
-            .any(|p| matches!(p, FilterProp::SameName)));
+        assert!(filters.contains(&TargetFilter::HasChosenName));
     }
 
     #[test]
     fn search_filter_basic_card_with_that_name() {
         let filter = parse_search_filter("basic card with that name", &mut ParseContext::default());
-        let TargetFilter::Typed(tf) = filter else {
-            panic!("Expected Typed filter with Basic + SameName, got {filter:?}");
+        let TargetFilter::And { filters } = filter else {
+            panic!("Expected And filter with Basic + HasChosenName, got {filter:?}");
         };
-        assert!(tf.properties.iter().any(|property| matches!(
-            property,
-            FilterProp::HasSupertype {
-                value: crate::types::card_type::Supertype::Basic
-            }
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic
+                    }
+                ))
         )));
-        assert!(tf
-            .properties
-            .iter()
-            .any(|property| matches!(property, FilterProp::SameName)));
+        assert!(filters.contains(&TargetFilter::HasChosenName));
     }
 
     #[test]

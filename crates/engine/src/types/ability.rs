@@ -5962,6 +5962,21 @@ pub enum Effect {
     /// Search a player's library for card(s) matching a filter.
     /// The destination is handled by the sub_ability chain (ChangeZone + Shuffle).
     SearchLibrary {
+        /// CR 701.23a: Zones the search looks through. Defaults to library-only
+        /// (the overwhelming majority of tutors). God-Pharaoh's-Gift-class cards
+        /// (Gate to the Afterlife, Dark Supplicant, Say Its Name, Boonweaver
+        /// Giant, Mishra) search graveyard + hand + library. The trailing "If you
+        /// search your library this way, shuffle" is the effect's own Shuffle
+        /// sub-ability and is always reached in the multi-zone case because
+        /// Library is in the set. CR 701.23 + CR 609.3: a `CantSearchLibrary`
+        /// muzzle suppresses only the library component — the other zones are
+        /// still searched, and the per-turn "searched a library" tracking fires
+        /// only when Library is actually among the searched zones.
+        #[serde(
+            default = "default_search_zones",
+            skip_serializing_if = "is_default_search_zones"
+        )]
+        source_zones: Vec<Zone>,
         /// What cards can be found.
         filter: TargetFilter,
         /// How many cards to find (usually 1). `QuantityExpr` so the count can be
@@ -6978,6 +6993,18 @@ fn is_default_search_selection_constraint(c: &SearchSelectionConstraint) -> bool
 
 fn is_default_outside_game_source_pool(pool: &OutsideGameSourcePool) -> bool {
     matches!(pool, OutsideGameSourcePool::Sideboard)
+}
+
+/// CR 701.23a: Default search zone set — library only, the overwhelming
+/// majority of tutors. Used by `Effect::SearchLibrary.source_zones`.
+fn default_search_zones() -> Vec<Zone> {
+    vec![Zone::Library]
+}
+
+/// True when `zones` is the library-only default, so multi-zone metadata is the
+/// only thing serialized into `card-data.json`.
+fn is_default_search_zones(zones: &[Zone]) -> bool {
+    zones == [Zone::Library]
 }
 
 fn default_zone_hand() -> Zone {
