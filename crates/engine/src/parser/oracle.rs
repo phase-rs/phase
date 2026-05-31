@@ -1262,7 +1262,66 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
         }
     }
     result.parse_warnings = ir.diagnostics.clone();
+    // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis. Cards like
+    // Journey to Nowhere and Oblivion Ring use a two-trigger design:
+    //   Line 1 (ETB): "When ~ enters, exile target creature."
+    //   Line 2 (LTB): "When ~ leaves the battlefield, return the exiled card
+    //                  to the battlefield under its owner's control."
+    // The ETB exile produces no duration (the oracle text has no "until" clause),
+    // so no ExileLink::UntilSourceLeaves is created and the exiled card is
+    // never returned. Fix: when we detect this paired pattern, set
+    // Duration::UntilHostLeavesPlay on the ETB exile's execute ability so the
+    // existing exile-link mechanism handles the return correctly. The LTB
+    // trigger stays registered as-is (its TrackedSet target gracefully resolves
+    // to nothing when the exile link has already returned the card).
+    synthesize_etb_exile_ltb_return_pair(&mut result.triggers);
     result
+}
+
+/// CR 607.1 + CR 610.3: Detect an (ETB exile, LTB return) trigger pair and
+/// upgrade the ETB exile to `Duration::UntilHostLeavesPlay` so the
+/// `ExileLink::UntilSourceLeaves` mechanism returns the exiled card when the
+/// source leaves. Covers Journey to Nowhere, Oblivion Ring, and the broader
+/// "exile target X … LTB return" two-trigger class.
+fn synthesize_etb_exile_ltb_return_pair(triggers: &mut [TriggerDefinition]) {
+    let has_ltb_return = triggers.iter().any(|t| {
+        t.mode == TriggerMode::LeavesBattlefield
+            && t.execute.as_deref().is_some_and(|ex| {
+                matches!(
+                    ex.effect.as_ref(),
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::TrackedSet { .. },
+                        ..
+                    }
+                )
+            })
+    });
+
+    if !has_ltb_return {
+        return;
+    }
+
+    for trig in triggers.iter_mut() {
+        if trig.mode != TriggerMode::ChangesZone || trig.destination != Some(Zone::Battlefield) {
+            continue;
+        }
+        let Some(execute) = trig.execute.as_deref_mut() else {
+            continue;
+        };
+        if !matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ) {
+            continue;
+        }
+        if execute.duration.is_none() {
+            execute.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+        }
+    }
 }
 
 /// Produce an `OracleDocIr` from Oracle text — the IR-production half of the
@@ -14402,6 +14461,44 @@ mod tests {
             card_face_gaps(&face).is_empty(),
             "Vizier of Remedies must have zero coverage gaps, got: {:?}",
             card_face_gaps(&face)
+        );
+    }
+
+    /// CR 607.1 + CR 610.3 + #1320: Journey to Nowhere / Oblivion Ring class —
+    /// two-trigger exile-return synthesis. The ETB exile ("exile target creature")
+    /// has no "until" language, but it's paired with an LTB return trigger. The
+    /// synthesis pass must set `Duration::UntilHostLeavesPlay` on the ETB exile
+    /// so the engine's ExileLink mechanism returns the card when the source leaves.
+    #[test]
+    fn journey_to_nowhere_etb_exile_gets_until_host_leaves_duration() {
+        let oracle = "When this enchantment enters, exile target creature.\n\
+                      When this enchantment leaves the battlefield, return the exiled card \
+                      to the battlefield under its owner's control.";
+        let result = parse(oracle, "Journey to Nowhere", &[], &["Enchantment"], &[]);
+
+        let etb = result
+            .triggers
+            .iter()
+            .find(|t| {
+                t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield)
+            })
+            .expect("must have ETB trigger");
+
+        let execute = etb.execute.as_deref().expect("ETB must have execute");
+        assert_eq!(
+            execute.duration,
+            Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+            "ETB exile must carry UntilHostLeavesPlay so the engine returns the card"
+        );
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "ETB execute must be ChangeZone→Exile"
         );
     }
 }

@@ -1179,8 +1179,8 @@
   },
   "categoryChoice": {
     "title": "Bleibende Karten zum Behalten wählen",
-    "subtitleOpponent": "Wähle eine bleibende Karte jedes Typs unter den bleibenden Nichtländer-Karten, die {{name}} kontrolliert; der Rest wird geopfert.",
-    "subtitleSelf": "Wähle eine bleibende Karte jedes Typs unter den bleibenden Nichtländer-Karten, die du kontrollierst; der Rest wird geopfert.",
+    "subtitleOpponent": "Wähle eine bleibende Karte für jede Kategorie für {{name}}.",
+    "subtitleSelf": "Wähle eine bleibende Karte für jede Kategorie.",
     "noneToKeep": "Kein {{category}} — keine zum Behalten",
     "objectFallback": "Objekt {{id}}"
   },

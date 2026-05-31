@@ -1159,10 +1159,15 @@ export type WaitingFor =
       player: PlayerId;
       target_player: PlayerId;
       categories: string[];
+      chooser_scope?: "EachPlayerSelf" | "ControllerForAll";
+      choose_filter?: TargetFilter;
+      sacrifice_filter?: TargetFilter;
+      source_controller?: PlayerId;
       eligible_per_category: ObjectId[][];
       source_id: ObjectId;
       remaining_players: PlayerId[];
       all_kept: ObjectId[];
+      scoped_players: PlayerId[];
     } }
   | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: CopyTargetSlot[]; current_slot?: number } }
   // CR 700.3 + CR 700.3a: Subject is partitioning their own eligible objects

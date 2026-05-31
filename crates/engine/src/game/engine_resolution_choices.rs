@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
-    PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
+    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind, PaymentCost, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
@@ -2343,8 +2343,12 @@ pub(super) fn handle_resolution_choice(
         (
             WaitingFor::CategoryChoice {
                 player,
-                target_player,
+                target_player: _,
                 categories,
+                chooser_scope,
+                choose_filter,
+                sacrifice_filter,
+                source_controller,
                 eligible_per_category,
                 source_id,
                 remaining_players,
@@ -2362,36 +2366,33 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
 
-            // Validate each choice is eligible for its category and no duplicates.
+            // Validate each choice is eligible for its category. A permanent can
+            // legally satisfy multiple category slots (artifact creature, etc.);
+            // dedupe only when building the final protected set.
             let mut chosen_this_round = Vec::new();
             for (i, choice) in choices.iter().enumerate() {
-                if let Some(obj_id) = choice {
-                    if !eligible_per_category[i].contains(obj_id) {
+                let Some(obj_id) = choice else {
+                    if !eligible_per_category[i].is_empty() {
                         return Err(EngineError::InvalidAction(format!(
-                            "Object {:?} is not eligible for category {:?}",
-                            obj_id, categories[i]
+                            "Must choose a permanent for category {:?}",
+                            categories[i]
                         )));
                     }
-                    if chosen_this_round.contains(obj_id) {
-                        return Err(EngineError::InvalidAction(format!(
-                            "Object {:?} chosen for multiple categories",
-                            obj_id
-                        )));
-                    }
+                    continue;
+                };
+                if !eligible_per_category[i].contains(obj_id) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Object {:?} is not eligible for category {:?}",
+                        obj_id, categories[i]
+                    )));
+                }
+                if !chosen_this_round.contains(obj_id) {
                     chosen_this_round.push(*obj_id);
                 }
             }
 
             // Accumulate kept permanents.
             all_kept.extend(chosen_this_round);
-
-            // Determine chooser_scope from context: if player == target_player, it's EachPlayerSelf.
-            // If player != target_player for a non-first player, it's ControllerForAll.
-            let chooser_scope = if player == target_player {
-                CategoryChooserScope::EachPlayerSelf
-            } else {
-                CategoryChooserScope::ControllerForAll
-            };
 
             // Issue #423 (Correction 1): `sacrifice_unchosen` moves permanents
             // to the graveyard via `sacrifice_permanent`. Mark where those
@@ -2413,17 +2414,21 @@ pub(super) fn handle_resolution_choice(
                     state,
                     &all_kept,
                     &scoped_players,
+                    &sacrifice_filter,
                     source_id,
+                    source_controller,
                     events,
                 );
             } else if let Err(e) = effects::choose_and_sacrifice_rest::advance_to_next_player(
                 state,
                 &categories,
                 chooser_scope,
-                player, // controller for ControllerForAll
+                source_controller,
                 source_id,
                 &remaining_players,
                 all_kept,
+                &choose_filter,
+                &sacrifice_filter,
                 &scoped_players,
                 events,
             ) {

@@ -324,6 +324,10 @@ pub enum GameEvent {
     SpellCountered {
         object_id: ObjectId,
         countered_by: ObjectId,
+        /// CR 109.5: "you control" on counter triggers refers to the countering
+        /// spell or ability's controller, not necessarily the source object's
+        /// current controller.
+        countered_by_controller: PlayerId,
     },
     CounterAdded {
         object_id: ObjectId,

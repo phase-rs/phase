@@ -519,6 +519,36 @@ pub(super) fn valid_source_matches(
     }
 }
 
+fn valid_source_controller_matches(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    countered_by: ObjectId,
+    countered_by_controller: PlayerId,
+    source_id: ObjectId,
+) -> bool {
+    match &trigger.valid_source {
+        None => true,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            type_filters,
+            properties,
+            ..
+        })) if type_filters.is_empty() && properties.is_empty() => {
+            state.objects.get(&source_id).map(|o| o.controller) == Some(countered_by_controller)
+        }
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            type_filters,
+            properties,
+            ..
+        })) if type_filters.is_empty() && properties.is_empty() => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|source| source.controller != countered_by_controller),
+        Some(_) => valid_source_matches(trigger, state, countered_by, source_id),
+    }
+}
+
 pub(super) fn valid_player_matches(
     trigger: &TriggerDefinition,
     state: &GameState,
@@ -1403,8 +1433,26 @@ pub(super) fn match_countered(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::SpellCountered { object_id, .. } = event {
-        valid_card_matches(trigger, state, *object_id, source_id)
+    if let GameEvent::SpellCountered {
+        object_id,
+        countered_by,
+        countered_by_controller,
+    } = event
+    {
+        // CR 701.6: Check the countered object against valid_card (type/name filter).
+        if !valid_card_matches(trigger, state, *object_id, source_id) {
+            return false;
+        }
+        // CR 109.5 + CR 701.6 + CR 603.2: "a spell or ability you control
+        // counters a spell" gates on the countering spell/ability controller,
+        // not just the source object's live controller.
+        valid_source_controller_matches(
+            trigger,
+            state,
+            *countered_by,
+            *countered_by_controller,
+            source_id,
+        )
     } else {
         false
     }
@@ -3393,6 +3441,82 @@ mod tests {
     /// Helper to create a minimal TriggerDefinition with typed fields.
     fn make_trigger(mode: TriggerMode) -> TriggerDefinition {
         TriggerDefinition::new(mode)
+    }
+
+    #[test]
+    fn countered_trigger_uses_countering_ability_controller() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Lullmage Mentor".to_string(),
+            Zone::Battlefield,
+        );
+        let countered_spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Countered Spell".to_string(),
+            Zone::Stack,
+        );
+        let countering_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Borrowed Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Countered);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+
+        let event = GameEvent::SpellCountered {
+            object_id: countered_spell,
+            countered_by: countering_source,
+            countered_by_controller: PlayerId(0),
+        };
+
+        assert!(match_countered(&event, &trigger, source, &state));
+    }
+
+    #[test]
+    fn countered_trigger_rejects_wrong_countering_controller() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Lullmage Mentor".to_string(),
+            Zone::Battlefield,
+        );
+        let countered_spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Countered Spell".to_string(),
+            Zone::Stack,
+        );
+        let countering_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Opponent-Controlled Counter".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::Countered);
+        trigger.valid_source = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ));
+
+        let event = GameEvent::SpellCountered {
+            object_id: countered_spell,
+            countered_by: countering_source,
+            countered_by_controller: PlayerId(1),
+        };
+
+        assert!(!match_countered(&event, &trigger, source, &state));
     }
 
     #[test]
@@ -6890,24 +7014,28 @@ mod tests {
     // BecomesTarget + valid_source (spell-only filtering)
     // -----------------------------------------------------------------------
 
-    fn setup_with_spell_on_stack(is_aura_spell: bool) -> (GameState, ObjectId) {
+    fn setup_with_named_spell_on_stack(
+        name: &str,
+        core_types: &[CoreType],
+        subtypes: &[&str],
+    ) -> (GameState, ObjectId) {
         let mut state = setup();
         let spell_id = create_object(
             &mut state,
             CardId(100),
             PlayerId(0),
-            if is_aura_spell {
-                "Pacifism".to_string()
-            } else {
-                "Lightning Bolt".to_string()
-            },
+            name.to_string(),
             Zone::Stack,
         );
-        if is_aura_spell {
-            if let Some(spell_obj) = state.objects.get_mut(&spell_id) {
-                spell_obj.card_types.core_types.push(CoreType::Enchantment);
-                spell_obj.card_types.subtypes.push("Aura".to_string());
-            }
+        if let Some(spell_obj) = state.objects.get_mut(&spell_id) {
+            spell_obj
+                .card_types
+                .core_types
+                .extend(core_types.iter().copied());
+            spell_obj
+                .card_types
+                .subtypes
+                .extend(subtypes.iter().map(|subtype| (*subtype).to_string()));
         }
         state.stack.push_back(StackEntry {
             id: spell_id,
@@ -6931,11 +7059,37 @@ mod tests {
         (state, spell_id)
     }
 
+    fn setup_with_spell_on_stack(is_aura_spell: bool) -> (GameState, ObjectId) {
+        if is_aura_spell {
+            setup_with_named_spell_on_stack("Pacifism", &[CoreType::Enchantment], &["Aura"])
+        } else {
+            setup_with_named_spell_on_stack("Lightning Bolt", &[CoreType::Instant], &[])
+        }
+    }
+
+    fn setup_with_sorcery_on_stack() -> (GameState, ObjectId) {
+        setup_with_named_spell_on_stack("Divination", &[CoreType::Sorcery], &[])
+    }
+
     fn aura_stack_spell_filter() -> TargetFilter {
         TargetFilter::And {
             filters: vec![
                 TargetFilter::StackSpell,
                 TargetFilter::Typed(TypedFilter::default().subtype("Aura".to_string())),
+            ],
+        }
+    }
+
+    fn instant_or_sorcery_stack_spell_filter() -> TargetFilter {
+        TargetFilter::And {
+            filters: vec![
+                TargetFilter::StackSpell,
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                    ],
+                },
             ],
         }
     }
@@ -7176,6 +7330,82 @@ mod tests {
         let trigger_owner = ObjectId(5);
         let mut trigger = make_trigger(TriggerMode::BecomesTarget);
         trigger.valid_source = Some(aura_stack_spell_filter());
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_instant_or_sorcery_filter_matches_instant_spell() {
+        let (state, spell_id) = setup_with_spell_on_stack(false);
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(instant_or_sorcery_stack_spell_filter());
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: spell_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_instant_or_sorcery_filter_matches_sorcery_spell() {
+        let (state, spell_id) = setup_with_sorcery_on_stack();
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(instant_or_sorcery_stack_spell_filter());
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: spell_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_instant_or_sorcery_filter_rejects_aura_spell() {
+        let (state, spell_id) = setup_with_spell_on_stack(true);
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(instant_or_sorcery_stack_spell_filter());
+
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: spell_id,
+        };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_instant_or_sorcery_filter_rejects_ability_source() {
+        let (state, ability_id) = setup_with_ability_on_stack();
+        let trigger_owner = ObjectId(5);
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(instant_or_sorcery_stack_spell_filter());
 
         let event = GameEvent::BecomesTarget {
             target: TargetRef::Object(trigger_owner),

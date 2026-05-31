@@ -6,11 +6,12 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityCost, AbilityDefinition, AdditionalCost, BeholdCostAction, ChoiceType, ChoiceValue,
-    ChooseFromZoneConstraint, ContinuousModification, CostPaidObjectSnapshot,
-    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
-    ModalChoice, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
-    StaticCondition, TargetFilter, TargetRef, TriggerCondition,
+    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
+    BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
+    ContinuousModification, CostPaidObjectSnapshot, DelayedTriggerCondition, Duration, EffectKind,
+    GameRestriction, KeywordAction, KickerVariant, ModalChoice, ResolvedAbility,
+    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
+    TriggerCondition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -2914,6 +2915,20 @@ pub enum WaitingFor {
         target_player: PlayerId,
         /// Type categories to fill (e.g., [Artifact, Creature, Enchantment, Land]).
         categories: Vec<CoreType>,
+        /// CR 101.4: Whether each player chooses independently or one player decides for all.
+        #[serde(default)]
+        chooser_scope: CategoryChooserScope,
+        /// Permanents eligible to be chosen for the category slots.
+        #[serde(default = "default_target_filter_permanent")]
+        choose_filter: TargetFilter,
+        /// Permanents in scope for the final sacrifice sweep.
+        #[serde(default = "default_target_filter_permanent")]
+        sacrifice_filter: TargetFilter,
+        /// Controller of the source ability. Needed after a save/reload or any
+        /// paused choice because `player` is the chooser, not necessarily the
+        /// source controller.
+        #[serde(default)]
+        source_controller: PlayerId,
         /// For each category, the eligible permanent IDs (battlefield objects matching that type).
         eligible_per_category: Vec<Vec<ObjectId>>,
         source_id: ObjectId,
