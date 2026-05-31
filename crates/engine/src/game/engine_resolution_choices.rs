@@ -2160,13 +2160,16 @@ pub(super) fn handle_resolution_choice(
                 if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), &choice) {
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
                         obj.chosen_attributes.push(attr);
-                        // CR 613.1: Persisted ETB/modal choices (creature type, card
-                        // type, color, etc.) gate continuous effects on the source.
-                        // Layer evaluation may have run before the choice was made
-                        // (Morophon buffs, Serra's Emissary protection, …) — re-run.
+                        // CR 607.2d + CR 613.1: Persisted ETB/modal choices (card
+                        // name, creature type, card type, color, etc.) can gate
+                        // source-dependent continuous or rule effects. Layer
+                        // evaluation may have run before the choice was made
+                        // (Morophon buffs, Pithing Needle prohibitions, Serra's
+                        // Emissary protection, …) — re-run.
                         if matches!(
                             choice_type,
-                            ChoiceType::CreatureType
+                            ChoiceType::CardName
+                                | ChoiceType::CreatureType
                                 | ChoiceType::CardType
                                 | ChoiceType::BasicLandType
                                 | ChoiceType::Color { .. }

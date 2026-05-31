@@ -36,6 +36,23 @@ fn add_morophon_static(state: &mut engine::types::game_state::GameState, moropho
         );
 }
 
+fn add_chosen_name_power_static(
+    state: &mut engine::types::game_state::GameState,
+    source: ObjectId,
+) {
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::HasChosenName)
+                .modifications(vec![ContinuousModification::AddPower { value: 1 }]),
+        );
+}
+
+// Shape test: manually constructs expected state.
 #[test]
 fn morophon_buffs_creature_with_matching_subtype_among_many() {
     let mut scenario = GameScenario::new();
@@ -112,5 +129,45 @@ fn morophon_creature_type_choice_marks_layers_dirty() {
         runner.state().objects.get(&bruse).unwrap().power,
         Some(5),
         "buff must apply immediately after choosing Human"
+    );
+}
+
+#[test]
+fn card_name_choice_marks_layers_dirty_for_chosen_name_static() {
+    let mut scenario = GameScenario::new();
+    let source = scenario
+        .add_creature(P0, "Pithing Needle Stand-In", 1, 1)
+        .id();
+    let llanowar = scenario.add_creature(P0, "Llanowar Elves", 1, 1).id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.all_card_names = vec!["Llanowar Elves".to_string()].into();
+        add_chosen_name_power_static(state, source);
+    }
+
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects.get(&llanowar).unwrap().power,
+        Some(1)
+    );
+
+    runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        player: P0,
+        choice_type: ChoiceType::CardName,
+        options: Vec::new(),
+        source_id: Some(source),
+    };
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Llanowar Elves".to_string(),
+        })
+        .expect("card name choice");
+    flush_layers(runner.state_mut());
+
+    assert_eq!(
+        runner.state().objects.get(&llanowar).unwrap().power,
+        Some(2),
+        "chosen-name continuous effects must update immediately after CardName choice"
     );
 }
