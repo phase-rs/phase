@@ -2552,7 +2552,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
         return true;
     }
 
-    // If b modifies power/toughness and a's filter compares P/T (CR 613.8a).
+    // CR 613.8a: b modifies power/toughness and a's filter compares P/T.
     let b_changes_pt = matches!(
         &b.modification,
         ContinuousModification::AddPower { .. }
@@ -2563,6 +2563,8 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::SetToughness { .. }
             | ContinuousModification::SetPowerDynamic { .. }
             | ContinuousModification::SetToughnessDynamic { .. }
+            | ContinuousModification::SetDynamicPower { .. }
+            | ContinuousModification::SetDynamicToughness { .. }
     );
 
     if b_changes_pt && filter_references_pt_stat(&a.affected_filter) {
@@ -2608,9 +2610,14 @@ fn filter_references_ability(filter: &TargetFilter) -> bool {
 /// Check if a `TargetFilter` compares power or toughness (CR 613.8a dependency axis).
 fn filter_references_pt_stat(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(TypedFilter { properties, .. }) => properties
-            .iter()
-            .any(|p| matches!(p, crate::types::ability::FilterProp::PtComparison { .. })),
+        TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|p| {
+            matches!(
+                p,
+                crate::types::ability::FilterProp::PtComparison { .. }
+                    | crate::types::ability::FilterProp::PowerGTSource
+                    | crate::types::ability::FilterProp::ToughnessGTPower
+            )
+        }),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().any(filter_references_pt_stat)
         }
