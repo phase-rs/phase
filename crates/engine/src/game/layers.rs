@@ -10,9 +10,9 @@ use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient,
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
-    CommanderOwnership, ContinuousModification, CopiableValues, Duration, Effect, ManaContribution,
-    ManaProduction, PlayerScope, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter,
-    TypedFilter,
+    CommanderOwnership, ContinuousModification, CopiableValues, Duration, Effect, FilterProp,
+    ManaContribution, ManaProduction, PlayerScope, QuantityExpr, StaticCondition, StaticDefinition,
+    TargetFilter, TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -2611,18 +2611,23 @@ fn filter_references_ability(filter: &TargetFilter) -> bool {
 /// Check if a `TargetFilter` compares power or toughness (CR 613.8a dependency axis).
 fn filter_references_pt_stat(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|p| {
-            matches!(
-                p,
-                crate::types::ability::FilterProp::PtComparison { .. }
-                    | crate::types::ability::FilterProp::PowerGTSource
-                    | crate::types::ability::FilterProp::ToughnessGTPower
-            )
-        }),
+        TargetFilter::Typed(TypedFilter { properties, .. }) => {
+            properties.iter().any(filter_prop_references_pt_stat)
+        }
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().any(filter_references_pt_stat)
         }
         TargetFilter::Not { filter } => filter_references_pt_stat(filter),
+        _ => false,
+    }
+}
+
+fn filter_prop_references_pt_stat(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ToughnessGTPower => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_references_pt_stat),
         _ => false,
     }
 }
@@ -4019,6 +4024,29 @@ mod tests {
         )
     }
 
+    fn creatures_you_ctrl_with_power_or_toughness_le(threshold: i32) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: threshold },
+                        },
+                        FilterProp::PtComparison {
+                            stat: PtStat::Toughness,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: threshold },
+                        },
+                    ],
+                }]),
+        )
+    }
+
     fn add_lord_static(
         state: &mut GameState,
         lord_id: ObjectId,
@@ -4253,6 +4281,13 @@ mod tests {
     }
 
     #[test]
+    fn pt_dependency_detects_disjunctive_pt_filter_props() {
+        let filter = creatures_you_ctrl_with_power_or_toughness_le(2);
+
+        assert!(filter_references_pt_stat(&filter));
+    }
+
+    #[test]
     fn set_pt_layer_orders_unconditional_setters_before_pt_threshold_filters() {
         let mut state = setup();
         let _bear = make_creature(&mut state, "Bear", 4, 4, PlayerId(0));
@@ -4293,18 +4328,26 @@ mod tests {
                 .push(def);
         }
 
-        let set_pt_effects: Vec<ActiveContinuousEffect> = collect_shared_active_continuous_effects(&state)
-            .into_iter()
-            .filter(|e| e.layer == Layer::SetPT)
-            .collect();
-        let ordered =
-            order_active_continuous_effects(Layer::SetPT, &set_pt_effects, &state);
+        let set_pt_effects: Vec<ActiveContinuousEffect> =
+            collect_shared_active_continuous_effects(&state)
+                .into_iter()
+                .filter(|e| e.layer == Layer::SetPT)
+                .collect();
+        let ordered = order_active_continuous_effects(Layer::SetPT, &set_pt_effects, &state);
 
         let shrink_set_power = ordered.iter().position(|e| {
-            e.source_id == shrink && matches!(e.modification, ContinuousModification::SetPower { value: 1 })
+            e.source_id == shrink
+                && matches!(
+                    e.modification,
+                    ContinuousModification::SetPower { value: 1 }
+                )
         });
         let setter_set_power = ordered.iter().position(|e| {
-            e.source_id == setter && matches!(e.modification, ContinuousModification::SetPower { value: 6 })
+            e.source_id == setter
+                && matches!(
+                    e.modification,
+                    ContinuousModification::SetPower { value: 6 }
+                )
         });
         assert!(shrink_set_power.is_some() && setter_set_power.is_some());
         assert!(
