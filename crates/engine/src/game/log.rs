@@ -319,6 +319,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::SpellCountered {
             object_id,
             countered_by,
+            ..
         } => vec![
             card_seg(state, *countered_by),
             text(" counters "),

@@ -7856,17 +7856,32 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::LifeLost, def));
     }
 
-    // CR 701.6 + CR 603.2: "Whenever a spell or ability you control counters a spell"
-    // — fires on `SpellCountered` events where the countering source is controlled
-    // by the trigger's controller. `valid_source` carries the controller constraint
-    // so `match_countered` can gate on `countered_by`.
-    if scan_contains(lower, "you control counters a spell") {
-        let mut def = make_base();
-        def.mode = TriggerMode::Countered;
-        def.valid_source = Some(TargetFilter::Typed(
-            TypedFilter::default().controller(ControllerRef::You),
-        ));
-        return Some((TriggerMode::Countered, def));
+    fn parse_countering_spell_or_ability_line(i: &str) -> OracleResult<'_, ControllerRef> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            delimited(
+                tag("a spell or ability "),
+                alt((
+                    value(ControllerRef::You, tag("you control")),
+                    value(ControllerRef::Opponent, tag("an opponent controls")),
+                )),
+                tag(" counters a spell"),
+            ),
+        )
+        .parse(i)
+    }
+    if let Ok((rem, controller)) = parse_countering_spell_or_ability_line(lower) {
+        if rem.trim().is_empty() {
+            // CR 109.5 + CR 701.6 + CR 603.2: "Whenever a spell or ability you
+            // control counters a spell" fires on `SpellCountered` events where the
+            // countering spell/ability controller matches this controller filter.
+            let mut def = make_base();
+            def.mode = TriggerMode::Countered;
+            def.valid_source = Some(TargetFilter::Typed(
+                TypedFilter::default().controller(controller),
+            ));
+            return Some((TriggerMode::Countered, def));
+        }
     }
 
     // CR 601.2: "Whenever you cast a/an [type] spell [post-spell modifier]" — extract
@@ -14733,6 +14748,21 @@ mod tests {
             def.valid_source,
             Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::You)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_spell_or_ability_opponent_controls_counters_a_spell() {
+        let def = parse_trigger_line(
+            "Whenever a spell or ability an opponent controls counters a spell, draw a card.",
+            "Hypothetical Counter Watcher",
+        );
+        assert_eq!(def.mode, TriggerMode::Countered);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
             ))
         );
     }
