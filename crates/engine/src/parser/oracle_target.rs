@@ -1473,6 +1473,8 @@ pub fn parse_type_phrase_with_ctx<'a>(
         break;
     }
 
+    let mut adjective_type_filters: Vec<TypeFilter> = Vec::new();
+
     // CR 700.6: "historic" adjective prefix can appear AFTER negation prefixes
     // (e.g. "nontoken historic permanent" in Arbaaz Mir). The pre-negation arm
     // above handles the bare-prefix case ("historic permanent"); this arm
@@ -1484,6 +1486,19 @@ pub fn parse_type_phrase_with_ctx<'a>(
         if starts_with_type_phrase_lead(rest) && !properties.contains(&FilterProp::Historic) {
             properties.push(FilterProp::Historic);
             pos += lower[pos..].len() - rest.len();
+        }
+    }
+
+    // "outlaw creature[s]" uses the outlaw subtype disjunction as an adjective
+    // before the concrete Creature type.
+    if let Ok((rest, type_filter)) = nom_target::parse_type_filter_word(&lower[pos..]) {
+        if matches!(type_filter, TypeFilter::AnyOf(_)) {
+            let rest_trimmed = rest.trim_start();
+            let ws = rest.len() - rest_trimmed.len();
+            if ws > 0 && starts_with_type_phrase_lead(rest_trimmed) {
+                adjective_type_filters.push(type_filter);
+                pos += lower[pos..].len() - rest_trimmed.len();
+            }
         }
     }
 
@@ -1951,6 +1966,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     }
 
     let type_filters = [
+        adjective_type_filters,
         card_type.map(|ct| vec![ct]).unwrap_or_default(),
         extra_core_type_filters,
         subtype
@@ -7975,6 +7991,23 @@ mod tests {
         } else {
             panic!("expected Or filter, got {filter:?}");
         }
+    }
+
+    #[test]
+    fn parse_type_phrase_outlaw_creatures_you_control() {
+        let (filter, remainder) = parse_type_phrase("outlaw creatures you control");
+        assert!(
+            remainder.trim().is_empty(),
+            "remainder should be empty, got: '{remainder}'"
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(typed.controller, Some(ControllerRef::You));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.type_filters.iter().any(|type_filter| {
+            matches!(type_filter, TypeFilter::AnyOf(filters) if filters.len() == 5)
+        }));
     }
 
     #[test]

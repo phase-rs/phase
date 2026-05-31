@@ -4057,8 +4057,8 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-        FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, ObjectScope,
-        ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue,
+        Duration, FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
+        ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue,
         PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode, SharedQuality,
         SharedQualityRelation, ShieldKind, StaticCondition, TargetFilter, TriggerCondition,
         TypeFilter, TypedFilter,
@@ -5951,6 +5951,49 @@ mod tests {
         );
         assert!(r.abilities.is_empty());
         assert_eq!(r.statics.len(), 1);
+    }
+
+    #[test]
+    fn spell_grants_quoted_ability_to_outlaw_creatures() {
+        let r = parse(
+            "Until end of turn, outlaw creatures you control get +1/+0 and gain \"{T}: This creature deals damage equal to its power to target creature.\"",
+            "Dead Before Sunrise",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        assert_eq!(r.abilities[0].duration, Some(Duration::UntilEndOfTurn));
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*r.abilities[0].effect
+        else {
+            panic!("expected GenericEffect, got {:?}", r.abilities[0].effect);
+        };
+        assert_eq!(static_abilities.len(), 1);
+        let static_def = &static_abilities[0];
+        let Some(TargetFilter::Typed(affected)) = &static_def.affected else {
+            panic!(
+                "expected typed affected filter, got {:?}",
+                static_def.affected
+            );
+        };
+        assert_eq!(affected.controller, Some(ControllerRef::You));
+        assert!(affected.type_filters.contains(&TypeFilter::Creature));
+        assert!(affected.type_filters.iter().any(|type_filter| {
+            matches!(type_filter, TypeFilter::AnyOf(filters) if filters.len() == 5)
+        }));
+        assert!(static_def.modifications.iter().any(|modification| {
+            matches!(modification, ContinuousModification::AddPower { value: 1 })
+        }));
+        assert!(static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::GrantAbility { definition }
+                    if matches!(&*definition.effect, Effect::DealDamage { .. })
+            )
+        }));
     }
 
     #[test]
