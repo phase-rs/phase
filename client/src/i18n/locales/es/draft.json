@@ -187,7 +187,7 @@
     },
     "bo3": {
       "label": "Al mejor de tres",
-      "description": "Juega una partida Bo3 con sideboard entre juegos."
+      "description": "Juega una partida Bo3 con banquillo entre juegos."
     },
     "run": {
       "label": "Recorrido completo",

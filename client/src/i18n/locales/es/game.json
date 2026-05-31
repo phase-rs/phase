@@ -908,16 +908,16 @@
     },
     "exileForManaAbility": {
       "title": "Exiliar",
-      "subtitle_one": "Elige {{count}} carta de {{source}} para exiliar",
-      "subtitle_other": "Elige {{count}} cartas de {{source}} para exiliar",
+      "subtitle_one": "Elige {{count}} carta {{source}} para exiliar",
+      "subtitle_other": "Elige {{count}} cartas {{source}} para exiliar",
       "sources": {
-        "Library": "tu biblioteca",
-        "Hand": "tu mano",
-        "Battlefield": "el campo de batalla",
-        "Graveyard": "tu cementerio",
-        "Stack": "la pila",
-        "Exile": "el exilio",
-        "Command": "la Zona de Mando"
+        "Library": "de tu biblioteca",
+        "Hand": "de tu mano",
+        "Battlefield": "del campo de batalla",
+        "Graveyard": "de tu cementerio",
+        "Stack": "de la pila",
+        "Exile": "del exilio",
+        "Command": "de la Zona de Mando"
       }
     },
     "multiTarget": {

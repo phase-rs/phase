@@ -57,7 +57,7 @@
     "saveAndContinue": "Guardar y continuar"
   },
   "card": {
-    "moveToSideboard": "Mover un/a {{name}} al sideboard",
+    "moveToSideboard": "Mover un/a {{name}} al banquillo",
     "moveToMain": "Mover un/a {{name}} al mazo principal",
     "removeOne": "Quitar un/a {{name}}",
     "makeCommander": "Establecer a {{name}} como comandante",
