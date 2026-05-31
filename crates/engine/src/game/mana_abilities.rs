@@ -1923,6 +1923,9 @@ fn batch_eligible_siblings(
             let obj = state.objects.get(&id)?;
             (id != exclude
                 && obj.controller == player
+                // CR 702.26b: Phased-out permanents are treated as though they
+                // do not exist and cannot contribute batch mana activations.
+                && !obj.is_phased_out()
                 && obj.abilities.iter().enumerate().any(|(index, ability)| {
                     ability == ability_def
                         && mana_ability_ready_without_simulation(
@@ -3657,6 +3660,31 @@ mod tests {
         assert!(
             siblings.contains(&sick),
             "a hasty {{T}} mana creature IS a batch sibling (CR 702.10)"
+        );
+    }
+
+    /// CR 702.26b: Phased-out permanents are treated as though they do not
+    /// exist, so a phased-out mana source cannot batch with a visible twin.
+    #[test]
+    fn batch_excludes_phased_out_mana_sibling() {
+        let mut state = GameState::new_two_player(42);
+        let ready = make_any_color_treasure(&mut state, 9700, PlayerId(0), ManaColor::ALL.to_vec());
+        let phased =
+            make_any_color_treasure(&mut state, 9701, PlayerId(0), ManaColor::ALL.to_vec());
+        let def = state.objects.get(&ready).unwrap().abilities[0].clone();
+
+        let mut events = Vec::new();
+        crate::game::phasing::phase_out_object(
+            &mut state,
+            phased,
+            crate::game::game_object::PhaseOutCause::Directly,
+            &mut events,
+        );
+
+        let siblings = batch_eligible_siblings(&state, PlayerId(0), ready, &def);
+        assert!(
+            !siblings.contains(&phased),
+            "phased-out mana sources must not batch (CR 702.26b)"
         );
     }
 

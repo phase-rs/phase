@@ -1256,6 +1256,21 @@ fn choosable_objects(waiting_for: &WaitingFor, viewer: PlayerId) -> HashSet<Obje
         | WaitingFor::ManifestDreadChoice { player, cards }
         | WaitingFor::WardDiscardChoice { player, cards, .. }
         | WaitingFor::ConniveDiscard { player, cards, .. }
+        | WaitingFor::PairChoice {
+            player,
+            choices: cards,
+            ..
+        }
+        | WaitingFor::DiscardForCost { player, cards, .. }
+        | WaitingFor::BeholdForCost {
+            player,
+            choices: cards,
+            ..
+        }
+        | WaitingFor::DiscardForManaAbility { player, cards, .. }
+        | WaitingFor::ExileForManaAbility { player, cards, .. }
+        | WaitingFor::ExileForCost { player, cards, .. }
+        | WaitingFor::CollectEvidenceChoice { player, cards, .. }
             if *player == viewer =>
         {
             cards.iter().copied().collect()
@@ -1281,6 +1296,38 @@ fn choosable_objects(waiting_for: &WaitingFor, viewer: PlayerId) -> HashSet<Obje
         | WaitingFor::ChooseLegend {
             player,
             candidates: permanents,
+            ..
+        }
+        | WaitingFor::SacrificeForCost {
+            player, permanents, ..
+        }
+        | WaitingFor::ReturnToHandForCost {
+            player, permanents, ..
+        }
+        | WaitingFor::RemoveCounterForCost {
+            player, permanents, ..
+        }
+        | WaitingFor::TapCreaturesForSpellCost {
+            player,
+            creatures: permanents,
+            ..
+        }
+        | WaitingFor::TapCreaturesForManaAbility {
+            player,
+            creatures: permanents,
+            ..
+        }
+        | WaitingFor::SacrificeForManaAbility {
+            player, permanents, ..
+        }
+        | WaitingFor::BlightChoice {
+            player,
+            creatures: permanents,
+            ..
+        }
+        | WaitingFor::HarmonizeTapChoice {
+            player,
+            eligible_creatures: permanents,
             ..
         } if *player == viewer => permanents.iter().copied().collect(),
         WaitingFor::CategoryChoice {
@@ -1616,12 +1663,14 @@ mod tests {
         AbilityCost, CategoryChooserScope, Effect, ModalChoice, ResolvedAbility, TargetFilter,
     };
     use engine::types::card_type::CoreType;
+    use engine::types::counter::CounterMatch;
     use engine::types::game_state::{
         CombatTaxPending, CopyTargetSlot, ManaAbilityResume, ManaChoiceContext, ManaChoicePrompt,
         MulliganBottomEntry, MulliganDecisionEntry, PendingCast, PendingManaAbility,
         TargetSelectionProgress, TargetSelectionSlot,
     };
     use engine::types::identifiers::CardId;
+    use engine::types::zones::ExileCostSourceZone;
     use pretty_assertions::assert_eq;
 
     fn lookup(_: &GameObject) -> Option<String> {
@@ -1898,6 +1947,66 @@ mod tests {
                 PlayerId(0),
             ),
             HashSet::from([ObjectId(26)])
+        );
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::PairChoice {
+                    player: PlayerId(0),
+                    source_id: ObjectId(1),
+                    choices: vec![ObjectId(27)],
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(27)])
+        );
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::ExileForCost {
+                    player: PlayerId(0),
+                    zone: ExileCostSourceZone::Graveyard,
+                    count: 1,
+                    cards: vec![ObjectId(28)],
+                    pending_cast: dummy_pending_cast(),
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(28)])
+        );
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::RemoveCounterForCost {
+                    player: PlayerId(0),
+                    count: 1,
+                    counter_type: CounterMatch::Any,
+                    permanents: vec![ObjectId(29)],
+                    pending_cast: dummy_pending_cast(),
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(29)])
+        );
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::TapCreaturesForManaAbility {
+                    player: PlayerId(0),
+                    count: 1,
+                    creatures: vec![ObjectId(30)],
+                    pending_mana_ability: dummy_pending_mana_ability(),
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(30)])
+        );
+        assert_eq!(
+            choosable_objects(
+                &WaitingFor::HarmonizeTapChoice {
+                    player: PlayerId(0),
+                    eligible_creatures: vec![ObjectId(31)],
+                    pending_cast: dummy_pending_cast(),
+                },
+                PlayerId(0),
+            ),
+            HashSet::from([ObjectId(31)])
         );
     }
 
