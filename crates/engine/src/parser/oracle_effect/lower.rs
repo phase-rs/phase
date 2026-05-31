@@ -3105,6 +3105,19 @@ fn parse_leading_command_return_destination(input: &str) -> OracleResult<'_, Ret
     ))
 }
 
+/// CR 601.2d: Cap "any number of" target selection to the distribution pool.
+/// Without this, the controller can select more permanents than counters or
+/// damage and the assign step deadlocks (each target must receive at least one).
+fn multi_target_for_distribute_among(distribution_amount: &QuantityExpr) -> MultiTargetSpec {
+    let (inner, is_up_to) = distribution_amount.peel_up_to();
+    let min = if is_up_to {
+        QuantityExpr::Fixed { value: 0 }
+    } else {
+        QuantityExpr::Fixed { value: 1 }
+    };
+    MultiTargetSpec::bounded_expr(min, inner.clone())
+}
+
 /// CR 601.2d: Parse "deal N damage divided as you choose among [targets]" and
 /// "deal N damage distributed among [targets]" → Effect::DealDamage with distribute flag.
 ///
@@ -3174,8 +3187,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
         let skip = target_lower.len() - rest.len();
         (
             &target_text[skip..],
-            // CR 601.2d: min: 1 because each target must receive at least 1.
-            Some(MultiTargetSpec::unlimited(1)),
+            Some(multi_target_for_distribute_among(&amount)),
         )
     } else {
         (target_text, None)
@@ -3251,8 +3263,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         let skip = target_text_lower.len() - rest.len();
         (
             &target_text[skip..],
-            // CR 601.2d: min: 1 because each target must receive at least 1.
-            Some(MultiTargetSpec::unlimited(1)),
+            Some(multi_target_for_distribute_among(&count_expr)),
         )
     } else {
         strip_optional_target_prefix(target_text)
