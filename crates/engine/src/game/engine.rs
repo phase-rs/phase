@@ -15007,6 +15007,88 @@ mod phase_trigger_regression_tests {
         assert!(state.pending_continuation.is_some());
     }
 
+    /// CR 610.3 + #783: When a permanent that exiled something "until it
+    /// leaves the battlefield" (Static Prison) sacrifices itself through a
+    /// "sacrifice unless you pay {E}" trigger, the exiled permanent must
+    /// return. The unless-payment decline path resolves the sacrifice but
+    /// historically skipped the post-action pipeline, so the exile return
+    /// never fired.
+    #[test]
+    fn static_prison_unless_pay_sacrifice_returns_exiled_permanent() {
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = setup_game_at_main_phase();
+
+        let prison = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Static Prison".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The exiled victim already sits in exile, linked to Static Prison.
+        let victim = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Exiled Permanent".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&victim)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.exile_links.push(ExileLink {
+            exiled_id: victim,
+            source_id: prison,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
+        });
+
+        // The "sacrifice this enchantment unless you pay {E}" trigger has
+        // resolved into an UnlessPayment prompt. P0 has no energy to pay.
+        let sacrifice = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            prison,
+            PlayerId(0),
+        );
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            pending_effect: Box::new(sacrifice),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
+
+        assert!(
+            !state.battlefield.contains(&prison),
+            "Static Prison should be sacrificed"
+        );
+        assert!(
+            state.battlefield.contains(&victim),
+            "exiled permanent must return when Static Prison sacrifices itself"
+        );
+        assert!(
+            !state.exile.contains(&victim),
+            "exiled permanent must no longer be in exile"
+        );
+    }
+
     /// CR 118.12 + CR 118.12a: "[Effect] unless [player] pays [cost]. If they do,
     /// [alternative]." When the unless cost is paid, the primary effect is
     /// suppressed AND the IfAPlayerDoes sub_ability runs as the alternative
