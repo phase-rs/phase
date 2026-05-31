@@ -21,7 +21,7 @@ impl SacrificeValuePolicy {
             ctx.decision.waiting_for,
             WaitingFor::PayCost {
                 kind: PayCostKind::Sacrifice,
-                resume: CostResume::Spell(_),
+                resume: CostResume::Spell { .. },
                 ..
             } | WaitingFor::WardSacrificeChoice { .. }
         ) {
@@ -130,7 +130,9 @@ mod tests {
                 choices: vec![creature, token],
                 count: 1,
                 min_count: 1,
-                resume: CostResume::Spell(dummy_pending()),
+                resume: CostResume::Spell {
+                    spell: dummy_pending(),
+                },
             },
             candidates: Vec::new(),
         };

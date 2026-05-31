@@ -1027,7 +1027,9 @@ fn advance_mana_ability_activation(
                 choices: cards,
                 count,
                 min_count: 0,
-                resume: CostResume::ManaAbility(Box::new(pending)),
+                resume: CostResume::ManaAbility {
+                    mana_ability: Box::new(pending),
+                },
             });
         }
     }
@@ -1047,7 +1049,9 @@ fn advance_mana_ability_activation(
                 choices: creatures,
                 count,
                 min_count: 0,
-                resume: CostResume::ManaAbility(Box::new(pending)),
+                resume: CostResume::ManaAbility {
+                    mana_ability: Box::new(pending),
+                },
             });
         }
     }
@@ -1081,7 +1085,9 @@ fn advance_mana_ability_activation(
                 choices: cards,
                 count,
                 min_count: 0,
-                resume: CostResume::ManaAbility(Box::new(pending)),
+                resume: CostResume::ManaAbility {
+                    mana_ability: Box::new(pending),
+                },
             });
         }
     }
@@ -1104,7 +1110,9 @@ fn advance_mana_ability_activation(
                 choices: permanents,
                 count,
                 min_count: 0,
-                resume: CostResume::ManaAbility(Box::new(pending)),
+                resume: CostResume::ManaAbility {
+                    mana_ability: Box::new(pending),
+                },
             });
         }
     }
@@ -4038,7 +4046,10 @@ mod tests {
                 kind: PayCostKind::Discard,
                 count,
                 choices: cards,
-                resume: CostResume::ManaAbility(pending_mana_ability),
+                resume:
+                    CostResume::ManaAbility {
+                        mana_ability: pending_mana_ability,
+                    },
                 ..
             } => {
                 assert_eq!(player, PlayerId(0));
@@ -6922,7 +6933,10 @@ mod tests {
                 kind: PayCostKind::Sacrifice,
                 count,
                 choices: permanents,
-                resume: CostResume::ManaAbility(pending_mana_ability),
+                resume:
+                    CostResume::ManaAbility {
+                        mana_ability: pending_mana_ability,
+                    },
                 ..
             } => {
                 assert_eq!(player, PlayerId(0));
@@ -7016,7 +7030,10 @@ mod tests {
                 kind: PayCostKind::ExileFromManaZone { zone },
                 count,
                 choices: cards,
-                resume: CostResume::ManaAbility(pending_mana_ability),
+                resume:
+                    CostResume::ManaAbility {
+                        mana_ability: pending_mana_ability,
+                    },
                 ..
             } => {
                 assert_eq!(player, PlayerId(0));
@@ -7211,7 +7228,10 @@ mod tests {
                 kind: PayCostKind::Sacrifice,
                 count,
                 choices: permanents,
-                resume: CostResume::ManaAbility(pending_mana_ability),
+                resume:
+                    CostResume::ManaAbility {
+                        mana_ability: pending_mana_ability,
+                    },
                 ..
             } => {
                 assert_eq!(count, 1);

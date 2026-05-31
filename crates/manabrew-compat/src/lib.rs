@@ -1943,7 +1943,9 @@ mod tests {
                     choices: vec![ObjectId(28)],
                     count: 1,
                     min_count: 0,
-                    resume: CostResume::Spell(dummy_pending_cast()),
+                    resume: CostResume::Spell {
+                        spell: dummy_pending_cast(),
+                    },
                 },
                 PlayerId(0),
             ),
@@ -1959,7 +1961,9 @@ mod tests {
                     choices: vec![ObjectId(29)],
                     count: 1,
                     min_count: 0,
-                    resume: CostResume::Spell(dummy_pending_cast()),
+                    resume: CostResume::Spell {
+                        spell: dummy_pending_cast(),
+                    },
                 },
                 PlayerId(0),
             ),
@@ -1973,7 +1977,9 @@ mod tests {
                     choices: vec![ObjectId(30)],
                     count: 1,
                     min_count: 0,
-                    resume: CostResume::ManaAbility(dummy_pending_mana_ability()),
+                    resume: CostResume::ManaAbility {
+                        mana_ability: dummy_pending_mana_ability(),
+                    },
                 },
                 PlayerId(0),
             ),

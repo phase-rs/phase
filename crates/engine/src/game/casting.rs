@@ -8524,7 +8524,9 @@ pub fn handle_activate_ability(
                 choices: eligible,
                 count: max_count,
                 min_count,
-                resume: CostResume::Spell(Box::new(pending_sac)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_sac),
+                },
             });
         }
 
@@ -8547,7 +8549,9 @@ pub fn handle_activate_ability(
                 choices: eligible,
                 count,
                 min_count: 0,
-                resume: CostResume::Spell(Box::new(pending_discard)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_discard),
+                },
             });
         }
 
@@ -8577,7 +8581,9 @@ pub fn handle_activate_ability(
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
-                resume: CostResume::Spell(Box::new(pending_exile)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_exile),
+                },
             });
         }
 
@@ -8614,7 +8620,9 @@ pub fn handle_activate_ability(
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
-                resume: CostResume::Spell(Box::new(pending_return)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_return),
+                },
             });
         }
 
@@ -8648,7 +8656,9 @@ pub fn handle_activate_ability(
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
-                resume: CostResume::Spell(Box::new(pending_counter)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_counter),
+                },
             });
         }
 
@@ -8673,7 +8683,9 @@ pub fn handle_activate_ability(
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
-                resume: CostResume::Spell(Box::new(pending_tap)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_tap),
+                },
             });
         }
 
@@ -19078,7 +19090,7 @@ mod tests {
                 kind: PayCostKind::TapCreatures,
                 count,
                 choices: creatures,
-                resume: CostResume::Spell(_),
+                resume: CostResume::Spell { .. },
                 ..
             } => {
                 assert_eq!(*count, 1);
@@ -21781,7 +21793,10 @@ mod tests {
                 kind: PayCostKind::Discard,
                 choices: cards,
                 count: 1,
-                resume: CostResume::Spell(pending_cast),
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 ..
             } => {
                 assert_eq!(player, PlayerId(0));
@@ -21861,7 +21876,10 @@ mod tests {
             WaitingFor::PayCost {
                 kind: PayCostKind::Discard,
                 choices: cards,
-                resume: CostResume::Spell(pending_cast),
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 ..
             } => (cards, pending_cast),
             other => panic!("expected PayCost Discard, got {other:?}"),
@@ -22582,7 +22600,10 @@ mod tests {
             WaitingFor::PayCost {
                 kind: PayCostKind::ExileFromZone { .. },
                 choices: cards,
-                resume: CostResume::Spell(pending_cast),
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 count: 3,
                 ..
             } => (cards, pending_cast),

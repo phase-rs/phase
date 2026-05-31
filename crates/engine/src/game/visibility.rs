@@ -1074,7 +1074,7 @@ mod tests {
             choices: vec![card_id],
             count: 1,
             min_count: 0,
-            resume: CostResume::Spell(pending),
+            resume: CostResume::Spell { spell: pending },
         };
 
         // Caster sees the real ID.
@@ -1103,7 +1103,10 @@ mod tests {
                 choices: cards,
                 count,
                 player,
-                resume: CostResume::Spell(pending_cast),
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 ..
             } => {
                 assert_eq!(zone, ExileCostSourceZone::Hand);
@@ -1139,7 +1142,9 @@ mod tests {
             choices: vec![card_id, other_card_id],
             count: 1,
             min_count: 0,
-            resume: CostResume::ManaAbility(dummy_pending_mana_ability(PlayerId(1), ObjectId(50))),
+            resume: CostResume::ManaAbility {
+                mana_ability: dummy_pending_mana_ability(PlayerId(1), ObjectId(50)),
+            },
         };
 
         let filtered_self = filter_state_for_viewer(&state, PlayerId(1));
@@ -1199,7 +1204,7 @@ mod tests {
             choices: vec![public_choice, private_choice],
             count: 1,
             min_count: 0,
-            resume: CostResume::Spell(pending),
+            resume: CostResume::Spell { spell: pending },
         };
 
         let filtered_self = filter_state_for_viewer(&state, PlayerId(1));
@@ -1222,7 +1227,10 @@ mod tests {
                 kind: PayCostKind::Behold { .. },
                 choices,
                 count,
-                resume: CostResume::Spell(pending_cast),
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 ..
             } => {
                 assert_eq!(choices, vec![public_choice]);
@@ -1304,7 +1312,7 @@ mod tests {
             choices: vec![card_id],
             count: 1,
             min_count: 0,
-            resume: CostResume::Spell(pending),
+            resume: CostResume::Spell { spell: pending },
         };
 
         let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
@@ -1343,7 +1351,9 @@ mod tests {
             choices: vec![card_id],
             count: 1,
             min_count: 0,
-            resume: CostResume::ManaAbility(dummy_pending_mana_ability(PlayerId(1), ObjectId(50))),
+            resume: CostResume::ManaAbility {
+                mana_ability: dummy_pending_mana_ability(PlayerId(1), ObjectId(50)),
+            },
         };
 
         let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));

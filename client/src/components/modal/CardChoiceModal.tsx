@@ -18,6 +18,7 @@ import type {
   OutsideGameSelection,
   TargetFilter,
   WaitingFor,
+  Zone,
 } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { CancelButton, ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
@@ -1533,7 +1534,7 @@ function SacrificeForManaAbilityModal({ data }: { data: PayCost["data"] }) {
 
 // ── Exile For Mana Ability Modal ──────────────────────────────────────────────
 
-function ExileForManaAbilityModal({ data, zone }: { data: PayCost["data"]; zone: string }) {
+function ExileForManaAbilityModal({ data, zone }: { data: PayCost["data"]; zone: Zone }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);

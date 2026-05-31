@@ -1651,8 +1651,14 @@ pub enum PayCostKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CostResume {
-    Spell(Box<PendingCast>),
-    ManaAbility(Box<PendingManaAbility>),
+    Spell {
+        #[serde(rename = "Spell")]
+        spell: Box<PendingCast>,
+    },
+    ManaAbility {
+        #[serde(rename = "ManaAbility")]
+        mana_ability: Box<PendingManaAbility>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3259,8 +3265,10 @@ impl WaitingFor {
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
             WaitingFor::PayCost { resume, .. } => match resume {
-                CostResume::Spell(pending_cast) => Some(pending_cast),
-                CostResume::ManaAbility(_) => None,
+                CostResume::Spell {
+                    spell: pending_cast,
+                } => Some(pending_cast),
+                CostResume::ManaAbility { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
@@ -3283,8 +3291,10 @@ impl WaitingFor {
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
             WaitingFor::PayCost { resume, .. } => match resume {
-                CostResume::Spell(pending_cast) => Some(pending_cast),
-                CostResume::ManaAbility(_) => None,
+                CostResume::Spell {
+                    spell: pending_cast,
+                } => Some(pending_cast),
+                CostResume::ManaAbility { .. } => None,
             },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
@@ -5888,7 +5898,9 @@ mod tests {
             choices: vec![ObjectId(1)],
             count: 1,
             min_count: 0,
-            resume: CostResume::Spell(dummy_pending()),
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
         variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
@@ -5898,7 +5910,9 @@ mod tests {
             choices: vec![ObjectId(1)],
             count: 1,
             min_count: 0,
-            resume: CostResume::Spell(dummy_pending()),
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
         variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
@@ -5908,7 +5922,9 @@ mod tests {
             choices: vec![ObjectId(1)],
             count: 1,
             min_count: 0,
-            resume: CostResume::Spell(dummy_pending()),
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
         variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
@@ -5916,7 +5932,9 @@ mod tests {
             choices: vec![ObjectId(1)],
             count: 1,
             min_count: 1,
-            resume: CostResume::Spell(dummy_pending()),
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
         variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
@@ -5924,7 +5942,9 @@ mod tests {
             choices: vec![ObjectId(1)],
             count: 1,
             min_count: 0,
-            resume: CostResume::Spell(dummy_pending()),
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
         variants.push(Box::new(WaitingFor::BlightChoice {
             player: PlayerId(0),
@@ -5945,7 +5965,9 @@ mod tests {
             choices: vec![ObjectId(1)],
             count: 1,
             min_count: 0,
-            resume: CostResume::Spell(dummy_pending()),
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
         variants.push(Box::new(WaitingFor::ConniveDiscard {
             player: PlayerId(0),
@@ -6072,20 +6094,22 @@ mod tests {
             choices: vec![ObjectId(1)],
             count: 1,
             min_count: 0,
-            resume: CostResume::ManaAbility(Box::new(PendingManaAbility {
-                player: PlayerId(0),
-                source_id: ObjectId(1),
-                ability_index: 0,
-                color_override: None,
-                resume: ManaAbilityResume::Priority,
-                chosen_tappers: Vec::new(),
-                chosen_discards: Vec::new(),
-                chosen_mana_payment: None,
-                chosen_exiled: Vec::new(),
-                chosen_sacrificed_battlefield: Vec::new(),
-                cost_paid_object: None,
-                batch_siblings: Vec::new(),
-            })),
+            resume: CostResume::ManaAbility {
+                mana_ability: Box::new(PendingManaAbility {
+                    player: PlayerId(0),
+                    source_id: ObjectId(1),
+                    ability_index: 0,
+                    color_override: None,
+                    resume: ManaAbilityResume::Priority,
+                    chosen_tappers: Vec::new(),
+                    chosen_discards: Vec::new(),
+                    chosen_mana_payment: None,
+                    chosen_exiled: Vec::new(),
+                    chosen_sacrificed_battlefield: Vec::new(),
+                    cost_paid_object: None,
+                    batch_siblings: Vec::new(),
+                }),
+            },
         };
         assert!(!tap_mana.has_pending_cast());
         assert!(tap_mana.pending_cast_ref().is_none());

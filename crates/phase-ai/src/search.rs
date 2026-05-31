@@ -828,7 +828,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // carry PendingManaAbility. Empty eligible lists shouldn't normally
         // happen but CancelCast is not valid here. Use empty selection.
         WaitingFor::PayCost {
-            resume: CostResume::ManaAbility(_),
+            resume: CostResume::ManaAbility { .. },
             ..
         } => Some(GameAction::SelectCards { cards: Vec::new() }),
 
@@ -869,7 +869,7 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::PayCost {
-            resume: CostResume::Spell(_),
+            resume: CostResume::Spell { .. },
             ..
         }
         | WaitingFor::BlightChoice { .. }

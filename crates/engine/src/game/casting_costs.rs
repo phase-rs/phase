@@ -2376,7 +2376,9 @@ fn pay_additional_cost(
                 choices,
                 count: count as usize,
                 min_count: 0,
-                resume: CostResume::Spell(Box::new(pending)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::Discard { count, filter, .. } => {
@@ -2401,7 +2403,9 @@ fn pay_additional_cost(
                 choices: eligible,
                 count,
                 min_count: 0,
-                resume: CostResume::Spell(Box::new(pending)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::Mana { cost: mana_cost } => {
@@ -2455,7 +2459,9 @@ fn pay_additional_cost(
                     choices: eligible,
                     count: max_count,
                     min_count,
-                    resume: CostResume::Spell(Box::new(pending)),
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending),
+                    },
                 });
             }
         }
@@ -2481,7 +2487,9 @@ fn pay_additional_cost(
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
-                resume: CostResume::Spell(Box::new(pending)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::RemoveCounter {
@@ -2510,7 +2518,9 @@ fn pay_additional_cost(
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
-                resume: CostResume::Spell(Box::new(pending)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::PayEnergy { amount } => {
@@ -2588,7 +2598,9 @@ fn pay_additional_cost(
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
-                resume: CostResume::Spell(Box::new(pending)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::CollectEvidence { amount } => {
@@ -2632,7 +2644,9 @@ fn pay_additional_cost(
                 choices: eligible,
                 count: count as usize,
                 min_count: 0,
-                resume: CostResume::Spell(Box::new(pending)),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         _ => {
@@ -5133,7 +5147,9 @@ mod tests {
             count: 2,
             // Fixed (non-variable) sacrifice cost of exactly 2 — min == count.
             min_count: 2,
-            resume: CostResume::Spell(Box::new(pending)),
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
         };
 
         apply_as_current(
@@ -5318,7 +5334,9 @@ mod tests {
             count: 2,
             // Fixed (non-variable) sacrifice cost of exactly 2 — min == count.
             min_count: 2,
-            resume: CostResume::Spell(Box::new(pending)),
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
         };
 
         apply_as_current(

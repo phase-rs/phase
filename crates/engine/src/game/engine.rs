@@ -1796,7 +1796,9 @@ fn apply_action(
             },
             GameAction::SelectCards { cards: chosen },
         ) => match resume {
-            CostResume::Spell(pending_cast) => match kind {
+            CostResume::Spell {
+                spell: pending_cast,
+            } => match kind {
                 PayCostKind::Discard => engine_casting::handle_discard_for_cost(
                     state,
                     *player,
@@ -1873,7 +1875,9 @@ fn apply_action(
                     ));
                 }
             },
-            CostResume::ManaAbility(pending_mana_ability) => match kind {
+            CostResume::ManaAbility {
+                mana_ability: pending_mana_ability,
+            } => match kind {
                 PayCostKind::TapCreatures => engine_casting::handle_tap_creatures_for_mana_ability(
                     state,
                     *count,
@@ -1908,9 +1912,11 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
-                // ReturnToHand, ExileFromZone, RemoveCounter, and Behold are
-                // spell-cast-only cost kinds; they never appear with a
-                // mana-ability resume.
+                // ReturnToHand, ExileFromZone, RemoveCounter, and Behold do not
+                // have mana-ability cost handlers wired today. If a future mana
+                // ability uses one of these CR-valid cost shapes, add the
+                // corresponding mana-ability handler instead of routing it
+                // through the spell pipeline.
                 PayCostKind::ReturnToHand
                 | PayCostKind::ExileFromZone { .. }
                 | PayCostKind::RemoveCounter { .. }
@@ -1926,7 +1932,10 @@ fn apply_action(
         (
             WaitingFor::PayCost {
                 player,
-                resume: CostResume::Spell(pending_cast),
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 ..
             },
             GameAction::CancelCast,
@@ -10368,7 +10377,7 @@ mod tests {
                 player: PlayerId(0),
                 kind: PayCostKind::TapCreatures,
                 count: 1,
-                resume: CostResume::ManaAbility(_),
+                resume: CostResume::ManaAbility { .. },
                 ..
             }
         ));
@@ -10851,7 +10860,7 @@ mod tests {
                 kind: PayCostKind::TapCreatures,
                 count,
                 choices: creatures,
-                resume: CostResume::ManaAbility(_),
+                resume: CostResume::ManaAbility { .. },
                 ..
             } => {
                 assert_eq!(player, PlayerId(0));
@@ -10977,7 +10986,7 @@ mod tests {
                 kind: PayCostKind::TapCreatures,
                 count,
                 choices: creatures,
-                resume: CostResume::Spell(_),
+                resume: CostResume::Spell { .. },
                 ..
             } => {
                 assert_eq!(player, PlayerId(0));
