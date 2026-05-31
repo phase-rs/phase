@@ -45,15 +45,16 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
-    ChooseFromZoneConstraint, CombatDamageScope, Comparator, ConjureCard, ContinuousModification,
-    ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, DoubleTarget,
-    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, IterationKindBinding,
-    ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty, ObjectScope, PaymentCost,
-    PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue,
-    QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope,
-    RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition,
+    ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
+    ContinuousModification, ControllerRef, DamageModification, DamageSource,
+    DelayedTriggerCondition, DoubleTarget, Duration, Effect, FilterProp, GainLifePlayer,
+    GameRestriction, IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec,
+    ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount,
+    PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    StepSkipTarget, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    UntilCondition, ZoneOwner,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -6621,6 +6622,10 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         return parsed_clause(effect);
     }
 
+    if let Some(clause) = try_parse_return_opponent_choice_from_graveyard(text) {
+        return clause;
+    }
+
     // CR 106.1 + CR 109.1: "For each color among [X], add one mana of that color"
     // (Faeburrow Elder). Must run before the generic for-each-prefix strip path,
     // because "that color" anaphors a per-iteration color rather than the
@@ -6735,6 +6740,56 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         clause.multi_target = extract_double_counter_multi_target(text);
     }
     clause
+}
+
+fn try_parse_return_opponent_choice_from_graveyard(text: &str) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (_, filter_text) =
+        parse_return_opponent_choice_from_graveyard_filter(lower.as_str()).ok()?;
+    let (target, _) = parse_target(filter_text);
+    if matches!(target, TargetFilter::Any) {
+        return None;
+    }
+    // CR 400.7: The chosen card changes zones from its owner's graveyard to hand.
+    // CR 608.2d: "of an opponent's choice" is a resolution-time card choice.
+    let filter = add_inferred_origin_constraints_to_target(target, Some(Zone::Graveyard), &lower);
+    let mut clause = parsed_clause(Effect::ChooseFromZone {
+        count: 1,
+        zone: Zone::Graveyard,
+        additional_zones: Vec::new(),
+        zone_owner: ZoneOwner::Controller,
+        filter: Some(filter),
+        chooser: Chooser::Opponent,
+        up_to: false,
+        constraint: None,
+    });
+    clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Hand,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+        },
+    )));
+    Some(clause)
+}
+
+fn parse_return_opponent_choice_from_graveyard_filter(input: &str) -> OracleResult<'_, &str> {
+    all_consuming(preceded(
+        tag("return "),
+        terminated(
+            take_until(" of an opponent's choice"),
+            tag(" of an opponent's choice from your graveyard to your hand"),
+        ),
+    ))
+    .parse(input)
 }
 
 fn try_parse_drawn_this_turn_choice(text: &str) -> Option<Effect> {
@@ -30014,6 +30069,56 @@ mod tests {
             "Expected PlayFromExile(UntilYourNextTurn) on TrackedSet(0), got {:?}",
             sub.effect
         );
+    }
+
+    #[test]
+    fn return_opponents_choice_from_your_graveyard_uses_zone_choice_chain() {
+        let def = parse_effect_chain(
+            "Return a nonland card of an opponent's choice from your graveyard to your hand.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChooseFromZone {
+            count,
+            zone,
+            zone_owner,
+            filter: Some(filter),
+            chooser,
+            up_to,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected ChooseFromZone, got {:?}", def.effect);
+        };
+        assert_eq!(*count, 1);
+        assert_eq!(*zone, Zone::Graveyard);
+        assert_eq!(*zone_owner, ZoneOwner::Controller);
+        assert_eq!(*chooser, Chooser::Opponent);
+        assert!(!up_to);
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed graveyard-card filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Card));
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+        assert!(typed.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        assert!(typed.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::You
+        }));
+
+        let sub = def.sub_ability.as_ref().expect("expected ChangeZone sub");
+        assert!(matches!(
+            &*sub.effect,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::Any,
+                ..
+            }
+        ));
     }
 
     #[test]
