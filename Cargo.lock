@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "draft-core"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "engine",
  "rand 0.9.4",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "draft-wasm"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "console_error_panic_hook",
  "draft-core",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "assert_matches",
  "im",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "engine-inventory-gen"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "engine-wasm"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "console_error_panic_hook",
  "engine",
@@ -690,7 +690,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "feed-scraper"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "clap",
  "reqwest",
@@ -1340,7 +1340,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lobby-broker"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "engine",
  "serde",
@@ -1371,7 +1371,7 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 
 [[package]]
 name = "manabrew-compat"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "engine",
  "pretty_assertions",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "mtgish-import"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "anyhow",
  "engine",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "phase-ai"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "engine",
  "rand 0.9.4",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "phase-server"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "axum",
  "clap",
@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "seat-reducer"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "engine",
  "phase-ai",
@@ -2340,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.1.42"
+version = "0.1.43"
 dependencies = [
  "draft-core",
  "engine",

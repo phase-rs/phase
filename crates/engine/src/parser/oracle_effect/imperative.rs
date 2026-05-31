@@ -2586,9 +2586,12 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
 
     // Pattern 2: "an artifact, a creature, ... from among [the nonland] permanents they control"
     if let Ok((after_categories, categories)) = parse_category_list_prefix(rest_lower) {
-        let (_, choose_filter) = preceded(tag::<_, _, E>(" from among "), parse_choose_domain)
-            .parse(after_categories)
-            .ok()?;
+        let (_, choose_filter) = preceded(
+            preceded(opt(tag::<_, _, E>(",")), tag(" from among ")),
+            parse_choose_domain,
+        )
+        .parse(after_categories)
+        .ok()?;
         return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
@@ -9358,6 +9361,33 @@ mod tests {
                         }) if type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Land)))
                     ),
                     "Gearhulk choose_filter should be nonland permanent, got {choose_filter:?}"
+                );
+                assert_eq!(choose_filter, sacrifice_filter);
+            }
+            other => panic!("Expected CategoryAndSacrificeRest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_from_among_gearhulk_pattern_with_comma() {
+        let text = "choose an artifact, a creature, an enchantment, and a planeswalker, from among the nonland permanents they control";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                choose_filter,
+                sacrifice_filter,
+                ..
+            }) => {
+                assert_eq!(
+                    categories,
+                    vec![
+                        CoreType::Artifact,
+                        CoreType::Creature,
+                        CoreType::Enchantment,
+                        CoreType::Planeswalker
+                    ]
                 );
                 assert_eq!(choose_filter, sacrifice_filter);
             }

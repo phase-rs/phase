@@ -120,7 +120,7 @@ cargo serve                         # Run phase-server (release)
 cargo coverage                      # Card support coverage report (reads data/card-data.json)
 cargo parser-gaps                   # Parser gap analysis report
 cargo rules-audit                   # MTG Comprehensive Rules audit (requires --features audit)
-cargo semantic-audit                 # Semantic audit of parsed card data (outputs data/semantic-audit.json + .md)
+cargo semantic-audit                # Semantic audit of parsed card data (outputs data/semantic-audit.json + .md)
 cargo scrape-feeds                  # Scrape metagame feeds from MTGGoldfish
 cargo tune-ai                       # Run AI weight tuning (requires --features tune)
 ```

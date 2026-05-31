@@ -2827,10 +2827,11 @@ pub enum QuantityRef {
         #[serde(default = "default_distinct_names")]
         qualities: Vec<SharedQuality>,
     },
-    /// CR 109.3: Count matching objects grouped by a shared object
-    /// characteristic, then aggregate the group sizes. Covers "the greatest
-    /// number of creatures you control that have a creature type in common"
-    /// without encoding the shared-quality clause as a target filter.
+    /// CR 109.3 + CR 205.3m: Count matching objects grouped by a shared object
+    /// characteristic, including creature types, then aggregate the group
+    /// sizes. Covers "the greatest number of creatures you control that have a
+    /// creature type in common" without encoding the shared-quality clause as a
+    /// target filter.
     ObjectCountBySharedQuality {
         filter: TargetFilter,
         quality: SharedQuality,

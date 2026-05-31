@@ -1586,6 +1586,7 @@ pub(super) fn begin_optional_cost_before_targets(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+/// CR 601.2b: X in a variable additional cost is announced before later target choices.
 pub(super) fn required_additional_cost_can_declare_x(
     state: &GameState,
     player: PlayerId,
@@ -1603,9 +1604,9 @@ pub(super) fn required_additional_cost_can_declare_x(
         .then_some(cost)
 }
 
-/// CR 601.2b/c/f: Some required additional costs announce X before targets
-/// are chosen. Keep the required cost pending while the shared payment step
-/// asks for X, then returns to deferred target selection.
+/// CR 601.2b: Some required additional costs announce X before targets are chosen.
+/// CR 601.2c: Target choices are deferred until that required cost X is known.
+/// CR 601.2f: The shared payment step then determines and pays the final total cost.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn begin_required_cost_before_targets(
     state: &mut GameState,
@@ -2659,12 +2660,15 @@ fn additional_cost_x_max(
         AbilityCost::PayLife { amount } if quantity_expr_contains_x(amount) => {
             Some(max_pay_life_x(state, player))
         }
-        AbilityCost::Sacrifice { target, count } if *count == u32::MAX => Some(
-            super::casting::find_eligible_sacrifice_targets(state, player, source_id, target)
-                .len()
-                .try_into()
-                .unwrap_or(u32::MAX),
-        ),
+        AbilityCost::Sacrifice { target, count } if *count == u32::MAX => {
+            // CR 601.2b: X in an additional sacrifice cost is announced before later target choices.
+            Some(
+                super::casting::find_eligible_sacrifice_targets(state, player, source_id, target)
+                    .len()
+                    .try_into()
+                    .unwrap_or(u32::MAX),
+            )
+        }
         AbilityCost::Composite { costs } => costs
             .iter()
             .filter_map(|cost| additional_cost_x_max(state, player, source_id, cost))
