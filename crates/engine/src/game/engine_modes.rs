@@ -5,7 +5,7 @@ use crate::types::mana::ManaCost;
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_chained_resolved, build_target_slots, flatten_targets_in_chain,
+    build_chained_resolved, build_target_slots_labelled, flatten_targets_in_chain,
     random_select_targets_for_ability, record_modal_mode_choices, target_constraints_from_modal,
     validate_modal_indices,
 };
@@ -52,6 +52,8 @@ pub(super) fn handle_ability_mode_choice(
                 ability_index,
                 ability_cost,
                 modal,
+                mode_abilities,
+                indices,
             },
             events,
         )
@@ -63,6 +65,8 @@ pub(super) fn handle_ability_mode_choice(
                 source_id,
                 resolved,
                 modal,
+                mode_abilities,
+                indices,
             },
             events,
         )
@@ -76,6 +80,12 @@ struct ActivatedModeChoice {
     ability_index: Option<usize>,
     ability_cost: Option<crate::types::ability::AbilityCost>,
     modal: crate::types::ability::ModalChoice,
+    /// CR 700.2: the card's mode definitions and the chosen indices, carried so
+    /// per-slot mode labels can be built at the SAME post-flush point as slots
+    /// (Finding 4 — slot count is state-dependent; the two vectors must come
+    /// from one `build_target_slots_labelled` call).
+    mode_abilities: Vec<crate::types::ability::AbilityDefinition>,
+    indices: Vec<usize>,
 }
 
 fn handle_activated_mode_choice(
@@ -90,11 +100,25 @@ fn handle_activated_mode_choice(
         ability_index,
         ability_cost,
         modal,
+        mode_abilities,
+        indices,
     } = choice;
 
     super::layers::flush_layers(state);
 
-    let target_slots = build_target_slots(state, &resolved)?;
+    // CR 700.2 / CR 601.2b: Build slots and per-mode labels together against the
+    // SAME post-flush state (Finding 4 — never let the two vectors diverge in
+    // length). `resolved.context` is the chained ability's context, reapplied
+    // per-mode by the labelled builder.
+    let (target_slots, mode_labels) = build_target_slots_labelled(
+        state,
+        &mode_abilities,
+        &indices,
+        &modal.mode_descriptions,
+        source_id,
+        player,
+        &resolved.context,
+    )?;
     let target_constraints = target_constraints_from_modal(&modal);
 
     if !target_slots.is_empty() {
@@ -170,6 +194,7 @@ fn handle_activated_mode_choice(
                 player,
                 pending_cast: Box::new(pending),
                 target_slots,
+                mode_labels,
                 selection,
             });
         }
@@ -224,6 +249,10 @@ struct TriggeredModeChoice {
     source_id: ObjectId,
     resolved: crate::types::ability::ResolvedAbility,
     modal: crate::types::ability::ModalChoice,
+    /// CR 700.2b: mode definitions + chosen indices, carried so per-slot mode
+    /// labels build from the same state as the slots (Finding 4).
+    mode_abilities: Vec<crate::types::ability::AbilityDefinition>,
+    indices: Vec<usize>,
 }
 
 fn handle_triggered_mode_choice(
@@ -236,13 +265,24 @@ fn handle_triggered_mode_choice(
         source_id,
         resolved,
         modal,
+        mode_abilities,
+        indices,
     } = choice;
 
     let mut trigger = state
         .pending_trigger
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
-    let target_slots = build_target_slots(state, &resolved)?;
+    // CR 700.2 / CR 700.2b: slots + per-mode labels built together (Finding 4).
+    let (target_slots, mode_labels) = build_target_slots_labelled(
+        state,
+        &mode_abilities,
+        &indices,
+        &modal.mode_descriptions,
+        source_id,
+        player,
+        &resolved.context,
+    )?;
     let target_constraints = target_constraints_from_modal(&modal);
 
     trigger.ability = resolved;
@@ -303,6 +343,7 @@ fn handle_triggered_mode_choice(
             return Ok(WaitingFor::TriggerTargetSelection {
                 player,
                 target_slots,
+                mode_labels,
                 target_constraints,
                 selection,
                 source_id: Some(source_id),

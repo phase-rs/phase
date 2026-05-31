@@ -1078,6 +1078,12 @@ impl GameObject {
         self.phase_status.is_phased_out()
     }
 
+    /// CR 702.26b: Only phased-out permanents on the battlefield are treated
+    /// as though they do not exist.
+    pub fn is_phased_out_permanent(&self) -> bool {
+        self.zone == Zone::Battlefield && self.is_phased_out()
+    }
+
     pub fn has_keyword_kind(&self, kind: KeywordKind) -> bool {
         super::keywords::has_keyword_kind(self, kind)
     }

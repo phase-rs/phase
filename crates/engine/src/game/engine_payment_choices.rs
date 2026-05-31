@@ -14,8 +14,8 @@ use crate::types::zones::Zone;
 use super::casting;
 use super::effects;
 use super::engine::{
-    handle_tap_land_for_mana, handle_untap_land_for_mana, resume_pending_continuation_if_priority,
-    EngineError,
+    check_exile_returns, handle_tap_land_for_mana, handle_untap_land_for_mana,
+    resume_pending_continuation_if_priority, EngineError,
 };
 use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::mana_abilities;
@@ -716,6 +716,15 @@ pub(super) fn handle_unless_payment(
         let result = effects::resolve_ability_chain(state, &ability, events, 0);
         state.current_trigger_event = previous_trigger_event;
         result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+        // CR 610.3 + #783: The unless-payment resume bypasses
+        // `run_post_action_pipeline` (see the inline-scan note in
+        // engine.rs), so the standard exile-return scan never runs. When the
+        // resolved effect makes a source leave the battlefield — e.g. Static
+        // Prison sacrificing itself via "sacrifice unless you pay {E}" — the
+        // permanent it exiled "until it leaves the battlefield" must return.
+        // Idempotent and event-scoped: a no-op when no source left this way.
+        check_exile_returns(state, events);
     }
 
     if matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }) {

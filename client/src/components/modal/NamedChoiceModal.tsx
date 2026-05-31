@@ -208,10 +208,17 @@ function HighlightedName({ name, query }: { name: string; query: string }) {
   );
 }
 
+/** Lists longer than this get a filter input so the player can narrow them
+ *  (e.g. ~280 creature types, the keyword list) instead of scanning a wall of
+ *  buttons. Short lists (colors, card types) render without the extra chrome. */
+const FILTERABLE_OPTION_THRESHOLD = 12;
+
 function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: string }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [selected, setSelected] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const filterRef = useRef<HTMLInputElement>(null);
 
   const handleConfirm = useCallback(() => {
     if (selected !== null) {
@@ -224,6 +231,13 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
     ? t(`namedChoice.title.${titleKey}`)
     : t("namedChoice.title.fallback");
   const isPlayerChoice = typeKey === "Player" || typeKey === "Opponent";
+  const showFilter = !isPlayerChoice && data.options.length > FILTERABLE_OPTION_THRESHOLD;
+
+  const visibleOptions = useMemo(() => {
+    if (!showFilter || query.trim() === "") return data.options;
+    const lower = query.trim().toLowerCase();
+    return data.options.filter((option) => option.toLowerCase().includes(lower));
+  }, [showFilter, query, data.options]);
 
   return (
     <ChoiceOverlay
@@ -233,6 +247,19 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
       maxWidthClassName="max-w-3xl"
       footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}
     >
+      {showFilter && (
+        <div className="mx-auto mb-4 w-full max-w-md">
+          <input
+            ref={filterRef}
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t("namedChoice.filterPlaceholder")}
+            autoFocus
+            className="w-full rounded-lg border-2 border-gray-600 bg-gray-900/90 px-4 py-2.5 text-base text-white placeholder-gray-500 outline-none transition focus:border-cyan-400"
+          />
+        </div>
+      )}
       <div
         className={`mx-auto mb-6 max-w-3xl gap-3 sm:mb-10 ${
           isPlayerChoice
@@ -240,7 +267,7 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
             : "flex w-fit flex-wrap items-center justify-center"
         }`}
       >
-        {data.options.map((option, index) => {
+        {visibleOptions.map((option, index) => {
           const isSelected = selected === option;
           const onClick = () => setSelected(isSelected ? null : option);
           if (isPlayerChoice) {
@@ -273,6 +300,9 @@ function ButtonGrid({ data, typeKey }: { data: NamedChoice["data"]; typeKey: str
           );
         })}
       </div>
+      {showFilter && visibleOptions.length === 0 && (
+        <p className="mb-6 text-center text-sm text-gray-500">{t("namedChoice.noOptionsMatch")}</p>
+      )}
     </ChoiceOverlay>
   );
 }

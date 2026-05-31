@@ -13,7 +13,6 @@
 //! - Full-size hand with no early-castable spell → `ForceMulligan`.
 //! - Full-size hand that passes all checks → `Score { +3.0 }`.
 
-use engine::types::ability::{AbilityKind, Effect, ManaProduction};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -256,79 +255,9 @@ fn spell_colors_available(
 }
 
 fn land_could_produce_two_or_more_colors(obj: &engine::game::game_object::GameObject) -> bool {
-    let mut colors = Vec::new();
-    for subtype in &obj.card_types.subtypes {
-        if let Some(mana_type) = engine::game::mana_payment::land_subtype_to_mana_type(subtype) {
-            push_color(&mut colors, mana_type);
-        }
-    }
-    for ability in obj.abilities.iter() {
-        if ability.kind != AbilityKind::Activated {
-            continue;
-        }
-        let Effect::Mana { produced, .. } = &*ability.effect else {
-            continue;
-        };
-        collect_mana_production_colors(&mut colors, produced);
-    }
-    colors.len() >= 2
-}
-
-fn collect_mana_production_colors(colors: &mut Vec<ManaType>, produced: &ManaProduction) {
-    match produced {
-        ManaProduction::Fixed {
-            colors: produced, ..
-        }
-        | ManaProduction::AnyOneColor {
-            color_options: produced,
-            ..
-        }
-        | ManaProduction::AnyCombination {
-            color_options: produced,
-            ..
-        } => {
-            for color in produced {
-                push_color(
-                    colors,
-                    engine::game::mana_sources::mana_color_to_type(color),
-                );
-            }
-        }
-        ManaProduction::ChoiceAmongCombinations { options } => {
-            for option in options {
-                for color in option {
-                    push_color(
-                        colors,
-                        engine::game::mana_sources::mana_color_to_type(color),
-                    );
-                }
-            }
-        }
-        ManaProduction::Mixed {
-            colors: produced, ..
-        } => {
-            for color in produced {
-                push_color(
-                    colors,
-                    engine::game::mana_sources::mana_color_to_type(color),
-                );
-            }
-        }
-        ManaProduction::Colorless { .. }
-        | ManaProduction::ChosenColor { .. }
-        | ManaProduction::OpponentLandColors { .. }
-        | ManaProduction::AnyTypeProduceableBy { .. }
-        | ManaProduction::ChoiceAmongExiledColors { .. }
-        | ManaProduction::AnyInCommandersColorIdentity { .. }
-        | ManaProduction::DistinctColorsAmongPermanents { .. }
-        | ManaProduction::TriggerEventManaType => {}
-    }
-}
-
-fn push_color(colors: &mut Vec<ManaType>, mana_type: ManaType) {
-    if mana_type != ManaType::Colorless && !colors.contains(&mana_type) {
-        colors.push(mana_type);
-    }
+    // Shared with draft fixing-land evaluation via the parts-based core.
+    crate::mana_colors::land_produced_color_types(&obj.card_types.subtypes, &obj.abilities).len()
+        >= 2
 }
 
 #[cfg(test)]

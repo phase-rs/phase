@@ -766,6 +766,7 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
                 }],
+                mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
             },
             candidates: Vec::new(),
@@ -837,6 +838,7 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(creature)],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             selection: TargetSelectionProgress::default(),
         };
 

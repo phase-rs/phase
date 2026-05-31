@@ -2703,12 +2703,15 @@ fn matches_filter_prop(
         FilterProp::NotColor { color } => !obj.color.contains(color),
         // CR 205.4a: Object does NOT have this supertype.
         FilterProp::NotSupertype { value } => !obj.card_types.supertypes.contains(value),
+        // CR 205.3e + CR 205.3m + CR 702.73a: A chosen creature type matches
+        // any listed subtype, and changeling objects have every creature type.
         FilterProp::IsChosenCreatureType => match source.chosen_creature_type {
-            Some(chosen) => obj
-                .card_types
-                .subtypes
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(chosen)),
+            Some(chosen) => subtype_matches_with_changeling(
+                chosen,
+                &obj.card_types.subtypes,
+                &obj.keywords,
+                &state.all_creature_types,
+            ),
             None => false,
         },
         // CR 205.3m: Object's creature type ties for highest count
@@ -3036,12 +3039,15 @@ fn zone_change_record_matches_property(
                 crate::game::quantity::triggering_event_player(state).is_some_and(|pid| pid == record.owner)
             }
         },
-        // CR 701.12: Source's chosen creature type applied to the snapshot subtypes.
+        // CR 205.3e + CR 205.3m + CR 702.73a: Source's chosen creature type
+        // applied to the snapshot subtypes, including changeling snapshots.
         FilterProp::IsChosenCreatureType => source.chosen_creature_type.is_some_and(|chosen| {
-            record
-                .subtypes
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(chosen))
+            subtype_matches_with_changeling(
+                chosen,
+                &record.subtypes,
+                &record.keywords,
+                &state.all_creature_types,
+            )
         }),
         FilterProp::MostPrevalentCreatureTypeIn { .. } => false,
         // CR 509.1b: Power comparison against the live source.
@@ -4657,7 +4663,7 @@ mod tests {
             .unwrap()
             .card_types
             .subtypes
-            .push("Elf".to_string());
+            .extend(["Elf".to_string(), "Warrior".to_string()]);
 
         let goblin = add_creature(&mut state, PlayerId(0), "Goblin");
         state
@@ -5031,6 +5037,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![TargetRef::Object(entered)],
             source,
@@ -6119,6 +6126,7 @@ mod tests {
             target_player: None,
             selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![crate::types::zones::Zone::Library],
         };
         let json = serde_json::to_string(&search).unwrap();
         let restored: Effect = serde_json::from_str(&json).unwrap();

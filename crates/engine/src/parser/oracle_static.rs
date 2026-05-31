@@ -4021,6 +4021,13 @@ pub(crate) fn parse_additive_type_clause_modifications(
     ) {
         return None;
     }
+    // CR 205.3i + CR 305.7: "is every land type in addition to its other types"
+    // grants all 17 land subtypes additively (Omo, Queen of Vesuva). The token
+    // is already combinator-extracted above; gate it against the fixed CR
+    // phrase here (mirrors the adjacent placeholder `matches!`).
+    if normalized_type_words == "every land type" {
+        return Some(vec![ContinuousModification::AddAllLandTypes]);
+    }
     let granted_lower = opt(preceded(
         alt((tag::<_, _, VE>(" and have "), tag::<_, _, VE>(" and has "))),
         rest::<_, VE>,
@@ -12003,10 +12010,7 @@ fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilter> {
 /// dispatcher catches the residual subject shapes that those code paths
 /// don't strip, plus every self-reference grant.
 ///
-/// Returns None when the line's subject doesn't map to a recognized filter
-/// (e.g., "each nonland creature with an everything counter on it" — Omo,
-/// Queen of Vesuva — needs the same counter-filter parsing the land variant
-/// also lacks).
+/// Returns None when the line's subject doesn't map to a recognized filter.
 fn parse_all_creature_types_grant(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     let (subject_tp, rest_tp) = tp
         .split_around(" is every creature type")
@@ -12047,10 +12051,9 @@ fn parse_all_creature_types_grant(tp: &TextPair<'_>, text: &str) -> Option<Stati
 /// CR 205.3 + CR 613.1d: Map the subject of an "{is|are} every creature
 /// type" static into a TargetFilter restricting which battlefield objects
 /// receive the grant. Sibling of `parse_land_type_change_subject` for the
-/// CR 702.73a creature-type class. Complex filter subjects ("each nonland
-/// creature with an everything counter on it" — Omo) are intentionally not
-/// recognized here; their counter-filter parsing is a separate gap shared
-/// with the land variant.
+/// CR 702.73a creature-type class. Counter-conditioned subjects ("each nonland
+/// creature with an everything counter on it" — Omo, Queen of Vesuva) are
+/// handled by `parse_counter_conditioned_nonland_creature_subject`.
 fn parse_creature_type_change_subject(subject: &str) -> Option<TargetFilter> {
     // Combinator dispatch — each subject phrase maps to its TypedFilter
     // shape. `all_consuming` requires the whole subject to be matched, so a
@@ -12058,6 +12061,11 @@ fn parse_creature_type_change_subject(subject: &str) -> Option<TargetFilter> {
     // false-positive. "creatures" must come last among the bare-creature
     // arms so the longer "creatures you control" prefix wins first.
     all_consuming(alt((
+        // CR 205.3 + CR 122.1: "each nonland creature with an everything counter
+        // on it" (Omo, Queen of Vesuva). The nonland constraint reuses the
+        // existing `TypeFilter::Non` building block; the counter clause is
+        // delegated to `parse_counter_suffix`. No new engine surface.
+        parse_counter_conditioned_nonland_creature_subject,
         map(
             tag::<_, _, OracleError<'_>>("creatures you control"),
             |_| TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
@@ -12076,6 +12084,39 @@ fn parse_creature_type_change_subject(subject: &str) -> Option<TargetFilter> {
     .parse(subject)
     .ok()
     .map(|(_, filter)| filter)
+}
+
+/// CR 205.3 + CR 122.1: Parse "[each] nonland creature with an everything
+/// counter on it" into a creature `TypedFilter` carrying
+/// `TypeFilter::Non(Land)` plus the counter `FilterProp` produced by the shared
+/// `parse_counter_suffix` combinator. Used by Omo, Queen of Vesuva's
+/// "Each nonland creature with an everything counter on it is every creature
+/// type" — routes to `AddAllCreatureTypes` via `parse_all_creature_types_grant`.
+fn parse_counter_conditioned_nonland_creature_subject(
+    input: &str,
+) -> OracleResult<'_, TargetFilter> {
+    let (input, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("each "),
+        tag::<_, _, OracleError<'_>>("all "),
+    )))
+    .parse(input)?;
+    let (input, _) = tag("nonland ").parse(input)?;
+    let (input, _) = alt((tag("creatures"), tag("creature"))).parse(input)?;
+    let (input, _) = space1.parse(input)?;
+    // Delegate the counter clause (e.g. "with an everything counter on it") to
+    // the shared building block rather than re-implementing counter recognition.
+    let Some((counter_prop, consumed)) = parse_counter_suffix(input) else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    };
+    let filter = TargetFilter::Typed(
+        TypedFilter::creature()
+            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+            .properties(vec![counter_prop]),
+    );
+    Ok((&input[consumed..], filter))
 }
 
 /// CR 604.1: Strip turn-condition suffixes from predicate text.
@@ -14807,6 +14848,83 @@ mod tests {
                 kind: ChosenSubtypeKind::CreatureType,
             }]
         );
+    }
+
+    #[test]
+    fn issue_1593_abomination_of_llanowar_cda_sums_battlefield_and_graveyard() {
+        // Issue #1593 — Abomination of Llanowar:
+        // "~'s power and toughness are each equal to the number of Elves you
+        //  control plus the number of Elf cards in your graveyard."
+        // CR 604.3: the CDA must parse to a SUM of two cross-zone object counts
+        // — battlefield Elves you control + Elf cards in your graveyard — not
+        // fall through to an Unimplemented static.
+        let def = parse_static_line(
+            "Abomination of Llanowar's power and toughness are each equal to the number of Elves you control plus the number of Elf cards in your graveyard.",
+        )
+        .expect("CDA must parse, not fall through to Unimplemented");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining, "must be a CDA");
+        assert_eq!(def.modifications.len(), 2, "power + toughness");
+
+        // Both P/T resolve to the same summed quantity. Assert the structure of
+        // each: Sum[ ObjectCount{Elf, controller: You}, ZoneCardCount{Graveyard,
+        // [Elf], Controller} ].
+        let assert_sum = |value: &QuantityExpr| {
+            let QuantityExpr::Sum { exprs } = value else {
+                panic!("expected Sum, got {value:?}");
+            };
+            assert_eq!(exprs.len(), 2, "two summed operands");
+
+            // Operand 1: battlefield Elves you control.
+            let QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf),
+                    },
+            } = &exprs[0]
+            else {
+                panic!("operand 0 must be ObjectCount, got {:?}", exprs[0]);
+            };
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Elf")),
+                "operand 0 must filter Elf, got {:?}",
+                tf.type_filters
+            );
+
+            // Operand 2: Elf cards in your graveyard.
+            let QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types,
+                        scope: CountScope::Controller,
+                    },
+            } = &exprs[1]
+            else {
+                panic!(
+                    "operand 1 must be a Graveyard ZoneCardCount, got {:?}",
+                    exprs[1]
+                );
+            };
+            assert!(
+                card_types
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Elf")),
+                "operand 1 must filter Elf cards, got {card_types:?}"
+            );
+        };
+
+        for m in &def.modifications {
+            match m {
+                ContinuousModification::SetDynamicPower { value }
+                | ContinuousModification::SetDynamicToughness { value } => assert_sum(value),
+                other => panic!("unexpected modification {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -19269,6 +19387,69 @@ mod tests {
 
         let mods_plural = parse_continuous_modifications("are every creature type");
         assert!(mods_plural.contains(&ContinuousModification::AddAllCreatureTypes));
+    }
+
+    #[test]
+    fn omo_land_every_land_type_is_add_all_land_types() {
+        // CR 205.3i + CR 305.7: Omo, Queen of Vesuva — "Each land with an
+        // everything counter on it is every land type in addition to its other
+        // types." Must produce the additive `AddAllLandTypes` marker, NOT a
+        // no-op `AddType { Land }`.
+        let def = parse_static_line(
+            "Each land with an everything counter on it is every land type in addition to its other types.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddAllLandTypes]
+        );
+        // Regression guard: the old broken parse produced AddType { Land }.
+        assert!(!def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddType { .. })));
+        // The affected subject carries the everything-counter FilterProp.
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::Counters { .. })));
+            }
+            other => panic!("Expected Typed land with counter prop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn omo_nonland_creature_counter_subject_is_all_creature_types() {
+        // CR 205.3 + CR 122.1: Omo, Queen of Vesuva — "Each nonland creature
+        // with an everything counter on it is every creature type." The subject
+        // is a nonland creature gated on the everything counter; the grant is
+        // the existing `AddAllCreatureTypes` modification.
+        let def = parse_static_line(
+            "Each nonland creature with an everything counter on it is every creature type.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::AddAllCreatureTypes]
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf
+                    .type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Land))));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::Counters { .. })));
+            }
+            other => panic!("Expected Typed nonland creature with counter prop, got {other:?}"),
+        }
     }
 
     // --- CantCastDuring: turn/phase-scoped casting prohibitions ---

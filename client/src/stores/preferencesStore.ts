@@ -50,6 +50,12 @@ export interface CardArtOverride {
 }
 
 export type CardSizePreference = "small" | "medium" | "large";
+/** How the hover card-preview behaves on desktop.
+ *  "follow" = the preview tracks the cursor (prior fixed behavior, default).
+ *  "side"   = the preview docks to the screen edge so it never covers the board.
+ *  "shift"  = the preview only appears while the Shift key is held (Tabletop
+ *             Simulator style), letting the player read the board uninterrupted. */
+export type CardPreviewMode = "follow" | "side" | "shift";
 export type HudLayout = "inline" | "floating";
 export type LogDefaultState = "open" | "closed";
 export type BattlefieldCardDisplay = "art_crop" | "full_card";
@@ -128,6 +134,7 @@ function buildDefaultPreferences(): PreferencesState {
     spellPaymentMode: "auto",
     showKeywordStrip: true,
     battlefieldPeekOnHover: true,
+    cardPreviewMode: "follow",
     stackDockSide: "right",
     opponentHudDensity: "comfortable",
     aiSeats: [defaultAiSeat()],
@@ -182,6 +189,9 @@ interface PreferencesState {
    *  previewing that opponent's nonland permanents. Disable for a quieter
    *  HUD — focus is still reachable via tab click. */
   battlefieldPeekOnHover: boolean;
+  /** Desktop hover card-preview behavior — follow cursor, dock to the side, or
+   *  only show while Shift is held. See {@link CardPreviewMode}. */
+  cardPreviewMode: CardPreviewMode;
   /** Screen edge the stack panel docks to and collapses toward. */
   stackDockSide: StackDockSide;
   /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
@@ -238,6 +248,7 @@ interface PreferencesActions {
   setSpellPaymentMode: (mode: SpellPaymentMode) => void;
   setShowKeywordStrip: (show: boolean) => void;
   setBattlefieldPeekOnHover: (enabled: boolean) => void;
+  setCardPreviewMode: (mode: CardPreviewMode) => void;
   setAiSeatDifficulty: (index: number, difficulty: AIDifficulty) => void;
   setAiSeatDeckId: (index: number, id: AiDeckSelection) => void;
   /** Grow or shrink `aiSeats` to `count` slots. New slots inherit defaults;
@@ -349,6 +360,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setSpellPaymentMode: (mode) => set({ spellPaymentMode: mode }),
       setShowKeywordStrip: (show) => set({ showKeywordStrip: show }),
       setBattlefieldPeekOnHover: (enabled) => set({ battlefieldPeekOnHover: enabled }),
+      setCardPreviewMode: (mode) => set({ cardPreviewMode: mode }),
       setAiSeatDifficulty: (index, difficulty) =>
         set((state) => {
           if (index < 0 || index >= state.aiSeats.length) return state;
@@ -432,7 +444,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 12,
+      version: 13,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -451,6 +463,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          browser-detected default so existing users keep their locale.
       // v9 → v10: Add stackDockSide; legacy stores default to right (the prior
       //          fixed behavior).
+      // v12 → v13: Add cardPreviewMode; legacy stores default to "follow" (the
+      //          prior fixed cursor-following behavior) via the shallow merge.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

@@ -69,16 +69,15 @@ fn resolution_choice_cardinality(
         return (1, 0, up_to);
     };
 
-    let max = spec
-        .max
-        .as_ref()
-        .map(|expr| crate::game::quantity::resolve_quantity_with_targets(state, expr, ability))
-        .map(|value| value.max(0) as usize)
-        .unwrap_or(eligible_count)
-        .max(spec.min)
-        .min(eligible_count);
-    let min = spec.min.min(max);
-    (max, min, min != max)
+    match crate::game::ability_utils::resolve_multi_target_bounds(
+        state,
+        ability,
+        spec,
+        eligible_count,
+    ) {
+        Ok(bounds) => (bounds.max, bounds.min, bounds.min != bounds.max),
+        Err(_) => (0, 0, up_to),
+    }
 }
 
 /// Result of a single zone-move attempt through the replacement pipeline.
@@ -504,7 +503,17 @@ pub fn resolve(
         // across every library in the game and let the player pick any card.
         // Hand/Graveyard/Exile zone-scan semantics (Show-and-Tell, Regrowth,
         // etc.) are unaffected.
-        if origin == Some(Zone::Library) && matches!(target_filter, TargetFilter::Any) {
+        //
+        // CR 701.23a: A multi-zone tutor's put-step carries `origin: None`
+        // (the found card may come from graveyard/hand/library, so the move
+        // reads the card's actual zone) with `target: Any`. The same fail-to-find
+        // no-op applies: empty targets means the search found nothing, so the
+        // put-step must do nothing rather than fall through to an `origin=None,
+        // Any` battlefield wildcard scan. Untargeted `None + Any` is never a
+        // real standalone effect — it only arises as this continuation artifact.
+        if (origin == Some(Zone::Library) || origin.is_none())
+            && matches!(target_filter, TargetFilter::Any)
+        {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,

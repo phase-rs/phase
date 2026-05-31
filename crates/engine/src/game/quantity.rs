@@ -143,6 +143,7 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             } => true,
             QuantityRef::ObjectCount { filter }
             | QuantityRef::ObjectCountDistinct { filter, .. }
+            | QuantityRef::ObjectCountBySharedQuality { filter, .. }
             | QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::Objects { filter },
             }
@@ -238,6 +239,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         // Read battlefield object population directly.
         QuantityRef::ObjectCount { .. }
         | QuantityRef::ObjectCountDistinct { .. }
+        | QuantityRef::ObjectCountBySharedQuality { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::Aggregate { .. }
         | QuantityRef::ControlledByEachPlayer { .. }
@@ -376,6 +378,7 @@ fn entered_object_perturbs_quantity_ref(
         // object matches the population filter (CR 109.5 controller via `ctx`).
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::ControlledByEachPlayer { filter, .. }
@@ -1149,6 +1152,52 @@ fn resolve_ref(
                 signatures.insert(signature);
             }
             usize_to_i32_saturating(signatures.len())
+        }
+        // CR 109.3 + CR 205.3m: Group the matching object population by a
+        // shared characteristic, such as creature type, and aggregate the
+        // resulting bucket sizes. Each object contributes once to each distinct
+        // value it has for `quality`; objects with no value for that quality
+        // contribute to no bucket.
+        QuantityRef::ObjectCountBySharedQuality {
+            filter,
+            quality,
+            aggregate,
+        } => {
+            let mut buckets: HashMap<String, HashSet<ObjectId>> = HashMap::new();
+            for id in object_count_matching_ids(state, filter, &filter_ctx, source_id) {
+                let Some(obj) = state.objects.get(&id) else {
+                    continue;
+                };
+                for value in crate::game::filter::object_shared_quality_values_public(
+                    obj,
+                    quality,
+                    &state.all_creature_types,
+                ) {
+                    buckets.entry(value).or_default().insert(id);
+                }
+            }
+
+            match aggregate {
+                AggregateFunction::Max => buckets
+                    .values()
+                    .map(HashSet::len)
+                    .max()
+                    .map_or(0, usize_to_i32_saturating),
+                AggregateFunction::Min => buckets
+                    .values()
+                    .map(HashSet::len)
+                    .min()
+                    .map_or(0, usize_to_i32_saturating),
+                AggregateFunction::Sum => {
+                    let unique_objects: HashSet<ObjectId> = buckets
+                        .values()
+                        .filter(|bucket| bucket.len() >= 2)
+                        .flatten()
+                        .copied()
+                        .collect();
+                    usize_to_i32_saturating(unique_objects.len())
+                }
+            }
         }
         QuantityRef::PlayerCount { filter } => {
             resolve_player_count(state, filter, controller, source_id)
@@ -4187,6 +4236,142 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 2);
+    }
+
+    fn shared_quality_count_expr(
+        aggregate: AggregateFunction,
+        quality: SharedQuality,
+    ) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountBySharedQuality {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                quality,
+                aggregate,
+            },
+        }
+    }
+
+    fn add_creature_with_subtypes(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        subtypes: &[&str],
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(300),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types = vec![CoreType::Creature];
+        obj.card_types.subtypes = subtypes
+            .iter()
+            .map(|subtype| (*subtype).to_string())
+            .collect();
+        id
+    }
+
+    #[test]
+    fn resolve_object_count_by_shared_quality_max_and_sum_creature_types() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec![
+            "Elf".to_string(),
+            "Warrior".to_string(),
+            "Druid".to_string(),
+            "Human".to_string(),
+        ];
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Elf Warrior", &["Elf", "Warrior"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Elf Druid", &["Elf", "Druid"]);
+        add_creature_with_subtypes(
+            &mut state,
+            PlayerId(0),
+            "Human Warrior",
+            &["Human", "Warrior"],
+        );
+        let changeling =
+            add_creature_with_subtypes(&mut state, PlayerId(0), "Masked Vandal", &["Shapeshifter"]);
+        state
+            .objects
+            .get_mut(&changeling)
+            .unwrap()
+            .keywords
+            .push(Keyword::Changeling);
+        add_creature_with_subtypes(&mut state, PlayerId(1), "Opponent Elf", &["Elf"]);
+
+        let source = ObjectId(0);
+        assert_eq!(
+            resolve_quantity(
+                &state,
+                &shared_quality_count_expr(AggregateFunction::Max, SharedQuality::CreatureType),
+                PlayerId(0),
+                source,
+            ),
+            3
+        );
+        assert_eq!(
+            resolve_quantity(
+                &state,
+                &shared_quality_count_expr(AggregateFunction::Sum, SharedQuality::CreatureType),
+                PlayerId(0),
+                source,
+            ),
+            4
+        );
+    }
+
+    #[test]
+    fn resolve_object_count_by_shared_quality_sum_deduplicates_multityped_objects() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec![
+            "Elf".to_string(),
+            "Warrior".to_string(),
+            "Goblin".to_string(),
+        ];
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Elf Warrior", &["Elf", "Warrior"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Elf", &["Elf"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Goblin", &["Goblin"]);
+
+        assert_eq!(
+            resolve_quantity(
+                &state,
+                &shared_quality_count_expr(AggregateFunction::Sum, SharedQuality::CreatureType),
+                PlayerId(0),
+                ObjectId(0),
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn resolve_object_count_by_shared_quality_min_and_empty_buckets() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec!["Elf".to_string(), "Warrior".to_string()];
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Elf Warrior", &["Elf", "Warrior"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Elf", &["Elf"]);
+
+        assert_eq!(
+            resolve_quantity(
+                &state,
+                &shared_quality_count_expr(AggregateFunction::Min, SharedQuality::CreatureType),
+                PlayerId(0),
+                ObjectId(0),
+            ),
+            1
+        );
+
+        let mut empty_state = GameState::new_two_player(43);
+        add_creature_with_subtypes(&mut empty_state, PlayerId(0), "Typeless", &[]);
+        assert_eq!(
+            resolve_quantity(
+                &empty_state,
+                &shared_quality_count_expr(AggregateFunction::Max, SharedQuality::CreatureType),
+                PlayerId(0),
+                ObjectId(0),
+            ),
+            0
+        );
     }
 
     #[test]

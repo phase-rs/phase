@@ -837,8 +837,11 @@ const SUBTYPE_PLURALS: &[(&str, &str)] = &[
     ("sphinxes", "Sphinx"),
     ("foxes", "Fox"),
     ("octopi", "Octopus"),
+    ("octopuses", "Octopus"),
     ("mice", "Mouse"),
     ("oxen", "Ox"),
+    ("pegasi", "Pegasus"),
+    ("pegasuses", "Pegasus"),
     ("allies", "Ally"),
     ("armies", "Army"),
     ("faeries", "Faerie"),
@@ -2702,6 +2705,8 @@ mod tests {
             parse_subtype("werewolves"),
             Some(("Werewolf".to_string(), 10))
         );
+        assert_eq!(parse_subtype("pegasi"), Some(("Pegasus".to_string(), 6)));
+        assert_eq!(parse_subtype("pegasuses"), Some(("Pegasus".to_string(), 9)));
     }
 
     #[test]

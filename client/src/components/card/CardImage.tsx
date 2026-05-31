@@ -6,6 +6,7 @@ import type { TokenSearchFilters } from "../../services/scryfall.ts";
 import type { TokenImageRef } from "../../adapter/types.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
+import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 
 interface CardImageProps {
   cardName: string;
@@ -19,6 +20,13 @@ interface CardImageProps {
   tokenFilters?: TokenSearchFilters;
   tokenImageRef?: TokenImageRef | null;
   faceDown?: boolean;
+  /**
+   * Renders a {T} symbol overlay in the corner to mark a tapped battlefield
+   * permanent. Used by selection modals — which display cards upright rather
+   * than rotated — so the player can still tell tapped permanents apart.
+   * Distinct from `tapped`, which rotates the card 90° (board rendering).
+   */
+  tapIndicator?: boolean;
   /**
    * Canonical lookup id from `printed_ref.oracle_id` (battlefield call sites).
    * When provided, the image is resolved by oracle id + `faceName`, which is
@@ -45,6 +53,7 @@ export function CardImage({
   tokenFilters,
   tokenImageRef,
   faceDown = false,
+  tapIndicator = false,
   oracleId,
   faceName,
   oracleText,
@@ -117,6 +126,15 @@ export function CardImage({
           title={t("card.unimplemented", { mechanics: unimplementedMechanics.join(", ") })}
         >
           !
+        </span>
+      )}
+      {tapIndicator && (
+        <span
+          className="absolute top-1 right-1 flex items-center justify-center rounded-full bg-black/70 p-1 shadow-md ring-1 ring-white/20"
+          title={t("card.tapped")}
+          aria-label={t("card.tapped")}
+        >
+          <ManaSymbol shard="T" size="sm" />
         </span>
       )}
     </div>

@@ -4,8 +4,10 @@ use crate::types::ability::{
     Effect, PtValue, ReplacementDefinition, ReplacementMode, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
+use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -17,6 +19,44 @@ use super::morph::apply_face_down_creature_characteristics;
 use super::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
 };
+
+/// CR 205.3m: Look up printed core types for a card name from deck-pool faces or
+/// the card-face registry when a runtime `GameObject` lacks characteristic data.
+pub fn printed_core_types_for_name<'a>(state: &'a GameState, name: &str) -> Option<&'a [CoreType]> {
+    let key = name.to_lowercase();
+    if let Some(face) = state.card_face_registry.get(&key) {
+        return Some(&face.card_type.core_types);
+    }
+    for pool in &state.deck_pools {
+        for entries in [
+            pool.registered_main.as_ref(),
+            pool.registered_sideboard.as_ref(),
+            pool.current_main.as_ref(),
+            pool.current_sideboard.as_ref(),
+            pool.registered_commander.as_ref(),
+            pool.current_commander.as_ref(),
+        ] {
+            for entry in entries {
+                if entry.card.name.eq_ignore_ascii_case(name) {
+                    return Some(&entry.card.card_type.core_types);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// CR 205.3m + CR 608.2c: Whether an object matches a core card type, including
+/// printed-type fallback for name-only library objects (issue #1604 class).
+pub fn object_has_core_type(state: &GameState, object_id: ObjectId, card_type: CoreType) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if obj.card_types.core_types.contains(&card_type) {
+        return true;
+    }
+    printed_core_types_for_name(state, &obj.name).is_some_and(|types| types.contains(&card_type))
+}
 
 pub fn printed_ref_from_face(card_face: &CardFace) -> Option<PrintedCardRef> {
     card_face
@@ -440,6 +480,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::AddDynamicKeyword { .. }
         | ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
         | ContinuousModification::RemoveChosenKeyword

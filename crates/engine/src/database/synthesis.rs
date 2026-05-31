@@ -1208,6 +1208,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
                         split: None,
+                        source_zones: vec![crate::types::zones::Zone::Library],
                     },
                 )
                 .cost(composite_cost);
@@ -4052,10 +4053,116 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_plot(face);
     synthesize_siege_intrinsics(face);
     synthesize_tribute_intrinsics(face);
+    // CR 702.124j: Partner with — ETB trigger letting target player fetch the
+    // named partner card from their library into their hand, then shuffle.
+    // The parenthetical reminder text is stripped by the oracle parser, so
+    // this trigger must be synthesized from the Keyword::Partner(With(name)).
+    synthesize_partner_with(face);
     // CR 721.2b: Spacecraft creature-shift at the max station-symbol striation
     // threshold. Must run after Oracle parsing so `face.power`/`face.toughness`
     // are in place and `Keyword::Station` has been normalized.
     synthesize_station(face);
+}
+
+/// CR 702.124j: Synthesize the "Partner with [Name]" ETB trigger.
+///
+/// Oracle reminder text (stripped by the parser):
+///   "When this creature enters, target player may put [Name] into their
+///    hand from their library, then shuffle."
+///
+/// The trigger searches the target player's library for a card with the exact
+/// partner name and puts it in their hand, then shuffles. The "may" is modeled
+/// as `optional: true` on the execute ability so the target player can decline.
+/// Idempotent: skips if the trigger is already present (re-synthesis guards).
+pub fn synthesize_partner_with(face: &mut CardFace) {
+    let partner_name = face.keywords.iter().find_map(|kw| {
+        if let Keyword::Partner(PartnerType::With(name)) = kw {
+            Some(name.clone())
+        } else {
+            None
+        }
+    });
+    let Some(partner_name) = partner_name else {
+        return;
+    };
+
+    // Idempotency: skip if an ETB trigger already references this partner by name.
+    let already_present = face.triggers.iter().any(|t| {
+        t.mode == TriggerMode::ChangesZone
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && t.execute.as_deref().is_some_and(|ex| {
+                matches!(
+                    ex.effect.as_ref(),
+                    Effect::SearchLibrary {
+                        filter: TargetFilter::Named { name },
+                        ..
+                    } if name == &partner_name
+                )
+            })
+    });
+    if already_present {
+        return;
+    }
+
+    // Shuffle target player's library after the search.
+    let shuffle = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Shuffle {
+            // TargetFilter::Player resolves against ability.targets (the chosen
+            // target player), shuffling the correct library.
+            target: TargetFilter::Player,
+        },
+    );
+
+    // Put the found card from the library into the target player's hand.
+    let put_in_hand = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Hand,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+        },
+    )
+    .sub_ability(shuffle);
+
+    // Search target player's library for the named partner card.
+    let mut search = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SearchLibrary {
+            filter: TargetFilter::Named {
+                name: partner_name.clone(),
+            },
+            count: QuantityExpr::Fixed { value: 1 },
+            reveal: true,
+            source_zones: vec![Zone::Library],
+            // CR 702.124j: the target player searches their own library.
+            target_player: Some(TargetFilter::Player),
+            selection_constraint: SearchSelectionConstraint::None,
+            split: None,
+        },
+    )
+    .sub_ability(put_in_hand);
+    // "may" — the target player can decline to search.
+    search.optional = true;
+
+    face.triggers.push(
+        TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Battlefield)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Battlefield])
+            .execute(search)
+            .description(format!(
+                "When ~ enters, target player may put {partner_name} into their hand from their library, then shuffle."
+            )),
+    );
 }
 
 /// CR 310.11a + CR 310.11b: Synthesize the two intrinsic abilities every Siege has:
@@ -4316,7 +4423,7 @@ fn build_oracle_face_inner(
     }
     keywords.extend(parsed.extracted_keywords);
 
-    // CR 702.124c: "Partner with [Name]" — upgrade Generic → With(name).
+    // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
     // Partner(Generic) via FromStr. Scan Oracle text for the actual partner name.
     if mtgjson_keyword_names.contains(&"partner with".to_string()) {
@@ -12006,6 +12113,86 @@ mod living_weapon_synthesis_tests {
     }
 
     /// CR 702.92a — Issue #974: Living weapon synthesis produces exactly one
+    /// CR 702.124j + #1143: "Partner with [Name]" synthesizes an ETB trigger
+    /// that lets the target player fetch the named partner from their library.
+    #[test]
+    fn synthesize_partner_with_emits_etb_search_trigger() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Partner(PartnerType::With(
+            "Bebop, Skull & Crossbones".to_string(),
+        )));
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_partner_with(&mut face);
+
+        assert_eq!(face.triggers.len(), 1, "exactly one Partner With trigger");
+        let trigger = &face.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        let execute = trigger.execute.as_deref().expect("must have execute");
+        assert!(execute.optional, "must be optional (\"may\")");
+        match execute.effect.as_ref() {
+            Effect::SearchLibrary {
+                filter: TargetFilter::Named { name },
+                target_player: Some(TargetFilter::Player),
+                reveal: true,
+                ..
+            } => {
+                assert_eq!(name, "Bebop, Skull & Crossbones");
+            }
+            other => panic!("expected SearchLibrary(Named, Player), got {other:?}"),
+        }
+        // Idempotency: calling again should not add a second trigger.
+        synthesize_partner_with(&mut face);
+        assert_eq!(face.triggers.len(), 1, "idempotent: no duplicate triggers");
+    }
+
+    #[test]
+    fn synthesize_partner_with_idempotency_matches_exact_partner_name() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Partner(PartnerType::With(
+            "Bebop, Skull & Crossbones".to_string(),
+        )));
+        face.triggers.push(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Battlefield)
+                .valid_card(TargetFilter::SelfRef)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SearchLibrary {
+                        filter: TargetFilter::Named {
+                            name: "Different Partner".to_string(),
+                        },
+                        count: QuantityExpr::Fixed { value: 1 },
+                        reveal: true,
+                        source_zones: vec![Zone::Library],
+                        target_player: Some(TargetFilter::Player),
+                        selection_constraint: SearchSelectionConstraint::None,
+                        split: None,
+                    },
+                )),
+        );
+
+        synthesize_partner_with(&mut face);
+
+        assert_eq!(
+            face.triggers.len(),
+            2,
+            "other named searches must not suppress Partner With synthesis"
+        );
+        assert!(face.triggers.iter().any(|trigger| {
+            trigger.execute.as_deref().is_some_and(|execute| {
+                matches!(
+                    execute.effect.as_ref(),
+                    Effect::SearchLibrary {
+                        filter: TargetFilter::Named { name },
+                        ..
+                    } if name == "Bebop, Skull & Crossbones"
+                )
+            })
+        }));
+    }
+
     /// ChangesZone ETB trigger whose execute chain is `Token(Phyrexian Germ,
     /// 0/0 black) → Attach(SelfRef, LastCreated)`. Mirrors the job-select
     /// regression shape (both share the keyword-to-ETB-attach synthesis

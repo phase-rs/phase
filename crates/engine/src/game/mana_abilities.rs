@@ -393,6 +393,13 @@ pub fn activate_mana_ability(
         .objects
         .get(&source_id)
         .ok_or_else(|| EngineError::InvalidAction("Mana ability source not found".to_string()))?;
+    // CR 702.26b: Phased-out permanents are treated as though they do not
+    // exist, so they cannot activate abilities.
+    if source.is_phased_out_permanent() {
+        return Err(EngineError::ActionNotAllowed(
+            "Phased-out permanents cannot activate abilities (CR 702.26b)".to_string(),
+        ));
+    }
     if source.controller != player {
         return Err(EngineError::NotYourPriority);
     }
@@ -901,6 +908,11 @@ fn mana_ability_ready_without_simulation(
     let Some(obj) = state.objects.get(&source_id) else {
         return false;
     };
+    // CR 702.26b: Phased-out permanents are treated as though they do not
+    // exist, so they cannot activate abilities.
+    if obj.is_phased_out_permanent() {
+        return false;
+    }
     // CR 701.35a: Detained permanents' activated abilities can't be activated.
     if !obj.detained_by.is_empty() {
         return false;
@@ -1916,23 +1928,24 @@ fn batch_eligible_siblings(
     // restriction) while a later identical copy is ready, so test whether *any*
     // matching ability index is ready.
     let mut siblings: Vec<ObjectId> = state
-        .objects
+        .battlefield
         .iter()
-        .filter_map(|(id, obj)| {
-            (*id != exclude
+        .copied()
+        .filter_map(|id| {
+            let obj = state.objects.get(&id)?;
+            (id != exclude
                 && obj.controller == player
-                && obj.zone == Zone::Battlefield
                 && obj.abilities.iter().enumerate().any(|(index, ability)| {
                     ability == ability_def
                         && mana_ability_ready_without_simulation(
                             state,
                             player,
-                            *id,
+                            id,
                             index,
                             ability_def,
                         )
                 }))
-            .then_some(*id)
+            .then_some(id)
         })
         .collect();
     siblings.sort_unstable_by_key(|id| id.0);
@@ -3656,6 +3669,49 @@ mod tests {
         assert!(
             siblings.contains(&sick),
             "a hasty {{T}} mana creature IS a batch sibling (CR 702.10)"
+        );
+    }
+
+    /// CR 702.26b: Phased-out permanents are treated as though they do not
+    /// exist, so a phased-out mana source cannot batch with a visible twin.
+    #[test]
+    fn batch_excludes_phased_out_mana_sibling() {
+        let mut state = GameState::new_two_player(42);
+        let ready = make_any_color_treasure(&mut state, 9700, PlayerId(0), ManaColor::ALL.to_vec());
+        let phased =
+            make_any_color_treasure(&mut state, 9701, PlayerId(0), ManaColor::ALL.to_vec());
+        let def = state.objects.get(&ready).unwrap().abilities[0].clone();
+
+        let mut events = Vec::new();
+        crate::game::phasing::phase_out_object(
+            &mut state,
+            phased,
+            crate::game::game_object::PhaseOutCause::Directly,
+            &mut events,
+        );
+
+        let siblings = batch_eligible_siblings(&state, PlayerId(0), ready, &def);
+        assert!(
+            !siblings.contains(&phased),
+            "phased-out mana sources must not batch (CR 702.26b)"
+        );
+        assert!(
+            !can_activate_mana_ability_now(&state, PlayerId(0), phased, 0, &def),
+            "phased-out mana sources must fail the readiness gate (CR 702.26b)"
+        );
+        let rejected = activate_mana_ability(
+            &mut state,
+            phased,
+            PlayerId(0),
+            0,
+            &def,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        );
+        assert!(
+            matches!(rejected, Err(EngineError::ActionNotAllowed(_))),
+            "phased-out mana sources must fail executor activation (CR 702.26b)"
         );
     }
 

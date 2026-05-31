@@ -49,6 +49,17 @@
     "showKeywords": "Show keywords on battlefield cards",
     "opponentHoverPreview": "Opponent Hover Preview",
     "showOpponentBoard": "Show opponent's board on HUD hover",
+    "cardPreview": "Card Hover Preview",
+    "cardPreviewOptions": {
+      "follow": "Follow cursor",
+      "side": "Dock to side",
+      "shift": "Hold Shift"
+    },
+    "cardPreviewHint": {
+      "follow": "The enlarged preview follows your cursor as you hover a card.",
+      "side": "The preview docks to the edge of the screen so it never covers the board.",
+      "shift": "The preview only appears while you hold Shift, like Tabletop Simulator."
+    },
     "cardArtPreferences": "Card Art Preferences",
     "clearArtOverrides_one": "Clear All Art Overrides ({{count}})",
     "clearArtOverrides_other": "Clear All Art Overrides ({{count}})",

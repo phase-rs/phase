@@ -229,14 +229,17 @@ fn parse_outlaw_type(input: &str) -> OracleResult<'_, TypeFilter> {
     Ok((rest, TypeFilter::AnyOf(any_of)))
 }
 
-/// Parse a self-reference from Oracle text: "~", "it", "this creature",
-/// "this permanent", "this spell", "this enchantment", "this artifact".
+/// Parse a self-reference from Oracle text: "~", "it", "itself",
+/// "this creature", "this permanent", "this spell", "this enchantment",
+/// "this artifact".
 ///
 /// Returns `TargetFilter::SelfRef` when a self-reference is recognized.
 pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
         value(TargetFilter::SelfRef, tag("~")),
         parse_it_self_reference,
+        // CR 201.5: "itself" is a self-reference to the object the ability is on.
+        parse_itself_self_reference,
         value(TargetFilter::SelfRef, tag("this creature")),
         value(TargetFilter::SelfRef, tag("this permanent")),
         value(TargetFilter::SelfRef, tag("this spell")),
@@ -256,6 +259,20 @@ fn parse_it_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
         None | Some(' ' | ',' | ';' | '.' | ':' | ')' | '/' | '\'' | '"') => {
             Ok((rest, TargetFilter::SelfRef))
         }
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
+    }
+}
+
+/// Parse "itself" as a self-reference, requiring a word boundary after "itself"
+/// to prevent false matches on words like "itselfless".
+fn parse_itself_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("itself").parse(input)?;
+    match rest.chars().next() {
+        None => Ok((rest, TargetFilter::SelfRef)),
+        Some(c) if !c.is_alphanumeric() => Ok((rest, TargetFilter::SelfRef)),
         _ => Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
@@ -636,6 +653,26 @@ mod tests {
         let (rest, f) = parse_self_reference("it").unwrap();
         assert_eq!(rest, "");
         assert_eq!(f, TargetFilter::SelfRef);
+    }
+
+    #[test]
+    fn test_parse_self_reference_itself() {
+        // "itself" at end of input should match
+        let (rest, f) = parse_self_reference("itself").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(f, TargetFilter::SelfRef);
+
+        // "itself" followed by word boundary should match
+        let (rest2, f2) = parse_self_reference("itself.").unwrap();
+        assert_eq!(rest2, ".");
+        assert_eq!(f2, TargetFilter::SelfRef);
+
+        let (rest3, f3) = parse_self_reference("itself-damage").unwrap();
+        assert_eq!(rest3, "-damage");
+        assert_eq!(f3, TargetFilter::SelfRef);
+
+        // "itselfless" should NOT match as an "itself" self-reference.
+        assert!(parse_self_reference("itselfless").is_err());
     }
 
     #[test]

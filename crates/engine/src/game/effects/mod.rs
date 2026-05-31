@@ -4105,6 +4105,7 @@ fn resolve_chain_body(
                     state.waiting_for = WaitingFor::TriggerTargetSelection {
                         player: ability.controller,
                         target_slots,
+                        mode_labels: Vec::new(),
                         target_constraints: vec![],
                         selection,
                         source_id: Some(ability.source_id),
@@ -4319,12 +4320,7 @@ pub(crate) fn evaluate_condition(
             let type_matches = state
                 .last_revealed_ids
                 .first()
-                .and_then(|id| {
-                    state
-                        .objects
-                        .get(id)
-                        .map(|obj| obj.card_types.core_types.contains(card_type))
-                })
+                .map(|id| super::printed_cards::object_has_core_type(state, *id, *card_type))
                 .unwrap_or(false);
             let filter_matches = match additional_filter {
                 // CR 205.3m: "of the chosen type" — check the revealed card's subtype
@@ -8197,6 +8193,7 @@ mod tests {
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(9000),
@@ -8410,6 +8407,7 @@ mod tests {
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(9000),
@@ -8692,6 +8690,7 @@ mod tests {
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(9000),
@@ -8899,6 +8898,7 @@ mod tests {
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![TargetRef::Object(destroyed_land)],
             ObjectId(9000),
@@ -10474,6 +10474,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),

@@ -49,6 +49,17 @@
     "showKeywords": "Mostra le parole chiave sulle carte sul campo di battaglia",
     "opponentHoverPreview": "Anteprima al passaggio sull'avversario",
     "showOpponentBoard": "Mostra il campo dell'avversario passando sull'HUD",
+    "cardPreview": "Anteprima della carta al passaggio del mouse",
+    "cardPreviewOptions": {
+      "follow": "Segui il cursore",
+      "side": "Ancora al lato",
+      "shift": "Tieni premuto Shift"
+    },
+    "cardPreviewHint": {
+      "follow": "L'anteprima ingrandita segue il cursore mentre passi sopra una carta.",
+      "side": "L'anteprima si ancora al bordo dello schermo, così non copre mai il campo di battaglia.",
+      "shift": "L'anteprima appare solo mentre tieni premuto il tasto Shift, come in Tabletop Simulator."
+    },
     "cardArtPreferences": "Preferenze illustrazione carte",
     "clearArtOverrides_one": "Cancella tutte le sostituzioni di illustrazione ({{count}})",
     "clearArtOverrides_other": "Cancella tutte le sostituzioni di illustrazione ({{count}})",

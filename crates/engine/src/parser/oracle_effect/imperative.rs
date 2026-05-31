@@ -1,7 +1,8 @@
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{all_consuming, eof, map, not, opt, rest, value};
+use nom::error::ParseError;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -21,14 +22,13 @@ use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
 };
-#[cfg(test)]
-use crate::types::ability::TypeFilter;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CategoryChooserScope, ChoiceType,
     Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
     FilterProp, GainLifePlayer, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool,
     PaymentCost, PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr,
-    QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypedFilter, ZoneOwner,
+    QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter,
+    TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -1674,6 +1674,11 @@ pub(super) fn parse_search_and_creation_ast(
         return Some(SearchCreationImperativeAst::MultiZoneSameNameExile);
     }
     if starts_with_possessive(lower, "search", "library")
+        // CR 701.23a: God-Pharaoh's-Gift-class multi-zone tutors ("search your
+        // graveyard, hand, and/or library for ...") — the word after the
+        // possessive is a non-library zone, so `starts_with_possessive` misses
+        // them; the zone-list detector routes them through the same lowering.
+        || super::parse_multi_search_zones(lower).is_some()
         || nom_on_lower(lower, lower, |i| {
             alt((
                 value((), tag("search target opponent's library")),
@@ -1697,6 +1702,7 @@ pub(super) fn parse_search_and_creation_ast(
             multi_destination: details.multi_destination,
             multi_enter_tapped: details.multi_enter_tapped,
             split: details.split,
+            source_zones: details.source_zones,
         });
     }
     // CR 701.16a + CR 701.20a: "look at the top N" (private) and "reveal the top N" (public)
@@ -1906,6 +1912,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             multi_destination: _,
             multi_enter_tapped: _,
             split,
+            source_zones,
         } => Effect::SearchLibrary {
             filter,
             // CR 107.1c + CR 701.23d: Lower the AST `up_to: bool` into the
@@ -1919,6 +1926,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             target_player,
             selection_constraint,
             split,
+            source_zones,
         },
         SearchCreationImperativeAst::SearchOutsideGame {
             filter,
@@ -2504,12 +2512,17 @@ pub(super) fn parse_category_and_sacrifice_rest_pub(
     rest_lower: &str,
 ) -> Option<ChooseImperativeAst> {
     parse_category_and_sacrifice_rest(rest_lower).map(|ast| match ast {
-        ChooseImperativeAst::CategoryAndSacrificeRest { categories, .. } => {
-            ChooseImperativeAst::CategoryAndSacrificeRest {
-                categories,
-                chooser_scope: CategoryChooserScope::ControllerForAll,
-            }
-        }
+        ChooseImperativeAst::CategoryAndSacrificeRest {
+            categories,
+            choose_filter,
+            sacrifice_filter,
+            ..
+        } => ChooseImperativeAst::CategoryAndSacrificeRest {
+            categories,
+            chooser_scope: CategoryChooserScope::ControllerForAll,
+            choose_filter,
+            sacrifice_filter,
+        },
         other => other,
     })
 }
@@ -2533,7 +2546,7 @@ const PERMANENT_TYPE_CATEGORIES: [CoreType; 6] = [
 ///
 /// Parser structure (nom combinators):
 /// - `tag("from among")` detects pattern 1
-/// - `take_until("from among")` + category parsing for pattern 2
+/// - `parse_category_list_prefix` consumes pattern 2's category list and returns the remainder
 /// - Category list: `parse_category_item` composed with comma + "and" separator
 fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
@@ -2558,6 +2571,8 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
                 return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                     categories: PERMANENT_TYPE_CATEGORIES.to_vec(),
                     chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                    choose_filter: permanent_filter(),
+                    sacrifice_filter: permanent_filter(),
                 });
             }
         }
@@ -2567,58 +2582,68 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
     if let Ok((after_from_among, _)) = tag::<_, _, E>("from among ").parse(rest_lower) {
         // Skip past "the permanents they control" / "the permanents that player controls"
         // to find the category list.
-        let categories_text = skip_permanent_clause(after_from_among)?;
+        let (categories_text, choose_filter) = parse_choose_domain(after_from_among).ok()?;
         let categories = parse_category_list(categories_text)?;
         return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            sacrifice_filter: choose_filter.clone(),
+            choose_filter,
         });
     }
 
     // Pattern 2: "an artifact, a creature, ... from among [the nonland] permanents they control"
-    if let Ok((_, before_from)) = take_until::<_, _, E>("from among").parse(rest_lower) {
-        let categories = parse_category_list(before_from.trim())?;
+    if let Ok((after_categories, categories)) = parse_category_list_prefix(rest_lower) {
+        let (_, choose_filter) = preceded(
+            preceded(opt(tag::<_, _, E>(",")), tag(" from among ")),
+            parse_choose_domain,
+        )
+        .parse(after_categories)
+        .ok()?;
         return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            sacrifice_filter: choose_filter.clone(),
+            choose_filter,
         });
     }
 
     None
 }
 
-/// Skip past "the permanents they control" / "the [nonland] permanents that player controls"
-/// clauses to find the category list that follows.
-fn skip_permanent_clause(input: &str) -> Option<&str> {
+fn permanent_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::permanent())
+}
+
+fn nonland_permanent_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::permanent().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+    )
+}
+
+/// Parse "the permanents they control" / "the [nonland] permanents that player controls"
+/// domains and return the category-list remainder plus the domain filter.
+fn parse_choose_domain(input: &str) -> OracleResult<'_, TargetFilter> {
     type E<'a> = OracleError<'a>;
 
-    // "the permanents they control " / "the permanents that player controls "
-    // / "the nonland permanents they control "
-    let (rest, _) = tag::<_, _, E>("the ").parse(input).ok()?;
-
-    // Optional "nonland " modifier
-    let rest = tag::<_, _, E>("nonland ")
-        .parse(rest)
-        .map(|(r, _)| r)
-        .unwrap_or(rest);
-
-    let (rest, _) = tag::<_, _, E>("permanents ").parse(rest).ok()?;
-
-    // "they control" / "that player controls"
-    let rest = if let Ok((r, _)) = tag::<_, _, E>("they control").parse(rest) {
-        r
-    } else if let Ok((r, _)) = tag::<_, _, E>("that player controls").parse(rest) {
-        r
-    } else {
-        return None;
-    };
-
-    // Strip optional trailing space/comma
-    let rest = rest.trim_start_matches(' ');
-    if rest.is_empty() {
-        return None;
-    }
-    Some(rest)
+    let (rest, _) = tag::<_, _, E>("the ").parse(input)?;
+    let (rest, nonland) = opt(tag::<_, _, E>("nonland ")).parse(rest)?;
+    let (rest, _) = tag::<_, _, E>("permanents ").parse(rest)?;
+    let (rest, _) = alt((
+        tag::<_, _, E>("they control"),
+        tag("you control"),
+        tag("that player controls"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(alt((tag::<_, _, E>(", "), tag(" ")))).parse(rest)?;
+    Ok((
+        rest,
+        if nonland.is_some() {
+            nonland_permanent_filter()
+        } else {
+            permanent_filter()
+        },
+    ))
 }
 
 /// Parse a comma-separated category list: "an artifact, a creature, an enchantment, and a land"
@@ -2626,41 +2651,53 @@ fn skip_permanent_clause(input: &str) -> Option<&str> {
 fn parse_category_list(input: &str) -> Option<Vec<CoreType>> {
     type E<'a> = OracleError<'a>;
 
-    let mut categories = Vec::new();
-    let mut remaining = input.trim();
+    let (remaining, categories) = parse_category_list_prefix(input).ok()?;
+    let remaining = remaining.trim_start();
+    if remaining.is_empty()
+        || tag::<_, _, E>(", then ").parse(remaining).is_ok()
+        || tag::<_, _, E>(". then ").parse(remaining).is_ok()
+        || tag::<_, _, E>(".").parse(remaining).is_ok()
+    {
+        return Some(categories);
+    }
 
-    loop {
-        // Strip optional leading ", " or ", and " or "and "
-        if let Ok((r, _)) = tag::<_, _, E>(", and ").parse(remaining) {
-            remaining = r;
-        } else if let Ok((r, _)) = tag::<_, _, E>(", ").parse(remaining) {
-            remaining = r;
-        } else if let Ok((r, _)) = tag::<_, _, E>("and ").parse(remaining) {
-            remaining = r;
-        }
+    None
+}
 
-        // Parse article + type: "an artifact" / "a creature" / "a land" / "a planeswalker" / "an enchantment"
-        let (after_article, _) = alt((tag::<_, _, E>("an "), tag("a ")))
-            .parse(remaining)
-            .ok()?;
+fn parse_category_list_prefix(input: &str) -> OracleResult<'_, Vec<CoreType>> {
+    type E<'a> = OracleError<'a>;
 
-        let (rest, core_type) = parse_core_type_name(after_article)?;
-        categories.push(core_type);
-        remaining = rest.trim();
+    let (mut remaining, first) = parse_category_item(input)?;
+    let mut categories = vec![first];
 
-        if remaining.is_empty()
-            || tag::<_, _, E>(", then ").parse(remaining).is_ok()
-            || tag::<_, _, E>(". then ").parse(remaining).is_ok()
-            || tag::<_, _, E>("from among").parse(remaining).is_ok()
-        {
+    while let Ok((after_separator, _)) = alt((
+        tag::<_, _, E>(", and "),
+        tag(", "),
+        tag(" and "),
+        tag("and "),
+    ))
+    .parse(remaining)
+    {
+        let Ok((after_item, core_type)) = parse_category_item(after_separator) else {
             break;
-        }
+        };
+        categories.push(core_type);
+        remaining = after_item;
     }
 
-    if categories.is_empty() {
-        return None;
-    }
-    Some(categories)
+    Ok((remaining, categories))
+}
+
+fn parse_category_item(input: &str) -> OracleResult<'_, CoreType> {
+    type E<'a> = OracleError<'a>;
+
+    let (input, _) = alt((tag::<_, _, E>("an "), tag("a "))).parse(input)?;
+    parse_core_type_name(input).ok_or_else(|| {
+        nom::Err::Error(OracleError::from_error_kind(
+            input,
+            nom::error::ErrorKind::Alt,
+        ))
+    })
 }
 
 /// Parse a core type name from lowercase text using nom combinators.
@@ -2739,9 +2776,13 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope,
+            choose_filter,
+            sacrifice_filter,
         } => Effect::ChooseAndSacrificeRest {
             categories,
             chooser_scope,
+            choose_filter,
+            sacrifice_filter,
         },
         // CR 115.1c + CR 601.2c: Two independent target slots. The bare-Effect
         // lowering surfaces only the first slot — the chained `TargetOnly`
@@ -3390,7 +3431,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
             enter_transformed,
             enters_attacking,
             up_to,
-            choice_count,
+            choice_count: choice_count.map(Box::new),
             enter_with_counters,
         });
     }
@@ -3974,6 +4015,7 @@ pub(super) fn lower_multi_filter_search_library(
             target_player,
             selection_constraint: SearchSelectionConstraint::MatchEachFilter { filters },
             split: None,
+            source_zones: vec![crate::types::zones::Zone::Library],
         });
     }
 
@@ -4015,6 +4057,7 @@ pub(super) fn lower_multi_filter_search_library(
                 target_player: target_player.clone(),
                 selection_constraint: selection_constraint.clone(),
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
         );
         search_def.sub_ability = tail;
@@ -4033,6 +4076,7 @@ pub(super) fn lower_multi_filter_search_library(
         target_player,
         selection_constraint,
         split: None,
+        source_zones: vec![crate::types::zones::Zone::Library],
     });
     clause.sub_ability = tail;
     clause
@@ -4098,6 +4142,7 @@ fn lower_target_referenced_search_library(
             target_player,
             selection_constraint,
             split: None,
+            source_zones: vec![crate::types::zones::Zone::Library],
         })
     } else {
         lower_multi_filter_search_library(
@@ -6132,7 +6177,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 enter_with_counters,
             });
             let mut clause = parsed_clause(effect);
-            clause.multi_target = Some(choice_count);
+            clause.multi_target = Some(*choice_count);
             clause
         }
         ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::PutCounterList {
@@ -6183,6 +6228,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 multi_enter_tapped,
                 // Reference-target searches are not cultivate-class splits.
                 split: _,
+                // Reference-target searches are library-only (default).
+                source_zones: _,
             },
         )) => lower_target_referenced_search_library(
             reference_target,
@@ -6215,6 +6262,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 multi_enter_tapped,
                 // Multi-filter searches handle destinations per-filter, not via split.
                 split: _,
+                // Multi-filter searches are library-only (default).
+                source_zones: _,
             },
         )) if !extra_filters.is_empty() => lower_multi_filter_search_library(
             filter,
@@ -9238,6 +9287,7 @@ mod tests {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
                 chooser_scope,
+                ..
             }) => {
                 assert_eq!(
                     categories,
@@ -9270,6 +9320,7 @@ mod tests {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
                 chooser_scope,
+                ..
             }) => {
                 assert_eq!(
                     categories,
@@ -9301,6 +9352,8 @@ mod tests {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
                 chooser_scope,
+                choose_filter,
+                sacrifice_filter,
             }) => {
                 assert_eq!(
                     categories,
@@ -9315,6 +9368,44 @@ mod tests {
                     chooser_scope,
                     crate::types::ability::CategoryChooserScope::EachPlayerSelf
                 );
+                assert!(
+                    matches!(
+                        &choose_filter,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            ..
+                        }) if type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Land)))
+                    ),
+                    "Gearhulk choose_filter should be nonland permanent, got {choose_filter:?}"
+                );
+                assert_eq!(choose_filter, sacrifice_filter);
+            }
+            other => panic!("Expected CategoryAndSacrificeRest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_choose_from_among_gearhulk_pattern_with_comma() {
+        let text = "choose an artifact, a creature, an enchantment, and a planeswalker, from among the nonland permanents they control";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                choose_filter,
+                sacrifice_filter,
+                ..
+            }) => {
+                assert_eq!(
+                    categories,
+                    vec![
+                        CoreType::Artifact,
+                        CoreType::Creature,
+                        CoreType::Enchantment,
+                        CoreType::Planeswalker
+                    ]
+                );
+                assert_eq!(choose_filter, sacrifice_filter);
             }
             other => panic!("Expected CategoryAndSacrificeRest, got {other:?}"),
         }

@@ -15,7 +15,9 @@ use super::context::ParseContext;
 use super::error::OracleResult;
 use super::primitives::{parse_article, parse_counter_type_typed, parse_number};
 use super::target::parse_type_filter_word;
-use crate::parser::oracle_target::{parse_shared_quality_clause, parse_type_phrase};
+use crate::parser::oracle_target::{
+    parse_shared_quality, parse_shared_quality_clause, parse_type_phrase,
+};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
@@ -394,6 +396,7 @@ pub fn parse_quantity_expr_number(input: &str) -> OracleResult<'_, QuantityExpr>
 /// "your life total", "cards in your hand", etc.
 pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
+        parse_object_count_by_shared_quality,
         parse_the_number_of,
         parse_distinct_card_types_exiled_with_source,
         parse_linked_exile_mana_value_ref,
@@ -434,6 +437,51 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_counters_among_ref,
     )))
     .parse(input)
+}
+
+/// CR 109.3 + CR 205.3m: Parse "the greatest/fewest/total number of
+/// <type-phrase> that have/share [a] <quality> in common" into a grouped
+/// object-count quantity.
+///
+/// The "in common" wrapper is not a target predicate: it asks for the size of
+/// quality buckets within the already-matched population. Keep it separate from
+/// `FilterProp::SharesQuality`, which validates a chosen group against a
+/// reference object/set.
+fn parse_object_count_by_shared_quality(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("the ").parse(input)?;
+    let (rest, aggregate) = alt((
+        value(AggregateFunction::Max, tag("greatest")),
+        value(AggregateFunction::Min, tag("fewest")),
+        value(AggregateFunction::Sum, tag("total")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" number of ").parse(rest)?;
+    let (rest, type_text) = take_until(" that ").parse(rest)?;
+    let (rest, _) = tag(" that ").parse(rest)?;
+    let (rest, _) = alt((tag("have "), tag("has "), tag("share "), tag("shares "))).parse(rest)?;
+    let (rest, _) = opt(alt((tag("a "), tag("at least one ")))).parse(rest)?;
+    let (rest, quality) = parse_shared_quality(rest)?;
+    let (rest, _) = tag(" in common").parse(rest)?;
+
+    let (filter, type_remainder) = parse_type_phrase(type_text.trim());
+    if !type_remainder.trim().is_empty()
+        || matches!(filter, TargetFilter::Any)
+        || !quantity_filter_has_meaningful_content(&filter)
+    {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    Ok((
+        rest,
+        QuantityRef::ObjectCountBySharedQuality {
+            filter,
+            quality,
+            aggregate,
+        },
+    ))
 }
 
 /// CR 607.2a: Parse linked-exile mana-value phrases into the shared aggregate
@@ -4005,6 +4053,109 @@ mod tests {
             }
             other => panic!("expected Treasure TokensCreatedThisTurn, got {other:?}"),
         }
+    }
+
+    fn assert_shared_quality_count_typed(
+        q: QuantityRef,
+    ) -> (
+        Vec<TypeFilter>,
+        Option<ControllerRef>,
+        Vec<FilterProp>,
+        SharedQuality,
+        AggregateFunction,
+    ) {
+        match q {
+            QuantityRef::ObjectCountBySharedQuality {
+                filter:
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }),
+                quality,
+                aggregate,
+            } => (type_filters, controller, properties, quality, aggregate),
+            other => panic!("expected ObjectCountBySharedQuality over Typed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_greatest_creature_type_count_in_common() {
+        let (rest, q) = parse_quantity_ref(
+            "the greatest number of creatures you control that have a creature type in common",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, properties, quality, aggregate) =
+            assert_shared_quality_count_typed(q);
+        assert_eq!(type_filters, vec![TypeFilter::Creature]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(!properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::SharesQuality { .. })));
+        assert_eq!(quality, SharedQuality::CreatureType);
+        assert_eq!(aggregate, AggregateFunction::Max);
+    }
+
+    #[test]
+    fn parse_fewest_noncreature_shared_quality_count_in_common() {
+        let (rest, q) = parse_quantity_ref(
+            "the fewest number of artifacts you control that share a color in common",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, _properties, quality, aggregate) =
+            assert_shared_quality_count_typed(q);
+        assert_eq!(type_filters, vec![TypeFilter::Artifact]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert_eq!(quality, SharedQuality::Color);
+        assert_eq!(aggregate, AggregateFunction::Min);
+    }
+
+    #[test]
+    fn parse_singular_at_least_one_shared_quality_count_in_common() {
+        let (rest, q) = parse_quantity_ref(
+            "the greatest number of permanent you control that has at least one color in common",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, _properties, quality, aggregate) =
+            assert_shared_quality_count_typed(q);
+        assert_eq!(type_filters, vec![TypeFilter::Permanent]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert_eq!(quality, SharedQuality::Color);
+        assert_eq!(aggregate, AggregateFunction::Max);
+    }
+
+    #[test]
+    fn parse_total_shared_quality_count_in_common() {
+        let (rest, q) = parse_quantity_ref(
+            "the total number of permanents you control that have a card type in common",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        let (type_filters, controller, _properties, quality, aggregate) =
+            assert_shared_quality_count_typed(q);
+        assert_eq!(type_filters, vec![TypeFilter::Permanent]);
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert_eq!(quality, SharedQuality::CardType);
+        assert_eq!(aggregate, AggregateFunction::Sum);
+    }
+
+    #[test]
+    fn parse_shared_quality_count_rejects_partial_population() {
+        assert!(parse_quantity_ref(
+            "the greatest number of creatures you control banana that have a creature type in common",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parse_shared_quality_count_rejects_empty_population() {
+        assert!(parse_quantity_ref(
+            "the greatest number of you control that have a creature type in common",
+        )
+        .is_err());
     }
 
     /// Helper: pull the `(type_filters, controller, properties, qualities)` tuple

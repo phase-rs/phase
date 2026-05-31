@@ -169,7 +169,27 @@ pub(super) fn drain_pending_phase_transition_progress(
         let scan_entries = scan_step_end_mana_handlers(state, player_id);
         state.pending_step_end_mana_handlers = scan_entries;
 
-        // Build per-unit decision payload from the player's surviving (non-expiry) pool.
+        // Build per-unit decision payload from the player's surviving pool.
+        //
+        // CR 500.5 + CR 703.4q (H2 invariant): expiry-bound units (e.g.
+        // Klauth's "you don't lose this mana as steps and phases end",
+        // Firebending's "Until end of combat, you don't lose this mana as
+        // steps and phases end" — CR 702.189a) have *already* had their fate
+        // decided by `clear_expiring_at_step_end` above — they were either
+        // dropped (their rule fired) or deliberately retained.
+        //
+        // CR 614.17 + CR 614.17c: "you don't lose this mana …" is a "can't"
+        // effect, not a replacement effect. It prevents the CR 106.4 /
+        // CR 703.4q lose-mana event for the protected units, and per
+        // CR 614.17c, once that event can't happen no other replacement
+        // effect — including a step-end mana handler (Upwelling, Horizon
+        // Stone, Kruphix) — can modify or replace it. So such units must NOT
+        // enter the empty-pool replacement pipeline at all; emitting a `Drop`
+        // decision here would empty the very mana the card promises to keep.
+        // Only `None`-expiry units flow into the pipeline as Drop-disposition
+        // decisions. The `enumerate` runs over the full pool so `pool_index`
+        // stays aligned with the retained expiry units that remain in
+        // `mana_pool.mana`.
         let units: Vec<crate::types::mana::UnitDecision> = state
             .players
             .iter()
@@ -179,6 +199,7 @@ pub(super) fn drain_pending_phase_transition_progress(
                     .mana
                     .iter()
                     .enumerate()
+                    .filter(|(_, u)| u.expiry.is_none())
                     .map(|(idx, u)| crate::types::mana::UnitDecision {
                         pool_index: idx,
                         color: u.color,
@@ -2055,6 +2076,89 @@ mod tests {
         );
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
         assert_eq!(state.players[1].mana_pool.total(), 0);
+    }
+
+    #[test]
+    fn advance_phase_keeps_end_of_turn_mana_until_cleanup() {
+        // CR 500.5 + CR 703.4q (H2 invariant, Klauth, Unrivaled Ancient):
+        // "Until end of turn, you don't lose this mana as steps and phases
+        // end." A unit carrying `ManaExpiry::EndOfTurn` must survive every
+        // non-cleanup phase/step transition and only drain when the turn
+        // actually ends. A plain `None`-expiry unit drains on the very first
+        // transition. RUNTIME test driving `advance_phase` through the live
+        // empty-pool pipeline — guards the payload builder that previously
+        // emitted a `Drop` decision for retained expiry-bound units.
+        use crate::types::mana::{ManaExpiry, ManaType, ManaUnit};
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+
+        let mut klauth_mana = ManaUnit::new(ManaType::Red, ObjectId(10), false, Vec::new());
+        klauth_mana.expiry = Some(ManaExpiry::EndOfTurn);
+        state.players[0].mana_pool.add(klauth_mana);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(11),
+            false,
+            Vec::new(),
+        ));
+
+        // First transition (PreCombatMain → next step, not cleanup): the
+        // plain Blue mana drains; the EndOfTurn Red mana is retained.
+        advance_phase(&mut state, &mut Vec::new());
+        assert_ne!(state.phase, Phase::Cleanup);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
+
+        // Drive forward until cleanup; the EndOfTurn mana survives each
+        // intermediate step and only drains once the turn ends.
+        while state.phase != Phase::Cleanup {
+            assert_eq!(
+                state.players[0].mana_pool.count_color(ManaType::Red),
+                1,
+                "EndOfTurn mana must persist through {:?}",
+                state.phase
+            );
+            advance_phase(&mut state, &mut Vec::new());
+        }
+        assert_eq!(state.phase, Phase::Cleanup);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
+    }
+
+    #[test]
+    fn advance_phase_keeps_end_of_combat_mana_until_combat_ends() {
+        // CR 500.5 + CR 703.4q + CR 702.189a: Firebending mana says "Until
+        // end of combat, you don't lose this mana as steps and phases end."
+        // It must survive combat step transitions through the live empty-pool
+        // pipeline, then drain when the game leaves combat.
+        use crate::types::mana::{ManaExpiry, ManaType, ManaUnit};
+
+        let mut state = setup();
+        state.phase = Phase::BeginCombat;
+
+        let mut firebending_mana = ManaUnit::new(ManaType::Red, ObjectId(10), false, Vec::new());
+        firebending_mana.expiry = Some(ManaExpiry::EndOfCombat);
+        state.players[0].mana_pool.add(firebending_mana);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(11),
+            false,
+            Vec::new(),
+        ));
+
+        while state.phase != Phase::PostCombatMain {
+            assert_eq!(
+                state.players[0].mana_pool.count_color(ManaType::Red),
+                1,
+                "EndOfCombat mana must persist through {:?}",
+                state.phase
+            );
+            advance_phase(&mut state, &mut Vec::new());
+            assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
+        }
+
+        assert_eq!(state.phase, Phase::PostCombatMain);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
     }
 
     #[test]

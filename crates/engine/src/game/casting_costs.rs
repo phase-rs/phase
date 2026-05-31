@@ -669,6 +669,7 @@ fn begin_deferred_target_selection(
         player,
         pending_cast: Box::new(pending),
         target_slots,
+        mode_labels: Vec::new(),
         selection,
     })
 }
@@ -1320,6 +1321,7 @@ pub(super) fn push_activated_ability_to_stack(
             player,
             pending_cast: Box::new(pending_act),
             target_slots,
+            mode_labels: Vec::new(),
             selection,
         });
     }
@@ -1581,6 +1583,54 @@ pub(super) fn begin_optional_cost_before_targets(
     pending.payment_mode = payment_mode;
     pending.deferred_target_selection = true;
     pending.additional_cost_flow = Some(optional_cost);
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 601.2b: X in a variable additional cost is announced before later target choices.
+pub(super) fn required_additional_cost_can_declare_x(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<AbilityCost> {
+    let Some(AdditionalCost::Required(cost)) = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.additional_cost.clone())
+    else {
+        return None;
+    };
+    additional_cost_x_max(state, player, object_id, &cost)
+        .is_some()
+        .then_some(cost)
+}
+
+/// CR 601.2b: Some required additional costs announce X before targets are chosen.
+/// CR 601.2c: Target choices are deferred until that required cost X is known.
+/// CR 601.2f: The shared payment step then determines and pays the final total cost.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn begin_required_cost_before_targets(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: ManaCost,
+    required_cost: AbilityCost,
+    casting_variant: CastingVariant,
+    cast_timing_permission: Option<CastTimingPermission>,
+    distribute: Option<DistributionUnit>,
+    origin_zone: Zone,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+    pending.casting_variant = casting_variant;
+    pending.cast_timing_permission = cast_timing_permission;
+    pending.distribute = distribute;
+    pending.origin_zone = origin_zone;
+    pending.payment_mode = payment_mode;
+    pending.deferred_target_selection = true;
+    pending.additional_cost_flow = Some(AdditionalCost::Required(required_cost));
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -2234,7 +2284,7 @@ fn pay_additional_cost(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if pending.ability.chosen_x.is_none() {
-        if let Some(max) = additional_cost_x_max(state, player, &cost) {
+        if let Some(max) = additional_cost_x_max(state, player, pending.object_id, &cost) {
             let min = pending.ability.min_x_value;
             if min > max {
                 super::casting::handle_cancel_cast(state, &pending, events);
@@ -2386,8 +2436,11 @@ fn pay_additional_cost(
                     pending.object_id,
                     target,
                 );
-                let (min_count, max_count) =
-                    super::casting::sacrifice_cost_bounds(count, eligible.len());
+                let (min_count, max_count) = super::casting::sacrifice_cost_bounds_with_chosen_x(
+                    count,
+                    eligible.len(),
+                    pending.ability.chosen_x,
+                );
                 if eligible.len() < min_count {
                     return Err(EngineError::ActionNotAllowed(
                         "Not enough eligible permanents to sacrifice".into(),
@@ -2535,6 +2588,9 @@ fn pay_additional_cost(
         }
         AbilityCost::TapCreatures { count, ref filter } => {
             // CR 702.34a: Tap untapped creatures matching filter as a cost.
+            // The source is eligible unless a {T} cost is also present in the
+            // activation cost (in which case the source was already tapped, so
+            // !obj.tapped naturally excludes it).
             let eligible: Vec<ObjectId> = state
                 .battlefield
                 .iter()
@@ -2543,7 +2599,6 @@ fn pay_additional_cost(
                     state.objects.get(id).is_some_and(|obj| {
                         obj.controller == player
                             && !obj.tapped
-                            && obj.id != pending.object_id
                             && super::filter::matches_target_filter(
                                 state,
                                 obj.id,
@@ -2595,16 +2650,32 @@ fn prepend_deferred_required_cost(cost: AbilityCost, pending: &mut PendingCast) 
     }
 }
 
-fn additional_cost_x_max(state: &GameState, player: PlayerId, cost: &AbilityCost) -> Option<u32> {
+fn additional_cost_x_max(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+) -> Option<u32> {
     match cost {
         AbilityCost::PayLife { amount } if quantity_expr_contains_x(amount) => {
             Some(max_pay_life_x(state, player))
         }
+        AbilityCost::Sacrifice { target, count } if *count == u32::MAX => {
+            // CR 601.2b: X in an additional sacrifice cost is announced before later target choices.
+            Some(
+                super::casting::find_eligible_sacrifice_targets(state, player, source_id, target)
+                    .len()
+                    .try_into()
+                    .unwrap_or(u32::MAX),
+            )
+        }
         AbilityCost::Composite { costs } => costs
             .iter()
-            .filter_map(|cost| additional_cost_x_max(state, player, cost))
+            .filter_map(|cost| additional_cost_x_max(state, player, source_id, cost))
             .min(),
-        AbilityCost::PerCounter { base, .. } => additional_cost_x_max(state, player, base),
+        AbilityCost::PerCounter { base, .. } => {
+            additional_cost_x_max(state, player, source_id, base)
+        }
         _ => None,
     }
 }
@@ -3665,13 +3736,15 @@ fn auto_tap_mana_sources_inner(
         .flatten()
         .collect();
 
-    // CR 605.3b: Auto-tap sort key. Tier layout (preserved from the
-    // pre-refactor sort; the enum factors the two scattered bool flags):
+    // CR 605.3b: Auto-tap sort key. Tier layout (the enum factors the two
+    // scattered bool flags):
     //   outer (tier_byte): 0 = non-sacrifice mana source; 1 = sacrifice-for-mana
     //     (source will not come back — always last).
-    //   middle (card_tier): 0 = pure land, 1 = non-land mana dork,
-    //     2 = land-creature (preserve for combat), 3 = deprioritized source
-    //     (spell's own source).
+    //   middle (card_tier): 0 = free-colorless land row (ideal generic filler);
+    //     1 = other land row; 2 = non-land non-creature rock (Signet);
+    //     3 = non-land creature dork (preserve as blocker); 4 = land-creature
+    //     manland (preserve as blocker); 5 = deprioritized source (spell's own
+    //     source).
     //   inner (priority_amount): penalty sub-tier + fixed-amount tiebreak
     //     (e.g. painland-1 < painland-2 < painland-None). Replaces the
     //     collapsed `harms_controller` bool — amounts now rank.
@@ -3683,14 +3756,29 @@ fn auto_tap_mana_sources_inner(
         let is_land = obj.is_some_and(|o| o.card_types.core_types.contains(&CoreType::Land));
         let is_creature =
             obj.is_some_and(|o| o.card_types.core_types.contains(&CoreType::Creature));
+        let row_is_free_colorless =
+            option.atomic_combination.is_none() && option.mana_type == ManaType::Colorless;
         let card_tier: u32 = if deprioritize_source == Some(option.object_id) {
-            3
+            5
         } else if is_land && is_creature {
-            2
-        } else if is_land {
+            // CR 509.1a: a chosen blocker must be untapped. An animated manland
+            // is a creature body — preserve it (and after a 1/1 dork: it is
+            // usually the bigger blocker, so it sorts after the dork).
+            4
+        } else if is_creature {
+            // CR 509.1a: preserve a non-land creature mana source (dork) as a
+            // blocker.
+            3
+        } else if is_land && row_is_free_colorless {
+            // Heuristic (no CR): a free colorless row is the ideal generic
+            // filler — it commits no colored production a later shard in this
+            // same payment needs.
             0
-        } else {
+        } else if is_land {
             1
+        } else {
+            // non-land non-creature mana source (rock / Signet)
+            2
         };
         (
             option.penalty.tier_byte() as u32,
@@ -4289,6 +4377,18 @@ pub fn enter_payment_step(
         }
     }
 
+    if state
+        .pending_cast
+        .as_ref()
+        .is_some_and(|pending| pending.deferred_target_selection)
+    {
+        let pending = *state
+            .pending_cast
+            .take()
+            .expect("checked pending cast presence");
+        return begin_deferred_target_selection(state, player, pending, events);
+    }
+
     if state.pending_cast.as_ref().is_some_and(|pending| {
         matches!(
             pending.additional_cost_flow,
@@ -4300,18 +4400,6 @@ pub fn enter_payment_step(
             .take()
             .expect("checked pending cast presence");
         return finish_pending_cost_or_cast(state, player, pending, events);
-    }
-
-    if state
-        .pending_cast
-        .as_ref()
-        .is_some_and(|pending| pending.deferred_target_selection)
-    {
-        let pending = *state
-            .pending_cast
-            .take()
-            .expect("checked pending cast presence");
-        return begin_deferred_target_selection(state, player, pending, events);
     }
 
     // CR 601.2h: Auto-finalize when no player-level decision remains. Convoke requires

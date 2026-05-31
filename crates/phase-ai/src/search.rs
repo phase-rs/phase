@@ -682,22 +682,54 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets.map(|new_targets| GameAction::RetargetSpell { new_targets })
         }
 
-        // Assign combat damage: all damage to first blocker or zero.
+        // Assign combat damage: greedy lethal-to-each, mirroring the engine's
+        // ai_support::candidates AssignCombatDamage arm so the fallback stays
+        // rules-legal for trample (CR 702.19b) and trample-over-PW (CR 702.19c).
         WaitingFor::AssignCombatDamage {
             total_damage,
             blockers,
+            trample,
+            pw_loyalty,
+            attack_target,
             ..
         } => {
-            let assignments: Vec<_> = blockers
-                .iter()
-                .enumerate()
-                .map(|(i, slot)| (slot.blocker_id, if i == 0 { *total_damage } else { 0 }))
-                .collect();
+            let mut remaining = *total_damage;
+            let mut assignments = Vec::new();
+            // CR 702.19b: Assign lethal to each blocker in order.
+            for slot in blockers {
+                let assign = remaining.min(slot.lethal_minimum);
+                assignments.push((slot.blocker_id, assign));
+                remaining = remaining.saturating_sub(assign);
+            }
+            // CR 510.1c: Non-trample — the leftover must land on a blocker (no player
+            // spillover), so dump it on the last blocker to keep the total == power.
+            if trample.is_none() && remaining > 0 {
+                if let Some(last) = assignments.last_mut() {
+                    last.1 += remaining;
+                    remaining = 0;
+                }
+            }
+            // CR 702.19c: Trample-over-PW attacking a PW splits excess into
+            // loyalty-worth to the PW and the remainder to the PW's controller.
+            let (trample_damage, controller_damage) = if *trample
+                == Some(engine::game::combat::TrampleKind::OverPlaneswalkers)
+                && matches!(
+                    attack_target,
+                    engine::game::combat::AttackTarget::Planeswalker(_)
+                ) {
+                let loyalty = pw_loyalty.unwrap_or(0);
+                let to_pw = remaining.min(loyalty);
+                let to_ctrl = remaining.saturating_sub(to_pw);
+                (to_pw, to_ctrl)
+            } else {
+                // CR 702.19b: Standard trample — all excess to the attack target.
+                (if trample.is_some() { remaining } else { 0 }, 0)
+            };
             Some(GameAction::AssignCombatDamage {
                 mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
                 assignments,
-                trample_damage: 0,
-                controller_damage: 0,
+                trample_damage,
+                controller_damage,
             })
         }
 
@@ -802,29 +834,18 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
 
-        // CR 101.4 + CR 701.21a: Category choice — pick one distinct permanent
+        // CR 101.4 + CR 701.21a: Category choice — pick one permanent
         // per type category, the rest are sacrificed. A permanent that belongs
         // to multiple categories (e.g. an artifact creature) is eligible in
-        // each, but the engine rejects choosing the same object for more than
-        // one category (`engine_resolution_choices.rs` SelectCategoryPermanents
-        // duplicate guard). Greedily pick the first not-yet-used eligible
-        // object per category, mirroring the `used`-vec algorithm in
-        // `choose_and_sacrifice_rest::try_auto_resolve` so the two stay
-        // consistent. `None` for empty/exhausted categories is a legal choice.
+        // each and may be chosen in each eligible slot. `None` is legal only
+        // for an empty category.
         WaitingFor::CategoryChoice {
             eligible_per_category,
             ..
         } => {
-            let mut used: Vec<engine::types::identifiers::ObjectId> = Vec::new();
             let choices = eligible_per_category
                 .iter()
-                .map(|eligible| {
-                    let pick = eligible.iter().copied().find(|id| !used.contains(id));
-                    if let Some(id) = pick {
-                        used.push(id);
-                    }
-                    pick
-                })
+                .map(|eligible| eligible.first().copied())
                 .collect();
             Some(GameAction::SelectCategoryPermanents { choices })
         }
@@ -1538,7 +1559,9 @@ pub(crate) fn deterministic_choice(
 
     // Combat decisions: delegate to specialized combat AI
     if let WaitingFor::DeclareAttackers {
-        valid_attacker_ids, ..
+        valid_attacker_ids,
+        valid_attack_targets,
+        ..
     } = &state.waiting_for
     {
         let attacks = choose_attackers_with_targets_with_profile(
@@ -1547,6 +1570,7 @@ pub(crate) fn deterministic_choice(
             &config.profile,
             config.combat_lookahead,
             Some(valid_attacker_ids),
+            Some(valid_attack_targets),
         );
         return Some(GameAction::DeclareAttackers { attacks });
     }
@@ -1594,7 +1618,9 @@ fn deterministic_combat_choice(
     profile: &crate::config::AiProfile,
 ) -> Option<GameAction> {
     if let WaitingFor::DeclareAttackers {
-        valid_attacker_ids, ..
+        valid_attacker_ids,
+        valid_attack_targets,
+        ..
     } = &state.waiting_for
     {
         let attacks = choose_attackers_with_targets_with_profile(
@@ -1603,6 +1629,7 @@ fn deterministic_combat_choice(
             profile,
             false,
             Some(valid_attacker_ids),
+            Some(valid_attack_targets),
         );
         return Some(GameAction::DeclareAttackers { attacks });
     }
@@ -1772,7 +1799,7 @@ mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::TargetRef;
+    use engine::types::ability::{CategoryChooserScope, TargetFilter, TargetRef, TypedFilter};
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
@@ -2191,6 +2218,7 @@ mod tests {
             waiting_for: WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
                 target_slots: Vec::new(),
+                mode_labels: Vec::new(),
                 target_constraints: Vec::new(),
                 selection: Default::default(),
                 source_id: None,
@@ -2252,6 +2280,7 @@ mod tests {
                 ],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: engine::types::game_state::TargetSelectionProgress {
                 current_slot: 0,
@@ -2286,6 +2315,7 @@ mod tests {
                 legal_targets: Vec::new(),
                 optional: true,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: Default::default(),
             source_id: None,
@@ -2605,15 +2635,12 @@ mod tests {
         );
     }
 
-    /// Regression for #447: when a permanent belongs to multiple type
-    /// categories (an artifact creature), the `CategoryChoice` fallback must
-    /// pick *distinct* objects per category. Picking the same object twice is
-    /// rejected by the engine (`engine_resolution_choices.rs`
-    /// SelectCategoryPermanents duplicate guard), which would softlock the AI
-    /// seat. The greedy `used`-vec algorithm mirrors
-    /// `choose_and_sacrifice_rest::try_auto_resolve`.
+    /// Regression for #1591: when a permanent belongs to multiple type
+    /// categories (an artifact creature), the `CategoryChoice` fallback may
+    /// choose that same object for every eligible category slot. The engine
+    /// dedupes only the protected set before sacrificing the rest.
     #[test]
-    fn category_choice_fallback_picks_distinct_objects_and_applies() {
+    fn category_choice_fallback_allows_duplicate_object_slots_and_applies() {
         let mut state = make_state();
         // Source of the ChooseAndSacrificeRest ability.
         let source_card = CardId(state.next_object_id);
@@ -2639,13 +2666,16 @@ mod tests {
             obj.card_types.core_types = vec![CoreType::Artifact, CoreType::Creature];
         }
 
-        // `[[X],[X]]` — X shared across both categories. The fallback must
-        // resolve this to distinct objects (X for the first, None for the
-        // second once X is used).
+        // `[[X],[X]]` — X shared across both categories. The fallback may use
+        // X for both slots because each slot asks a separate category question.
         state.waiting_for = WaitingFor::CategoryChoice {
             player: PlayerId(0),
             target_player: PlayerId(0),
             categories: vec![CoreType::Artifact, CoreType::Creature],
+            chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            source_controller: PlayerId(0),
             eligible_per_category: vec![vec![artifact_creature], vec![artifact_creature]],
             source_id: source,
             remaining_players: Vec::new(),
@@ -2659,19 +2689,13 @@ mod tests {
             other => panic!("expected SelectCategoryPermanents, got {other:?}"),
         };
 
-        // No object may be repeated across categories.
-        let picked: Vec<ObjectId> = choices.iter().filter_map(|c| *c).collect();
-        for (i, id) in picked.iter().enumerate() {
-            assert!(
-                !picked[i + 1..].contains(id),
-                "fallback must not repeat an object across categories: {choices:?}"
-            );
-        }
+        assert_eq!(
+            choices,
+            vec![Some(artifact_creature), Some(artifact_creature)]
+        );
 
-        // Driving the chosen action through the real engine must succeed —
-        // the duplicate guard would reject a repeated object.
         engine::game::engine::apply(&mut state, PlayerId(0), action)
-            .expect("engine must accept the distinct-object category choice");
+            .expect("engine must accept duplicate-object category choices");
     }
 
     // --- Multikicker mana-budget guard (issue #454) ---
@@ -2778,5 +2802,79 @@ mod tests {
             GameAction::DecideOptionalCost { pay: true },
             "AI must pay a multikick when it has mana to spare"
         );
+    }
+
+    /// Build a single-blocker AssignCombatDamage prompt and run the AI fallback.
+    fn assign_combat_damage_fallback(
+        total_damage: u32,
+        lethal_minimum: u32,
+        trample: Option<engine::game::combat::TrampleKind>,
+    ) -> GameAction {
+        let mut state = make_state();
+        let attacker = add_creature(&mut state, PlayerId(0), total_damage as i32, 1);
+        let blocker = add_creature(&mut state, PlayerId(1), 1, lethal_minimum as i32);
+        state.waiting_for = WaitingFor::AssignCombatDamage {
+            player: PlayerId(0),
+            attacker_id: attacker,
+            total_damage,
+            blockers: vec![engine::types::game_state::DamageSlot {
+                blocker_id: blocker,
+                lethal_minimum,
+            }],
+            assignment_modes: vec![engine::types::game_state::CombatDamageAssignmentMode::Normal],
+            trample,
+            defending_player: PlayerId(1),
+            attack_target: engine::game::combat::AttackTarget::Player(PlayerId(1)),
+            pw_loyalty: None,
+            pw_controller: None,
+        };
+        fallback_action(&state).expect("AssignCombatDamage fallback must produce an action")
+    }
+
+    /// CR 702.19b: single-blocker trample attacker — the AI fallback keeps lethal
+    /// on the blocker and tramples the excess through to the defending player.
+    #[test]
+    fn fallback_single_blocker_trample_tramples_excess() {
+        let action =
+            assign_combat_damage_fallback(5, 2, Some(engine::game::combat::TrampleKind::Standard));
+        match action {
+            GameAction::AssignCombatDamage {
+                mode,
+                assignments,
+                trample_damage,
+                controller_damage,
+            } => {
+                assert_eq!(
+                    mode,
+                    engine::types::game_state::CombatDamageAssignmentMode::Normal
+                );
+                assert_eq!(assignments.len(), 1);
+                assert_eq!(assignments[0].1, 2, "lethal (2) assigned to blocker");
+                assert_eq!(trample_damage, 3, "excess (3) tramples through");
+                assert_eq!(controller_damage, 0);
+            }
+            other => panic!("expected AssignCombatDamage, got {other:?}"),
+        }
+    }
+
+    /// CR 510.1c: single-blocker non-trample attacker — the AI fallback assigns
+    /// all damage to the blocker (no spillover to the player is legal).
+    #[test]
+    fn fallback_single_blocker_no_trample_all_to_blocker() {
+        let action = assign_combat_damage_fallback(5, 2, None);
+        match action {
+            GameAction::AssignCombatDamage {
+                assignments,
+                trample_damage,
+                controller_damage,
+                ..
+            } => {
+                assert_eq!(assignments.len(), 1);
+                assert_eq!(assignments[0].1, 5, "all 5 to the single blocker");
+                assert_eq!(trample_damage, 0, "no trample without trample keyword");
+                assert_eq!(controller_damage, 0);
+            }
+            other => panic!("expected AssignCombatDamage, got {other:?}"),
+        }
     }
 }

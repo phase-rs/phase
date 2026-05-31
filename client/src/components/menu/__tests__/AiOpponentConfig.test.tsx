@@ -169,6 +169,32 @@ describe("AiOpponentConfig — cEDH badge + disabled difficulty", () => {
     render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
     expect(screen.queryByLabelText("cEDH")).not.toBeInTheDocument();
   });
+
+  it("clears cEDH mode when switching away from Commander-family formats", async () => {
+    act(() => {
+      usePreferencesStore.getState().setCedhMode(true);
+    });
+
+    const { rerender } = render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+    rerender(<AiOpponentConfig selectedFormat="Standard" opponentCount={1} />);
+
+    await waitFor(() => {
+      expect(usePreferencesStore.getState().cedhMode).toBe(false);
+    });
+  });
+
+  it("preserves cEDH mode when the selected format is not loaded", () => {
+    act(() => {
+      usePreferencesStore.getState().setCedhMode(true);
+    });
+
+    const { rerender } = render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+    rerender(<AiOpponentConfig selectedFormat={undefined} opponentCount={1} />);
+    expect(usePreferencesStore.getState().cedhMode).toBe(true);
+
+    rerender(<AiOpponentConfig selectedFormat={null} opponentCount={1} />);
+    expect(usePreferencesStore.getState().cedhMode).toBe(true);
+  });
 });
 
 describe("AiOpponentConfig — bracket filter", () => {

@@ -1675,29 +1675,95 @@ pub enum DelayedTriggerCondition {
 /// CR 115.1d: "Any number" means zero or more.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiTargetSpec {
-    pub min: usize,
+    #[serde(
+        serialize_with = "serialize_multi_target_min",
+        deserialize_with = "deserialize_multi_target_min"
+    )]
+    pub min: QuantityExpr,
     /// `None` means "any number" (unlimited). CR 115.1d.
     pub max: Option<QuantityExpr>,
 }
 
 impl MultiTargetSpec {
     pub fn fixed(min: usize, max: usize) -> Self {
-        Self::bounded(min, QuantityExpr::Fixed { value: max as i32 })
+        Self::bounded_expr(
+            QuantityExpr::Fixed { value: min as i32 },
+            QuantityExpr::Fixed { value: max as i32 },
+        )
     }
 
     pub fn up_to(max: QuantityExpr) -> Self {
-        Self::bounded(0, max)
+        Self::bounded_expr(QuantityExpr::Fixed { value: 0 }, max)
+    }
+
+    pub fn exact(count: QuantityExpr) -> Self {
+        Self::bounded_expr(count.clone(), count)
     }
 
     pub fn unlimited(min: usize) -> Self {
-        Self { min, max: None }
+        Self {
+            min: QuantityExpr::Fixed { value: min as i32 },
+            max: None,
+        }
     }
 
     pub fn bounded(min: usize, max: QuantityExpr) -> Self {
+        Self::bounded_expr(QuantityExpr::Fixed { value: min as i32 }, max)
+    }
+
+    pub fn bounded_expr(min: QuantityExpr, max: QuantityExpr) -> Self {
         Self {
             min,
             max: Some(max),
         }
+    }
+
+    pub fn min_is_fixed_zero(&self) -> bool {
+        matches!(self.min, QuantityExpr::Fixed { value: 0 })
+    }
+
+    pub fn fixed_min_usize(&self) -> Option<usize> {
+        match self.min {
+            QuantityExpr::Fixed { value } if value >= 0 => Some(value as usize),
+            _ => None,
+        }
+    }
+
+    pub fn map_quantities<F>(&mut self, mut map: F)
+    where
+        F: FnMut(QuantityExpr) -> QuantityExpr,
+    {
+        self.min = map(self.min.clone());
+        if let Some(max) = self.max.take() {
+            self.max = Some(map(max));
+        }
+    }
+}
+
+fn serialize_multi_target_min<S>(min: &QuantityExpr, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match min {
+        QuantityExpr::Fixed { value } => serializer.serialize_i32(*value),
+        other => other.serialize(serializer),
+    }
+}
+
+fn deserialize_multi_target_min<'de, D>(deserializer: D) -> Result<QuantityExpr, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum MultiTargetMin {
+        Fixed(i32),
+        Expr(QuantityExpr),
+    }
+
+    match MultiTargetMin::deserialize(deserializer)? {
+        MultiTargetMin::Fixed(value) => Ok(QuantityExpr::Fixed { value }),
+        MultiTargetMin::Expr(expr) => Ok(expr),
     }
 }
 
@@ -2760,6 +2826,16 @@ pub enum QuantityRef {
         filter: TargetFilter,
         #[serde(default = "default_distinct_names")]
         qualities: Vec<SharedQuality>,
+    },
+    /// CR 109.3 + CR 205.3m: Count matching objects grouped by a shared object
+    /// characteristic, including creature types, then aggregate the group
+    /// sizes. Covers "the greatest number of creatures you control that have a
+    /// creature type in common" without encoding the shared-quality clause as a
+    /// target filter.
+    ObjectCountBySharedQuality {
+        filter: TargetFilter,
+        quality: SharedQuality,
+        aggregate: AggregateFunction,
     },
     /// Count of players matching a player-level filter.
     /// Used for "for each opponent who lost life this turn" and similar patterns.
@@ -5886,6 +5962,21 @@ pub enum Effect {
     /// Search a player's library for card(s) matching a filter.
     /// The destination is handled by the sub_ability chain (ChangeZone + Shuffle).
     SearchLibrary {
+        /// CR 701.23a: Zones the search looks through. Defaults to library-only
+        /// (the overwhelming majority of tutors). God-Pharaoh's-Gift-class cards
+        /// (Gate to the Afterlife, Dark Supplicant, Say Its Name, Boonweaver
+        /// Giant, Mishra) search graveyard + hand + library. The trailing "If you
+        /// search your library this way, shuffle" is the effect's own Shuffle
+        /// sub-ability and is always reached in the multi-zone case because
+        /// Library is in the set. CR 701.23 + CR 609.3: a `CantSearchLibrary`
+        /// muzzle suppresses only the library component — the other zones are
+        /// still searched, and the per-turn "searched a library" tracking fires
+        /// only when Library is actually among the searched zones.
+        #[serde(
+            default = "default_search_zones",
+            skip_serializing_if = "is_default_search_zones"
+        )]
+        source_zones: Vec<Zone>,
         /// What cards can be found.
         filter: TargetFilter,
         /// How many cards to find (usually 1). `QuantityExpr` so the count can be
@@ -6399,6 +6490,12 @@ pub enum Effect {
         /// CR 101.4: Whether each player chooses independently or one player decides for all.
         #[serde(default)]
         chooser_scope: CategoryChooserScope,
+        /// Permanents eligible to be chosen for the category slots.
+        #[serde(default = "default_target_filter_permanent")]
+        choose_filter: TargetFilter,
+        /// Permanents in scope for the final sacrifice sweep.
+        #[serde(default = "default_target_filter_permanent")]
+        sacrifice_filter: TargetFilter,
     },
     /// CR 702.110b: Exploit — sacrifice a creature you control (optional).
     /// The controller may sacrifice any creature they control, including the exploiter itself.
@@ -6898,6 +6995,18 @@ fn is_default_outside_game_source_pool(pool: &OutsideGameSourcePool) -> bool {
     matches!(pool, OutsideGameSourcePool::Sideboard)
 }
 
+/// CR 701.23a: Default search zone set — library only, the overwhelming
+/// majority of tutors. Used by `Effect::SearchLibrary.source_zones`.
+fn default_search_zones() -> Vec<Zone> {
+    vec![Zone::Library]
+}
+
+/// True when `zones` is the library-only default, so multi-zone metadata is the
+/// only thing serialized into `card-data.json`.
+fn is_default_search_zones(zones: &[Zone]) -> bool {
+    zones == [Zone::Library]
+}
+
 fn default_zone_hand() -> Zone {
     Zone::Hand
 }
@@ -6946,6 +7055,10 @@ pub enum CopyRetargetPermission {
 
 pub(crate) fn default_target_filter_any() -> TargetFilter {
     TargetFilter::Any
+}
+
+pub(crate) fn default_target_filter_permanent() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::permanent())
 }
 
 /// CR 115.1: a copy keeps the original spell's declared targets unless an
@@ -9552,10 +9665,11 @@ pub enum TriggerCondition {
     /// Used to gate continuous triggers that only become active at higher class levels.
     ClassLevelGE { level: u8 },
 
-    /// "if you cast it" — zoneless cast check (unlike CastFromZone which requires a specific zone).
-    /// CR 701.57a: Used by Discover ETB triggers.
-    /// Negation ("if it wasn't cast") is expressed via `Not { Box::new(WasCast) }`.
-    WasCast,
+    /// CR 601.2 + CR 603.4: reads the ENTERING object's `cast_from_zone`, never the source.
+    WasCast {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zone: Option<Zone>,
+    },
     /// CR 305.1 + CR 603.4: Intervening/event condition for zone-change
     /// triggers whose subject must have been played as a land. Negation
     /// ("without being played") is expressed via `Not { Box::new(WasPlayed) }`.
@@ -11124,6 +11238,10 @@ pub enum ContinuousModification {
     /// CR 305.6 + CR 305.7: Adds all five basic land types in addition to
     /// existing types. Used by Prismatic Omen, Dryad of the Ilysian Grove.
     AddAllBasicLandTypes,
+    /// CR 205.3i + CR 305.7: grants every land type (all 17 land subtypes) and
+    /// their mana abilities, additive. Distinct from AddAllBasicLandTypes
+    /// (CR 305.6, 5 basic types). Omo, Queen of Vesuva. Layer 4.
+    AddAllLandTypes,
     /// Adds the source object's chosen subtype (creature type or basic land type).
     /// Resolved at layer evaluation time from the source's `chosen_attributes`.
     AddChosenSubtype {
@@ -11680,7 +11798,11 @@ impl ResolvedAbility {
     /// the same "zero targets is legal" fact, so target-slot collection must
     /// honor either.
     pub fn targeting_is_optional(&self) -> bool {
-        self.optional_targeting || self.multi_target.as_ref().is_some_and(|spec| spec.min == 0)
+        self.optional_targeting
+            || self
+                .multi_target
+                .as_ref()
+                .is_some_and(MultiTargetSpec::min_is_fixed_zero)
     }
 }
 
@@ -12311,6 +12433,32 @@ mod tests {
         let json = serde_json::to_string(&ability).unwrap();
         let deserialized: ResolvedAbility = serde_json::from_str(&json).unwrap();
         assert_eq!(ability, deserialized);
+    }
+
+    #[test]
+    fn multi_target_spec_serializes_fixed_min_compatibly_and_dynamic_min_roundtrips() {
+        let fixed = MultiTargetSpec::fixed(0, 2);
+        let fixed_json = serde_json::to_value(&fixed).unwrap();
+        assert_eq!(fixed_json["min"], serde_json::json!(0));
+        assert_eq!(
+            serde_json::from_value::<MultiTargetSpec>(fixed_json).unwrap(),
+            fixed
+        );
+
+        let dynamic = MultiTargetSpec::exact(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        let dynamic_json = serde_json::to_value(&dynamic).unwrap();
+        assert!(
+            dynamic_json["min"].is_object(),
+            "dynamic min must serialize as a QuantityExpr object"
+        );
+        assert_eq!(
+            serde_json::from_value::<MultiTargetSpec>(dynamic_json).unwrap(),
+            dynamic
+        );
     }
 
     #[test]

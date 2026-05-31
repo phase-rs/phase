@@ -3,7 +3,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
@@ -18,7 +18,7 @@ use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CastingPermission, Chooser, CopyRetargetPermission,
     CounterSourceRider, Effect, LibraryPosition, PermissionGrantee, QuantityExpr, QuantityRef,
-    StaticDefinition, TargetFilter,
+    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -565,8 +565,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // "with that name" or "with the same name as that card" suffixes.
                     let has_search_prefix = nom_primitives::scan_contains(&before_lower, "search ");
                     let search_with_that_name = has_search_prefix
-                        && (before_lower.ends_with("with that name")
-                            || before_lower.ends_with("with the same name as that card"))
+                        && parse_search_exile_name_suffix(&before_lower).is_ok()
                         && tag::<_, _, OracleError<'_>>("exile them")
                             .parse(remainder_trimmed)
                             .is_ok();
@@ -591,6 +590,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             && (opt(tag::<_, _, OracleError<'_>>("put ")), tag("the rest"))
                                 .parse(remainder_trimmed)
                                 .is_ok();
+                    let sacrifice_rest_remainder = preceded(
+                        opt(tag::<_, _, OracleError<'_>>("then ")),
+                        alt((
+                            tag::<_, _, OracleError<'_>>("sacrifices the rest"),
+                            tag("sacrifice the rest"),
+                        )),
+                    )
+                    .parse(remainder_trimmed)
+                    .is_ok();
                     // CR 109.5 + CR 608.2c + CR 800.4g: "you and that player each <body>"
                     // (and analogous "you and <player-noun> each <body>" compound
                     // subjects) is a SINGLE compound subject distributing the body
@@ -679,7 +687,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         && alt((tag::<_, _, OracleError<'_>>("add "), tag("subtract ")))
                             .parse(remainder_trimmed)
                             .is_ok();
-                    let suppress = nom_primitives::scan_contains(&before_lower, "from among")
+                    let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
+                        && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
                         || prevent_then_put_continuation
@@ -748,6 +757,18 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     .parse(trimmed_lower.as_str())
     .is_ok();
     sequence_starts
+}
+
+fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (rest, _) = take_until::<_, _, OracleError<'_>>("with ").parse(input)?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("with that name"),
+        tag("with the chosen name"),
+        tag("with the same name as that card"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = eof.parse(rest)?;
+    Ok((rest, ()))
 }
 
 fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(ClauseBoundary, usize)> {
@@ -1653,20 +1674,33 @@ pub(super) fn apply_clause_continuation(
             reveal,
             attach_to_source,
         } => {
+            // CR 701.23a: A multi-zone tutor ("graveyard, hand, and/or library")
+            // finds the card in any searched zone, so the put-step must move it
+            // from wherever it actually is (`origin: None`). A library-only
+            // search keeps `origin: Some(Library)` — that origin doubles as the
+            // CR 701.23b fail-to-find signal for the change-zone resolver.
+            let mut multi_zone_search = false;
             if let Some(previous) = defs.last_mut() {
                 if let Effect::SearchLibrary {
                     reveal: existing_reveal,
+                    source_zones,
                     ..
                 } = &mut *previous.effect
                 {
                     *existing_reveal |= reveal;
+                    multi_zone_search = source_zones.iter().any(|zone| *zone != Zone::Library);
                 }
                 apply_search_destination_to_ability_chain(previous, destination, enter_tapped);
             }
+            let put_origin = if multi_zone_search {
+                None
+            } else {
+                Some(Zone::Library)
+            };
             let mut change_zone = AbilityDefinition::new(
                 kind,
                 Effect::ChangeZone {
-                    origin: Some(Zone::Library),
+                    origin: put_origin,
                     destination,
                     target: TargetFilter::Any,
                     owner_library: false,
@@ -2212,6 +2246,21 @@ pub(super) fn apply_clause_continuation(
                 face_down,
             };
         }
+        ContinuationAst::ChooseAndSacrificeRestFilter { sacrifice_filter } => {
+            let Some(filter) = sacrifice_filter else {
+                return;
+            };
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::ChooseAndSacrificeRest {
+                sacrifice_filter: existing,
+                ..
+            } = &mut *previous.effect
+            {
+                *existing = filter;
+            }
+        }
     }
 }
 
@@ -2309,6 +2358,7 @@ pub(super) fn continuation_absorbs_current(
         // parse_followup_continuation_ast; the "exile it [face down]" clause is
         // folded into that Dig (rewritten to ExileTop) and emits no sibling def.
         ContinuationAst::ExileLookedAtCard { .. } => true,
+        ContinuationAst::ChooseAndSacrificeRestFilter { .. } => true,
     }
 }
 
@@ -2867,6 +2917,7 @@ pub(super) fn parse_followup_continuation_ast(
     let lower = text.to_lowercase();
 
     match previous_effect {
+        Effect::ChooseAndSacrificeRest { .. } => parse_choose_and_sacrifice_rest_followup(&lower),
         Effect::SearchLibrary { .. } if is_search_result_reveal_clause(&lower) => {
             Some(ContinuationAst::SearchRevealResult)
         }
@@ -3433,6 +3484,66 @@ pub(super) fn parse_followup_continuation_ast(
     }
 }
 
+fn parse_choose_and_sacrifice_rest_followup(lower: &str) -> Option<ContinuationAst> {
+    type E<'a> = OracleError<'a>;
+    let lower = lower.trim();
+
+    all_consuming(terminated(
+        preceded(
+            opt(tag::<_, _, E>("then ")),
+            alt((
+                parse_bare_choose_and_sacrifice_rest_filter,
+                parse_explicit_choose_and_sacrifice_rest_filter,
+            )),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .ok()
+    .map(|(_, sacrifice_filter)| ContinuationAst::ChooseAndSacrificeRestFilter { sacrifice_filter })
+}
+
+fn parse_bare_choose_and_sacrifice_rest_filter(
+    input: &str,
+) -> Result<(&str, Option<TargetFilter>), nom::Err<OracleError<'_>>> {
+    let (input, _) =
+        alt((tag::<_, _, OracleError<'_>>("sacrifices"), tag("sacrifice"))).parse(input)?;
+    let (input, _) = tag(" the rest").parse(input)?;
+    Ok((input, None))
+}
+
+fn parse_explicit_choose_and_sacrifice_rest_filter(
+    input: &str,
+) -> Result<(&str, Option<TargetFilter>), nom::Err<OracleError<'_>>> {
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("each player ")).parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("sacrifices "),
+        tag("sacrifice "),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("all other ").parse(input)?;
+    let (input, filter) = parse_nonland_permanent_domain(input)?;
+    Ok((input, Some(filter)))
+}
+
+fn parse_nonland_permanent_domain(
+    input: &str,
+) -> Result<(&str, TargetFilter), nom::Err<OracleError<'_>>> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("nonland permanents ").parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("they control"),
+        tag("you control"),
+        tag("that player controls"),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        TargetFilter::Typed(
+            TypedFilter::permanent().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        ),
+    ))
+}
+
 /// CR 122.6a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
 /// Returns `TokenEntersWithCounters` continuation on success.
 fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> {
@@ -3764,6 +3875,17 @@ mod tests {
         // Lotho: "you lose 1 life and create a Treasure token"
         let chunks = clause_texts("you lose 1 life and create a Treasure token");
         assert_eq!(chunks, vec!["you lose 1 life", "create a Treasure token"]);
+    }
+
+    #[test]
+    fn bare_and_keeps_chosen_name_search_exile_compound() {
+        // CR 701.23a + CR 701.18a: "search ... with the chosen name and exile
+        // them" is one search compound, not a SearchLibrary followed by a second
+        // standalone ChangeZone.
+        let chunks = clause_texts(
+            "search target opponent's graveyard, hand, and library for any number of cards with the chosen name and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
 
     #[test]
@@ -4163,6 +4285,38 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0], "you gain 1 life");
         assert!(chunks[1].starts_with("~ deals 1 damage"));
+    }
+
+    #[test]
+    fn from_among_sacrifice_rest_splits_for_absorption() {
+        let chunks = clause_texts(
+            "each player chooses an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control, then sacrifices the rest.",
+        );
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[1], "sacrifices the rest",
+            "sacrifice-rest continuation must be a separate chunk"
+        );
+    }
+
+    #[test]
+    fn choose_and_sacrifice_rest_followup_accepts_then_and_period() {
+        let effect = Effect::ChooseAndSacrificeRest {
+            categories: vec![crate::types::card_type::CoreType::Artifact],
+            chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
+            choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "then sacrifices the rest.",
+                &effect,
+                &mut ParseContext::default(),
+            ),
+            Some(ContinuationAst::ChooseAndSacrificeRestFilter {
+                sacrifice_filter: None,
+            })
+        );
     }
 
     #[test]

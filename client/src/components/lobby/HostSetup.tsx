@@ -75,10 +75,29 @@ export function HostSetup({
   // the chosen format, and downstream views (the deck picker reached via
   // "Change Deck") can read the format from the store to filter decks.
   const storeFormatConfig = useMultiplayerStore((s) => s.formatConfig);
-  const initialFormatConfig = storeFormatConfig ?? FORMAT_DEFAULTS.Commander;
+  const lastHostConfig = useMultiplayerStore((s) => s.lastHostConfig);
+  const rememberHostConfig = useMultiplayerStore((s) => s.rememberHostConfig);
+
+  const isP2P = connectionMode === "p2p";
+
+  // Restore the player's last host-setup choices across sessions — but only
+  // when they're still hostable in this connection mode. A remembered format
+  // whose minimum exceeds the P2P mesh ceiling can't run over P2P, so we drop
+  // back to defaults rather than seed an unhostable configuration.
+  const remembered =
+    lastHostConfig != null &&
+    (!isP2P || FORMAT_DEFAULTS[lastHostConfig.format].min_players <= P2P_MAX_PEERS)
+      ? lastHostConfig
+      : null;
+  const initialFormatConfig =
+    remembered?.formatConfig ?? storeFormatConfig ?? FORMAT_DEFAULTS.Commander;
+  // Clamp a remembered player count to what this mode/format can actually seat.
+  const seatCeiling = isP2P
+    ? Math.min(initialFormatConfig.max_players, P2P_MAX_PEERS)
+    : initialFormatConfig.max_players;
 
   const [roomName, setRoomName] = useState("");
-  const [isPublic, setIsPublic] = useState(true);
+  const [isPublic, setIsPublic] = useState(remembered?.isPublic ?? true);
   const [showPassword, setShowPassword] = useState(false);
   const [password, setPassword] = useState("");
   const [selectedFormat, setSelectedFormat] = useState<GameFormat>(
@@ -86,10 +105,12 @@ export function HostSetup({
   );
   const [formatConfig, setLocalFormatConfig] =
     useState<FormatConfig>(initialFormatConfig);
-  const [playerCount, setPlayerCount] = useState(initialFormatConfig.min_players);
-  const [matchType, setMatchType] = useState<MatchType>("Bo1");
-  const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>([]);
-  const [startWhenFull, setStartWhenFull] = useState(true);
+  const [playerCount, setPlayerCount] = useState(
+    Math.min(remembered?.playerCount ?? initialFormatConfig.min_players, seatCeiling),
+  );
+  const [matchType, setMatchType] = useState<MatchType>(remembered?.matchType ?? "Bo1");
+  const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>(remembered?.aiSeats ?? []);
+  const [startWhenFull, setStartWhenFull] = useState(remembered?.startWhenFull ?? true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const effectiveMatchType = playerCount === 2 ? matchType : "Bo1";
   const aiDeckCatalog = useAiDeckCatalog({
@@ -112,7 +133,6 @@ export function HostSetup({
     setFormatConfig(formatConfig);
   }, [formatConfig, setFormatConfig]);
 
-  const isP2P = connectionMode === "p2p";
   const maxPlayers = isP2P
     ? Math.min(formatConfig.max_players, P2P_MAX_PEERS)
     : formatConfig.max_players;
@@ -181,6 +201,20 @@ export function HostSetup({
         : displayName
           ? `${displayName}'s table`
           : null;
+    // Remember the chosen settings so the next host session restores them
+    // instead of resetting to defaults. Persist the format's own config (with
+    // its true `max_players` ceiling), not `finalConfig` — the latter's
+    // `max_players` is the chosen player count and would cap the slider on
+    // restore. Room name and password are intentionally not persisted.
+    rememberHostConfig({
+      format: selectedFormat,
+      formatConfig,
+      playerCount,
+      matchType: effectiveMatchType,
+      isPublic,
+      startWhenFull,
+      aiSeats,
+    });
     try {
       const ok = await onHost({
         displayName,

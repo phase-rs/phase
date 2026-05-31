@@ -863,6 +863,17 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         (None, None) => None,
     };
 
+    // CR 603.4: Intervening-if life-gain triggers check the gained-life
+    // condition when they trigger and resolve, so "that many" distribution
+    // references bind to the same turn-scoped life-gain quantity.
+    if def.condition.as_ref().is_some_and(
+        crate::parser::oracle_effect::trigger_condition_references_controller_life_gained,
+    ) {
+        if let Some(ability) = def.execute.as_deref_mut() {
+            crate::parser::oracle_effect::rewrite_gained_life_that_many_distribution_refs(ability);
+        }
+    }
+
     // CR 109.4 + CR 603.7c: Surface TargetFilter::Player when execute
     // references ControllerRef::TargetPlayer.
     if def.valid_target.is_none() {
@@ -2099,6 +2110,20 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
                 qualities: qualities.clone(),
             },
         },
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCountBySharedQuality {
+                    filter,
+                    quality,
+                    aggregate,
+                },
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountBySharedQuality {
+                filter: substitute_another_in_filter(filter),
+                quality: quality.clone(),
+                aggregate: *aggregate,
+            },
+        },
         // CR 603.4 + CR 109.3: Aggregate populations are also "object
         // populations" in the same sense as ObjectCount — when an
         // intervening-if references an aggregate over "each other <type>",
@@ -2403,7 +2428,32 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         if !after.starts_with(" from") {
             return (
                 strip_condition_clause(text, pos, "if you cast it".len()),
-                Some(TriggerCondition::WasCast),
+                Some(TriggerCondition::WasCast { zone: None }),
+            );
+        }
+    }
+
+    // CR 603.4 + CR 601.2 + CR 603.2c: "if it/they entered or w(as|ere) cast from a graveyard"
+    // allow-noncombinator: structural if-clause excision, not parse dispatch
+    for pattern in &[
+        "if they entered or were cast from a graveyard",
+        "if it entered or was cast from a graveyard",
+    ] {
+        if let Some(pos) = tp.find(pattern) {
+            return (
+                strip_condition_clause(text, pos, pattern.len()),
+                Some(TriggerCondition::Or {
+                    conditions: vec![
+                        TriggerCondition::ZoneChangeObjectMatchesFilter {
+                            origin: Some(Zone::Graveyard),
+                            destination: Zone::Battlefield,
+                            filter: TargetFilter::Any,
+                        },
+                        TriggerCondition::WasCast {
+                            zone: Some(Zone::Graveyard),
+                        },
+                    ],
+                }),
             );
         }
     }
@@ -2418,7 +2468,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             Some(TriggerCondition::Or {
                 conditions: vec![
                     TriggerCondition::Not {
-                        condition: Box::new(TriggerCondition::WasCast),
+                        condition: Box::new(TriggerCondition::WasCast { zone: None }),
                     },
                     TriggerCondition::ManaSpentCondition {
                         text: "no mana was spent to cast them".to_string(),
@@ -2440,14 +2490,14 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // which is not cast — does not re-trigger the ability infinitely. The
     // literal "if it was cast" is not a substring of "if it wasn't cast"
     // (the latter has "wasn't", not "was cast"), so the two arms are disjoint.
-    // NOTE: if a zone-specific "if it was cast from <zone>" trigger arm is ever
-    // added, it must be ordered BEFORE this one — "if it was cast" is a prefix
-    // of "if it was cast from your hand" and would shadow it here.
+    // NOTE: a zone-specific "if it was cast from <zone>" arm must be ordered
+    // BEFORE this one — "if it was cast" is a prefix of "if it was cast from
+    // your hand" and would shadow it here.
     let was_cast_pos = tp.find("if it was cast"); // allow-noncombinator: anchor for strip_condition_clause — structural if-clause excision, not parse dispatch
     if let Some(pos) = was_cast_pos {
         return (
             strip_condition_clause(text, pos, "if it was cast".len()),
-            Some(TriggerCondition::WasCast),
+            Some(TriggerCondition::WasCast { zone: None }),
         );
     }
 
@@ -2456,7 +2506,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return (
             strip_condition_clause(text, pos, "if it wasn't cast".len()),
             Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasCast),
+                condition: Box::new(TriggerCondition::WasCast { zone: None }),
             }),
         );
     }
@@ -3141,14 +3191,70 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
 
     // Object noun phrase: the "ability" being activated. Decomposed into
     // article + optional modifier + noun so the grammar accepts both "an
-    // ability" and "an activated ability". This is also the clean extension
-    // point for the source-object filter axis ("an ability **of an artifact**",
-    // "of a creature or land", "of a permanent"). The matcher already consults
-    // `def.valid_card` via `valid_card_matches`, so adding source-object filters
-    // here unlocks Crackdown Construct, Wizened Mentor, Runic Armasaur, Ceaseless
-    // Searblades, and similar cards.
-    fn parse_ability_object(input: &str) -> OracleResult<'_, ()> {
-        value((), (tag("an "), opt(tag("activated ")), tag("ability"))).parse(input)
+    // ability" and "an activated ability". An optional "of <source>" suffix
+    // narrows the trigger to abilities whose source matches a type filter.
+    // The matcher already consults `def.valid_card` via `valid_card_matches`,
+    // so the source-object filter is propagated directly.
+    // Cards: Crackdown Construct, Ashnod the Uncaring, Wizened Mentor,
+    // Runic Armasaur, Ceaseless Searblades.
+    fn parse_ability_object(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+        let (rest, _) = (tag("an "), opt(tag("activated ")), tag("ability")).parse(input)?;
+        // CR 602.1a + CR 113.7: Optional source-object filter narrows the
+        // trigger to abilities whose source matches a type filter ("of an
+        // artifact or creature", "of a creature or land", "of a permanent").
+        opt(preceded(
+            tag(" of "),
+            preceded(alt((tag("a "), tag("an "))), parse_source_type_disjunction),
+        ))
+        .map(|filter| filter.map(source_object_filter))
+        .parse(rest)
+    }
+
+    fn source_object_filter(type_filters: Vec<TypeFilter>) -> TargetFilter {
+        // CR 109.2: A card type/subtype description without "card", "spell",
+        // "source", or a zone means a permanent of that type on the battlefield.
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }],
+            ..TypedFilter::default()
+        })
+    }
+
+    /// CR 602.1a: Parse a disjunction of card types for the source-object
+    /// filter: "artifact or creature", "creature or land", "permanent", etc.
+    /// Uses `separated_list1` per R1 (nom combinators on the first pass).
+    fn parse_source_type_disjunction(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+        separated_list1(tag(" or "), parse_single_source_type)
+            .map(|types| {
+                if types.len() == 1 {
+                    types
+                } else {
+                    vec![TypeFilter::AnyOf(types)]
+                }
+            })
+            .parse(input)
+    }
+
+    /// CR 205: Match a single card type keyword for source-object filters.
+    fn parse_single_source_type(input: &str) -> OracleResult<'_, TypeFilter> {
+        alt((
+            value(TypeFilter::Artifact, tag("artifact")),
+            value(TypeFilter::Creature, tag("creature")),
+            value(TypeFilter::Land, tag("land")),
+            value(TypeFilter::Enchantment, tag("enchantment")),
+            value(TypeFilter::Planeswalker, tag("planeswalker")),
+            value(TypeFilter::Permanent, tag("permanent")),
+            parse_source_subtype,
+        ))
+        .parse(input)
+    }
+
+    fn parse_source_subtype(input: &str) -> OracleResult<'_, TypeFilter> {
+        parse_subtype(input)
+            .map(|(subtype, consumed)| (&input[consumed..], TypeFilter::Subtype(subtype)))
+            .ok_or_else(|| oracle_err(input))
     }
 
     fn parse_qualifier(input: &str) -> OracleResult<'_, Option<TriggerCondition>> {
@@ -3174,10 +3280,11 @@ fn try_parse_ability_activation_trigger(lower: &str) -> Option<(TriggerMode, Tri
         ),
     );
 
-    if let Ok((_, (subject, _, qualifier))) = all_consuming(parse_line).parse(lower) {
+    if let Ok((_, (subject, source_filter, qualifier))) = all_consuming(parse_line).parse(lower) {
         let mut def = make_base();
         def.mode = TriggerMode::AbilityActivated;
         def.valid_target = subject;
+        def.valid_card = source_filter;
         def.condition = qualifier;
         return Some((TriggerMode::AbilityActivated, def));
     }
@@ -3870,7 +3977,12 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_phrase("becomes the target of a spell or ability"),
         parse_event_phrase("become the target of a spell or ability"),
         parse_event_phrase("becomes the target of an aura spell"),
+        parse_event_phrase("becomes the target of an instant or sorcery spell"),
+        parse_event_phrase("become the target of an instant or sorcery spell"),
         parse_event_phrase("becomes the target of a spell"),
+        // CR 702.26c: "phases in" / "phase in" — phasing trigger verb.
+        parse_event_phrase("phases in"),
+        parse_event_phrase("phase in"),
     ));
     let player_actions = alt((
         passive_player_actions,
@@ -5291,10 +5403,13 @@ fn try_parse_event(
         return Some((TriggerMode::Blocks, def));
     }
 
-    // "leaves the battlefield" / "leaves"
+    // "leaves the battlefield" / "leaves" / "leave the battlefield" / "leave"
+    // CR 603.2c: Plural "leave" form is used with batched "one or more" subjects.
     let leaves_tail = alt((
         value((), tag::<_, _, OracleError<'_>>("leaves the battlefield")),
-        value((), tag("leaves")),
+        value((), tag::<_, _, OracleError<'_>>("leave the battlefield")),
+        value((), tag::<_, _, OracleError<'_>>("leaves")),
+        value((), tag("leave")),
     ))
     .parse(rest)
     .ok()
@@ -5514,6 +5629,8 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
+        /// CR 702.26c: Permanent phases in from phased-out state.
+        PhasesIn,
         /// CR 701.3d: Equipment/Aura becomes unattached from a permanent.
         BecomesUnattached(Option<TargetFilter>),
         // CR 701.3a: Equipment/Aura becomes attached to a permanent.
@@ -5562,6 +5679,21 @@ fn try_parse_event(
                     )),
                 },
                 tag("becomes the target of an aura spell"),
+            ),
+            // CR 115.1a: "instant or sorcery spell" source restriction.
+            value(
+                SimpleEvent::BecomesTargetSpell {
+                    qualifier: Some(TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        ],
+                    }),
+                },
+                alt((
+                    tag("becomes the target of an instant or sorcery spell"),
+                    tag("become the target of an instant or sorcery spell"),
+                )),
             ),
             value(
                 SimpleEvent::BecomesTargetSpell { qualifier: None },
@@ -5625,6 +5757,11 @@ fn try_parse_event(
             // CR 702.171c: Actor-side saddle trigger (reserved — no cards today without
             // the compound, but the arm is ready for future printings).
             value(SimpleEvent::Saddles, tag("saddles a mount")),
+        )))
+        .or(alt((
+            // CR 702.26c: "phases in" / "phase in" — phasing trigger.
+            value(SimpleEvent::PhasesIn, tag("phases in")),
+            value(SimpleEvent::PhasesIn, tag("phase in")),
             // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
             parse_becomes_unattached,
             // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
@@ -5758,6 +5895,11 @@ fn try_parse_event(
                 // CR 702.122 + CR 702.171c: Compound actor-side trigger. Fires on
                 // either saddling a Mount or crewing a Vehicle.
                 def.mode = TriggerMode::SaddlesOrCrews;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::PhasesIn => {
+                // CR 702.26c: Permanent phases in from phased-out state.
+                def.mode = TriggerMode::PhaseIn;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::BecomesUnattached(host_filter) => {
@@ -7842,6 +7984,27 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
     }
 
+    // CR 603.2 + CR 613.3: "When you lose control of ~" — fires after a
+    // controller change on the source object. Maps to ChangesController so
+    // the trigger fires on the GainControl/GiveControl effect-resolved event.
+    // valid_card = SelfRef gates the trigger to changes on this specific object.
+    // The trigger controller is the previous controller (still Khârn's holder
+    // at trigger-scan time, because layer re-evaluation runs after trigger
+    // collection in the post-action pipeline).
+    fn parse_you_lose_control_of_self(i: &str) -> OracleResult<'_, ()> {
+        all_consuming(preceded(
+            alt((tag("when "), tag("whenever "))),
+            value((), tag("you lose control of ~")),
+        ))
+        .parse(i)
+    }
+    if parse_you_lose_control_of_self(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesController;
+        def.valid_card = Some(TargetFilter::SelfRef);
+        return Some((TriggerMode::ChangesController, def));
+    }
+
     if matches!(lower, "whenever you lose life" | "when you lose life") {
         let mut def = make_base();
         def.mode = TriggerMode::LifeLost;
@@ -7858,6 +8021,34 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         def.valid_target = Some(TargetFilter::Controller);
         def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
         return Some((TriggerMode::LifeLost, def));
+    }
+
+    fn parse_countering_spell_or_ability_line(i: &str) -> OracleResult<'_, ControllerRef> {
+        preceded(
+            alt((tag("whenever "), tag("when "))),
+            delimited(
+                tag("a spell or ability "),
+                alt((
+                    value(ControllerRef::You, tag("you control")),
+                    value(ControllerRef::Opponent, tag("an opponent controls")),
+                )),
+                tag(" counters a spell"),
+            ),
+        )
+        .parse(i)
+    }
+    if let Ok((rem, controller)) = parse_countering_spell_or_ability_line(lower) {
+        if rem.trim().is_empty() {
+            // CR 109.5 + CR 701.6 + CR 603.2: "Whenever a spell or ability you
+            // control counters a spell" fires on `SpellCountered` events where the
+            // countering spell/ability controller matches this controller filter.
+            let mut def = make_base();
+            def.mode = TriggerMode::Countered;
+            def.valid_source = Some(TargetFilter::Typed(
+                TypedFilter::default().controller(controller),
+            ));
+            return Some((TriggerMode::Countered, def));
+        }
     }
 
     // CR 601.2: "Whenever you cast a/an [type] spell [post-spell modifier]" — extract
@@ -10119,7 +10310,7 @@ mod tests {
         CastingPermission, Comparator, ContinuousModification, ControllerRef, CountScope,
         DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp,
         ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        QuantityExpr, QuantityRef, SharedQuality, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -10189,6 +10380,17 @@ mod tests {
         )
         .expect("parse single-zone negation");
         assert_eq!(single, OriginConstraint::NotEquals(Zone::Hand));
+    }
+
+    #[test]
+    fn parses_phases_in_trigger_as_phase_in_mode() {
+        let def = parse_trigger_line(
+            "Whenever Warping Wurm phases in, put a +1/+1 counter on it.",
+            "Warping Wurm",
+        );
+
+        assert_eq!(def.mode, TriggerMode::PhaseIn);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
     #[test]
@@ -13259,6 +13461,38 @@ mod tests {
         );
     }
 
+    /// CR 603.2 + CR 613.3 + #1522: "When you lose control of ~" — Sigil of
+    /// Corruption ability on Khârn the Betrayer. Maps to ChangesController with
+    /// valid_card = SelfRef so the trigger fires only when this specific permanent
+    /// changes controller. Execute draws 2 for the previous controller (the trigger
+    /// fires before layer re-evaluation, so the previous controller still holds Khârn
+    /// at trigger-scan time).
+    #[test]
+    fn trigger_when_you_lose_control_maps_to_changes_controller() {
+        let def = parse_trigger_line(
+            "When you lose control of ~, draw two cards.",
+            "Khârn the Betrayer",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesController);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    /// CR 603.2c: Batched "one or more permanents … leave the battlefield" uses the plural
+    /// verb form. The parser must accept "leave" alongside "leaves" for LTB triggers.
+    #[test]
+    fn trigger_one_or_more_permanents_leave_the_battlefield() {
+        let def = parse_trigger_line(
+            "Whenever one or more permanents you control leave the battlefield, scry 1.",
+            "Nefarious Imp",
+        );
+        assert_eq!(def.mode, TriggerMode::LeavesBattlefield);
+        assert!(def.batched, "one or more must set batched flag");
+        assert!(
+            !def.trigger_zones.contains(&Zone::Graveyard),
+            "non-self-ref LTB must not extend to graveyard"
+        );
+    }
+
     /// CR 603.6c: "Whenever a permanent is returned to a player's hand" — Warped Devotion.
     #[test]
     fn trigger_returned_to_a_players_hand() {
@@ -14684,6 +14918,36 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::LifeLost);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    #[test]
+    fn trigger_spell_or_ability_you_control_counters_a_spell() {
+        let def = parse_trigger_line(
+            "Whenever a spell or ability you control counters a spell, you may tap or untap target permanent.",
+            "Lullmage Mentor",
+        );
+        assert_eq!(def.mode, TriggerMode::Countered);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            ))
+        );
+    }
+
+    #[test]
+    fn trigger_spell_or_ability_opponent_controls_counters_a_spell() {
+        let def = parse_trigger_line(
+            "Whenever a spell or ability an opponent controls counters a spell, draw a card.",
+            "Hypothetical Counter Watcher",
+        );
+        assert_eq!(def.mode, TriggerMode::Countered);
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
     }
 
     #[test]
@@ -16576,6 +16840,65 @@ mod tests {
                 filters: vec![
                     TargetFilter::StackSpell,
                     TargetFilter::Typed(TypedFilter::default().subtype("Aura".to_string())),
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_becomes_target_of_instant_or_sorcery_spell() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control becomes the target of an instant or sorcery spell, that creature gets +3/+3 until end of turn.",
+            "Wild Defiance",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+            ))
+        );
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        ],
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_batched_become_target_of_instant_or_sorcery_spell() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control become the target of an instant or sorcery spell, draw a card.",
+            "Hypothetical Wild Defiance Payoff",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert!(def.batched);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+            ))
+        );
+        assert_eq!(
+            def.valid_source,
+            Some(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                        ],
+                    },
                 ],
             })
         );
@@ -20950,7 +21273,7 @@ mod tests {
                 assert_eq!(
                     conditions[0],
                     TriggerCondition::Not {
-                        condition: Box::new(TriggerCondition::WasCast),
+                        condition: Box::new(TriggerCondition::WasCast { zone: None }),
                     }
                 );
                 assert!(
@@ -20980,7 +21303,7 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(TriggerCondition::Not {
-                condition: Box::new(TriggerCondition::WasCast),
+                condition: Box::new(TriggerCondition::WasCast { zone: None }),
             })
         );
     }
@@ -22484,6 +22807,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn substitute_another_rewrites_shared_quality_count_filter() {
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountBySharedQuality {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::Another],
+                }),
+                quality: SharedQuality::CreatureType,
+                aggregate: AggregateFunction::Max,
+            },
+        };
+
+        let rewritten = substitute_another_in_expr(&expr);
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountBySharedQuality { filter, .. },
+        } = rewritten
+        else {
+            panic!("expected ObjectCountBySharedQuality, got {rewritten:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.properties.contains(&FilterProp::OtherThanTriggerObject));
+        assert!(!tf.properties.contains(&FilterProp::Another));
+    }
+
     /// Issue #444 — Odric, Lunarch Marshal. The full trigger parses to a
     /// single `GenericEffect` carrying one conditioned `StaticDefinition` per
     /// keyword (first strike + the 11 from the "the same is true for"
@@ -23143,5 +23494,119 @@ mod snapshot_tests {
                 .map(|ability| ability.effect.as_ref()),
             Some(Effect::CopySpell { .. })
         ));
+    }
+
+    /// CR 602.1: "Whenever you activate an ability of an artifact or creature
+    /// that isn't a mana ability" — source-object filter with type disjunction.
+    /// Cards: Crackdown Construct, Ashnod the Uncaring.
+    #[test]
+    fn trigger_activate_ability_of_artifact_or_creature() {
+        let def = parse_trigger_line(
+            "Whenever you activate an ability of an artifact or creature that isn't a mana ability, ~ gets +1/+1 until end of turn.",
+            "Crackdown Construct",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::ActivatedAbilityIsNonMana)
+        );
+        // Source-object filter: artifact or creature.
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::AnyOf(vec![
+                    TypeFilter::Artifact,
+                    TypeFilter::Creature,
+                ])],
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }],
+                ..TypedFilter::default()
+            }))
+        );
+    }
+
+    /// CR 109.2: "an ability of an Elemental" describes an Elemental permanent
+    /// source on the battlefield, not an Elemental card in another zone.
+    #[test]
+    fn trigger_activate_ability_of_subtype_source() {
+        let def = parse_trigger_line(
+            "Whenever you activate an ability of an Elemental, ~ gets +1/+0 until end of turn.",
+            "Ceaseless Searblades",
+        );
+        assert_eq!(def.mode, TriggerMode::AbilityActivated);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Elemental".to_string())],
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }],
+                ..TypedFilter::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn twilight_diviner_second_trigger_has_graveyard_origin_condition() {
+        let def = parse_trigger_line(
+            "Whenever one or more other creatures you control enter, if they entered or were cast from a graveyard, create a token that's a copy of one of them. This ability triggers only once each turn.",
+            "Twilight Diviner",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert!(def.batched, "should be batched");
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+        match &def.condition {
+            Some(TriggerCondition::Or { conditions }) => {
+                assert_eq!(conditions.len(), 2);
+                assert!(
+                    matches!(
+                        &conditions[0],
+                        TriggerCondition::ZoneChangeObjectMatchesFilter {
+                            origin: Some(Zone::Graveyard),
+                            destination: Zone::Battlefield,
+                            ..
+                        }
+                    ),
+                    "first disjunct should be ZoneChangeObjectMatchesFilter(Graveyard→Battlefield)"
+                );
+                assert_eq!(
+                    conditions[1],
+                    TriggerCondition::WasCast {
+                        zone: Some(Zone::Graveyard)
+                    }
+                );
+            }
+            other => panic!("expected Or condition, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entered_or_cast_from_graveyard_singular_form() {
+        let def = parse_trigger_line(
+            "Whenever another creature enters under your control, if it entered or was cast from a graveyard, draw a card.",
+            "Test Card",
+        );
+        match &def.condition {
+            Some(TriggerCondition::Or { conditions }) => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(
+                    &conditions[0],
+                    TriggerCondition::ZoneChangeObjectMatchesFilter {
+                        origin: Some(Zone::Graveyard),
+                        destination: Zone::Battlefield,
+                        ..
+                    }
+                ));
+                assert_eq!(
+                    conditions[1],
+                    TriggerCondition::WasCast {
+                        zone: Some(Zone::Graveyard)
+                    }
+                );
+            }
+            other => panic!("expected Or condition, got: {other:?}"),
+        }
     }
 }
