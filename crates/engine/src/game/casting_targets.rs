@@ -52,6 +52,17 @@ pub(crate) fn handle_select_modes(
     // Spells resolve once — no cross-resolution mode constraints apply.
     validate_modal_indices(&modal, &indices, &[])?;
 
+    // CR 700.2 + CR 601.2c: Sorted ascending to match the slot order produced by
+    // `build_chained_resolved` and `build_target_slots_labelled`. Persisted on
+    // every `PendingCast` produced below so a later deferred target-selection
+    // step (e.g. after `ChooseX`) can re-derive per-slot mode labels for the
+    // targeting UI without re-running the mode-choice flow.
+    let sorted_indices: Vec<usize> = {
+        let mut s = indices.clone();
+        s.sort_unstable();
+        s
+    };
+
     // CR 700.2e + CR 115.1: The `player` parameter is the mode *chooser* (the
     // controller for standard modals; the opponent for "an opponent chooses
     // —"). Mode selection (CR 601.2b) routes to that player, but the spell is
@@ -96,6 +107,7 @@ pub(crate) fn handle_select_modes(
         pending_x.origin_zone = pending.origin_zone;
         pending_x.payment_mode = pending.payment_mode;
         pending_x.deferred_target_selection = true;
+        pending_x.chosen_modes = sorted_indices.clone();
         pending_x.additional_cost_decided = pending.additional_cost_decided;
         pending_x.declared_kickers_to_pay = pending.declared_kickers_to_pay;
         pending_x.declined_kickers = pending.declined_kickers;
@@ -117,6 +129,9 @@ pub(crate) fn handle_select_modes(
         pending.object_id,
         controller,
         &pending.ability.context,
+        // CR 107.1b: X is announced during the cost-payment step (after target
+        // selection on this non-deferred path), so it is not yet known here.
+        None,
     )?;
     if !target_slots.is_empty() {
         // CR 115.1 + CR 701.9b: For abilities marked `Random`, the game (not the
@@ -164,6 +179,7 @@ pub(crate) fn handle_select_modes(
         pending_sel.origin_zone = pending.origin_zone;
         pending_sel.additional_cost_flow = pending.additional_cost_flow;
         pending_sel.deferred_target_selection = pending.deferred_target_selection;
+        pending_sel.chosen_modes = sorted_indices.clone();
         pending_sel.additional_cost_decided = pending.additional_cost_decided;
         pending_sel.declared_kickers_to_pay = pending.declared_kickers_to_pay;
         pending_sel.declined_kickers = pending.declined_kickers;
@@ -232,6 +248,7 @@ pub(crate) fn handle_select_targets(
             pending_dist.origin_zone = pending.origin_zone;
             pending_dist.additional_cost_flow = pending.additional_cost_flow.clone();
             pending_dist.deferred_target_selection = pending.deferred_target_selection;
+            pending_dist.chosen_modes = pending.chosen_modes.clone();
             pending_dist.additional_cost_decided = pending.additional_cost_decided;
             pending_dist.declared_kickers_to_pay = pending.declared_kickers_to_pay.clone();
             pending_dist.declined_kickers = pending.declined_kickers.clone();

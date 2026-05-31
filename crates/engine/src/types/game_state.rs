@@ -960,6 +960,13 @@ pub struct PendingCast {
     /// during the normal cost-payment step after targets are chosen.
     #[serde(default)]
     pub deferred_target_selection: bool,
+    /// CR 700.2 + CR 601.2b: Indices of the modes chosen during the cast's
+    /// modal step, sorted ascending to match `build_chained_resolved` /
+    /// `build_target_slots_labelled`. Persisted so a deferred target-selection
+    /// step (after X or an additional cost) can re-build per-slot mode labels
+    /// for the targeting UI. Empty for non-modal casts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_modes: Vec<usize>,
     /// CR 601.2b: Set to `true` once an optional additional cost (e.g. Casualty)
     /// that was deferred before target selection has been decided (paid or declined).
     /// Guards `finish_pending_cast_cost_or_pay` from re-presenting the same cost
@@ -1015,6 +1022,7 @@ impl PendingCast {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
@@ -5721,6 +5729,7 @@ mod tests {
                 additional_cost_flow: None,
                 deferred_modal_choice: None,
                 deferred_target_selection: false,
+                chosen_modes: Vec::new(),
                 additional_cost_decided: false,
                 declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
@@ -6044,6 +6053,7 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),

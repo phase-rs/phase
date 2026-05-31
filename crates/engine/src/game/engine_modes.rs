@@ -118,6 +118,10 @@ fn handle_activated_mode_choice(
         source_id,
         player,
         &resolved.context,
+        // CR 107.1b: Activated-ability X is announced earlier in the activation
+        // flow; non-X activated abilities pass None. Threading the activated
+        // ability's chosen_x through is a separate concern outside this fix.
+        None,
     )?;
     let target_constraints = target_constraints_from_modal(&modal);
 
@@ -282,6 +286,8 @@ fn handle_triggered_mode_choice(
         source_id,
         player,
         &resolved.context,
+        // CR 107.1b: Triggered abilities don't use a chosen X here.
+        None,
     )?;
     let target_constraints = target_constraints_from_modal(&modal);
 
