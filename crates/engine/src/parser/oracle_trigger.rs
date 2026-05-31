@@ -862,6 +862,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         (None, None) => None,
     };
 
+    // CR 603.4: Intervening-if life-gain triggers check the gained-life
+    // condition when they trigger and resolve, so "that many" distribution
+    // references bind to the same turn-scoped life-gain quantity.
     if def.condition.as_ref().is_some_and(
         crate::parser::oracle_effect::trigger_condition_references_controller_life_gained,
     ) {
