@@ -229,8 +229,9 @@ fn parse_outlaw_type(input: &str) -> OracleResult<'_, TypeFilter> {
     Ok((rest, TypeFilter::AnyOf(any_of)))
 }
 
-/// Parse a self-reference from Oracle text: "~", "it", "this creature",
-/// "this permanent", "this spell", "this enchantment", "this artifact".
+/// Parse a self-reference from Oracle text: "~", "it", "itself",
+/// "this creature", "this permanent", "this spell", "this enchantment",
+/// "this artifact".
 ///
 /// Returns `TargetFilter::SelfRef` when a self-reference is recognized.
 pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -665,6 +666,13 @@ mod tests {
         let (rest2, f2) = parse_self_reference("itself.").unwrap();
         assert_eq!(rest2, ".");
         assert_eq!(f2, TargetFilter::SelfRef);
+
+        let (rest3, f3) = parse_self_reference("itself-damage").unwrap();
+        assert_eq!(rest3, "-damage");
+        assert_eq!(f3, TargetFilter::SelfRef);
+
+        // "itselfless" should NOT match as an "itself" self-reference.
+        assert!(parse_self_reference("itselfless").is_err());
     }
 
     #[test]
