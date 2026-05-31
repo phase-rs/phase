@@ -2128,4 +2128,98 @@ mod tests {
             "colored shards remain untouched by Affinity"
         );
     }
+
+    /// Issue #1542: Emergence Zone must expose TapLandForMana alongside its
+    /// sacrifice-for-flash activated ability.
+    #[test]
+    fn emergence_zone_exposes_tap_for_mana() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let mut state = setup_priority();
+        use crate::types::mana::{ManaType, ManaUnit};
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+        let land_id = create_object(
+            &mut state,
+            CardId(1542),
+            PlayerId(0),
+            "Emergence Zone".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            let parsed = parse_oracle_text(
+                "{T}: Add {C}.\n\
+                 {1}, {T}, Sacrifice this land: You may cast spells this turn as though they had flash.",
+                "Emergence Zone",
+                &[],
+                &[String::from("Land")],
+                &[],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+
+        let (_, _, grouped) = legal_actions_full(&state);
+        let land_actions = grouped
+            .get(&land_id)
+            .expect("Emergence Zone should expose legal actions");
+        assert!(
+            land_actions.iter().any(|action| matches!(
+                action,
+                GameAction::TapLandForMana { object_id } if *object_id == land_id
+            )),
+            "expected TapLandForMana in grouped actions, got {land_actions:?}"
+        );
+        assert!(
+            land_actions.iter().any(|action| matches!(
+                action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index: 1,
+                } if *source_id == land_id
+            )),
+            "flash sacrifice ability must be activatable when {{1}} is payable"
+        );
+
+        let flash_effect = &state.objects[&land_id].abilities[1].effect;
+        assert!(
+            matches!(*flash_effect.clone(), Effect::GenericEffect { .. }),
+            "flash ability must parse as GenericEffect, not CastFromZone — got {flash_effect:?}"
+        );
+        assert_eq!(state.objects[&land_id].abilities.len(), 2);
+
+        use crate::game::engine::apply_as_current;
+        apply_as_current(
+            &mut state,
+            GameAction::TapLandForMana {
+                object_id: land_id,
+            },
+        )
+        .expect("TapLandForMana must succeed when flash ability is also legal");
+        assert!(
+            state.objects[&land_id].tapped,
+            "Emergence Zone should be tapped after TapLandForMana"
+        );
+        assert!(
+            state.players[0].mana_pool.total() >= 1,
+            "mana should be added to pool"
+        );
+    }
 }

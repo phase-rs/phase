@@ -10367,18 +10367,52 @@ fn has_from_among_cards_exiled_with_self(rest: &str) -> bool {
 }
 
 /// CR 601.3b + CR 702.8a: "you may cast [type] spells as though they had flash"
-/// — a duration-scoped flash-timing grant (Teferi, Time Raveler +1 class),
-/// not a `CastFromZone` card-selection permission. Must dispatch before
-/// `try_parse_cast_effect`, which misclassifies the spell-type filter as an
-/// activation-time target and blocks loyalty activation (issue #878).
+/// — a duration-scoped flash-timing grant (Teferi, Time Raveler +1 class;
+/// Emergence Zone sacrifice ability), not a `CastFromZone` card-selection
+/// permission. Must dispatch before `try_parse_cast_effect`, which
+/// misclassifies the spell-type filter as an activation-time target and blocks
+/// loyalty activation (issue #878).
 fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    let (type_text_orig, _) = nom_on_lower(tp.original, tp.lower, |i| {
+    let ((type_text_orig, flash_duration), _) = nom_on_lower(tp.original, tp.lower, |i| {
         let (i, _) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
         let (i, _) = tag("cast ").parse(i)?;
-        let (i, type_part) = take_until(" spells as though they had flash").parse(i)?;
-        let (i, _) = tag(" spells as though they had flash").parse(i)?;
+        let (i, type_part) = take_until(" spells this turn as though they had flash").parse(i)?;
+        let (i, _) = tag(" spells this turn as though they had flash").parse(i)?;
         let (i, _) = eof.parse(i)?;
-        Ok((i, type_part.trim().to_string()))
+        Ok((
+            i,
+            (
+                type_part.trim().to_string(),
+                Duration::UntilEndOfTurn,
+            ),
+        ))
+    })
+    .or_else(|| {
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, _) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
+            let (i, _) = tag("cast ").parse(i)?;
+            let (i, type_part) = take_until(" spells as though they had flash").parse(i)?;
+            let (i, _) = tag(" spells as though they had flash").parse(i)?;
+            let (i, _) = eof.parse(i)?;
+            Ok((
+                i,
+                (
+                    type_part.trim().to_string(),
+                    Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    },
+                ),
+            ))
+        })
+    })
+    .or_else(|| {
+        nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, _) = opt(tag("you may ")).parse(i)?;
+            let (i, _) = tag("cast ").parse(i)?;
+            let (i, _) = tag("spells this turn as though they had flash").parse(i)?;
+            let (i, _) = eof.parse(i)?;
+            Ok((i, (String::new(), Duration::UntilEndOfTurn)))
+        })
     })
     .or_else(|| {
         nom_on_lower(tp.original, tp.lower, |i| {
@@ -10386,7 +10420,15 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
             let (i, _) = tag("cast ").parse(i)?;
             let (i, _) = tag("spells as though they had flash").parse(i)?;
             let (i, _) = eof.parse(i)?;
-            Ok((i, String::new()))
+            Ok((
+                i,
+                (
+                    String::new(),
+                    Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    },
+                ),
+            ))
         })
     })?;
 
@@ -10423,9 +10465,7 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
                 definition: Box::new(granted_static),
             },
         ])],
-        duration: Some(Duration::UntilNextTurnOf {
-            player: PlayerScope::Controller,
-        }),
+        duration: Some(flash_duration),
         target: Some(TargetFilter::Controller),
     }))
 }
@@ -34518,6 +34558,27 @@ mod tests {
             "Expected GrantNextSpellAbility(CastAsThoughFlash), got {:?}",
             def.effect
         );
+    }
+
+    #[test]
+    fn parse_cast_spells_this_turn_as_though_flash() {
+        // Emergence Zone (issue #1542): "this turn" is part of the permission
+        // phrase, not a separate duration prefix — must not fall through to
+        // `CastFromZone`.
+        let def = parse_effect_chain(
+            "You may cast spells this turn as though they had flash.",
+            AbilityKind::Activated,
+        );
+        let Effect::GenericEffect {
+            duration,
+            target,
+            ..
+        } = *def.effect
+        else {
+            panic!("expected GenericEffect flash grant, got {:?}", def.effect);
+        };
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(target, Some(TargetFilter::Controller));
     }
 
     #[test]
