@@ -853,7 +853,7 @@ fn graveyard_event_to_valid_card(
         }
         // CR 614.6: "If a card [predicate] would be put into [player]'s graveyard from anywhere".
         // Combines the card predicate with an ownership filter derived from the player scope.
-        // Cards go to their owner's graveyard (CR 404.3), so owner == destination player.
+        // CR 400.3: Cards go to their owner's graveyard, so owner == destination player.
         E::WouldPutACardInAPlayersGraveyardFromAnywhere(cards, players)
         | E::WouldPutACardInAPlayersGraveyardFromAnywhereOtherThanBattlefield(cards, players)
         | E::WouldPutACardOrTokenInAPlayersGraveyardFromAnywhere(cards, players) => {
@@ -3237,6 +3237,16 @@ mod tests {
                 ..
             }
         ));
-        assert!(def.valid_card.is_some());
+        let TargetFilter::And { filters } = def.valid_card.as_ref().expect("valid card filter")
+        else {
+            panic!("expected And valid-card filter, got {:?}", def.valid_card);
+        };
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { properties, .. })
+                if properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                })
+        )));
     }
 }
