@@ -7773,10 +7773,14 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // The trigger controller is the previous controller (still Khârn's holder
     // at trigger-scan time, because layer re-evaluation runs after trigger
     // collection in the post-action pipeline).
-    if matches!(
-        lower,
-        "when you lose control of ~" | "whenever you lose control of ~"
-    ) {
+    fn parse_you_lose_control_of_self(i: &str) -> OracleResult<'_, ()> {
+        all_consuming(preceded(
+            alt((tag("when "), tag("whenever "))),
+            value((), tag("you lose control of ~")),
+        ))
+        .parse(i)
+    }
+    if parse_you_lose_control_of_self(lower).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::ChangesController;
         def.valid_card = Some(TargetFilter::SelfRef);

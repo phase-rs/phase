@@ -182,7 +182,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "dark tutelage",
     "darkstar augur",
     "daxos of meletis",
-    "dead before sunrise",
     "deadshot",
     "death",
     "death watch",
@@ -460,8 +459,8 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        266,
-        "Expected exactly 266 cards retaining ObjectScope::Anaphoric (the #495 \
+        265,
+        "Expected exactly 265 cards retaining ObjectScope::Anaphoric (the #495 \
          behavior-neutral floor of 156, minus four cards unlocked by #607's \
          target-subject DamageAll source wrapper, plus 89 cards from category 4, \
          plus the UUID-disambiguated Reanimate print key \
@@ -474,13 +473,14 @@ fn anaphoric_scope_set_is_frozen() {
          category-3 target-spell anaphora, plus Captain Ripley Vance category-1 \
          trigger-source anaphora, plus Sly Spy category-4 reveal/move anaphora, \
          plus Thorin, Mountain-King — fresh card data still retains the \
-         category-3 target-creature anaphora tracked by #512); count moved to {}.",
+         category-3 target-creature anaphora tracked by #512, minus Dead \
+         Before Sunrise from #1522's recipient/subject rewrite); count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        266,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 266 cards."
+        265,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 265 cards."
     );
 }
 
