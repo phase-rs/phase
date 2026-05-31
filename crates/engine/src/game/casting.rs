@@ -8,8 +8,9 @@ use crate::types::ability::{
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CastPaymentMode, CastingVariant, CastingVariantChoiceOption, ConvokeMode, GameState,
-    PendingCast, SneakPlacement, SpellCastRecord, StackEntry, StackEntryKind, WaitingFor,
+    CastPaymentMode, CastingVariant, CastingVariantChoiceOption, ConvokeMode, CostResume,
+    GameState, PayCostKind, PendingCast, SneakPlacement, SpellCastRecord, StackEntry,
+    StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -8517,12 +8518,15 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_sac.activation_cost = Some(cost.clone());
             pending_sac.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::SacrificeForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Sacrifice,
+                choices: eligible,
                 count: max_count,
                 min_count,
-                permanents: eligible,
-                pending_cast: Box::new(pending_sac),
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_sac),
+                },
             });
         }
 
@@ -8539,11 +8543,15 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_discard.activation_cost = Some(cost.clone());
             pending_discard.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::DiscardForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Discard,
+                choices: eligible,
                 count,
-                cards: eligible,
-                pending_cast: Box::new(pending_discard),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_discard),
+                },
             });
         }
 
@@ -8567,12 +8575,15 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_exile.activation_cost = Some(cost.clone());
             pending_exile.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::ExileForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
-                zone: narrow_zone,
+                kind: PayCostKind::ExileFromZone { zone: narrow_zone },
+                choices: eligible,
                 count: count as usize,
-                cards: eligible,
-                pending_cast: Box::new(pending_exile),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_exile),
+                },
             });
         }
 
@@ -8603,11 +8614,15 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_return.activation_cost = Some(cost.clone());
             pending_return.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::ReturnToHandForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::ReturnToHand,
+                choices: eligible,
                 count: count as usize,
-                permanents: eligible,
-                pending_cast: Box::new(pending_return),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_return),
+                },
             });
         }
 
@@ -8633,12 +8648,17 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_counter.activation_cost = Some(cost.clone());
             pending_counter.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::RemoveCounterForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
-                count,
-                counter_type: counter_type.clone(),
-                permanents: eligible,
-                pending_cast: Box::new(pending_counter),
+                kind: PayCostKind::RemoveCounter {
+                    counter_type: counter_type.clone(),
+                },
+                choices: eligible,
+                count: count as usize,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_counter),
+                },
             });
         }
 
@@ -8657,11 +8677,15 @@ pub fn handle_activate_ability(
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_tap.activation_cost = Some(cost.clone());
             pending_tap.activation_ability_index = Some(ability_index);
-            return Ok(WaitingFor::TapCreaturesForSpellCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::TapCreatures,
+                choices: eligible,
                 count: count as usize,
-                creatures: eligible,
-                pending_cast: Box::new(pending_tap),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_tap),
+                },
             });
         }
 
@@ -10894,11 +10918,14 @@ mod tests {
         let waiting = handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
             .expect("activation should ask for the token sacrifice cost first");
         state.waiting_for = waiting;
-        let WaitingFor::SacrificeForCost {
-            permanents, count, ..
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            choices: permanents,
+            count,
+            ..
         } = &state.waiting_for
         else {
-            panic!("expected SacrificeForCost, got {:?}", state.waiting_for);
+            panic!("expected PayCost Sacrifice, got {:?}", state.waiting_for);
         };
         assert_eq!(*count, 1);
         assert_eq!(permanents, &vec![token]);
@@ -11810,8 +11837,11 @@ mod tests {
         )
         .unwrap();
         match state.waiting_for {
-            WaitingFor::SacrificeForCost {
-                count, min_count, ..
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                count,
+                min_count,
+                ..
             } => {
                 assert_eq!(count, 2);
                 assert_eq!(min_count, 2);
@@ -12692,11 +12722,16 @@ mod tests {
         .unwrap();
 
         match &state.waiting_for {
-            WaitingFor::DiscardForCost { cards, count, .. } => {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                choices: cards,
+                count,
+                ..
+            } => {
                 assert_eq!(*count, 1);
                 assert_eq!(cards, &vec![discarded]);
             }
-            other => panic!("expected DiscardForCost, got {other:?}"),
+            other => panic!("expected PayCost Discard, got {other:?}"),
         }
         assert!(
             state.objects[&blood].zone == Zone::Battlefield,
@@ -12794,10 +12829,13 @@ mod tests {
         // CR 118.3 + CR 602.2b: the activation detours to ExileForCost, and
         // only the nonland card is an eligible choice.
         match &state.waiting_for {
-            WaitingFor::ExileForCost {
-                zone: ExileCostSourceZone::Hand,
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::ExileFromZone {
+                        zone: ExileCostSourceZone::Hand,
+                    },
                 count,
-                cards,
+                choices: cards,
                 ..
             } => {
                 assert_eq!(*count, 1, "Jhoira exiles exactly one card");
@@ -12807,7 +12845,7 @@ mod tests {
                     "the land must be excluded by the Non:Land cost filter"
                 );
             }
-            other => panic!("expected WaitingFor::ExileForCost, got {other:?}"),
+            other => panic!("expected WaitingFor::PayCost ExileFromZone, got {other:?}"),
         }
         assert_eq!(
             state.objects[&nonland].zone,
@@ -14773,17 +14811,18 @@ mod tests {
         state.waiting_for = waiting;
 
         match &state.waiting_for {
-            WaitingFor::SacrificeForCost {
+            WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Sacrifice,
                 count,
-                permanents,
+                choices: permanents,
                 ..
             } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(*count, 1);
                 assert_eq!(permanents, &vec![land]);
             }
-            other => panic!("expected SacrificeForCost, got {other:?}"),
+            other => panic!("expected PayCost Sacrifice, got {other:?}"),
         }
 
         crate::game::engine::apply_as_current(
@@ -15035,8 +15074,13 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("spell should still be castable by sacrificing a land");
-        let WaitingFor::SacrificeForCost { permanents, .. } = waiting else {
-            panic!("expected SacrificeForCost");
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            choices: permanents,
+            ..
+        } = waiting
+        else {
+            panic!("expected PayCost Sacrifice");
         };
 
         assert_eq!(permanents, vec![land]);
@@ -16754,7 +16798,13 @@ mod tests {
 
         let waiting =
             handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
-        assert!(matches!(waiting, WaitingFor::ReturnToHandForCost { .. }));
+        assert!(matches!(
+            waiting,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ReturnToHand,
+                ..
+            }
+        ));
         state.waiting_for = waiting;
 
         apply_as_current(
@@ -16822,11 +16872,15 @@ mod tests {
         let waiting =
             handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new()).unwrap();
         match waiting {
-            WaitingFor::ReturnToHandForCost { permanents, .. } => {
+            WaitingFor::PayCost {
+                kind: PayCostKind::ReturnToHand,
+                choices: permanents,
+                ..
+            } => {
                 assert_eq!(permanents, vec![source]);
                 assert!(!permanents.contains(&other_land));
             }
-            other => panic!("expected ReturnToHandForCost, got {other:?}"),
+            other => panic!("expected PayCost ReturnToHand, got {other:?}"),
         }
     }
 
@@ -19032,13 +19086,17 @@ mod tests {
             handle_select_modes(&mut state, PlayerId(0), vec![1, 2], &mut events).unwrap();
 
         match &state.waiting_for {
-            WaitingFor::TapCreaturesForSpellCost {
-                count, creatures, ..
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures,
+                count,
+                choices: creatures,
+                resume: CostResume::Spell { .. },
+                ..
             } => {
                 assert_eq!(*count, 1);
                 assert_eq!(creatures, &vec![helper]);
             }
-            other => panic!("expected TapCreaturesForSpellCost, got {other:?}"),
+            other => panic!("expected PayCost TapCreatures (spell), got {other:?}"),
         }
 
         crate::game::engine::apply_as_current(
@@ -21711,7 +21769,10 @@ mod tests {
 
         assert!(matches!(
             result.waiting_for,
-            WaitingFor::DiscardForCost { .. }
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                ..
+            }
         ));
     }
 
@@ -21727,16 +21788,21 @@ mod tests {
         let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut Vec::new())
             .expect("retrace cast should request land discard");
         let (cards, pending_cast) = match waiting {
-            WaitingFor::DiscardForCost {
+            WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Discard,
+                choices: cards,
                 count: 1,
-                cards,
-                pending_cast,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
+                ..
             } => {
                 assert_eq!(player, PlayerId(0));
                 (cards, pending_cast)
             }
-            other => panic!("expected DiscardForCost, got {other:?}"),
+            other => panic!("expected PayCost Discard, got {other:?}"),
         };
         assert_eq!(cards, vec![land]);
         assert!(!cards.contains(&nonland));
@@ -21807,12 +21873,16 @@ mod tests {
         let waiting = handle_cast_spell(&mut state, PlayerId(0), spell, card_id, &mut Vec::new())
             .expect("retrace cast should start");
         let (cards, pending_cast) = match waiting {
-            WaitingFor::DiscardForCost {
-                cards,
-                pending_cast,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Discard,
+                choices: cards,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 ..
             } => (cards, pending_cast),
-            other => panic!("expected DiscardForCost, got {other:?}"),
+            other => panic!("expected PayCost Discard, got {other:?}"),
         };
         super::casting_costs::handle_discard_for_cost(
             &mut state,
@@ -22336,10 +22406,13 @@ mod tests {
         // The escape additional cost (exile five other graveyard cards) is
         // enforced — the cast pauses for the exile selection.
         let (legal_cards, count) = match result.waiting_for {
-            WaitingFor::ExileForCost {
-                zone: ExileCostSourceZone::Graveyard,
+            WaitingFor::PayCost {
+                kind:
+                    PayCostKind::ExileFromZone {
+                        zone: ExileCostSourceZone::Graveyard,
+                    },
                 count,
-                ref cards,
+                choices: ref cards,
                 ..
             } => (cards.clone(), count),
             other => {
@@ -22445,8 +22518,10 @@ mod tests {
             .expect("granted escape should start cost payment");
         assert!(matches!(
             waiting,
-            WaitingFor::ExileForCost {
-                zone: ExileCostSourceZone::Graveyard,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Graveyard,
+                },
                 count: 3,
                 ..
             }
@@ -22522,13 +22597,17 @@ mod tests {
         let waiting = handle_cast_spell(&mut state, PlayerId(0), obj_id, card_id, &mut events)
             .expect("escape cast should begin");
         let (exile_cards, pending_cast) = match waiting {
-            WaitingFor::ExileForCost {
-                cards,
-                pending_cast,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone { .. },
+                choices: cards,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 count: 3,
                 ..
             } => (cards, pending_cast),
-            other => panic!("expected ExileForCost, got {other:?}"),
+            other => panic!("expected PayCost ExileFromZone, got {other:?}"),
         };
 
         let chosen: Vec<ObjectId> = exile_cards.iter().copied().take(3).collect();
@@ -25386,11 +25465,11 @@ mod tests {
                 handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut Vec::new())
                     .unwrap();
             match &waiting {
-                WaitingFor::RemoveCounterForCost {
+                WaitingFor::PayCost {
                     player,
+                    kind: PayCostKind::RemoveCounter { counter_type },
                     count,
-                    counter_type,
-                    permanents,
+                    choices: permanents,
                     ..
                 } => {
                     assert_eq!(*player, PlayerId(0));
@@ -25398,7 +25477,7 @@ mod tests {
                     assert_eq!(*counter_type, CounterMatch::Any);
                     assert_eq!(permanents, &vec![saga]);
                 }
-                other => panic!("Expected RemoveCounterForCost, got {other:?}"),
+                other => panic!("Expected PayCost RemoveCounter, got {other:?}"),
             }
             state.waiting_for = waiting;
 

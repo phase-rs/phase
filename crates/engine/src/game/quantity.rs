@@ -8537,7 +8537,7 @@ mod tests {
     fn greater_good_draws_equal_to_sacrificed_creature_power_end_to_end() {
         use crate::game::scenario::{GameScenario, P0};
         use crate::types::actions::GameAction;
-        use crate::types::game_state::WaitingFor;
+        use crate::types::game_state::{PayCostKind, WaitingFor};
         use crate::types::phase::Phase;
 
         let mut scenario = GameScenario::new();
@@ -8620,7 +8620,10 @@ mod tests {
         assert!(
             matches!(
                 runner.state().waiting_for,
-                WaitingFor::SacrificeForCost { .. }
+                WaitingFor::PayCost {
+                    kind: PayCostKind::Sacrifice,
+                    ..
+                }
             ),
             "activating a sacrifice-cost ability must prompt for the permanent"
         );

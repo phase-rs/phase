@@ -99,12 +99,14 @@ describe("Discard cost modal", () => {
 
   it("allows cancelling discard costs", () => {
     setWaitingFor({
-      type: "DiscardForCost",
+      type: "PayCost",
       data: {
         player: 0,
+        kind: { type: "Discard" },
+        choices: [],
         count: 1,
-        cards: [],
-        pending_cast: {},
+        min_count: 0,
+        resume: { type: "Spell", Spell: {} },
       },
     } as unknown as WaitingFor);
 
@@ -116,21 +118,25 @@ describe("Discard cost modal", () => {
 
   it.each([
     [
-      "SacrificeForCost",
+      "PayCost Sacrifice",
       {
         player: 0,
+        kind: { type: "Sacrifice" },
+        choices: [],
         count: 1,
-        permanents: [],
-        pending_cast: {},
+        min_count: 0,
+        resume: { type: "Spell", Spell: {} },
       },
     ],
     [
-      "ReturnToHandForCost",
+      "PayCost ReturnToHand",
       {
         player: 0,
+        kind: { type: "ReturnToHand" },
+        choices: [],
         count: 1,
-        permanents: [],
-        pending_cast: {},
+        min_count: 0,
+        resume: { type: "Spell", Spell: {} },
       },
     ],
     [
@@ -143,13 +149,14 @@ describe("Discard cost modal", () => {
       },
     ],
     [
-      "ExileForCost",
+      "PayCost ExileFromZone",
       {
         player: 0,
-        zone: "Graveyard",
+        kind: { type: "ExileFromZone", zone: "Graveyard" },
+        choices: [],
         count: 1,
-        cards: [],
-        pending_cast: {},
+        min_count: 0,
+        resume: { type: "Spell", Spell: {} },
       },
     ],
     [
@@ -169,7 +176,10 @@ describe("Discard cost modal", () => {
         pending_cast: {},
       },
     ],
-  ])("allows cancelling %s", (type, data) => {
+  ])("allows cancelling %s", (label, data) => {
+    // BlightChoice/CollectEvidence/Harmonize keep their own variant `type`;
+    // the PayCost-prefixed labels all map to the unified `PayCost` variant.
+    const type = label.startsWith("PayCost") ? "PayCost" : label;
     setWaitingFor({ type, data } as unknown as WaitingFor);
 
     render(<CardChoiceModal />);
@@ -180,12 +190,14 @@ describe("Discard cost modal", () => {
 
   it("handles discard prompts for mana ability costs", () => {
     setWaitingFor({
-      type: "DiscardForManaAbility",
+      type: "PayCost",
       data: {
         player: 0,
+        kind: { type: "Discard" },
+        choices: [],
         count: 1,
-        cards: [],
-        pending_mana_ability: {},
+        min_count: 0,
+        resume: { type: "ManaAbility", ManaAbility: {} },
       },
     } as unknown as WaitingFor);
 

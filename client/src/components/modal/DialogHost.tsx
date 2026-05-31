@@ -43,9 +43,18 @@ export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = 
   "RetargetChoice",
   "ExploreChoice",
   "ReturnAsAuraTarget",
-  "TapCreaturesForManaAbility",
-  "TapCreaturesForSpellCost",
 ]);
+
+// CR 118.3 + CR 605.3b: a `PayCost` prompt is click-through only for the
+// TapCreatures kind (the player taps creatures on the battlefield). All other
+// cost kinds surface a modal in `CardChoiceModal` and must stay host-wrapped.
+export function isClickThroughWaitingFor(
+  waitingFor: WaitingFor | null | undefined,
+): boolean {
+  if (!waitingFor) return false;
+  if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
+  return waitingFor.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
+}
 
 function isDialogVisibleFor(waitingFor: WaitingFor | null | undefined): boolean {
   if (!waitingFor) return false;
@@ -54,7 +63,7 @@ function isDialogVisibleFor(waitingFor: WaitingFor | null | undefined): boolean 
 
 function isClickThroughDialog(waitingFor: WaitingFor | null | undefined): boolean {
   if (!waitingFor) return false;
-  if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
+  if (isClickThroughWaitingFor(waitingFor)) return true;
   // CR 702.51a (Convoke) / CR 701.67a (Waterbend) / CR 702.126a (Improvise):
   // these tap-payment modes let the caster tap creatures/artifacts on the
   // battlefield to pay generic/colored mana while the `ManaPaymentUI` panel

@@ -3,7 +3,7 @@ use rand::Rng;
 use engine::ai_support::build_decision_context;
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CostResume, GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::cast_facts_for_action;
@@ -827,12 +827,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // Mana ability sub-costs: these are not pending-cast states but
         // carry PendingManaAbility. Empty eligible lists shouldn't normally
         // happen but CancelCast is not valid here. Use empty selection.
-        WaitingFor::TapCreaturesForManaAbility { .. }
-        | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileForManaAbility { .. }
-        | WaitingFor::SacrificeForManaAbility { .. } => {
-            Some(GameAction::SelectCards { cards: Vec::new() })
-        }
+        WaitingFor::PayCost {
+            resume: CostResume::ManaAbility { .. },
+            ..
+        } => Some(GameAction::SelectCards { cards: Vec::new() }),
 
         // CR 101.4 + CR 701.21a: Category choice — pick one permanent
         // per type category, the rest are sacrificed. A permanent that belongs
@@ -870,14 +868,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ManaPayment { .. }
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::DefilerPayment { .. }
-        | WaitingFor::DiscardForCost { .. }
-        | WaitingFor::SacrificeForCost { .. }
-        | WaitingFor::ReturnToHandForCost { .. }
+        | WaitingFor::PayCost {
+            resume: CostResume::Spell { .. },
+            ..
+        }
         | WaitingFor::BlightChoice { .. }
-        | WaitingFor::BeholdForCost { .. }
-        | WaitingFor::TapCreaturesForSpellCost { .. }
-        | WaitingFor::ExileForCost { .. }
-        | WaitingFor::RemoveCounterForCost { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. } => {
             // These are all pending-cast states — the has_pending_cast guard

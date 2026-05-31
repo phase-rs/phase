@@ -5,8 +5,8 @@ use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
 use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
-    ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, GameState, RetargetScope, StackEntry,
-    StackEntryKind, WaitingFor,
+    ActionResult, AutoPassMode, AutoPassRequest, ConvokeMode, CostResume, GameState, PayCostKind,
+    RetargetScope, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -1781,28 +1781,161 @@ fn apply_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
-        // CR 601.2b: Player selected cards to discard as additional casting cost.
+        // CR 118.3 + CR 601.2b + CR 605.3b: Player selected objects to pay a
+        // cost. The single `PayCost` state dispatches on `kind` (which action)
+        // and `resume` (spell-cast vs mana-ability pipeline) to the
+        // appropriate authoritative handler.
         (
-            WaitingFor::DiscardForCost {
+            WaitingFor::PayCost {
                 player,
+                kind,
+                choices,
                 count,
-                cards: legal_cards,
-                pending_cast,
+                min_count,
+                resume,
             },
             GameAction::SelectCards { cards: chosen },
-        ) => engine_casting::handle_discard_for_cost(
-            state,
-            *player,
-            *pending_cast.clone(),
-            *count,
-            legal_cards,
-            &chosen,
-            &mut events,
-        )?,
+        ) => match resume {
+            CostResume::Spell {
+                spell: pending_cast,
+            } => match kind {
+                PayCostKind::Discard => engine_casting::handle_discard_for_cost(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    *count,
+                    choices,
+                    &chosen,
+                    &mut events,
+                )?,
+                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    (*min_count, *count),
+                    choices,
+                    &chosen,
+                    &mut events,
+                )?,
+                PayCostKind::ReturnToHand => engine_casting::handle_return_to_hand_for_cost(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    *count,
+                    choices,
+                    &chosen,
+                    &mut events,
+                )?,
+                PayCostKind::ExileFromZone { zone } => engine_casting::handle_exile_for_cost(
+                    state,
+                    *player,
+                    *zone,
+                    *pending_cast.clone(),
+                    *count,
+                    choices,
+                    &chosen,
+                    &mut events,
+                )?,
+                PayCostKind::RemoveCounter { counter_type } => {
+                    casting_costs::handle_remove_counter_for_cost(
+                        state,
+                        *player,
+                        *pending_cast.clone(),
+                        *count as u32,
+                        counter_type.clone(),
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
+                PayCostKind::TapCreatures => engine_casting::handle_tap_creatures_for_spell_cost(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    *count,
+                    choices,
+                    &chosen,
+                    &mut events,
+                )?,
+                PayCostKind::Behold { action } => engine_casting::handle_behold_for_cost(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    *count,
+                    choices,
+                    *action,
+                    &chosen,
+                    &mut events,
+                )?,
+                // ExileFromManaZone is mana-ability-only; never appears with a
+                // spell-cast resume.
+                PayCostKind::ExileFromManaZone { .. } => {
+                    return Err(EngineError::InvalidAction(
+                        "ExileFromManaZone cost cannot resume a spell cast".into(),
+                    ));
+                }
+            },
+            CostResume::ManaAbility {
+                mana_ability: pending_mana_ability,
+            } => match kind {
+                PayCostKind::TapCreatures => engine_casting::handle_tap_creatures_for_mana_ability(
+                    state,
+                    *count,
+                    choices,
+                    pending_mana_ability,
+                    &chosen,
+                    &mut events,
+                )?,
+                PayCostKind::Discard => engine_casting::handle_discard_for_mana_ability(
+                    state,
+                    *count,
+                    choices,
+                    pending_mana_ability,
+                    &chosen,
+                    &mut events,
+                )?,
+                PayCostKind::ExileFromManaZone { .. } => {
+                    super::mana_abilities::handle_exile_for_mana_ability(
+                        state,
+                        *count,
+                        choices,
+                        pending_mana_ability,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
+                PayCostKind::Sacrifice => super::mana_abilities::handle_sacrifice_for_mana_ability(
+                    state,
+                    *count,
+                    choices,
+                    pending_mana_ability,
+                    &chosen,
+                    &mut events,
+                )?,
+                // ReturnToHand, ExileFromZone, RemoveCounter, and Behold do not
+                // have mana-ability cost handlers wired today. If a future mana
+                // ability uses one of these CR-valid cost shapes, add the
+                // corresponding mana-ability handler instead of routing it
+                // through the spell pipeline.
+                PayCostKind::ReturnToHand
+                | PayCostKind::ExileFromZone { .. }
+                | PayCostKind::RemoveCounter { .. }
+                | PayCostKind::Behold { .. } => {
+                    return Err(EngineError::InvalidAction(
+                        "Cost kind cannot resume a mana ability".into(),
+                    ));
+                }
+            },
+        },
+        // CR 601.2: Player backed out of a cost-payment choice. Only spell
+        // casts can be cancelled; mana-ability cost payment has no cancel path.
         (
-            WaitingFor::DiscardForCost {
+            WaitingFor::PayCost {
                 player,
-                pending_cast,
+                resume:
+                    CostResume::Spell {
+                        spell: pending_cast,
+                    },
                 ..
             },
             GameAction::CancelCast,
@@ -1825,87 +1958,6 @@ fn apply_action(
         )?,
         (
             WaitingFor::ActivationCostOneOfChoice {
-                player,
-                pending_cast,
-                ..
-            },
-            GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
-        (
-            WaitingFor::SacrificeForCost {
-                player,
-                count,
-                min_count,
-                permanents,
-                pending_cast,
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => engine_casting::handle_sacrifice_for_cost(
-            state,
-            *player,
-            *pending_cast.clone(),
-            (*min_count, *count),
-            permanents,
-            &chosen,
-            &mut events,
-        )?,
-        (
-            WaitingFor::SacrificeForCost {
-                player,
-                pending_cast,
-                ..
-            },
-            GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
-        // CR 118.3: Player selected permanents to return to hand as cost.
-        (
-            WaitingFor::ReturnToHandForCost {
-                player,
-                count,
-                permanents,
-                pending_cast,
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => engine_casting::handle_return_to_hand_for_cost(
-            state,
-            *player,
-            *pending_cast.clone(),
-            *count,
-            permanents,
-            &chosen,
-            &mut events,
-        )?,
-        (
-            WaitingFor::ReturnToHandForCost {
-                player,
-                pending_cast,
-                ..
-            },
-            GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
-        // CR 118.3 + CR 122.1: Player selected a permanent to remove a counter
-        // from as a cost.
-        (
-            WaitingFor::RemoveCounterForCost {
-                player,
-                count,
-                counter_type,
-                permanents,
-                pending_cast,
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => casting_costs::handle_remove_counter_for_cost(
-            state,
-            *player,
-            *pending_cast.clone(),
-            *count,
-            counter_type.clone(),
-            permanents,
-            &chosen,
-            &mut events,
-        )?,
-        (
-            WaitingFor::RemoveCounterForCost {
                 player,
                 pending_cast,
                 ..
@@ -1938,127 +1990,6 @@ fn apply_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
-        // CR 702.34a: Player selected creatures to tap as a spell cost (flashback tap cost).
-        (
-            WaitingFor::TapCreaturesForSpellCost {
-                player,
-                count,
-                creatures,
-                pending_cast,
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => engine_casting::handle_tap_creatures_for_spell_cost(
-            state,
-            *player,
-            *pending_cast.clone(),
-            *count,
-            creatures,
-            &chosen,
-            &mut events,
-        )?,
-        (
-            WaitingFor::BeholdForCost {
-                player,
-                count,
-                choices,
-                action,
-                pending_cast,
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => engine_casting::handle_behold_for_cost(
-            state,
-            *player,
-            *pending_cast.clone(),
-            *count,
-            choices,
-            *action,
-            &chosen,
-            &mut events,
-        )?,
-        (
-            WaitingFor::BeholdForCost {
-                player,
-                pending_cast,
-                ..
-            },
-            GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
-        (
-            WaitingFor::TapCreaturesForSpellCost {
-                player,
-                pending_cast,
-                ..
-            },
-            GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
-        (
-            WaitingFor::TapCreaturesForManaAbility {
-                count,
-                creatures,
-                pending_mana_ability,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => engine_casting::handle_tap_creatures_for_mana_ability(
-            state,
-            *count,
-            creatures,
-            pending_mana_ability,
-            &chosen,
-            &mut events,
-        )?,
-        (
-            WaitingFor::DiscardForManaAbility {
-                count,
-                cards: legal_cards,
-                pending_mana_ability,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => engine_casting::handle_discard_for_mana_ability(
-            state,
-            *count,
-            legal_cards,
-            pending_mana_ability,
-            &chosen,
-            &mut events,
-        )?,
-        // CR 117.1 + CR 118.3 + CR 605.3b + CR 400.7j: Player selected
-        // object(s) to exile as a mana ability cost.
-        (
-            WaitingFor::ExileForManaAbility {
-                count,
-                cards,
-                pending_mana_ability,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => super::mana_abilities::handle_exile_for_mana_ability(
-            state,
-            *count,
-            cards,
-            pending_mana_ability,
-            &chosen,
-            &mut events,
-        )?,
-        // CR 117.1 + CR 118.3 + CR 605.3b + CR 202.3: Player selected battlefield
-        // permanent(s) to sacrifice as a mana ability cost (Phyrexian Altar class).
-        (
-            WaitingFor::SacrificeForManaAbility {
-                count,
-                permanents,
-                pending_mana_ability,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => super::mana_abilities::handle_sacrifice_for_mana_ability(
-            state,
-            *count,
-            permanents,
-            pending_mana_ability,
-            &chosen,
-            &mut events,
-        )?,
         (
             WaitingFor::ChooseManaColor {
                 choice, context, ..
@@ -2168,37 +2099,6 @@ fn apply_action(
             &payment,
             &mut events,
         )?,
-        // CR 118.9a + CR 601.2b + CR 601.2h: Player selected cards to exile as
-        // part of an alternative or additional casting cost. Covers escape
-        // (CR 702.138a, graveyard) and pitch spells (Force of Will, Force of
-        // Negation, Misdirection, Unmask, etc., hand).
-        (
-            WaitingFor::ExileForCost {
-                player,
-                zone,
-                count,
-                cards: legal_cards,
-                pending_cast,
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => engine_casting::handle_exile_for_cost(
-            state,
-            *player,
-            *zone,
-            *pending_cast.clone(),
-            *count,
-            legal_cards,
-            &chosen,
-            &mut events,
-        )?,
-        (
-            WaitingFor::ExileForCost {
-                player,
-                pending_cast,
-                ..
-            },
-            GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
         (
             WaitingFor::CollectEvidenceChoice {
                 player,
@@ -6847,8 +6747,11 @@ mod tests {
             )
             .unwrap();
         }
-        let WaitingFor::SacrificeForCost {
-            count, permanents, ..
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            count,
+            choices: permanents,
+            ..
         } = &state.waiting_for
         else {
             panic!("Broadside Bombardiers boast should require a sacrifice cost");
@@ -10470,9 +10373,11 @@ mod tests {
 
         assert!(matches!(
             result.waiting_for,
-            WaitingFor::TapCreaturesForManaAbility {
+            WaitingFor::PayCost {
                 player: PlayerId(0),
+                kind: PayCostKind::TapCreatures,
                 count: 1,
+                resume: CostResume::ManaAbility { .. },
                 ..
             }
         ));
@@ -10950,17 +10855,19 @@ mod tests {
         .unwrap();
 
         match result.waiting_for {
-            WaitingFor::TapCreaturesForManaAbility {
+            WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::TapCreatures,
                 count,
-                creatures,
+                choices: creatures,
+                resume: CostResume::ManaAbility { .. },
                 ..
             } => {
                 assert_eq!(player, PlayerId(0));
                 assert_eq!(count, 1);
                 assert_eq!(creatures, vec![creature]);
             }
-            other => panic!("expected TapCreaturesForManaAbility, got {other:?}"),
+            other => panic!("expected PayCost TapCreatures (mana ability), got {other:?}"),
         }
         assert!(!state.objects.get(&holdout).unwrap().tapped);
         assert!(!state.objects.get(&creature).unwrap().tapped);
@@ -11074,17 +10981,19 @@ mod tests {
         .unwrap();
 
         match result.waiting_for {
-            WaitingFor::TapCreaturesForSpellCost {
+            WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::TapCreatures,
                 count,
-                creatures,
+                choices: creatures,
+                resume: CostResume::Spell { .. },
                 ..
             } => {
                 assert_eq!(player, PlayerId(0));
                 assert_eq!(count, 2);
                 assert_eq!(creatures, vec![elf_a, elf_b]);
             }
-            other => panic!("expected TapCreaturesForSpellCost, got {other:?}"),
+            other => panic!("expected PayCost TapCreatures (spell), got {other:?}"),
         }
         assert!(!state.objects.get(&lathril).unwrap().tapped);
 

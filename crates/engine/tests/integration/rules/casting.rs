@@ -473,20 +473,25 @@ fn escape_full_casting_flow() {
     assert!(
         matches!(
             result.waiting_for,
-            WaitingFor::ExileForCost {
-                zone: ExileCostSourceZone::Graveyard,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Graveyard,
+                },
                 count: 2,
                 ..
             }
         ),
-        "Expected ExileForCost (Graveyard), got {:?}",
+        "Expected PayCost ExileFromZone (Graveyard), got {:?}",
         result.waiting_for
     );
 
     // Verify the escape card itself is NOT in the eligible list
-    if let WaitingFor::ExileForCost {
-        zone: ExileCostSourceZone::Graveyard,
-        ref cards,
+    if let WaitingFor::PayCost {
+        kind:
+            PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Graveyard,
+            },
+        choices: ref cards,
         ..
     } = result.waiting_for
     {
@@ -597,16 +602,21 @@ fn escape_variant_preserved_through_mana_payment() {
     // Should prompt for exile selection
     assert!(matches!(
         result.waiting_for,
-        WaitingFor::ExileForCost {
-            zone: ExileCostSourceZone::Graveyard,
+        WaitingFor::PayCost {
+            kind: PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Graveyard,
+            },
             ..
         }
     ));
 
     // Select exile targets
-    if let WaitingFor::ExileForCost {
-        zone: ExileCostSourceZone::Graveyard,
-        ref cards,
+    if let WaitingFor::PayCost {
+        kind:
+            PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Graveyard,
+            },
+        choices: ref cards,
         ..
     } = result.waiting_for
     {
@@ -790,9 +800,12 @@ fn pitch_full_casting_flow() {
     };
 
     let eligible = match &result.waiting_for {
-        WaitingFor::ExileForCost {
-            zone: ExileCostSourceZone::Hand,
-            cards,
+        WaitingFor::PayCost {
+            kind:
+                PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Hand,
+                },
+            choices: cards,
             count,
             player,
             ..
@@ -801,7 +814,7 @@ fn pitch_full_casting_flow() {
             assert_eq!(*count, 1);
             cards.clone()
         }
-        other => panic!("expected ExileForCost (Hand), got {other:?}"),
+        other => panic!("expected PayCost ExileFromZone (Hand), got {other:?}"),
     };
     assert!(
         !eligible.contains(&spell_id),
@@ -873,12 +886,14 @@ fn pitch_cancel_returns_to_priority() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::ExileForCost {
-                zone: ExileCostSourceZone::Hand,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Hand,
+                },
                 ..
             }
         ),
-        "expected ExileForCost (Hand) before cancel, got {:?}",
+        "expected PayCost ExileFromZone (Hand) before cancel, got {:?}",
         runner.state().waiting_for
     );
 

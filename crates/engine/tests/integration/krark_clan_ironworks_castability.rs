@@ -30,7 +30,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, CostResume, GameState, PayCostKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -317,10 +317,12 @@ fn manual_payment_flow_resolves_kci_sacrifice_to_pay_spell_cost() {
     .expect("ActivateAbility(KCI) during ManaPayment must succeed");
 
     match &state.waiting_for {
-        WaitingFor::SacrificeForManaAbility {
+        WaitingFor::PayCost {
             player,
+            kind: PayCostKind::Sacrifice,
             count,
-            permanents,
+            choices: permanents,
+            resume: CostResume::ManaAbility { .. },
             ..
         } => {
             assert_eq!(*player, P0);

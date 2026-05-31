@@ -100,16 +100,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ChooseRingBearer { .. }
         | WaitingFor::ChooseDungeon { .. }
         | WaitingFor::ChooseDungeonRoom { .. }
-        | WaitingFor::DiscardForCost { .. }
-        | WaitingFor::SacrificeForCost { .. }
-        | WaitingFor::ReturnToHandForCost { .. }
+        | WaitingFor::PayCost { .. }
         | WaitingFor::BlightChoice { .. }
-        | WaitingFor::BeholdForCost { .. }
-        | WaitingFor::TapCreaturesForSpellCost { .. }
-        | WaitingFor::TapCreaturesForManaAbility { .. }
         | WaitingFor::ChooseManaColor { .. }
-        | WaitingFor::ExileForCost { .. }
-        | WaitingFor::RemoveCounterForCost { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. }
         | WaitingFor::OptionalEffectChoice { .. }
@@ -152,9 +145,6 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::MiracleCastOffer { .. }
         | WaitingFor::MadnessCastOffer { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
-        | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileForManaAbility { .. }
-        | WaitingFor::SacrificeForManaAbility { .. }
         | WaitingFor::PayManaAbilityMana { .. }
         | WaitingFor::ActivationCostOneOfChoice { .. } => DecisionKind::ActivateAbility,
     }

@@ -37,7 +37,8 @@ export function TargetingOverlay() {
   const retargetSpellName = isRetargetChoice
     ? objects?.[stack?.[waitingFor.data.stack_entry_index]?.source_id ?? -1]?.name
     : undefined;
-  const isTapCreatureChoice = waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost";
+  const isTapCreatureChoice =
+    waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
   const targetSlots = isTargetSelection ? waitingFor.data.target_slots : [];
   const selection = isTargetSelection ? waitingFor.data.selection : null;
   const currentTargetSlot = isCopyRetarget
@@ -53,10 +54,10 @@ export function TargetingOverlay() {
         ? waitingFor.data.source_id
       : waitingFor?.type === "ReturnAsAuraTarget"
         ? waitingFor.data.source_id
-      : waitingFor?.type === "TapCreaturesForManaAbility"
-        ? (waitingFor.data.pending_mana_ability as { source_id?: number } | undefined)?.source_id
-      : waitingFor?.type === "TapCreaturesForSpellCost"
-        ? waitingFor.data.pending_cast?.object_id
+      : waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures"
+        ? waitingFor.data.resume.type === "ManaAbility"
+          ? (waitingFor.data.resume.ManaAbility as { source_id?: number } | undefined)?.source_id
+          : (waitingFor.data.resume.Spell as { object_id?: number } | undefined)?.object_id
       : undefined;
   const sourceName = sourceId != null ? objects?.[sourceId]?.name : undefined;
 
@@ -161,7 +162,10 @@ export function TargetingOverlay() {
         {/* Player targets are handled by PlayerHud/OpponentHud glow + click */}
 
         <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
-          {(waitingFor.type === "TargetSelection" || waitingFor.type === "TapCreaturesForSpellCost") && (
+          {(waitingFor.type === "TargetSelection" ||
+            (waitingFor.type === "PayCost" &&
+              waitingFor.data.kind.type === "TapCreatures" &&
+              waitingFor.data.resume.type === "Spell")) && (
             <button
               onClick={handleCancel}
               className="rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"
@@ -206,7 +210,7 @@ export function TargetingOverlay() {
 
 type TargetingPromptParams = {
   waitingFor: {
-    type: "TargetSelection" | "TriggerTargetSelection" | "ExploreChoice" | "CopyTargetChoice" | "TapCreaturesForManaAbility" | "TapCreaturesForSpellCost";
+    type: "TargetSelection" | "TriggerTargetSelection" | "ExploreChoice" | "CopyTargetChoice" | "PayCost";
     data: {
       target_slots?: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean }[];
       mode_labels?: (string | null)[];

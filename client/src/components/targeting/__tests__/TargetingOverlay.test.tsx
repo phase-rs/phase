@@ -137,16 +137,21 @@ describe("TargetingOverlay", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
       waiting_for: {
-        type: "TapCreaturesForSpellCost",
+        type: "PayCost",
         data: {
           player: 0,
+          kind: { type: "TapCreatures" },
+          choices: [],
           count: 1,
-          creatures: [],
-          pending_cast: {
-            object_id: 5,
-            card_id: 10,
-            ability: { targets: [] },
-            cost: { type: "NoCost" },
+          min_count: 0,
+          resume: {
+            type: "Spell",
+            Spell: {
+              object_id: 5,
+              card_id: 10,
+              ability: { targets: [] },
+              cost: { type: "NoCost" },
+            },
           },
         },
       },
@@ -181,16 +186,21 @@ describe("TargetingOverlay", () => {
         }),
       },
       waiting_for: {
-        type: "TapCreaturesForManaAbility",
+        type: "PayCost",
         data: {
           player: 0,
+          kind: { type: "TapCreatures" },
+          choices: [7],
           count: 1,
-          creatures: [7],
-          pending_mana_ability: {
-            player: 0,
-            source_id: 4,
-            ability_index: 1,
-            resume: "Priority",
+          min_count: 0,
+          resume: {
+            type: "ManaAbility",
+            ManaAbility: {
+              player: 0,
+              source_id: 4,
+              ability_index: 1,
+              resume: "Priority",
+            },
           },
         },
       },
