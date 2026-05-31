@@ -1687,6 +1687,15 @@ pub enum WaitingFor {
         player: PlayerId,
         pending_cast: Box<PendingCast>,
         target_slots: Vec<TargetSelectionSlot>,
+        /// CR 700.2 / CR 601.2b: For a modal spell whose chosen modes each
+        /// require targets, this carries a per-slot display label naming the
+        /// mode each target belongs to. `mode_labels[i]` ↔ `target_slots[i]`
+        /// (same length when present); `None` for slots without a mode
+        /// context (non-modal spells, or modes whose description is missing).
+        /// Display-only — the engine owns the slot→mode mapping; the UI just
+        /// surfaces it in the targeting banner.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mode_labels: Vec<Option<String>>,
         #[serde(default)]
         selection: TargetSelectionProgress,
     },
@@ -2078,6 +2087,12 @@ pub enum WaitingFor {
     TriggerTargetSelection {
         player: PlayerId,
         target_slots: Vec<TargetSelectionSlot>,
+        /// CR 700.2 / CR 601.2b: Per-slot mode display label, parallel to
+        /// `target_slots` (`mode_labels[i]` ↔ `target_slots[i]`). Populated for
+        /// modal triggered abilities (CR 700.2b) whose chosen modes target;
+        /// `None` per slot otherwise. Display-only — see `TargetSelection`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mode_labels: Vec<Option<String>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         target_constraints: Vec<TargetSelectionConstraint>,
         #[serde(default)]
@@ -5876,6 +5891,7 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(ObjectId(1))],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: vec![],
             selection: TargetSelectionProgress::default(),
             source_id: None,
@@ -6206,6 +6222,7 @@ mod tests {
                 ],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: vec![],
             selection: TargetSelectionProgress::default(),
             source_id: Some(ObjectId(10)),

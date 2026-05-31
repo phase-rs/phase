@@ -4339,6 +4339,7 @@ pub(super) fn begin_pending_trigger_target_selection(
     Ok(Some(WaitingFor::TriggerTargetSelection {
         player,
         target_slots,
+        mode_labels: Vec::new(),
         target_constraints,
         selection,
         source_id: Some(source_id),
@@ -12221,6 +12222,7 @@ mod trigger_target_tests {
                 &[],
             )
             .unwrap(),
+            mode_labels: Vec::new(),
             source_id: None,
             description: None,
         };
@@ -12312,6 +12314,7 @@ mod trigger_target_tests {
                 legal_targets: vec![TargetRef::Object(legal_target)],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress::default(),
             source_id: None,
@@ -12733,6 +12736,7 @@ mod trigger_target_tests {
                     optional: false,
                 },
             ],
+            mode_labels: Vec::new(),
             target_constraints: vec![TargetSelectionConstraint::DifferentTargetPlayers],
             selection: crate::types::game_state::TargetSelectionProgress::default(),
             source_id: None,
@@ -12847,6 +12851,7 @@ mod trigger_target_tests {
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
             target_slots: target_slots.clone(),
+            mode_labels: Vec::new(),
             target_constraints: target_constraints.clone(),
             selection: crate::game::ability_utils::begin_target_selection(
                 &target_slots,

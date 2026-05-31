@@ -2223,6 +2223,7 @@ mod tests {
             waiting_for: WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
                 target_slots: Vec::new(),
+                mode_labels: Vec::new(),
                 target_constraints: Vec::new(),
                 selection: Default::default(),
                 source_id: None,
@@ -2284,6 +2285,7 @@ mod tests {
                 ],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: engine::types::game_state::TargetSelectionProgress {
                 current_slot: 0,
@@ -2318,6 +2320,7 @@ mod tests {
                 legal_targets: Vec::new(),
                 optional: true,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: Default::default(),
             source_id: None,

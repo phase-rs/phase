@@ -12,7 +12,7 @@ use crate::types::player::PlayerId;
 use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_selected_slots_in_chain,
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_chained_resolved, build_target_slots, choose_target_for_ability,
+    build_chained_resolved, build_target_slots_labelled, choose_target_for_ability,
     flatten_targets_in_chain, random_select_targets_for_ability, validate_modal_indices,
     validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
@@ -106,7 +106,18 @@ pub(crate) fn handle_select_modes(
     // Check for targeting on the combined ability
     super::layers::flush_layers(state);
 
-    let target_slots = build_target_slots(state, &resolved)?;
+    // CR 700.2 / CR 601.2b: Build slots and their per-mode display labels
+    // together against the SAME post-flush state, so `mode_labels.len()` can
+    // never diverge from `target_slots.len()` (slot count is state-dependent).
+    let (target_slots, mode_labels) = build_target_slots_labelled(
+        state,
+        &abilities,
+        &indices,
+        &modal.mode_descriptions,
+        pending.object_id,
+        controller,
+        &pending.ability.context,
+    )?;
     if !target_slots.is_empty() {
         // CR 115.1 + CR 701.9b: For abilities marked `Random`, the game (not the
         // controller) selects targets uniformly from each slot's legal-target set.
@@ -161,6 +172,7 @@ pub(crate) fn handle_select_modes(
             player: controller,
             pending_cast: Box::new(pending_sel),
             target_slots,
+            mode_labels,
             selection,
         });
     }
@@ -306,15 +318,17 @@ pub(crate) fn handle_choose_target(
     target: Option<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (pending, target_slots, selection) = match &state.waiting_for {
+    let (pending, target_slots, mode_labels, selection) = match &state.waiting_for {
         WaitingFor::TargetSelection {
             pending_cast,
             target_slots,
+            mode_labels,
             selection,
             ..
         } => (
             *pending_cast.clone(),
             target_slots.clone(),
+            mode_labels.clone(),
             selection.clone(),
         ),
         _ => {
@@ -332,10 +346,13 @@ pub(crate) fn handle_choose_target(
         &selection,
         target,
     )? {
+        // CR 700.2: preserve the inbound mode labels unchanged — walking the
+        // slots one at a time does not change the slot→mode mapping.
         TargetSelectionAdvance::InProgress(selection) => Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending),
             target_slots,
+            mode_labels,
             selection,
         }),
         TargetSelectionAdvance::Complete(selected_slots) => {
