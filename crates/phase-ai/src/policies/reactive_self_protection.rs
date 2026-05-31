@@ -1,9 +1,12 @@
 //! Reactive self-protection tactical policy.
 //!
-//! Penalises the AI for casting "save yourself" spells when there is no
-//! immediate threat to react to. Empirically observed: AI casting Teferi's
-//! Protection on turn 3 against an empty board — wasting a 3-mana reactive
-//! spell that has no work to do.
+//! Penalises the AI for casting OR activating "save yourself" effects when
+//! there is no immediate threat to react to. Empirically observed: AI casting
+//! Teferi's Protection on turn 3 against an empty board; AI repeatedly paying
+//! "discard a card: ~ gains protection from everything" until its hand is
+//! empty; AI activating Sylvan Safekeeper ("sacrifice a land: target creature
+//! you control gains shroud") on turn 1 for no reason. All are the same class:
+//! paying a cost for a defensive grant with no work to do.
 //!
 //! The classifier keys on **typed effect signatures**, not card names or
 //! Oracle text. A spell is treated as self-protection when it grants
@@ -51,7 +54,7 @@ impl TacticalPolicy for ReactiveSelfProtectionPolicy {
     }
 
     fn decision_kinds(&self) -> &'static [DecisionKind] {
-        &[DecisionKind::CastSpell]
+        &[DecisionKind::CastSpell, DecisionKind::ActivateAbility]
     }
 
     fn activation(
@@ -67,7 +70,10 @@ impl TacticalPolicy for ReactiveSelfProtectionPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        if !matches!(ctx.candidate.action, GameAction::CastSpell { .. }) {
+        if !matches!(
+            ctx.candidate.action,
+            GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
+        ) {
             return PolicyVerdict::Score {
                 delta: 0.0,
                 reason: PolicyReason::new("reactive_self_protection_na"),
@@ -193,18 +199,34 @@ fn is_self_protection_effect(effect: &Effect) -> bool {
         // CR 615.1: Damage prevention shielding the caster.
         Effect::PreventDamage { .. } => true,
         // CR 604.3: Continuous static abilities granting defensive keywords or
-        // modes to the caster's own permanents.
+        // modes to the caster's own permanents. The grant's scope may live on
+        // the static's `affected` filter (self-referential: "~ gains shroud")
+        // OR on the enclosing `GenericEffect.target` when `affected` is
+        // `ParentTarget` (targeted: "target creature you control gains shroud").
         Effect::GenericEffect {
-            static_abilities, ..
+            static_abilities,
+            target,
+            ..
         } => static_abilities
             .iter()
-            .any(static_definition_is_self_protection),
+            .any(|sd| static_definition_is_self_protection(sd, target.as_ref())),
         _ => false,
     }
 }
 
-fn static_definition_is_self_protection(sd: &StaticDefinition) -> bool {
-    let affects_self = sd.affected.as_ref().is_some_and(target_filter_self_scoped);
+fn static_definition_is_self_protection(
+    sd: &StaticDefinition,
+    parent_target: Option<&TargetFilter>,
+) -> bool {
+    let affects_self = match sd.affected.as_ref() {
+        // A static scoped to ParentTarget grants to whatever the parent ability
+        // targets (e.g. Sylvan Safekeeper: "target creature you control gains
+        // shroud"), so self-scoping is decided by the parent ability's target
+        // filter, not by `affected`.
+        Some(TargetFilter::ParentTarget) => parent_target.is_some_and(target_filter_self_scoped),
+        Some(f) => target_filter_self_scoped(f),
+        None => false,
+    };
     if !affects_self {
         return false;
     }
@@ -256,7 +278,92 @@ fn target_filter_self_scoped(filter: &TargetFilter) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::types::ability::{ControllerRef, StaticDefinition, TypedFilter};
+    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::zones::create_object;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, StaticDefinition, TypedFilter,
+    };
+    use engine::types::game_state::WaitingFor;
+    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::zones::Zone;
+    use std::sync::Arc;
+
+    use crate::config::AiConfig;
+    use crate::context::AiContext;
+
+    const AI: PlayerId = PlayerId(0);
+
+    /// Build a `GenericEffect` keyword grant with explicit `affected` (static
+    /// scope) and `target` (parent-ability scope) filters — the two axes that
+    /// decide self-scoping.
+    fn grant_effect(
+        affected: Option<TargetFilter>,
+        target: Option<TargetFilter>,
+        keyword: Keyword,
+    ) -> Effect {
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition {
+                mode: StaticMode::Continuous,
+                affected,
+                modifications: vec![ContinuousModification::AddKeyword { keyword }],
+                condition: None,
+                per_player_condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: Vec::new(),
+                characteristic_defining: false,
+                description: None,
+            }],
+            target,
+            duration: None,
+        }
+    }
+
+    /// Battlefield object controlled by the AI with a single activated ability
+    /// whose effect is `effect` (ability index 0).
+    fn ai_object_with_activated(state: &mut GameState, effect: Effect) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(1),
+            AI,
+            "Self-Protector".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities)
+            .push(AbilityDefinition::new(AbilityKind::Activated, effect));
+        id
+    }
+
+    /// Run `ReactiveSelfProtectionPolicy::verdict` for activating `source_id`'s
+    /// ability 0 — drives the real policy path for an `ActivateAbility` candidate.
+    fn activate_verdict(state: &GameState, source_id: ObjectId) -> PolicyVerdict {
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+            },
+            metadata: ActionMetadata {
+                actor: Some(AI),
+                tactical_class: TacticalClass::Ability,
+            },
+        };
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: AI },
+            candidates: Vec::new(),
+        };
+        let config = AiConfig::default();
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+        ReactiveSelfProtectionPolicy.verdict(&ctx)
+    }
 
     fn indestructible_grant_to_self() -> Effect {
         Effect::GenericEffect {
@@ -417,5 +524,150 @@ mod tests {
             duration: None,
         };
         assert!(is_self_protection_effect(&effect));
+    }
+
+    // ───────── #3: activation cost-benefit (extend to ActivateAbility) ────────
+
+    /// Classifier: a targeted grant scoped to ParentTarget with a self-scoped
+    /// parent target (Sylvan Safekeeper shape) IS self-protection.
+    /// Discriminating for the part-3 classifier extension.
+    #[test]
+    fn classifier_recognises_parent_target_grant_to_you() {
+        assert!(is_self_protection_effect(&grant_effect(
+            Some(TargetFilter::ParentTarget),
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You)
+            )),
+            Keyword::Shroud,
+        )));
+    }
+
+    /// Classifier: the same shape but granting to an OPPONENT's creature is NOT
+    /// self-protection (parent target is opponent-scoped).
+    #[test]
+    fn classifier_rejects_parent_target_grant_to_opponent() {
+        assert!(!is_self_protection_effect(&grant_effect(
+            Some(TargetFilter::ParentTarget),
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            )),
+            Keyword::Shroud,
+        )));
+    }
+
+    /// Runtime: activating a SelfRef defensive grant ("~ gains indestructible")
+    /// with no threat present is penalized. Discriminating for the
+    /// decision_kinds/guard widening (revert → `_na`).
+    #[test]
+    fn activation_self_ref_protection_no_threat_penalized() {
+        let mut state = GameState::new_two_player(42);
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_threat");
+                assert_eq!(delta, NO_THREAT_PENALTY);
+            }
+            PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+        }
+    }
+
+    /// Runtime: activating a ParentTarget grant to a creature you control
+    /// ("sac a land: target creature you control gains shroud", Sylvan
+    /// Safekeeper) with no threat is penalized. Discriminating for part 3
+    /// (revert the ParentTarget classifier branch → `_na`).
+    #[test]
+    fn activation_parent_target_protection_no_threat_penalized() {
+        let mut state = GameState::new_two_player(42);
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(
+                Some(TargetFilter::ParentTarget),
+                Some(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+                Keyword::Shroud,
+            ),
+        );
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_no_threat");
+                assert_eq!(delta, NO_THREAT_PENALTY);
+            }
+            PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+        }
+    }
+
+    /// Runtime guard: a non-protection activated ability (draw) is unaffected.
+    #[test]
+    fn activation_non_protection_unaffected() {
+        let mut state = GameState::new_two_player(42);
+        let id = ai_object_with_activated(
+            &mut state,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_na");
+                assert_eq!(delta, 0.0);
+            }
+            PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+        }
+    }
+
+    /// Runtime guard: with an opponent removal spell on the stack targeting the
+    /// AI's permanent, the protection activation IS allowed (threat present).
+    #[test]
+    fn activation_self_protection_with_threat_allowed() {
+        use engine::types::ability::{ResolvedAbility, TargetRef};
+        use engine::types::game_state::{StackEntry, StackEntryKind};
+
+        let mut state = GameState::new_two_player(42);
+        let id = ai_object_with_activated(
+            &mut state,
+            grant_effect(Some(TargetFilter::SelfRef), None, Keyword::Indestructible),
+        );
+        // Opponent Destroy spell on the stack targeting the AI's permanent.
+        let opp = PlayerId(1);
+        let spell_id = create_object(
+            &mut state,
+            CardId(99),
+            opp,
+            "Doom Blade".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(id)],
+            spell_id,
+            opp,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: opp,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        match activate_verdict(&state, id) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "reactive_self_protection_threat_present");
+                assert_eq!(delta, 0.0);
+            }
+            PolicyVerdict::Reject { .. } => panic!("unexpected reject"),
+        }
     }
 }
