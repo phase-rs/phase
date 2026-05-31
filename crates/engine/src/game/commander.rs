@@ -19,15 +19,12 @@ pub fn commander_tax(state: &GameState, commander_id: ObjectId) -> u32 {
 
 /// CR 408.3 + CR 903.8: Record that a commander was cast from the command zone, incrementing its cast count.
 pub fn record_commander_cast(state: &mut GameState, commander_id: ObjectId) {
-    let Some(obj) = state.objects.get(&commander_id) else {
-        return;
-    };
-    if !obj.is_commander {
-        return;
-    }
-    let owner = obj.owner;
     *state.commander_cast_count.entry(commander_id).or_insert(0) += 1;
-    state.commander_cast_owners.insert(commander_id, owner);
+    if let Some(obj) = state.objects.get(&commander_id) {
+        if obj.is_commander {
+            state.commander_cast_owners.insert(commander_id, obj.owner);
+        }
+    }
 }
 
 /// CR 903.8: Count previous times `player` has cast their commander(s) from
