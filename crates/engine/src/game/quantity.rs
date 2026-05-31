@@ -8863,6 +8863,7 @@ mod tests {
                     keywords: vec![],
                     colors: vec![],
                     counters: Default::default(),
+                    chosen_attributes: vec![],
                 },
             );
             state.exile_links.push(ExileLink {

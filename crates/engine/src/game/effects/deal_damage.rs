@@ -41,7 +41,9 @@ fn player_context_target(
     target_filter: &TargetFilter,
 ) -> Option<TargetRef> {
     if matches!(target_filter, TargetFilter::SourceChosenPlayer) {
-        return super::source_chosen_player(state, ability).map(TargetRef::Player);
+        // CR 607.2d + CR 608.2c: Resolve "the chosen player" from the
+        // source's linked persisted choice.
+        return super::source_chosen_player(state, ability.source_id).map(TargetRef::Player);
     }
 
     if matches!(

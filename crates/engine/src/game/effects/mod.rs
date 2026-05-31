@@ -2356,7 +2356,9 @@ pub(crate) fn resolve_player_for_context_ref(
         }
     }
     if matches!(target_filter, TargetFilter::SourceChosenPlayer) {
-        if let Some(player) = source_chosen_player(state, ability) {
+        // CR 607.2d + CR 608.2c: Resolve "the chosen player" from the
+        // source's linked persisted choice.
+        if let Some(player) = source_chosen_player(state, ability.source_id) {
             return player;
         }
     }
@@ -2403,13 +2405,10 @@ pub(crate) fn resolve_player_for_context_ref(
 /// linked persisted choice. Triggered abilities may resolve after the source
 /// left the battlefield; in that case the LKI cache carries the source choices
 /// as they last existed in the public zone.
-pub(crate) fn source_chosen_player(
-    state: &GameState,
-    ability: &ResolvedAbility,
-) -> Option<PlayerId> {
+pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
     state
         .objects
-        .get(&ability.source_id)
+        .get(&source_id)
         .and_then(|obj| {
             obj.chosen_attributes.iter().find_map(|attr| match attr {
                 ChosenAttribute::Player(player) => Some(*player),
@@ -2417,7 +2416,7 @@ pub(crate) fn source_chosen_player(
             })
         })
         .or_else(|| {
-            state.lki_cache.get(&ability.source_id).and_then(|lki| {
+            state.lki_cache.get(&source_id).and_then(|lki| {
                 lki.chosen_attributes.iter().find_map(|attr| match attr {
                     ChosenAttribute::Player(player) => Some(*player),
                     _ => None,
@@ -5075,7 +5074,10 @@ mod tests {
             PlayerId(0),
         );
 
-        assert_eq!(source_chosen_player(&state, &ability), Some(PlayerId(1)));
+        assert_eq!(
+            source_chosen_player(&state, ability.source_id),
+            Some(PlayerId(1))
+        );
 
         state.objects.remove(&source);
         state.lki_cache.insert(
@@ -5099,7 +5101,10 @@ mod tests {
             },
         );
 
-        assert_eq!(source_chosen_player(&state, &ability), Some(PlayerId(1)));
+        assert_eq!(
+            source_chosen_player(&state, ability.source_id),
+            Some(PlayerId(1))
+        );
     }
 
     /// CR 119.3 + CR 115.10: `effect_has_iteration_bound_recipient` must

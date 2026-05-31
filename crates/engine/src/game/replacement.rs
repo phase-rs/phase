@@ -2,10 +2,10 @@ use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, ChosenAttribute, CombatDamageScope, ControllerRef,
-    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect,
-    PostReplacementContinuation, PreventionAmount, QuantityExpr, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, ShieldKind, TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, PostReplacementContinuation,
+    PreventionAmount, QuantityExpr, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ShieldKind, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -2202,7 +2202,11 @@ fn matches_damage_target_filter(
             DamageTargetPlayerScope::Opponent => player != repl_controller,
             DamageTargetPlayerScope::Controller => player == repl_controller,
             DamageTargetPlayerScope::SourceChosenPlayer => {
-                source_chosen_player(state, repl_source).is_some_and(|chosen| player == chosen)
+                // CR 607.2d + CR 614.1a: A damage replacement can scope
+                // "the chosen player" through the replacement source's linked
+                // persisted choice.
+                crate::game::effects::source_chosen_player(state, repl_source)
+                    .is_some_and(|chosen| player == chosen)
             }
             DamageTargetPlayerScope::Specific(specific) => player == *specific,
         }
@@ -2231,29 +2235,6 @@ fn matches_damage_target_filter(
                 .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature)),
         },
     }
-}
-
-/// CR 607.2d + CR 614.1a: Damage replacements can refer to the player chosen
-/// for the replacement source ("the chosen player"). If no linked choice exists,
-/// the replacement does not apply to that source-chosen scope.
-fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
-    state
-        .objects
-        .get(&source_id)
-        .and_then(|obj| {
-            obj.chosen_attributes.iter().find_map(|attr| match attr {
-                ChosenAttribute::Player(player) => Some(*player),
-                _ => None,
-            })
-        })
-        .or_else(|| {
-            state.lki_cache.get(&source_id).and_then(|lki| {
-                lki.chosen_attributes.iter().find_map(|attr| match attr {
-                    ChosenAttribute::Player(player) => Some(*player),
-                    _ => None,
-                })
-            })
-        })
 }
 
 // --- Pipeline functions ---

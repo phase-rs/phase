@@ -539,6 +539,8 @@ fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<Stat
     parse_static_line_multi(line)
 }
 
+/// CR 607.2d: Reconcile self-chosen type statics with the source's linked
+/// persisted choice.
 fn reconcile_self_chosen_type_statics(result: &mut ParsedAbilities, types: &[String]) {
     let Some(chosen_kind) = chosen_subtype_kind_from_persisted_choice(result)
         .or_else(|| chosen_kind_from_card_types(types))
@@ -585,6 +587,13 @@ fn chosen_subtype_kind_from_persisted_choice(
             result
                 .abilities
                 .iter()
+                .find_map(chosen_subtype_kind_from_ability)
+        })
+        .or_else(|| {
+            result
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
                 .find_map(chosen_subtype_kind_from_ability)
         })
 }
@@ -13631,6 +13640,26 @@ mod tests {
             "unexpected DynamicQty warning: {:?}",
             parsed.parse_warnings
         );
+    }
+
+    #[test]
+    fn trigger_persisted_type_choice_reconciles_self_chosen_type_static() {
+        let parsed = parse(
+            "When ~ enters, choose a creature type.\n~ is the chosen type in addition to its other types.",
+            "Synthetic Relic",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+
+        assert_eq!(parsed.triggers.len(), 1);
+        let static_def = parsed.statics.first().expect("expected static ability");
+        assert!(static_def.modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::AddChosenSubtype {
+                kind: crate::types::ability::ChosenSubtypeKind::CreatureType
+            }
+        )));
     }
 
     #[test]

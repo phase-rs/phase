@@ -7880,6 +7880,7 @@ mod tests {
                 keywords: vec![],
                 colors: vec![],
                 counters: Default::default(),
+                chosen_attributes: vec![],
             },
         );
 
@@ -7946,6 +7947,7 @@ mod tests {
                 keywords: vec![],
                 colors: vec![],
                 counters: Default::default(),
+                chosen_attributes: vec![],
             },
         );
 

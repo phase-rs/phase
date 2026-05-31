@@ -2692,6 +2692,7 @@ fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
     Some(mode)
 }
 
+/// CR 607.2d: Parse a self-chosen type static ability line.
 fn parse_self_chosen_type_static(input: &str) -> OracleResult<'_, ChosenSubtypeKind> {
     let (input, kind) = alt((
         value(ChosenSubtypeKind::BasicLandType, tag("~ is")),
@@ -6774,8 +6775,16 @@ fn lower_rule_static(
                 keyword: Keyword::Shroud,
             }])
             .description(description.to_string()),
-        RuleStaticPredicate::Hexproof => StaticDefinition::new(StaticMode::Hexproof)
+        RuleStaticPredicate::Hexproof if rule_static_affected_is_player_scope(&affected) => {
+            StaticDefinition::new(StaticMode::Hexproof)
+                .affected(affected)
+                .description(description.to_string())
+        }
+        RuleStaticPredicate::Hexproof => StaticDefinition::continuous()
             .affected(affected)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof,
+            }])
             .description(description.to_string()),
         RuleStaticPredicate::MayLookAtTopOfLibrary => {
             StaticDefinition::new(StaticMode::MayLookAtTopOfLibrary)
