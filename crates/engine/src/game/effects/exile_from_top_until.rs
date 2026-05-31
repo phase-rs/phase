@@ -823,12 +823,19 @@ mod tests {
         // nonland filter excludes them from the cast permission.
         for &hit in &[p0_hit, p1_hit, p2_hit] {
             let perms = &state.objects[&hit].casting_permissions;
-            assert!(
-                perms.iter().any(|p| matches!(
-                    p,
-                    CastingPermission::ExileWithAltCost { cost, granted_to: Some(g), .. }
-                        if *cost == ManaCost::zero() && *g == PlayerId(0)
-                )),
+            let zero_cost_etali_permissions = perms
+                .iter()
+                .filter(|p| {
+                    matches!(
+                        p,
+                        CastingPermission::ExileWithAltCost { cost, granted_to: Some(g), .. }
+                            if *cost == ManaCost::zero() && *g == PlayerId(0)
+                    )
+                })
+                .count();
+            assert_eq!(
+                zero_cost_etali_permissions,
+                1,
                 "nonland hit {:?} must have ExileWithAltCost {{ zero, granted_to: PlayerId(0) }} in casting_permissions={:?}",
                 hit,
                 perms

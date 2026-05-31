@@ -126,7 +126,9 @@ pub fn resolve(
                     granted_to,
                 }
             };
-            obj.casting_permissions.push(permission);
+            if !obj.casting_permissions.contains(&permission) {
+                obj.casting_permissions.push(permission);
+            }
         }
     }
 
