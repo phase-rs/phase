@@ -1281,8 +1281,8 @@ pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
 /// CR 607.1 + CR 610.3: Detect an (ETB exile, LTB return) trigger pair and
 /// upgrade the ETB exile to `Duration::UntilHostLeavesPlay` so the
 /// `ExileLink::UntilSourceLeaves` mechanism returns the exiled card when the
-/// source leaves. Covers Journey to Nowhere / Oblivion Ring / Silkwrap /
-/// Singing Bell Strike / all "exile target X … LTB return" two-trigger cards.
+/// source leaves. Covers Journey to Nowhere, Oblivion Ring, and the broader
+/// "exile target X … LTB return" two-trigger class.
 fn synthesize_etb_exile_ltb_return_pair(triggers: &mut [TriggerDefinition]) {
     let has_ltb_return = triggers.iter().any(|t| {
         t.mode == TriggerMode::LeavesBattlefield

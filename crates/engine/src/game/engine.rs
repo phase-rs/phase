@@ -13818,6 +13818,110 @@ mod exile_return_tests {
             "returned object must still be an enchantment"
         );
     }
+
+    /// CR 607.2a + CR 610.3: Two-trigger exile-return cards link the ETB
+    /// exile to the LTB return text. Journey to Nowhere has no explicit
+    /// "until" text on the ETB trigger, so the parser synthesis must still
+    /// create an `UntilSourceLeaves` exile link for the runtime return path.
+    #[test]
+    fn journey_to_nowhere_two_trigger_oracle_returns_exiled_creature() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::TargetRef;
+        use crate::types::game_state::StackEntry;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        let journey_id = scenario
+            .add_creature(P0, "Journey to Nowhere", 0, 0)
+            .as_enchantment()
+            .from_oracle_text(
+                "When this enchantment enters, exile target creature.\n\
+                 When this enchantment leaves the battlefield, return the exiled card \
+                 to the battlefield under its owner's control.",
+            )
+            .id();
+        let creature_id = scenario.add_creature(P1, "Opponent Creature", 2, 2).id();
+
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let journey = state
+            .objects
+            .get(&journey_id)
+            .expect("Journey to Nowhere on battlefield");
+        let etb_trigger = journey
+            .trigger_definitions
+            .iter_all()
+            .find(|t| {
+                matches!(t.mode, crate::types::TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)
+            })
+            .expect("Journey must have ETB trigger");
+        let execute_def = etb_trigger.execute.as_deref().expect("trigger.execute");
+        assert_eq!(
+            execute_def.duration,
+            Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+            "parser synthesis must make the ETB exile create an exile link"
+        );
+
+        let mut resolved = build_resolved_from_def(execute_def, journey_id, PlayerId(0));
+        resolved.targets = vec![TargetRef::Object(creature_id)];
+
+        state.stack.push_back(StackEntry {
+            id: ObjectId(9_000_001),
+            source_id: journey_id,
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                source_id: journey_id,
+                ability: Box::new(resolved),
+                description: Some("When Journey to Nowhere enters...".to_string()),
+                condition: None,
+                trigger_event: None,
+                source_name: String::new(),
+                subject_match_count: None,
+            },
+        });
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(state, &mut events);
+
+        assert!(state.exile.contains(&creature_id));
+        assert!(state.exile_links.iter().any(|link| {
+            link.exiled_id == creature_id
+                && link.source_id == journey_id
+                && matches!(
+                    link.kind,
+                    crate::types::game_state::ExileLinkKind::UntilSourceLeaves {
+                        return_zone: Zone::Battlefield
+                    }
+                )
+        }));
+
+        let mut events: Vec<GameEvent> = Vec::new();
+        crate::game::zones::move_to_zone(state, journey_id, Zone::Graveyard, &mut events);
+        let default_wf = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        crate::game::engine_priority::run_post_action_pipeline(
+            state,
+            &mut events,
+            &default_wf,
+            false,
+        )
+        .unwrap();
+
+        assert!(state.players[0].graveyard.contains(&journey_id));
+        assert!(state.battlefield.contains(&creature_id));
+        assert!(!state.exile.contains(&creature_id));
+        assert!(state.exile_links.is_empty());
+    }
 }
 
 #[cfg(test)]
