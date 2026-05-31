@@ -56,7 +56,14 @@ fn resolve_library_owner(
 fn searcher_is_library_owner(target_player: &TargetFilter) -> bool {
     matches!(
         target_player,
-        TargetFilter::ParentTargetController
+        // CR 702.124c: "Partner with" — target player searches their own library,
+        // so when the target is selected via TargetFilter::Player (any player),
+        // the targeted player is both the library owner and the searcher.
+        // Asymmetric searches (Bribery, Praetor's Grasp) use Opponent/specific
+        // player targets where the controller is the searcher — those use
+        // target_player: Some(Opponent) which falls through to the else branch.
+        TargetFilter::Player
+            | TargetFilter::ParentTargetController
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSpellController
             | TargetFilter::TriggeringSpellOwner
