@@ -1261,15 +1261,11 @@ fn choosable_objects(waiting_for: &WaitingFor, viewer: PlayerId) -> HashSet<Obje
             choices: cards,
             ..
         }
-        | WaitingFor::DiscardForCost { player, cards, .. }
-        | WaitingFor::BeholdForCost {
+        | WaitingFor::PayCost {
             player,
             choices: cards,
             ..
         }
-        | WaitingFor::DiscardForManaAbility { player, cards, .. }
-        | WaitingFor::ExileForManaAbility { player, cards, .. }
-        | WaitingFor::ExileForCost { player, cards, .. }
         | WaitingFor::CollectEvidenceChoice { player, cards, .. }
             if *player == viewer =>
         {
@@ -1297,28 +1293,6 @@ fn choosable_objects(waiting_for: &WaitingFor, viewer: PlayerId) -> HashSet<Obje
             player,
             candidates: permanents,
             ..
-        }
-        | WaitingFor::SacrificeForCost {
-            player, permanents, ..
-        }
-        | WaitingFor::ReturnToHandForCost {
-            player, permanents, ..
-        }
-        | WaitingFor::RemoveCounterForCost {
-            player, permanents, ..
-        }
-        | WaitingFor::TapCreaturesForSpellCost {
-            player,
-            creatures: permanents,
-            ..
-        }
-        | WaitingFor::TapCreaturesForManaAbility {
-            player,
-            creatures: permanents,
-            ..
-        }
-        | WaitingFor::SacrificeForManaAbility {
-            player, permanents, ..
         }
         | WaitingFor::BlightChoice {
             player,
@@ -1665,9 +1639,9 @@ mod tests {
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterMatch;
     use engine::types::game_state::{
-        CombatTaxPending, CopyTargetSlot, ManaAbilityResume, ManaChoiceContext, ManaChoicePrompt,
-        MulliganBottomEntry, MulliganDecisionEntry, PendingCast, PendingManaAbility,
-        TargetSelectionProgress, TargetSelectionSlot,
+        CombatTaxPending, CopyTargetSlot, CostResume, ManaAbilityResume, ManaChoiceContext,
+        ManaChoicePrompt, MulliganBottomEntry, MulliganDecisionEntry, PayCostKind, PendingCast,
+        PendingManaAbility, TargetSelectionProgress, TargetSelectionSlot,
     };
     use engine::types::identifiers::CardId;
     use engine::types::zones::ExileCostSourceZone;
@@ -1961,12 +1935,17 @@ mod tests {
         );
         assert_eq!(
             choosable_objects(
-                &WaitingFor::ExileForCost {
+                &WaitingFor::PayCost {
                     player: PlayerId(0),
-                    zone: ExileCostSourceZone::Graveyard,
+                    kind: PayCostKind::ExileFromZone {
+                        zone: ExileCostSourceZone::Graveyard,
+                    },
+                    choices: vec![ObjectId(28)],
                     count: 1,
-                    cards: vec![ObjectId(28)],
-                    pending_cast: dummy_pending_cast(),
+                    min_count: 0,
+                    resume: CostResume::Spell {
+                        spell: dummy_pending_cast(),
+                    },
                 },
                 PlayerId(0),
             ),
@@ -1974,12 +1953,17 @@ mod tests {
         );
         assert_eq!(
             choosable_objects(
-                &WaitingFor::RemoveCounterForCost {
+                &WaitingFor::PayCost {
                     player: PlayerId(0),
+                    kind: PayCostKind::RemoveCounter {
+                        counter_type: CounterMatch::Any,
+                    },
+                    choices: vec![ObjectId(29)],
                     count: 1,
-                    counter_type: CounterMatch::Any,
-                    permanents: vec![ObjectId(29)],
-                    pending_cast: dummy_pending_cast(),
+                    min_count: 0,
+                    resume: CostResume::Spell {
+                        spell: dummy_pending_cast(),
+                    },
                 },
                 PlayerId(0),
             ),
@@ -1987,11 +1971,15 @@ mod tests {
         );
         assert_eq!(
             choosable_objects(
-                &WaitingFor::TapCreaturesForManaAbility {
+                &WaitingFor::PayCost {
                     player: PlayerId(0),
+                    kind: PayCostKind::TapCreatures,
+                    choices: vec![ObjectId(30)],
                     count: 1,
-                    creatures: vec![ObjectId(30)],
-                    pending_mana_ability: dummy_pending_mana_ability(),
+                    min_count: 0,
+                    resume: CostResume::ManaAbility {
+                        mana_ability: dummy_pending_mana_ability(),
+                    },
                 },
                 PlayerId(0),
             ),

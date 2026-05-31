@@ -7,8 +7,8 @@ use crate::types::ability::{
 };
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CastPaymentMode, CastingVariant, ConvokeMode, DistributionUnit, GameState, PendingCast,
-    StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
+    CastPaymentMode, CastingVariant, ConvokeMode, CostResume, DistributionUnit, GameState,
+    PayCostKind, PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -2370,12 +2370,15 @@ fn pay_additional_cost(
                     "No eligible object to behold".to_string(),
                 ));
             }
-            return Ok(WaitingFor::BeholdForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
-                count: count as usize,
+                kind: PayCostKind::Behold { action },
                 choices,
-                action,
-                pending_cast: Box::new(pending),
+                count: count as usize,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::Discard { count, filter, .. } => {
@@ -2394,11 +2397,15 @@ fn pay_additional_cost(
                     "Not enough cards in hand to discard".to_string(),
                 ));
             }
-            return Ok(WaitingFor::DiscardForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::Discard,
+                choices: eligible,
                 count,
-                cards: eligible,
-                pending_cast: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::Mana { cost: mana_cost } => {
@@ -2446,12 +2453,15 @@ fn pay_additional_cost(
                         "Not enough eligible permanents to sacrifice".into(),
                     ));
                 }
-                return Ok(WaitingFor::SacrificeForCost {
+                return Ok(WaitingFor::PayCost {
                     player,
+                    kind: PayCostKind::Sacrifice,
+                    choices: eligible,
                     count: max_count,
                     min_count,
-                    permanents: eligible,
-                    pending_cast: Box::new(pending),
+                    resume: CostResume::Spell {
+                        spell: Box::new(pending),
+                    },
                 });
             }
         }
@@ -2471,11 +2481,15 @@ fn pay_additional_cost(
                     "Not enough eligible permanents to return".into(),
                 ));
             }
-            return Ok(WaitingFor::ReturnToHandForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::ReturnToHand,
+                choices: eligible,
                 count: count as usize,
-                permanents: eligible,
-                pending_cast: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::RemoveCounter {
@@ -2496,12 +2510,17 @@ fn pay_additional_cost(
                     "No eligible permanents with counters".into(),
                 ));
             }
-            return Ok(WaitingFor::RemoveCounterForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
-                count,
-                counter_type: counter_type.clone(),
-                permanents: eligible,
-                pending_cast: Box::new(pending),
+                kind: PayCostKind::RemoveCounter {
+                    counter_type: counter_type.clone(),
+                },
+                choices: eligible,
+                count: count as usize,
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::PayEnergy { amount } => {
@@ -2573,12 +2592,15 @@ fn pay_additional_cost(
                     "Not enough eligible cards in {zone:?} to exile"
                 )));
             }
-            return Ok(WaitingFor::ExileForCost {
+            return Ok(WaitingFor::PayCost {
                 player,
-                zone: narrow_zone,
+                kind: PayCostKind::ExileFromZone { zone: narrow_zone },
+                choices: eligible,
                 count: count as usize,
-                cards: eligible,
-                pending_cast: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         AbilityCost::CollectEvidence { amount } => {
@@ -2616,11 +2638,15 @@ fn pay_additional_cost(
                     "Not enough eligible creatures to tap".into(),
                 ));
             }
-            return Ok(WaitingFor::TapCreaturesForSpellCost {
+            return Ok(WaitingFor::PayCost {
                 player,
+                kind: PayCostKind::TapCreatures,
+                choices: eligible,
                 count: count as usize,
-                creatures: eligible,
-                pending_cast: Box::new(pending),
+                min_count: 0,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending),
+                },
             });
         }
         _ => {
@@ -5114,13 +5140,16 @@ mod tests {
 
         // Park at the cost-sacrifice prompt for two creatures, then drive the
         // real `apply_action` resolution by selecting both.
-        state.waiting_for = WaitingFor::SacrificeForCost {
+        state.waiting_for = WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::Sacrifice,
+            choices: vec![observer, plain],
             count: 2,
             // Fixed (non-variable) sacrifice cost of exactly 2 — min == count.
             min_count: 2,
-            permanents: vec![observer, plain],
-            pending_cast: Box::new(pending),
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
         };
 
         apply_as_current(
@@ -5298,13 +5327,16 @@ mod tests {
             },
         });
 
-        state.waiting_for = WaitingFor::SacrificeForCost {
+        state.waiting_for = WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::Sacrifice,
+            choices: vec![observer, plain],
             count: 2,
             // Fixed (non-variable) sacrifice cost of exactly 2 — min == count.
             min_count: 2,
-            permanents: vec![observer, plain],
-            pending_cast: Box::new(pending),
+            resume: CostResume::Spell {
+                spell: Box::new(pending),
+            },
         };
 
         apply_as_current(
@@ -8319,11 +8351,11 @@ mod tests {
         .expect("pitch cost should produce ExileForCost");
 
         match result {
-            WaitingFor::ExileForCost {
+            WaitingFor::PayCost {
                 player,
-                zone,
+                kind: PayCostKind::ExileFromZone { zone },
+                choices: cards,
                 count,
-                cards,
                 ..
             } => {
                 assert_eq!(player, caster);
@@ -8342,7 +8374,7 @@ mod tests {
                     "cast source itself must never be eligible: {cards:?}"
                 );
             }
-            other => panic!("expected ExileForCost, got {other:?}"),
+            other => panic!("expected PayCost ExileFromZone, got {other:?}"),
         }
     }
 
@@ -8709,11 +8741,11 @@ mod tests {
         .expect("graveyard exile cost should produce ExileForCost");
 
         match result {
-            WaitingFor::ExileForCost {
+            WaitingFor::PayCost {
                 player,
-                zone,
+                kind: PayCostKind::ExileFromZone { zone },
+                choices: cards,
                 count,
-                cards,
                 ..
             } => {
                 assert_eq!(player, caster);
@@ -8732,7 +8764,7 @@ mod tests {
                     "cast source itself must never be eligible: {cards:?}"
                 );
             }
-            other => panic!("expected ExileForCost, got {other:?}"),
+            other => panic!("expected PayCost ExileFromZone, got {other:?}"),
         }
     }
 

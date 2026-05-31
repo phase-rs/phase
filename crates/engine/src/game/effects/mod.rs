@@ -2529,7 +2529,7 @@ fn ability_with_event_context_targets(
     pending
 }
 
-/// CR 603.7c: Extract an event-context target filter from an effect, if present.
+/// CR 603.2: Extract an event-context target filter from an effect, if present.
 /// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
 /// that auto-resolve from `state.current_trigger_event` at resolution time.
 fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
@@ -2625,6 +2625,8 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
             | TargetFilter::TriggeringSource
             | TargetFilter::DefendingPlayer
             | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::StackSpell
     ) {
         Some(filter)
     } else {
@@ -3498,7 +3500,7 @@ fn resolve_chain_body(
         ability.effect,
         Effect::Unimplemented { .. } | Effect::RuntimeHandled { .. }
     ) {
-        // CR 603.7c: If the ability has empty targets but its effect uses an event-context
+        // CR 603.2: If the ability has empty targets but its effect uses an event-context
         // target filter (TriggeringSpellController, TriggeringSource, etc.), resolve the
         // filter into an actual TargetRef using the current trigger event context.
         let resolved_ability = if ability.targets.is_empty() {

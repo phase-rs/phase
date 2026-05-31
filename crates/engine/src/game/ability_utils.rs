@@ -3913,7 +3913,8 @@ mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        GameState, StackEntryKind, TargetSelectionConstraint, TargetSelectionSlot, WaitingFor,
+        GameState, PayCostKind, StackEntryKind, TargetSelectionConstraint, TargetSelectionSlot,
+        WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -4045,7 +4046,13 @@ mod tests {
         )
         .expect("Maze's End activation should begin");
         assert!(
-            matches!(waiting, WaitingFor::ReturnToHandForCost { .. }),
+            matches!(
+                waiting,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::ReturnToHand,
+                    ..
+                }
+            ),
             "self-bounce cost should request a return-to-hand selection"
         );
         state.waiting_for = waiting;

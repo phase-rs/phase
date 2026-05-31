@@ -37,17 +37,16 @@ function getPendingCastObjectId(
     case "ModeChoice":
     case "OptionalCostChoice":
     case "DefilerPayment":
-    case "DiscardForCost":
-    case "SacrificeForCost":
-    case "ReturnToHandForCost":
-    case "RemoveCounterForCost":
     case "BlightChoice":
-    case "BeholdForCost":
-    case "TapCreaturesForSpellCost":
-    case "ExileForCost":
     case "HarmonizeTapChoice":
     case "ChooseXValue":
       return waitingFor.data.pending_cast.object_id;
+    // CR 601.2b: PayCost carries its pending cast inside `resume` (only the
+    // spell-cast resume; mana-ability cost payment has no pending cast).
+    case "PayCost":
+      return waitingFor.data.resume.type === "Spell"
+        ? waitingFor.data.resume.Spell.object_id
+        : null;
     case "ManaPayment":
       return topOfStackId;
     default:

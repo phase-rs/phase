@@ -1,5 +1,5 @@
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CostResume, GameState, PayCostKind, WaitingFor};
 use engine::types::player::PlayerId;
 
 use crate::features::DeckFeatures;
@@ -19,7 +19,11 @@ impl SacrificeValuePolicy {
         };
         if !matches!(
             ctx.decision.waiting_for,
-            WaitingFor::SacrificeForCost { .. } | WaitingFor::WardSacrificeChoice { .. }
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                resume: CostResume::Spell { .. },
+                ..
+            } | WaitingFor::WardSacrificeChoice { .. }
         ) {
             return 0.0;
         }
@@ -120,12 +124,15 @@ mod tests {
 
         let config = AiConfig::default();
         let decision = AiDecisionContext {
-            waiting_for: WaitingFor::SacrificeForCost {
+            waiting_for: WaitingFor::PayCost {
                 player: PlayerId(0),
+                kind: PayCostKind::Sacrifice,
+                choices: vec![creature, token],
                 count: 1,
                 min_count: 1,
-                permanents: vec![creature, token],
-                pending_cast: dummy_pending(),
+                resume: CostResume::Spell {
+                    spell: dummy_pending(),
+                },
             },
             candidates: Vec::new(),
         };

@@ -49,14 +49,10 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "AlternativeCastChoice",
     "CastingVariantChoice",
     "ChoosePermanentTypeSlot",
-    "DiscardForCost",
-    "SacrificeForCost",
-    "ReturnToHandForCost",
-    "RemoveCounterForCost",
+    // CR 118.3 + CR 601.2b + CR 605.3b: unified cost-payment selection
+    // (replaces the 11 old per-cost variants; dispatches on `kind`).
+    "PayCost",
     "BlightChoice",
-    "BeholdForCost",
-    "TapCreaturesForSpellCost",
-    "ExileForCost",
     "HarmonizeTapChoice",
     "CollectEvidenceChoice",
     // Multi-step target / offer choices rendered by CardChoiceModal.
@@ -64,11 +60,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ParadigmCastOffer", // verified rendered: CardChoiceModal.tsx:219 case → :221 → ParadigmCastOfferModal (:1515)
     // Note: `PopulateChoice` is intentionally NOT registered — it has no
     // renderer anywhere in client/src/, so the safety-net modal must fire for it.
-    // Mana abilities
-    "TapCreaturesForManaAbility",
-    "DiscardForManaAbility",
-    "ExileForManaAbility",
-    "SacrificeForManaAbility",
+    // Mana abilities (cost-selection prompts now route through PayCost above).
     "PayManaAbilityMana",
     "ChooseManaColor",
     // Combat

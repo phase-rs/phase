@@ -42,8 +42,7 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
     case "ReturnAsAuraTarget":
     case "TriggerTargetSelection":
     case "RetargetChoice":
-    case "TapCreaturesForManaAbility":
-    case "TapCreaturesForSpellCost":
+    case "PayCost":
       return waitingFor.data.player;
     default:
       return null;
@@ -118,11 +117,8 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
       return { mode: "target", eligibleIds: targetEligibleIds };
     }
 
-    if (
-      waitingFor?.type === "TapCreaturesForManaAbility"
-      || waitingFor?.type === "TapCreaturesForSpellCost"
-    ) {
-      const tappableIds = new Set(waitingFor.data.creatures);
+    if (waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures") {
+      const tappableIds = new Set(waitingFor.data.choices);
       const eligibleIds = group.ids.filter((id) => tappableIds.has(id));
       return eligibleIds.length > 0 ? { mode: "tap", eligibleIds } : null;
     }
@@ -376,10 +372,7 @@ function CollapsedGroupPicker({
   };
 
   const tapLimit = useMemo(() => {
-    if (
-      waitingFor?.type !== "TapCreaturesForManaAbility"
-      && waitingFor?.type !== "TapCreaturesForSpellCost"
-    ) {
+    if (waitingFor?.type !== "PayCost" || waitingFor.data.kind.type !== "TapCreatures") {
       return 0;
     }
     const groupIdSet = new Set(group.ids);
