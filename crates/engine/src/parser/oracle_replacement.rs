@@ -1891,17 +1891,17 @@ fn parse_enters_with_counters(
     // parse yields a typed filter with a concrete type/subtype (not the `Any`
     // fallback). A non-type subject parses to the `[Any]` fallback and is
     // rejected, falling through to the `SelfRef` self-ETB branch.
-    let subject = parse_distributive_subject(work_text).filter(|(subject_text, _)| {
+    let subject = parse_distributive_subject(work_text).and_then(|(subject_text, scope)| {
         let (filter, _) = parse_type_phrase(subject_text);
-        matches!(
+        let is_valid = matches!(
             &filter,
             TargetFilter::Typed(TypedFilter { type_filters, .. })
                 if !type_filters.is_empty()
                     && type_filters.as_slice() != [TypeFilter::Any]
-        )
+        );
+        is_valid.then_some((filter, scope))
     });
-    let valid_card = if let Some((subject_text, scope)) = subject {
-        let (filter, _) = parse_type_phrase(subject_text);
+    let valid_card = if let Some((filter, scope)) = subject {
         // CR 614.12: only the "other" scope excludes the source from the subset.
         let filter = match (filter, scope) {
             (

@@ -6418,6 +6418,104 @@ mod tests {
         );
     }
 
+    /// CR 614.1c + CR 614.12: Dragonstorm Globe's external ETB replacement
+    /// applies to the general subset "Each Dragon you control", including
+    /// token Dragons. This drives the full spell -> stack -> token creation ->
+    /// replacement pipeline; if the parser falls back to `SelfRef`, the
+    /// Artifact source never matches the entering Dragon and this counter is
+    /// missing.
+    #[test]
+    fn dragonstorm_globe_counters_created_dragon_token() {
+        let mut state = setup_game_at_main_phase();
+        let globe = create_object(
+            &mut state,
+            CardId(9170),
+            PlayerId(0),
+            "Dragonstorm Globe".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&globe).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+        }
+        apply_oracle_to_object(
+            &mut state,
+            globe,
+            "Dragonstorm Globe",
+            "Each Dragon you control enters with an additional +1/+1 counter on it.",
+        );
+
+        let token_spell = create_object(
+            &mut state,
+            CardId(9171),
+            PlayerId(0),
+            "Make a Dragon".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&token_spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Token {
+                    name: "Dragon".to_string(),
+                    power: crate::types::ability::PtValue::Fixed(4),
+                    toughness: crate::types::ability::PtValue::Fixed(4),
+                    types: vec!["Creature".to_string(), "Dragon".to_string()],
+                    colors: vec![ManaColor::Red],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+            ));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: token_spell,
+                card_id: CardId(9171),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        let dragon = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|object| {
+                object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Dragon")
+            })
+            .expect("Dragon token should be on the battlefield");
+        assert_eq!(
+            dragon
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default(),
+            1,
+            "Dragonstorm Globe must add one +1/+1 counter to the created Dragon token"
+        );
+    }
+
     /// CR 603.6c + CR 614.1c: Cathars' Crusade triggers on any creature you
     /// control entering. Its `PutCounterAll` effect must distribute one
     /// +1/+1 counter to *every* creature its controller controls — including
