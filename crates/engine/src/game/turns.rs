@@ -2126,6 +2126,42 @@ mod tests {
     }
 
     #[test]
+    fn advance_phase_keeps_end_of_combat_mana_until_combat_ends() {
+        // CR 500.5 + CR 703.4q + CR 702.189a: Firebending mana says "Until
+        // end of combat, you don't lose this mana as steps and phases end."
+        // It must survive combat step transitions through the live empty-pool
+        // pipeline, then drain when the game leaves combat.
+        use crate::types::mana::{ManaExpiry, ManaType, ManaUnit};
+
+        let mut state = setup();
+        state.phase = Phase::BeginCombat;
+
+        let mut firebending_mana = ManaUnit::new(ManaType::Red, ObjectId(10), false, Vec::new());
+        firebending_mana.expiry = Some(ManaExpiry::EndOfCombat);
+        state.players[0].mana_pool.add(firebending_mana);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(11),
+            false,
+            Vec::new(),
+        ));
+
+        while state.phase != Phase::PostCombatMain {
+            assert_eq!(
+                state.players[0].mana_pool.count_color(ManaType::Red),
+                1,
+                "EndOfCombat mana must persist through {:?}",
+                state.phase
+            );
+            advance_phase(&mut state, &mut Vec::new());
+            assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
+        }
+
+        assert_eq!(state.phase, Phase::PostCombatMain);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
+    }
+
+    #[test]
     fn transient_retention_drives_player_retained_mana_query() {
         // CR 611.2b + CR 703.4q: The Last Agni Kai shape — a spell installs a
         // turn-scoped retention rule via `add_transient_continuous_effect` with
