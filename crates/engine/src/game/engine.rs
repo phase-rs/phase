@@ -13664,6 +13664,126 @@ mod exile_return_tests {
             "returned object must still be an enchantment"
         );
     }
+
+    /// CR 607.1 + CR 610.3 + #881: Haytham Kenway — per-opponent multi-target exile
+    /// with Duration::UntilHostLeavesPlay. Exiles one creature per opponent using
+    /// the per-opponent fanout targeting mechanism; ExileLinks are created for each;
+    /// all return when the source leaves the battlefield.
+    #[test]
+    fn haytham_kenway_per_opponent_exile_returns_when_source_leaves() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::TargetRef;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+
+        // Haytham Kenway on P0's battlefield with his real parsed oracle text.
+        let haytham_id = scenario
+            .add_creature(P0, "Haytham Kenway", 3, 3)
+            .from_oracle_text(
+                "When this creature enters, for each opponent, exile up to one target \
+                 creature that player controls until this creature leaves the battlefield.",
+            )
+            .id();
+
+        // Opponent's creature to be exiled.
+        let victim_id = scenario.add_creature(P1, "Opponent Creature", 2, 2).id();
+
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Verify parser: ETB trigger must have UntilHostLeavesPlay on the exile execute.
+        let haytham = state
+            .objects
+            .get(&haytham_id)
+            .expect("Haytham on battlefield");
+        let etb = haytham
+            .trigger_definitions
+            .iter_all()
+            .find(|t| {
+                matches!(t.mode, crate::types::TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)
+            })
+            .expect("Haytham must have ETB trigger");
+        let execute_def = etb.execute.as_deref().expect("ETB must have execute");
+        assert_eq!(
+            execute_def.duration,
+            Some(crate::types::ability::Duration::UntilHostLeavesPlay),
+            "Haytham ETB exile must carry UntilHostLeavesPlay"
+        );
+
+        // Build the resolved exile effect with the opponent's creature as a target.
+        // The per-opponent fanout produces [Player(P1), Object(victim)] target pairs;
+        // we simulate the post-selection ability.targets state.
+        let mut resolved = build_resolved_from_def(execute_def, haytham_id, PlayerId(0));
+        resolved.targets = vec![TargetRef::Player(PlayerId(1)), TargetRef::Object(victim_id)];
+
+        // Push and resolve the trigger.
+        let stack_id = ObjectId(9_000_001);
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: stack_id,
+            source_id: haytham_id,
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                source_id: haytham_id,
+                ability: Box::new(resolved),
+                description: Some("When Haytham enters...".to_string()),
+                condition: None,
+                trigger_event: None,
+                source_name: String::new(),
+                subject_match_count: None,
+            },
+        });
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(state, &mut events);
+
+        assert!(
+            state.exile.contains(&victim_id),
+            "creature must be in exile"
+        );
+        let has_link = state.exile_links.iter().any(|link| {
+            link.exiled_id == victim_id
+                && link.source_id == haytham_id
+                && matches!(
+                    link.kind,
+                    crate::types::game_state::ExileLinkKind::UntilSourceLeaves {
+                        return_zone: Zone::Battlefield
+                    }
+                )
+        });
+        assert!(
+            has_link,
+            "UntilSourceLeaves exile link must be created; exile_links={:?}",
+            state.exile_links
+        );
+
+        // Haytham Kenway leaves the battlefield (dies, bounced, etc.).
+        let mut events: Vec<GameEvent> = Vec::new();
+        crate::game::zones::move_to_zone(state, haytham_id, Zone::Graveyard, &mut events);
+        crate::game::engine_priority::run_post_action_pipeline(
+            state,
+            &mut events,
+            &WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            true,
+        )
+        .unwrap();
+
+        assert!(
+            state.battlefield.contains(&victim_id),
+            "exiled creature must return when Haytham Kenway leaves the battlefield"
+        );
+        assert!(!state.exile.contains(&victim_id));
+        assert!(state.exile_links.is_empty(), "exile link must be consumed");
+    }
 }
 
 #[cfg(test)]

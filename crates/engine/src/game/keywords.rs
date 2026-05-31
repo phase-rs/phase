@@ -226,7 +226,18 @@ pub fn source_matches_card_type(source: &GameObject, type_name: &str) -> bool {
         "sorceries" | "sorcery" => core.contains(&CoreType::Sorcery),
         "planeswalkers" | "planeswalker" => core.contains(&CoreType::Planeswalker),
         "lands" | "land" => core.contains(&CoreType::Land),
-        _ => false,
+        // CR 702.16a + CR 205.3: "protection from [creature subtype]" — sources
+        // like "assassins" or "dragons" are stored as CardType by the parser
+        // but must match via the creature-subtype list. Try both the plural
+        // form (as stored) and the singular (strip one trailing 's') against
+        // every subtype on the source object, case-insensitively.
+        _ => {
+            let singular = type_name.strip_suffix('s').unwrap_or(type_name);
+            source.card_types.subtypes.iter().any(|st| {
+                let lower = st.to_ascii_lowercase();
+                lower == type_name || lower == singular
+            })
+        }
     }
 }
 
@@ -644,6 +655,52 @@ mod tests {
             &no_choice,
             &creature_source,
         ));
+    }
+
+    /// CR 702.16a + CR 205.3 + #881: "protection from [creature subtype]" — the
+    /// parser stores the subtype as `ProtectionTarget::CardType("assassins")`.
+    /// `source_matches_card_type` must recognise creature subtypes via the
+    /// source's `card_types.subtypes` list, checking both plural and singular.
+    #[test]
+    fn source_matches_protection_from_creature_subtype() {
+        let mut haytham = make_obj();
+        haytham.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        haytham
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::CardType(
+                "assassins".to_string(),
+            )));
+
+        // An Assassin creature must match "protection from assassins".
+        let mut assassin_source = make_obj();
+        assassin_source.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        assassin_source
+            .card_types
+            .subtypes
+            .push("Assassin".to_string());
+
+        assert!(
+            source_matches_protection_target(
+                &ProtectionTarget::CardType("assassins".to_string()),
+                &haytham,
+                &assassin_source,
+            ),
+            "Assassin creature must match 'protection from assassins'"
+        );
+
+        // A non-Assassin creature must NOT match.
+        let mut knight_source = make_obj();
+        knight_source.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        knight_source.card_types.subtypes.push("Knight".to_string());
+
+        assert!(
+            !source_matches_protection_target(
+                &ProtectionTarget::CardType("assassins".to_string()),
+                &haytham,
+                &knight_source,
+            ),
+            "Knight creature must NOT match 'protection from assassins'"
+        );
     }
 
     /// Issue #767 / CR 702.16k: "protection from each of your opponents"
