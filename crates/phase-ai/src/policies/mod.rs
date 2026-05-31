@@ -20,6 +20,7 @@ mod free_outlet_activation;
 pub(crate) mod hand_disruption;
 mod hold_mana_up;
 mod interaction_reservation;
+mod land_sequencing;
 mod landfall_timing;
 mod lethality_awareness;
 mod life_total_resource;
