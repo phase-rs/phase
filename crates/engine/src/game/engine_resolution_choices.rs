@@ -2171,6 +2171,7 @@ pub(super) fn handle_resolution_choice(
                                 | ChoiceType::BasicLandType
                                 | ChoiceType::Color { .. }
                                 | ChoiceType::Keyword { .. }
+                                | ChoiceType::CardName
                         ) {
                             crate::game::layers::mark_layers_full(state);
                         }
