@@ -6465,6 +6465,12 @@ pub enum Effect {
         /// CR 101.4: Whether each player chooses independently or one player decides for all.
         #[serde(default)]
         chooser_scope: CategoryChooserScope,
+        /// Permanents eligible to be chosen for the category slots.
+        #[serde(default = "default_target_filter_permanent")]
+        choose_filter: TargetFilter,
+        /// Permanents in scope for the final sacrifice sweep.
+        #[serde(default = "default_target_filter_permanent")]
+        sacrifice_filter: TargetFilter,
     },
     /// CR 702.110b: Exploit — sacrifice a creature you control (optional).
     /// The controller may sacrifice any creature they control, including the exploiter itself.
@@ -7012,6 +7018,10 @@ pub enum CopyRetargetPermission {
 
 pub(crate) fn default_target_filter_any() -> TargetFilter {
     TargetFilter::Any
+}
+
+pub(crate) fn default_target_filter_permanent() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::permanent())
 }
 
 /// CR 115.1: a copy keeps the original spell's declared targets unless an

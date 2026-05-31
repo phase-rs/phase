@@ -1,7 +1,8 @@
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{all_consuming, eof, map, not, opt, rest, value};
+use nom::error::ParseError;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -21,14 +22,13 @@ use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
 };
-#[cfg(test)]
-use crate::types::ability::TypeFilter;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CategoryChooserScope, ChoiceType,
     Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
     FilterProp, GainLifePlayer, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool,
     PaymentCost, PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr,
-    QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypedFilter, ZoneOwner,
+    QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter,
+    TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -2504,12 +2504,17 @@ pub(super) fn parse_category_and_sacrifice_rest_pub(
     rest_lower: &str,
 ) -> Option<ChooseImperativeAst> {
     parse_category_and_sacrifice_rest(rest_lower).map(|ast| match ast {
-        ChooseImperativeAst::CategoryAndSacrificeRest { categories, .. } => {
-            ChooseImperativeAst::CategoryAndSacrificeRest {
-                categories,
-                chooser_scope: CategoryChooserScope::ControllerForAll,
-            }
-        }
+        ChooseImperativeAst::CategoryAndSacrificeRest {
+            categories,
+            choose_filter,
+            sacrifice_filter,
+            ..
+        } => ChooseImperativeAst::CategoryAndSacrificeRest {
+            categories,
+            chooser_scope: CategoryChooserScope::ControllerForAll,
+            choose_filter,
+            sacrifice_filter,
+        },
         other => other,
     })
 }
@@ -2533,7 +2538,7 @@ const PERMANENT_TYPE_CATEGORIES: [CoreType; 6] = [
 ///
 /// Parser structure (nom combinators):
 /// - `tag("from among")` detects pattern 1
-/// - `take_until("from among")` + category parsing for pattern 2
+/// - `parse_category_list_prefix` consumes pattern 2's category list and returns the remainder
 /// - Category list: `parse_category_item` composed with comma + "and" separator
 fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
@@ -2558,6 +2563,8 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
                 return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                     categories: PERMANENT_TYPE_CATEGORIES.to_vec(),
                     chooser_scope: CategoryChooserScope::EachPlayerSelf,
+                    choose_filter: permanent_filter(),
+                    sacrifice_filter: permanent_filter(),
                 });
             }
         }
@@ -2567,58 +2574,65 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
     if let Ok((after_from_among, _)) = tag::<_, _, E>("from among ").parse(rest_lower) {
         // Skip past "the permanents they control" / "the permanents that player controls"
         // to find the category list.
-        let categories_text = skip_permanent_clause(after_from_among)?;
+        let (categories_text, choose_filter) = parse_choose_domain(after_from_among).ok()?;
         let categories = parse_category_list(categories_text)?;
         return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            sacrifice_filter: choose_filter.clone(),
+            choose_filter,
         });
     }
 
     // Pattern 2: "an artifact, a creature, ... from among [the nonland] permanents they control"
-    if let Ok((_, before_from)) = take_until::<_, _, E>("from among").parse(rest_lower) {
-        let categories = parse_category_list(before_from.trim())?;
+    if let Ok((after_categories, categories)) = parse_category_list_prefix(rest_lower) {
+        let (_, choose_filter) = preceded(tag::<_, _, E>(" from among "), parse_choose_domain)
+            .parse(after_categories)
+            .ok()?;
         return Some(ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            sacrifice_filter: choose_filter.clone(),
+            choose_filter,
         });
     }
 
     None
 }
 
-/// Skip past "the permanents they control" / "the [nonland] permanents that player controls"
-/// clauses to find the category list that follows.
-fn skip_permanent_clause(input: &str) -> Option<&str> {
+fn permanent_filter() -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::permanent())
+}
+
+fn nonland_permanent_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::permanent().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+    )
+}
+
+/// Parse "the permanents they control" / "the [nonland] permanents that player controls"
+/// domains and return the category-list remainder plus the domain filter.
+fn parse_choose_domain(input: &str) -> OracleResult<'_, TargetFilter> {
     type E<'a> = OracleError<'a>;
 
-    // "the permanents they control " / "the permanents that player controls "
-    // / "the nonland permanents they control "
-    let (rest, _) = tag::<_, _, E>("the ").parse(input).ok()?;
-
-    // Optional "nonland " modifier
-    let rest = tag::<_, _, E>("nonland ")
-        .parse(rest)
-        .map(|(r, _)| r)
-        .unwrap_or(rest);
-
-    let (rest, _) = tag::<_, _, E>("permanents ").parse(rest).ok()?;
-
-    // "they control" / "that player controls"
-    let rest = if let Ok((r, _)) = tag::<_, _, E>("they control").parse(rest) {
-        r
-    } else if let Ok((r, _)) = tag::<_, _, E>("that player controls").parse(rest) {
-        r
-    } else {
-        return None;
-    };
-
-    // Strip optional trailing space/comma
-    let rest = rest.trim_start_matches(' ');
-    if rest.is_empty() {
-        return None;
-    }
-    Some(rest)
+    let (rest, _) = tag::<_, _, E>("the ").parse(input)?;
+    let (rest, nonland) = opt(tag::<_, _, E>("nonland ")).parse(rest)?;
+    let (rest, _) = tag::<_, _, E>("permanents ").parse(rest)?;
+    let (rest, _) = alt((
+        tag::<_, _, E>("they control"),
+        tag("you control"),
+        tag("that player controls"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(alt((tag::<_, _, E>(", "), tag(" ")))).parse(rest)?;
+    Ok((
+        rest,
+        if nonland.is_some() {
+            nonland_permanent_filter()
+        } else {
+            permanent_filter()
+        },
+    ))
 }
 
 /// Parse a comma-separated category list: "an artifact, a creature, an enchantment, and a land"
@@ -2626,41 +2640,53 @@ fn skip_permanent_clause(input: &str) -> Option<&str> {
 fn parse_category_list(input: &str) -> Option<Vec<CoreType>> {
     type E<'a> = OracleError<'a>;
 
-    let mut categories = Vec::new();
-    let mut remaining = input.trim();
+    let (remaining, categories) = parse_category_list_prefix(input).ok()?;
+    let remaining = remaining.trim_start();
+    if remaining.is_empty()
+        || tag::<_, _, E>(", then ").parse(remaining).is_ok()
+        || tag::<_, _, E>(". then ").parse(remaining).is_ok()
+        || tag::<_, _, E>(".").parse(remaining).is_ok()
+    {
+        return Some(categories);
+    }
 
-    loop {
-        // Strip optional leading ", " or ", and " or "and "
-        if let Ok((r, _)) = tag::<_, _, E>(", and ").parse(remaining) {
-            remaining = r;
-        } else if let Ok((r, _)) = tag::<_, _, E>(", ").parse(remaining) {
-            remaining = r;
-        } else if let Ok((r, _)) = tag::<_, _, E>("and ").parse(remaining) {
-            remaining = r;
-        }
+    None
+}
 
-        // Parse article + type: "an artifact" / "a creature" / "a land" / "a planeswalker" / "an enchantment"
-        let (after_article, _) = alt((tag::<_, _, E>("an "), tag("a ")))
-            .parse(remaining)
-            .ok()?;
+fn parse_category_list_prefix(input: &str) -> OracleResult<'_, Vec<CoreType>> {
+    type E<'a> = OracleError<'a>;
 
-        let (rest, core_type) = parse_core_type_name(after_article)?;
-        categories.push(core_type);
-        remaining = rest.trim();
+    let (mut remaining, first) = parse_category_item(input)?;
+    let mut categories = vec![first];
 
-        if remaining.is_empty()
-            || tag::<_, _, E>(", then ").parse(remaining).is_ok()
-            || tag::<_, _, E>(". then ").parse(remaining).is_ok()
-            || tag::<_, _, E>("from among").parse(remaining).is_ok()
-        {
+    while let Ok((after_separator, _)) = alt((
+        tag::<_, _, E>(", and "),
+        tag(", "),
+        tag(" and "),
+        tag("and "),
+    ))
+    .parse(remaining)
+    {
+        let Ok((after_item, core_type)) = parse_category_item(after_separator) else {
             break;
-        }
+        };
+        categories.push(core_type);
+        remaining = after_item;
     }
 
-    if categories.is_empty() {
-        return None;
-    }
-    Some(categories)
+    Ok((remaining, categories))
+}
+
+fn parse_category_item(input: &str) -> OracleResult<'_, CoreType> {
+    type E<'a> = OracleError<'a>;
+
+    let (input, _) = alt((tag::<_, _, E>("an "), tag("a "))).parse(input)?;
+    parse_core_type_name(input).ok_or_else(|| {
+        nom::Err::Error(OracleError::from_error_kind(
+            input,
+            nom::error::ErrorKind::Alt,
+        ))
+    })
 }
 
 /// Parse a core type name from lowercase text using nom combinators.
@@ -2739,9 +2765,13 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         ChooseImperativeAst::CategoryAndSacrificeRest {
             categories,
             chooser_scope,
+            choose_filter,
+            sacrifice_filter,
         } => Effect::ChooseAndSacrificeRest {
             categories,
             chooser_scope,
+            choose_filter,
+            sacrifice_filter,
         },
         // CR 115.1c + CR 601.2c: Two independent target slots. The bare-Effect
         // lowering surfaces only the first slot — the chained `TargetOnly`
@@ -9238,6 +9268,7 @@ mod tests {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
                 chooser_scope,
+                ..
             }) => {
                 assert_eq!(
                     categories,
@@ -9270,6 +9301,7 @@ mod tests {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
                 chooser_scope,
+                ..
             }) => {
                 assert_eq!(
                     categories,
@@ -9301,6 +9333,8 @@ mod tests {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
                 chooser_scope,
+                choose_filter,
+                sacrifice_filter,
             }) => {
                 assert_eq!(
                     categories,
@@ -9315,6 +9349,17 @@ mod tests {
                     chooser_scope,
                     crate::types::ability::CategoryChooserScope::EachPlayerSelf
                 );
+                assert!(
+                    matches!(
+                        &choose_filter,
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            ..
+                        }) if type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Land)))
+                    ),
+                    "Gearhulk choose_filter should be nonland permanent, got {choose_filter:?}"
+                );
+                assert_eq!(choose_filter, sacrifice_filter);
             }
             other => panic!("Expected CategoryAndSacrificeRest, got {other:?}"),
         }

@@ -1238,6 +1238,14 @@ fn detect_dynamic_qty(
     if cleaned_for_each_is_only_decline_iteration(cleaned) && json_has_any(ast_json, &["\"Not\""]) {
         return;
     }
+    // CR 101.4 + CR 701.21a: Tragic Arrogance-style "For each player, you choose
+    // ..." is a turn-order choice procedure, not a numeric quantity. Its carrier
+    // is the dedicated ChooseAndSacrificeRest effect rather than a QuantityExpr.
+    if cleaned.contains("for each player, you choose ") // allow-noncombinator: swallow detector marker scan on classified text
+        && json_has_any(ast_json, &["ChooseAndSacrificeRest"])
+    {
+        return;
+    }
     // CR 701.38: Council's-dilemma vote-tally payoffs ("create a number of X
     // equal to [twice] the number of <choice> votes" — Emissary Green) realize
     // their dynamic count through the Vote resolver's per-vote fan-out: each
@@ -2639,6 +2647,17 @@ mod tests {
         let parsed = parse(
             "Put a +1/+1 counter on target creature you control, then double the number of +1/+1 counters on that creature.",
             &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    #[test]
+    fn dynamic_qty_accepts_choose_and_sacrifice_rest_for_each_player() {
+        let parsed = parse_named(
+            "For each player, you choose from among the permanents that player controls an artifact, a creature, an enchantment, and a planeswalker. Then each player sacrifices all other nonland permanents they control.",
+            "Tragic Arrogance",
+            &["Sorcery"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));

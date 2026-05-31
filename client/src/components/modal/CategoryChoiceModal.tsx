@@ -11,15 +11,10 @@ import { gameButtonClass } from "../ui/buttonStyles.ts";
 
 type CategoryChoice = Extract<WaitingFor, { type: "CategoryChoice" }>;
 
-// CR 101.4 + CR 701.21a: Choose one permanent of each given type category from
-// among the nonland permanents controlled by `target_player`; every permanent
-// not chosen is sacrificed. The engine pre-filters `eligible_per_category` by
-// controller and core type — this modal is purely the chooser. An object that
-// belongs to multiple categories (e.g. an artifact creature) appears in each
-// eligible list, but the engine rejects selecting the same object for two
-// categories (`engine_resolution_choices.rs` SelectCategoryPermanents duplicate
-// guard); this component mirrors that rule by disabling an already-chosen
-// object in sibling categories.
+// CR 101.4 + CR 701.21a: The engine pre-filters `eligible_per_category` by
+// controller, category, and effect-specific filters; this modal is purely the
+// chooser. An object that belongs to multiple categories may appear in each
+// eligible list and may be submitted for each matching category slot.
 //
 // CR 800.4g: if `target_player` has left the game mid-resolution, the engine
 // substitutes the choice — that leaver path is handled engine-side and is out
@@ -54,6 +49,9 @@ export function CategoryChoiceModal({ data }: { data: CategoryChoice["data"] }) 
 
   if (!objects) return null;
 
+  const readyToConfirm = data.eligible_per_category.every(
+    (eligible, index) => eligible.length === 0 || choices[index] !== null,
+  );
   const choosingForOpponent = data.player !== data.target_player;
   const subtitle = choosingForOpponent
     ? t("categoryChoice.subtitleOpponent", {
@@ -65,7 +63,7 @@ export function CategoryChoiceModal({ data }: { data: CategoryChoice["data"] }) 
     <ChoiceOverlay
       title={t("categoryChoice.title")}
       subtitle={subtitle}
-      footer={<ConfirmButton onClick={handleConfirm} />}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={!readyToConfirm} />}
     >
       <div className="mb-4 space-y-4">
         {data.categories.map((category, categoryIndex) => {
@@ -89,23 +87,16 @@ export function CategoryChoiceModal({ data }: { data: CategoryChoice["data"] }) 
               ) : (
                 eligible.map((id) => {
                   const isSelected = choices[categoryIndex] === id;
-                  // CR 101.4 + CR 701.21a: an object chosen in another
-                  // category cannot be chosen here too.
-                  const chosenElsewhere = choices.some(
-                    (chosen, i) => i !== categoryIndex && chosen === id,
-                  );
                   return (
                     <button
                       key={id}
                       type="button"
                       aria-pressed={isSelected}
-                      disabled={chosenElsewhere}
                       onClick={() => handleSelect(categoryIndex, id)}
                       className={
                         gameButtonClass({
                           tone: isSelected ? "blue" : "neutral",
                           size: "md",
-                          disabled: chosenElsewhere,
                         }) + " w-full text-left"
                       }
                       {...hoverProps(id)}
