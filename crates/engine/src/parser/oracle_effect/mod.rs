@@ -21767,6 +21767,42 @@ mod tests {
     }
 
     #[test]
+    fn effect_chain_create_generic_token_sequence() {
+        let def = parse_effect_chain(
+            "Create a Food token and a Treasure token.",
+            AbilityKind::Spell,
+        );
+
+        match &*def.effect {
+            Effect::Token { name, .. } => assert_eq!(name, "Food"),
+            other => panic!("expected first Token effect, got {other:?}"),
+        }
+
+        let sub = def.sub_ability.as_ref().expect("second token sub-ability");
+        match &*sub.effect {
+            Effect::Token { name, .. } => assert_eq!(name, "Treasure"),
+            other => panic!("expected second Token effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_chain_create_single_token_with_keyword_conjunction_does_not_split() {
+        let def = parse_effect_chain(
+            "Create a 4/4 white Angel creature token with flying and vigilance.",
+            AbilityKind::Spell,
+        );
+
+        assert!(def.sub_ability.is_none());
+        match &*def.effect {
+            Effect::Token { name, keywords, .. } => {
+                assert_eq!(name, "Angel");
+                assert_eq!(keywords, &vec![Keyword::Flying, Keyword::Vigilance]);
+            }
+            other => panic!("expected Token effect, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn effect_create_treasure_token() {
         let e = parse_effect("Create a Treasure token");
         assert!(matches!(
