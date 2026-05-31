@@ -92,6 +92,7 @@ pub enum PolicyId {
     PlaneswalkerLoyalty,
     EquipmentPriority,
     LandSequencing,
+    ConditionGatedActivation,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -218,6 +219,7 @@ impl Default for PolicyRegistry {
             Box::new(super::planeswalker_loyalty::PlaneswalkerLoyaltyPolicy),
             Box::new(super::equipment_priority::EquipmentPriorityPolicy),
             Box::new(super::land_sequencing::LandSequencingPolicy),
+            Box::new(super::condition_gated_activation::ConditionGatedActivationPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
