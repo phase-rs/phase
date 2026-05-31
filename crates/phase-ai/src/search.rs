@@ -1,7 +1,6 @@
 use rand::Rng;
 
 use engine::ai_support::build_decision_context;
-use engine::types::ability::{CategoryChooserScope, TargetFilter, TypedFilter};
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -1794,7 +1793,7 @@ mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::TargetRef;
+    use engine::types::ability::{CategoryChooserScope, TargetFilter, TargetRef, TypedFilter};
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
