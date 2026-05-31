@@ -1261,7 +1261,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let lower = text.to_lowercase();
     let mut pos = 0;
     let mut properties = Vec::new();
-    let mut property_disjunction_range: Option<(usize, usize)> = None;
+    let mut property_disjunction_ranges: Vec<(usize, usize)> = Vec::new();
     let lower_trimmed = lower.trim_start();
     let offset = lower.len() - lower_trimmed.len();
     pos += offset;
@@ -1311,7 +1311,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
         if let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(&lower[pos..]) {
             if let Some((next_prop, next_consumed)) = parse_combat_status_prefix(after_or) {
                 properties.push(next_prop);
-                property_disjunction_range = Some((disjunction_start, 2));
+                property_disjunction_ranges.push((disjunction_start, 2));
                 pos += "or ".len() + next_consumed;
             }
         }
@@ -1490,8 +1490,8 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
-    // "outlaw creature[s]" uses the outlaw subtype disjunction as an adjective
-    // before the concrete Creature type.
+    // CR 700.12: "outlaw creature[s]" uses the outlaw subtype disjunction as
+    // an adjective before the concrete Creature type.
     if let Ok((rest, type_filter)) = nom_target::parse_type_filter_word(&lower[pos..]) {
         if matches!(type_filter, TypeFilter::AnyOf(_)) {
             let rest_trimmed = rest.trim_start();
@@ -1746,7 +1746,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     } else if let Some((suffix, consumed)) = parse_keyword_suffix(&lower[pos..]) {
         if suffix.disjunctive && suffix.properties.len() > 1 {
-            property_disjunction_range = Some((properties.len(), suffix.properties.len()));
+            property_disjunction_ranges.push((properties.len(), suffix.properties.len()));
         }
         properties.extend(suffix.properties);
         pos += consumed;
@@ -1983,33 +1983,51 @@ pub fn parse_type_phrase_with_ctx<'a>(
         neg_type_filters,
     ]
     .concat();
-    let filter = if let Some((start, len)) = property_disjunction_range {
-        let disjunctive_props = properties[start..start + len].to_vec();
-        let common_props = properties[..start]
-            .iter()
-            .chain(properties[start + len..].iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        TargetFilter::Or {
-            filters: disjunctive_props
-                .into_iter()
-                .map(|disjunctive_prop| {
-                    let mut branch_props = common_props.clone();
-                    branch_props.push(disjunctive_prop);
-                    TargetFilter::Typed(TypedFilter {
-                        type_filters: type_filters.clone(),
-                        controller: controller.clone(),
-                        properties: branch_props,
-                    })
-                })
-                .collect(),
-        }
-    } else {
+    let filter = if property_disjunction_ranges.is_empty() {
         TargetFilter::Typed(TypedFilter {
             type_filters,
             controller,
             properties,
         })
+    } else {
+        let mut disjunctive_indices = vec![false; properties.len()];
+        for (start, len) in &property_disjunction_ranges {
+            for is_disjunctive in disjunctive_indices.iter_mut().skip(*start).take(*len) {
+                *is_disjunctive = true;
+            }
+        }
+        let common_props = properties
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !disjunctive_indices[*idx])
+            .map(|(_, prop)| prop.clone())
+            .collect::<Vec<_>>();
+        let mut branch_props = vec![common_props];
+        for (start, len) in property_disjunction_ranges {
+            let disjunctive_props = properties[start..start + len].to_vec();
+            branch_props = branch_props
+                .into_iter()
+                .flat_map(|common| {
+                    disjunctive_props.iter().cloned().map(move |prop| {
+                        let mut branch = common.clone();
+                        branch.push(prop);
+                        branch
+                    })
+                })
+                .collect();
+        }
+        TargetFilter::Or {
+            filters: branch_props
+                .into_iter()
+                .map(|properties| {
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: type_filters.clone(),
+                        controller: controller.clone(),
+                        properties,
+                    })
+                })
+                .collect(),
+        }
     };
     let filter = if exclude_chosen_type {
         TargetFilter::And {
@@ -8213,6 +8231,37 @@ mod tests {
         assert!(second.type_filters.contains(&TypeFilter::Creature));
         assert!(first.properties.contains(&FilterProp::Attacking));
         assert!(second.properties.contains(&FilterProp::Blocking));
+    }
+
+    #[test]
+    fn parse_type_phrase_cross_products_multiple_property_disjunctions() {
+        let (filter, remainder) =
+            parse_type_phrase("attacking or blocking creature with flying or vigilance");
+        assert!(remainder.trim().is_empty(), "remainder: '{remainder}'");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 4);
+        let expected = [
+            (FilterProp::Attacking, Keyword::Flying),
+            (FilterProp::Attacking, Keyword::Vigilance),
+            (FilterProp::Blocking, Keyword::Flying),
+            (FilterProp::Blocking, Keyword::Vigilance),
+        ];
+        for (filter, (combat_prop, keyword)) in filters.iter().zip(expected) {
+            let typed = typed_leg(filter).expect("branch should be typed");
+            assert!(typed.type_filters.contains(&TypeFilter::Creature));
+            assert!(
+                typed.properties.contains(&combat_prop),
+                "missing {combat_prop:?} in {typed:?}"
+            );
+            assert!(
+                typed.properties.contains(&FilterProp::WithKeyword {
+                    value: keyword.clone()
+                }),
+                "missing {keyword:?} in {typed:?}"
+            );
+        }
     }
 
     #[test]

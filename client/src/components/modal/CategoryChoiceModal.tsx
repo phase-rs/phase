@@ -50,7 +50,7 @@ export function CategoryChoiceModal({ data }: { data: CategoryChoice["data"] }) 
   if (!objects) return null;
 
   const readyToConfirm = data.eligible_per_category.every(
-    (eligible, index) => eligible.length === 0 || choices[index] !== null,
+    (eligible, index) => eligible.length === 0 || choices[index] != null,
   );
   const choosingForOpponent = data.player !== data.target_player;
   const subtitle = choosingForOpponent

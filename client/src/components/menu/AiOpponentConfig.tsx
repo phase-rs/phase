@@ -6,6 +6,7 @@ import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import { filterByBracket, useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { CEDH_BRACKET } from "../../services/cedhLock";
+import { isCommanderFamilyFormat } from "../../types/bracket";
 import {
   AI_DECK_RANDOM,
   usePreferencesStore,
@@ -16,7 +17,7 @@ import type { DeckArchetype } from "../../services/engineRuntime";
 import { BracketFilter } from "./BracketFilter";
 
 interface Props {
-  selectedFormat?: GameFormat;
+  selectedFormat?: GameFormat | null;
   selectedMatchType?: MatchType;
   /** Number of AI opponents to configure (i.e. playerCount - 1). Defaults to 1
    *  so the component still renders sensibly when mounted outside the setup
@@ -70,10 +71,8 @@ export function AiOpponentConfig({
   const setCoverageFloor = usePreferencesStore((s) => s.setAiCoverageFloor);
   const bracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
   const setBracketFilter = usePreferencesStore((s) => s.setAiBracketFilter);
-
-  // cEDH (competitive EDH, bracket 5) is a Commander-only concept, so the
-  // table-wide toggle only applies to the Commander variants.
-  const isCedhFormat = selectedFormat === "Commander" || selectedFormat === "DuelCommander";
+  const isCedhFormat = isCommanderFamilyFormat(selectedFormat);
+  const effectiveCedhMode = cedhMode && isCedhFormat;
 
   // Keep the persisted seat list in sync with the setup page's player count.
   useEffect(() => {
@@ -84,10 +83,12 @@ export function AiOpponentConfig({
   // (GameProvider → effectiveAiDifficulty). When the format is known to be a
   // non-Commander variant the toggle is hidden, so clear any stale enabled
   // state to stop it silently forcing cEDH difficulty on non-Commander tables.
-  // Guard on a defined format so the brief `formatConfig === null` window while
-  // the setup page resolves its format doesn't clobber a legitimate flag.
+  // Guard on a truthy format so the brief format-loading window doesn't clobber
+  // a legitimate flag.
   useEffect(() => {
-    if (selectedFormat !== undefined && !isCedhFormat && cedhMode) setCedhMode(false);
+    if (selectedFormat && !isCedhFormat && cedhMode) {
+      setCedhMode(false);
+    }
   }, [selectedFormat, isCedhFormat, cedhMode, setCedhMode]);
 
   const { candidates, loading, error } = useAiDeckCatalog({ selectedFormat, selectedMatchType });
@@ -102,19 +103,19 @@ export function AiOpponentConfig({
   // vary per seat.
   const filteredDecks = useMemo(() => {
     // In cEDH mode, restrict the random pool to bracket-5 decks.
-    const cedhFiltered = cedhMode ? filterByBracket(candidates, CEDH_BRACKET) : candidates;
+    const cedhFiltered = effectiveCedhMode ? filterByBracket(candidates, CEDH_BRACKET) : candidates;
     return cedhFiltered.filter((d) => {
       if (d.coveragePct != null && d.coveragePct < coverageFloor) return false;
       if (archetypeFilter !== "Any" && d.archetype && d.archetype !== archetypeFilter) {
         return false;
       }
-      if (!cedhMode && bracketFilter.length > 0 && selectedFormat === "Commander") {
+      if (!effectiveCedhMode && bracketFilter.length > 0 && isCedhFormat) {
         if (d.bracket === null) return false;             // untagged excluded
         if (!bracketFilter.includes(d.bracket)) return false;
       }
       return true;
     });
-  }, [candidates, coverageFloor, archetypeFilter, bracketFilter, selectedFormat, cedhMode]);
+  }, [candidates, coverageFloor, archetypeFilter, bracketFilter, isCedhFormat, effectiveCedhMode]);
 
   // Render exactly `opponentCount` panels regardless of how many slots the
   // store currently holds — the effect above will catch the store up on the
@@ -182,7 +183,7 @@ export function AiOpponentConfig({
             key={i}
             index={i}
             seat={seat}
-            cedhMode={cedhMode}
+            cedhMode={effectiveCedhMode}
             candidates={candidates}
             filteredDecks={filteredDecks}
             expanded={!isMulti || expandedIndex === i}
@@ -247,7 +248,7 @@ export function AiOpponentConfig({
           </span>
         </label>
 
-        {selectedFormat === "Commander" && (
+        {isCedhFormat && (
           <div className="flex flex-col gap-1">
             <span className="text-xs text-slate-400">{t("aiOpponent.bracket")}</span>
             <BracketFilter selected={bracketFilter} onChange={setBracketFilter} />

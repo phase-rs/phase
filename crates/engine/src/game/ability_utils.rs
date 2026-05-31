@@ -1369,6 +1369,8 @@ fn resolve_multi_target_max(
         .map(|expr| resolve_quantity_with_targets(state, expr, ability).max(0) as usize)
 }
 
+/// CR 601.2c: A spell with a variable number of targets announces how many
+/// targets it will choose before choosing them.
 fn resolve_multi_target_min(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -1383,9 +1385,10 @@ pub(crate) struct MultiTargetBounds {
     pub max: usize,
 }
 
-/// CR 115.1d + CR 601.2c: Resolve a multi-target count after any required
-/// quantity choices have been announced, then cap optional slots at the live
-/// legal-target set while preserving the required minimum.
+/// CR 115.1d: A triggered ability's targets are chosen as it is put on the stack.
+/// CR 601.2c: Resolve a multi-target count after any required quantity choices
+/// have been announced, then cap optional slots at the live legal-target set
+/// while preserving the required minimum.
 pub(crate) fn resolve_multi_target_bounds(
     state: &GameState,
     ability: &ResolvedAbility,

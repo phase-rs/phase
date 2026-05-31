@@ -2467,9 +2467,10 @@ fn apply_action(
             let convoke_mode = *convoke_mode;
             if let Some(pending) = state.pending_cast.as_ref() {
                 if pending.deferred_target_selection {
-                    // CR 601.2c + CR 601.2f: A chosen X that determines target
-                    // count must have a legal target assignment before it is
-                    // locked into the pending cast.
+                    // CR 601.2c: A chosen X that determines target count must
+                    // have a legal target assignment before it is locked into
+                    // the pending cast.
+                    // CR 601.2f: The same X value then determines the total cost.
                     let mut trial = pending.as_ref().clone();
                     trial.ability.set_chosen_x_recursive(value);
                     trial.cost.concretize_x(value);
