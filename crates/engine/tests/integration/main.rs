@@ -75,6 +75,7 @@ mod magnetic_mountain_choose_and_pay;
 mod mana_drain_refund;
 mod master_of_ceremonies;
 mod militant_angel_attacked_opponents;
+mod morophon_chosen_type_1653;
 mod mycoloth_upkeep_trigger;
 mod mystic_forge_regression;
 mod obliterate_regression;

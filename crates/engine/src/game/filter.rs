@@ -2704,11 +2704,12 @@ fn matches_filter_prop(
         // CR 205.4a: Object does NOT have this supertype.
         FilterProp::NotSupertype { value } => !obj.card_types.supertypes.contains(value),
         FilterProp::IsChosenCreatureType => match source.chosen_creature_type {
-            Some(chosen) => obj
-                .card_types
-                .subtypes
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(chosen)),
+            Some(chosen) => subtype_matches_with_changeling(
+                chosen,
+                &obj.card_types.subtypes,
+                &obj.keywords,
+                &state.all_creature_types,
+            ),
             None => false,
         },
         // CR 205.3m: Object's creature type ties for highest count
@@ -3038,10 +3039,12 @@ fn zone_change_record_matches_property(
         },
         // CR 701.12: Source's chosen creature type applied to the snapshot subtypes.
         FilterProp::IsChosenCreatureType => source.chosen_creature_type.is_some_and(|chosen| {
-            record
-                .subtypes
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(chosen))
+            subtype_matches_with_changeling(
+                chosen,
+                &record.subtypes,
+                &record.keywords,
+                &state.all_creature_types,
+            )
         }),
         FilterProp::MostPrevalentCreatureTypeIn { .. } => false,
         // CR 509.1b: Power comparison against the live source.
@@ -4657,7 +4660,7 @@ mod tests {
             .unwrap()
             .card_types
             .subtypes
-            .push("Elf".to_string());
+            .extend(["Elf".to_string(), "Warrior".to_string()]);
 
         let goblin = add_creature(&mut state, PlayerId(0), "Goblin");
         state
