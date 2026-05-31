@@ -565,8 +565,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // "with that name" or "with the same name as that card" suffixes.
                     let has_search_prefix = nom_primitives::scan_contains(&before_lower, "search ");
                     let search_with_that_name = has_search_prefix
-                        && (before_lower.ends_with("with that name")
-                            || before_lower.ends_with("with the same name as that card"))
+                        && parse_search_exile_name_suffix(&before_lower).is_ok()
                         && tag::<_, _, OracleError<'_>>("exile them")
                             .parse(remainder_trimmed)
                             .is_ok();
@@ -758,6 +757,18 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     .parse(trimmed_lower.as_str())
     .is_ok();
     sequence_starts
+}
+
+fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (rest, _) = take_until::<_, _, OracleError<'_>>("with ").parse(input)?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("with that name"),
+        tag("with the chosen name"),
+        tag("with the same name as that card"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = eof.parse(rest)?;
+    Ok((rest, ()))
 }
 
 fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(ClauseBoundary, usize)> {
@@ -1663,20 +1674,33 @@ pub(super) fn apply_clause_continuation(
             reveal,
             attach_to_source,
         } => {
+            // CR 701.23a: A multi-zone tutor ("graveyard, hand, and/or library")
+            // finds the card in any searched zone, so the put-step must move it
+            // from wherever it actually is (`origin: None`). A library-only
+            // search keeps `origin: Some(Library)` — that origin doubles as the
+            // CR 701.23b fail-to-find signal for the change-zone resolver.
+            let mut multi_zone_search = false;
             if let Some(previous) = defs.last_mut() {
                 if let Effect::SearchLibrary {
                     reveal: existing_reveal,
+                    source_zones,
                     ..
                 } = &mut *previous.effect
                 {
                     *existing_reveal |= reveal;
+                    multi_zone_search = source_zones.iter().any(|zone| *zone != Zone::Library);
                 }
                 apply_search_destination_to_ability_chain(previous, destination, enter_tapped);
             }
+            let put_origin = if multi_zone_search {
+                None
+            } else {
+                Some(Zone::Library)
+            };
             let mut change_zone = AbilityDefinition::new(
                 kind,
                 Effect::ChangeZone {
-                    origin: Some(Zone::Library),
+                    origin: put_origin,
                     destination,
                     target: TargetFilter::Any,
                     owner_library: false,
@@ -3851,6 +3875,17 @@ mod tests {
         // Lotho: "you lose 1 life and create a Treasure token"
         let chunks = clause_texts("you lose 1 life and create a Treasure token");
         assert_eq!(chunks, vec!["you lose 1 life", "create a Treasure token"]);
+    }
+
+    #[test]
+    fn bare_and_keeps_chosen_name_search_exile_compound() {
+        // CR 701.23a + CR 701.18a: "search ... with the chosen name and exile
+        // them" is one search compound, not a SearchLibrary followed by a second
+        // standalone ChangeZone.
+        let chunks = clause_texts(
+            "search target opponent's graveyard, hand, and library for any number of cards with the chosen name and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, Duration, Effect,
-    GameRestriction, ModalSelectionCondition, ProhibitedActivity, QuantityExpr, ResolvedAbility,
-    RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
+    GameRestriction, ModalSelectionCondition, ObjectScope, PlayerScope, ProhibitedActivity,
+    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, StaticDefinition,
+    TargetFilter, TargetRef,
 };
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
@@ -28,7 +29,8 @@ use super::ability_utils::{
     ability_target_legality_needs_chosen_x, assign_targets_in_chain, auto_select_targets,
     auto_select_targets_for_ability, begin_target_selection, begin_target_selection_for_ability,
     build_resolved_from_def, build_target_slots, compute_unavailable_modes,
-    flatten_targets_in_chain, has_legal_target_assignment_for_ability, modal_choice_for_player,
+    filter_references_target_player, flatten_targets_in_chain,
+    has_legal_target_assignment_for_ability, modal_choice_for_player,
     target_constraints_from_modal,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
@@ -8247,6 +8249,96 @@ pub fn can_activate_ability_now(
     }
 }
 
+/// CR 608.2c: Evaluate an activated ability's intervening-if `condition` against
+/// the CURRENT game state, as it would be evaluated at resolution. Returns `None`
+/// when the ability has no condition (nothing is gated) or when the condition
+/// depends on resolution-time context that does not exist before activation
+/// (chosen targets, the cast/trigger event, mana spent, prior-effect amounts), so
+/// callers must treat only `Some(false)` as "the payoff is gated off right now".
+///
+/// This is a decision aid for AI value heuristics — e.g. to avoid paying a cost
+/// for a hideaway land's "play the exiled card if your creatures' total power is
+/// 10 or greater" when the threshold is unmet. The engine deliberately does NOT
+/// gate activation legality on this condition (CR 602.5 + the Shelldock Isle
+/// ruling: the ability is legal to activate regardless; only the effect is gated
+/// at resolution), so this must never be used as a legality gate.
+pub fn ability_condition_currently_met(
+    state: &GameState,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> Option<bool> {
+    let obj = state.objects.get(&source_id)?;
+    let def = obj.abilities.get(ability_index)?;
+    let condition = def.condition.as_ref()?;
+    if !ability_condition_is_board_state_evaluable(condition) {
+        return None;
+    }
+    let resolved = build_resolved_from_def(def, source_id, obj.controller);
+    Some(crate::game::effects::evaluate_condition(
+        condition, state, &resolved,
+    ))
+}
+
+/// True when `condition` resolves purely from persistent board/controller state,
+/// so evaluating it before the ability is activated is meaningful (no chosen
+/// targets, no cast/trigger event, no spell context). Conservative by design: any
+/// shape not positively known to be board-state-only returns `false`, so callers
+/// decline to judge it rather than read uninitialized resolution context. Covers
+/// the hideaway / "Cost: do X if [board condition]" class (a `QuantityCheck` whose
+/// operands are board/controller-relative); extend the allowlist as new
+/// board-state condition shapes need pre-activation evaluation.
+fn ability_condition_is_board_state_evaluable(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            quantity_expr_is_board_state_relative(lhs) && quantity_expr_is_board_state_relative(rhs)
+        }
+        _ => false,
+    }
+}
+
+fn quantity_expr_is_board_state_relative(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => true,
+        QuantityExpr::Ref { qty } => quantity_ref_is_board_state_relative(qty),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_is_board_state_relative(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().all(quantity_expr_is_board_state_relative),
+        _ => false,
+    }
+}
+
+fn quantity_ref_is_board_state_relative(qty: &QuantityRef) -> bool {
+    // A player axis is concrete (resolvable now) unless it needs a chosen target
+    // or an outer scoped-player iteration context.
+    let player_is_concrete =
+        |p: &PlayerScope| !matches!(p, PlayerScope::Target | PlayerScope::ScopedPlayer);
+    match qty {
+        QuantityRef::HandSize { player }
+        | QuantityRef::LifeTotal { player }
+        | QuantityRef::GraveyardSize { player }
+        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::PartySize { player }
+        | QuantityRef::Speed { player } => player_is_concrete(player),
+        QuantityRef::LifeAboveStarting | QuantityRef::StartingLifeTotal => true,
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::Aggregate { filter, .. } => !filter_references_target_player(filter),
+        QuantityRef::CountersOn { scope, .. }
+        | QuantityRef::Power { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope } => matches!(scope, ObjectScope::Source),
+        // Conservative default: any ref not positively known to be
+        // board/controller-relative (Variable/X, target-relative scopes,
+        // cast/trigger-event context, etc.) makes the condition non-evaluable
+        // before activation, so the helper returns `None`.
+        _ => false,
+    }
+}
+
 /// CR 602.2: To activate an ability is to put it onto the stack and pay its costs.
 /// CR 602.2a: Only an object's controller can activate its activated ability unless
 /// the object specifically says otherwise.
@@ -9474,6 +9566,104 @@ mod tests {
             .cost(AbilityCost::Tap),
         );
         source
+    }
+
+    #[test]
+    fn ability_condition_currently_met_gates_on_board_relative_quantity() {
+        let mut state = GameState::new_two_player(42);
+        // Hideaway-shaped source: a {T}-cost ability gated by "creatures you
+        // control have total power 10 or greater" (Mosswort's condition shape).
+        let source = create_object(
+            &mut state,
+            CardId(80),
+            PlayerId(0),
+            "Hideaway".to_string(),
+            Zone::Battlefield,
+        );
+        let your_power_ge_10 = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: crate::types::ability::AggregateFunction::Sum,
+                    property: crate::types::ability::ObjectProperty::Power,
+                    filter: TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::default()
+                            .with_type(crate::types::ability::TypeFilter::Creature)
+                            .controller(crate::types::ability::ControllerRef::You),
+                    ),
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 10 },
+        };
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+                .cost(AbilityCost::Tap)
+                .condition(your_power_ge_10),
+        );
+
+        // No creatures → total power 0 < 10 → board-relative, gated off.
+        assert_eq!(
+            ability_condition_currently_met(&state, source, 0),
+            Some(false)
+        );
+
+        // A 12-power creature → condition now met.
+        let big = create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(0),
+            "Giant".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let c = state.objects.get_mut(&big).unwrap();
+            c.card_types.core_types.push(CoreType::Creature);
+            c.base_power = Some(12);
+            c.power = Some(12);
+        }
+        assert_eq!(
+            ability_condition_currently_met(&state, source, 0),
+            Some(true)
+        );
+
+        // An ability with no condition → nothing gated → None.
+        let plain = create_object(
+            &mut state,
+            CardId(82),
+            PlayerId(0),
+            "Plain".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&plain).unwrap().abilities).push(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+                .cost(AbilityCost::Tap),
+        );
+        assert_eq!(ability_condition_currently_met(&state, plain, 0), None);
+
+        // A target-relative condition can't be evaluated before targets exist →
+        // the allowlist declines it (None), so the policy never penalizes it.
+        let targeter = create_object(
+            &mut state,
+            CardId(83),
+            PlayerId(0),
+            "Targeter".to_string(),
+            Zone::Battlefield,
+        );
+        let target_life_ge_5 = AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Target,
+                },
+            },
+            comparator: crate::types::ability::Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 5 },
+        };
+        Arc::make_mut(&mut state.objects.get_mut(&targeter).unwrap().abilities).push(
+            AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+                .cost(AbilityCost::Tap)
+                .condition(target_life_ge_5),
+        );
+        assert_eq!(ability_condition_currently_met(&state, targeter, 0), None);
     }
 
     #[test]
@@ -16618,6 +16808,7 @@ mod tests {
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
                         split: None,
+                        source_zones: vec![crate::types::zones::Zone::Library],
                     },
                 )
                 .cost(AbilityCost::ReturnToHand {
@@ -16895,6 +17086,170 @@ mod tests {
         );
         assert!(state.objects[&safe_land].tapped);
         assert_eq!(state.players[0].life, 20);
+    }
+
+    /// Auto-tap should spend a free colorless land row (card_tier 0) on the
+    /// generic part of a cost, preserving a pain-free colored dual whose
+    /// production a later shard might need. Cost {1}{G}: phase 1 taps the
+    /// Forest for {G} (fewest rows); phase 2's generic taps the brushland's
+    /// free {C} row (tier 0) rather than the dual (tier 1), leaving the dual
+    /// untapped.
+    #[test]
+    fn auto_tap_uses_colorless_row_for_generic_preserving_dual() {
+        let mut state = setup_game_at_main_phase();
+
+        // Spell costing {1}{G}.
+        let spell_id = create_single_color_spell_in_hand(
+            &mut state,
+            CardId(40),
+            "Test Generic Plus Green",
+            ManaCostShard::Green,
+        );
+        state.objects.get_mut(&spell_id).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+
+        // 1. Basic Forest — single {G} row.
+        let forest = add_basic_land(&mut state, CardId(41), "Forest", "Forest");
+
+        // 2. Pain-free dual producing {B} and {G} (penalty None) — inserted
+        //    BEFORE the brushland.
+        let dual = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Pain-Free Dual".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dual).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::AnyOneColor {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            color_options: vec![ManaColor::Black, ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // 3. Brushland-shape land (free {C} row + AnyOneColor{Green,White}),
+        //    penalty None — inserted AFTER the dual.
+        let brushland = add_brushland_like_land(&mut state, CardId(43), "Llanowar Wastes", false);
+
+        let mut events = Vec::new();
+        handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(40), &mut events).unwrap();
+
+        assert!(
+            !state.objects[&dual].tapped,
+            "auto-tap should preserve the pain-free dual by spending the free colorless row on generic"
+        );
+        assert!(
+            state.objects[&forest].tapped,
+            "Forest should pay the {{G}} shard"
+        );
+        assert!(
+            state.objects[&brushland].tapped,
+            "brushland's free colorless row should pay the generic"
+        );
+    }
+
+    /// Auto-tap should preserve a non-land creature mana dork (card_tier 3) as
+    /// a potential blocker (CR 509.1a) by spending an equivalent non-creature
+    /// rock (card_tier 2) instead. Cost {G}: the rock taps, the dork stays
+    /// untapped.
+    #[test]
+    fn auto_tap_prefers_rock_over_creature_dork() {
+        let mut state = setup_game_at_main_phase();
+
+        let spell_id = create_single_color_spell_in_hand(
+            &mut state,
+            CardId(44),
+            "Test Mono Green",
+            ManaCostShard::Green,
+        );
+
+        // 1. Mono-green creature dork (T: Add {G}) — inserted BEFORE the rock.
+        let dork = create_object(
+            &mut state,
+            CardId(45),
+            PlayerId(0),
+            "Green Dork".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dork).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.summoning_sick = false;
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // 2. Mono-green non-creature non-land rock (T: Add {G}).
+        let rock = create_object(
+            &mut state,
+            CardId(46),
+            PlayerId(0),
+            "Green Rock".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&rock).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let mut events = Vec::new();
+        handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(44), &mut events).unwrap();
+
+        assert!(
+            state.objects[&rock].tapped,
+            "auto-tap should spend the rock for {{G}}"
+        );
+        assert!(
+            !state.objects[&dork].tapped,
+            "auto-tap should preserve the creature dork as a blocker"
+        );
     }
 
     #[test]
@@ -26720,6 +27075,7 @@ mod tests {
                     target_player: None,
                     selection_constraint: SearchSelectionConstraint::None,
                     split: None,
+                    source_zones: vec![crate::types::zones::Zone::Library],
                 },
             )
             .cost(AbilityCost::Composite {

@@ -2525,6 +2525,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
             | ContinuousModification::RemoveSupertype { .. }
             | ContinuousModification::AddAllCreatureTypes
             | ContinuousModification::AddAllBasicLandTypes
+            | ContinuousModification::AddAllLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
             | ContinuousModification::SetBasicLandType { .. }
     );
@@ -2783,6 +2784,7 @@ fn modification_dynamic_quantity(m: &ContinuousModification) -> Option<&Quantity
         | ContinuousModification::RemoveAllSubtypes { .. }
         | ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
         | ContinuousModification::RemoveChosenKeyword
@@ -3265,6 +3267,18 @@ fn apply_continuous_effect_filtered(
                     let subtype = land_type.as_subtype_str().to_string();
                     if !obj.card_types.subtypes.iter().any(|s| s == &subtype) {
                         obj.card_types.subtypes.push(subtype);
+                    }
+                }
+            }
+            // CR 205.3i: every land type is one of the 17 land subtypes.
+            // CR 305.7: a land that gains land types in addition to its own
+            // keeps its types and gains the new land types and their mana
+            // abilities. The basic types among the 17 grant their mana ability
+            // automatically via `apply_intrinsic_basic_land_mana_abilities`.
+            ContinuousModification::AddAllLandTypes => {
+                for subtype in crate::types::card_type::LAND_SUBTYPES {
+                    if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
+                        obj.card_types.subtypes.push((*subtype).to_string());
                     }
                 }
             }
@@ -5863,6 +5877,114 @@ mod tests {
         );
     }
 
+    /// Issue #1593 — Abomination of Llanowar: end-to-end (real parser → layers).
+    /// "~'s power and toughness are each equal to the number of Elves you control
+    ///  plus the number of Elf cards in your graveyard." The graveyard term must
+    ///  be ADDED, not dropped (the reported "not adding from graveyard").
+    #[test]
+    fn issue_1593_abomination_of_llanowar_runtime_counts_elves_and_graveyard() {
+        let mut state = setup();
+
+        // Abomination of Llanowar is itself an Elf (Elf Horror), so it counts
+        // toward "Elves you control". Parse its CDA with the REAL parser so this
+        // test exercises the full parser→runtime pipeline.
+        let abomination = make_creature(&mut state, "Abomination of Llanowar", 0, 0, PlayerId(0));
+        {
+            let def = crate::parser::oracle_static::parse_static_line(
+                "Abomination of Llanowar's power and toughness are each equal to the number of Elves you control plus the number of Elf cards in your graveyard.",
+            )
+            .expect("CDA must parse");
+            let obj = state.objects.get_mut(&abomination).unwrap();
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(def);
+        }
+
+        // Baseline: only Abomination itself is an Elf you control, empty graveyard.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let obj = state.objects.get(&abomination).unwrap();
+        assert_eq!(
+            obj.power,
+            Some(1),
+            "1 Elf you control (itself), 0 graveyard"
+        );
+        assert_eq!(obj.toughness, Some(1));
+
+        // Add 2 more Elf creatures you control (total 3 Elves you control) and a
+        // non-Elf creature that must NOT be counted.
+        for _ in 0..2 {
+            let elf = make_creature(&mut state, "Llanowar Elves", 1, 1, PlayerId(0));
+            let o = state.objects.get_mut(&elf).unwrap();
+            o.card_types.subtypes.push("Elf".to_string());
+            o.base_card_types = o.card_types.clone();
+        }
+        let _bear = make_creature(&mut state, "Grizzly Bears", 2, 2, PlayerId(0));
+
+        // Add 4 Elf cards to YOUR graveyard, plus a non-Elf card and an Elf card
+        // in the OPPONENT's graveyard (neither must be counted). `create_object`
+        // already registers each object in the correct zone via `add_to_zone`,
+        // so we must NOT push to the graveyard list again (that would double-count).
+        // CR 404.2: Graveyard membership is player-scoped. Deliberately diverge
+        // owner/controller below so this test fails if graveyard counts use
+        // controller instead of owner.
+        for _ in 0..4 {
+            let id = create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Dead Elf".to_string(),
+                Zone::Graveyard,
+            );
+            let o = state.objects.get_mut(&id).unwrap();
+            o.controller = PlayerId(1);
+            o.card_types.core_types.push(CoreType::Creature);
+            o.card_types.subtypes.push("Elf".to_string());
+            o.base_card_types = o.card_types.clone();
+        }
+        let non_elf = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Dead Bear".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&non_elf)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&non_elf).unwrap().controller = PlayerId(1);
+
+        let opp_elf = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(1),
+            "Opp Dead Elf".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let o = state.objects.get_mut(&opp_elf).unwrap();
+            o.controller = PlayerId(0);
+            o.card_types.core_types.push(CoreType::Creature);
+            o.card_types.subtypes.push("Elf".to_string());
+            o.base_card_types = o.card_types.clone();
+        }
+
+        // Expected: 3 Elves you control + 4 Elf cards in YOUR graveyard = 7.
+        state.layers_dirty.mark_full();
+        evaluate_layers(&mut state);
+        let obj = state.objects.get(&abomination).unwrap();
+        assert_eq!(
+            obj.power,
+            Some(7),
+            "3 Elves you control + 4 Elf cards in graveyard = 7"
+        );
+        assert_eq!(obj.toughness, Some(7));
+    }
+
     #[test]
     fn test_tarmogoyf_cda_counts_card_types_in_graveyards() {
         let mut state = setup();
@@ -7049,6 +7171,131 @@ mod tests {
                 "Missing basic land type: {name}"
             );
         }
+    }
+
+    #[test]
+    fn omo_everything_counter_grants_all_land_and_creature_types() {
+        // CR 205.3i + CR 305.7 + CR 122.1: Omo, Queen of Vesuva.
+        // "Each land with an everything counter on it is every land type in
+        //  addition to its other types."
+        // "Each nonland creature with an everything counter on it is every
+        //  creature type."
+        // A land and a nonland creature each carrying an `everything` counter
+        // gain all land types / all creature types respectively; the basic land
+        // types also grant their intrinsic mana ability (CR 305.7). A land and
+        // creature WITHOUT the counter gain nothing (FilterProp::Counters
+        // affected-set gating drives the layer).
+        let mut state = setup();
+        state.all_creature_types = vec!["Bear".to_string(), "Goblin".to_string()];
+        let p0 = PlayerId(0);
+
+        // Counter filter shared by both statics.
+        let counter_prop = FilterProp::Counters {
+            counters: CounterMatch::OfType(CounterType::Generic("everything".to_string())),
+            comparator: crate::types::ability::Comparator::GE,
+            count: QuantityExpr::Fixed { value: 1 },
+        };
+
+        // Land WITH an everything counter (gains all land types).
+        let land_with = make_land(&mut state, "Plain Land", p0);
+        state
+            .objects
+            .get_mut(&land_with)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("everything".to_string()), 1);
+        // Land WITHOUT the counter (mutation control — gains nothing).
+        let land_without = make_land(&mut state, "Bare Land", p0);
+
+        // Nonland creature WITH an everything counter (gains all creature types).
+        let creature_with = make_creature(&mut state, "Test Beast", 2, 2, p0);
+        state
+            .objects
+            .get_mut(&creature_with)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("everything".to_string()), 1);
+        // Nonland creature WITHOUT the counter (mutation control).
+        let creature_without = make_creature(&mut state, "Bare Beast", 2, 2, p0);
+
+        // Omo's two statics as a single source.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Omo, Queen of Vesuva".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::land().properties(vec![counter_prop.clone()]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddAllLandTypes]),
+            );
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                            .properties(vec![counter_prop.clone()]),
+                    ))
+                    .modifications(vec![ContinuousModification::AddAllCreatureTypes]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        // Land with the counter has all 17 land subtypes (spot-check a spread).
+        let land = state.objects.get(&land_with).unwrap();
+        for name in ["Forest", "Island", "Desert", "Gate", "Locus"] {
+            assert!(
+                land.card_types.subtypes.contains(&name.to_string()),
+                "Counter land missing land type: {name}"
+            );
+        }
+        // CR 305.7: a basic land type among the 17 grants its intrinsic mana ability.
+        assert!(
+            has_basic_land_mana_ability(land, ManaColor::Green),
+            "Counter land should gain Forest's intrinsic {{T}}: Add {{G}} (CR 305.7)"
+        );
+
+        // Creature with the counter gains the global creature types.
+        let creature = state.objects.get(&creature_with).unwrap();
+        for name in &state.all_creature_types {
+            assert!(
+                creature.card_types.subtypes.contains(name),
+                "Counter creature missing creature type: {name}"
+            );
+        }
+
+        // Mutation check: objects WITHOUT the counter gain nothing.
+        let bare_land = state.objects.get(&land_without).unwrap();
+        assert!(
+            !bare_land
+                .card_types
+                .subtypes
+                .contains(&"Forest".to_string()),
+            "Land without the counter must NOT gain land types"
+        );
+        assert!(
+            !has_basic_land_mana_ability(bare_land, ManaColor::Green),
+            "Land without the counter must NOT gain a mana ability"
+        );
+        let bare_creature = state.objects.get(&creature_without).unwrap();
+        assert!(
+            !bare_creature
+                .card_types
+                .subtypes
+                .contains(&"Bear".to_string()),
+            "Creature without the counter must NOT gain creature types"
+        );
     }
 
     #[test]

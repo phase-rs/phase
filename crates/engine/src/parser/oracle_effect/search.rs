@@ -12,6 +12,7 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity;
 use super::super::oracle_target::{
     parse_mana_value_suffix, parse_shared_quality_clause, parse_target, parse_type_phrase,
+    parse_zone_word,
 };
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
@@ -185,6 +186,9 @@ pub(super) fn parse_search_library_details(
         multi_destination,
         multi_enter_tapped,
         split,
+        // CR 701.23a: Library-only unless the text names a multi-zone set
+        // ("graveyard, hand, and/or library").
+        source_zones: parse_multi_search_zones(lower).unwrap_or_else(|| vec![Zone::Library]),
     }
 }
 
@@ -442,6 +446,7 @@ fn parse_filter_region_terminator(input: &str) -> Option<&str> {
         ", then ",
         ", shuffle ",
         ", exile ",
+        " and exile ",
         " and reveal ",
         " with different names",
         " with different powers",
@@ -578,18 +583,23 @@ fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
     use nom::combinator::value;
     use nom::sequence::preceded;
 
+    // CR 701.23a: The possessive determiner identifies the searched player; the
+    // zone(s) that follow ("library" for a single-zone tutor, or "graveyard,
+    // hand, and library" for a multi-zone exile like Ancient Vendetta) do not
+    // change WHO is searched. Match the determiner alone so multi-zone opponent
+    // searches don't silently drop the target player.
     let (filter, _rest) = nom_on_lower(lower, lower, |i| {
         preceded(
             tag("search "),
             alt((
                 value(
                     TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                    tag("target opponent's library"),
+                    tag("target opponent's "),
                 ),
-                value(TargetFilter::Player, tag("target player's library")),
+                value(TargetFilter::Player, tag("target player's ")),
                 value(
                     TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                    tag("an opponent's library"),
+                    tag("an opponent's "),
                 ),
             )),
         )
@@ -715,6 +725,14 @@ pub(crate) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
         }
     }
 
+    // CR 201.2 + CR 701.23a: "a card named X" / "a [type] card named X" — a
+    // name filter (God-Pharaoh's-Gift-class tutors, Lost Legacy, etc.). Parse
+    // before the type-phrase attempt so "card" isn't mistaken for a type word
+    // and the name isn't dropped by the fallback path.
+    if let Some(filter) = parse_search_named_filter(type_text) {
+        return filter;
+    }
+
     let (parsed_filter, remainder) = parse_type_phrase(type_text);
     if search_filter_has_meaningful_content(&parsed_filter) {
         let mut suffix = SearchSuffixConstraints::default();
@@ -740,6 +758,132 @@ pub(crate) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
     parse_search_filter_fallback(type_word, suffix_text, is_basic, ctx)
 }
 
+/// CR 201.2 + CR 701.23a: Parse a "card named X" search filter (e.g. the filter
+/// region of "search ... for a card named God-Pharaoh's Gift"), returning a
+/// `FilterProp::Named` filter (name match is case-insensitive at runtime).
+///
+/// Anchored on the `"card named "` template (the leading article was already
+/// stripped by the caller). Anchoring is deliberate: it bails on the negated
+/// "... not named X" form (owned by `parse_not_named_suffix`) and on descriptive
+/// clauses like "a card with a name noted as you drafted cards named X" (Aether
+/// Searcher), where "named" is not the search-target template — neither begins
+/// with "card named ".
+///
+/// Card names can contain commas (Altanak, the Thrice-Called) AND the word
+/// "and" (Sword of Fire and Ice, Gisa and Geralf), so the name is never split
+/// on punctuation, and a bare " and " is NOT a boundary — only a clause-joining
+/// conjunction terminates it (see [`parse_name_terminator`]).
+///
+/// Kept separate from the name extractors in `oracle_target.rs` / `condition.rs`
+/// on purpose: those split on `,`/`.`, which would truncate comma-bearing names.
+fn parse_search_named_filter(text: &str) -> Option<TargetFilter> {
+    let (after, _) = tag::<_, _, OracleError<'_>>("card named ")
+        .parse(text)
+        .ok()?;
+    // CR 201.2: The name runs to the earliest *clause-joining* terminator. Scan
+    // at word boundaries (every terminator begins with a space) and stop at the
+    // first position where `parse_name_terminator` matches, so a " and " that is
+    // part of the name ("Fire and Ice") is preserved.
+    let name_end = after
+        .char_indices()
+        .filter(|&(_, c)| c == ' ')
+        .find(|&(idx, _)| parse_name_terminator(&after[idx..]).is_ok())
+        .map_or(after.len(), |(idx, _)| idx);
+    let name = after[..name_end].trim_end_matches('.').trim();
+    (!name.is_empty()).then(|| {
+        TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Named {
+            name: name.to_string(),
+        }]))
+    })
+}
+
+/// CR 201.2 + CR 701.18a: Match a clause-joining terminator that ends a card
+/// name in "card named X …". A bare " and " is NOT a terminator (it may be part
+/// of the name — "Fire and Ice", "Gisa and Geralf"); " and " only ends the name
+/// when it introduces a follow-up *action* (" and put/reveal/shuffle/…"). The
+/// disjunction (" and/or ") and sequence (" then ") connectives always end it.
+fn parse_name_terminator(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        value((), tag(" and/or ")),
+        value((), tag(" then ")),
+        value(
+            (),
+            (
+                tag(" and "),
+                alt((
+                    tag("put"),
+                    tag("reveal"),
+                    tag("shuffle"),
+                    tag("exile"),
+                    tag("play"),
+                    tag("cast"),
+                    tag("attach"),
+                    tag("return"),
+                )),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 701.23a: Match a separator between zones in a zone list — handles commas,
+/// "and", "or", and the "and/or" conjunction in any combination. Longer forms
+/// are tried first so the list parser consumes the whole connective.
+fn parse_search_zone_separator(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag(", and/or "),
+            tag(", and "),
+            tag(", or "),
+            tag(" and/or "),
+            tag(" and "),
+            tag(" or "),
+            tag(", "),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 701.23a: Detect a multi-zone search ("search your graveyard, hand, and/or
+/// library for ...") and return the deduplicated zone set in canonical order
+/// (Graveyard, Hand, Library). Returns `None` for the ordinary single-zone
+/// library search so the caller falls back to the library-only default.
+pub(super) fn parse_multi_search_zones(lower: &str) -> Option<Vec<Zone>> {
+    fn run(input: &str) -> Result<Vec<Zone>, nom::Err<OracleError<'_>>> {
+        let (input, _) = take_until::<_, _, OracleError<'_>>("search ").parse(input)?;
+        let (input, _) = tag("search ").parse(input)?;
+        // Strip the possessive that precedes the zone list. Multi-zone tutors are
+        // always controller-owned ("your"); the opponent-search forms remain
+        // single-zone and never reach here.
+        let (input, _) = opt(alt((
+            tag("your "),
+            tag("their "),
+            tag("target player's "),
+            tag("target opponent's "),
+            tag("an opponent's "),
+        )))
+        .parse(input)?;
+        // `take_until` yields `(remaining, consumed_before)` — the zone list is
+        // the consumed-before output, not the remainder.
+        let (_, region) = take_until(" for ").parse(input)?;
+        // Reuse the canonical zone-word combinator (handles plurals + the full
+        // zone vocabulary); the canonicalize step below keeps only the three
+        // tutoring zones.
+        let (_, zones) =
+            separated_list1(parse_search_zone_separator, parse_zone_word).parse(region)?;
+        Ok(zones)
+    }
+    let zones = run(lower).ok()?;
+    // CR 701.23a: Canonicalize and dedupe; only treat as multi-zone when 2+
+    // distinct zones are named (a lone "library" is the ordinary tutor).
+    let set: Vec<Zone> = [Zone::Graveyard, Zone::Hand, Zone::Library]
+        .into_iter()
+        .filter(|z| zones.contains(z))
+        .collect();
+    (set.len() >= 2).then_some(set)
+}
+
 fn parse_search_filter_color_disjunction(
     text: &str,
     ctx: &mut ParseContext,
@@ -762,6 +906,7 @@ fn parse_search_filter_color_disjunction(
                 &SearchSuffixConstraints {
                     properties: vec![FilterProp::HasColor { color }],
                     type_filters: Vec::new(),
+                    filters: Vec::new(),
                 },
             )
         })
@@ -790,6 +935,7 @@ fn parse_search_filter_leading_property_stack(
             &SearchSuffixConstraints {
                 properties,
                 type_filters: Vec::new(),
+                filters: Vec::new(),
             },
         )
     })
@@ -1152,6 +1298,7 @@ fn parse_search_specialized_type_word(type_word: &str, ctx: &mut ParseContext) -
 struct SearchSuffixConstraints {
     properties: Vec<FilterProp>,
     type_filters: Vec<TypeFilter>,
+    filters: Vec<TargetFilter>,
 }
 
 fn strip_search_card_suffix(text: &str) -> &str {
@@ -1229,11 +1376,17 @@ fn apply_search_suffix_constraints(
     filter: TargetFilter,
     suffix: &SearchSuffixConstraints,
 ) -> TargetFilter {
-    if suffix.properties.is_empty() && suffix.type_filters.is_empty() {
+    if suffix.properties.is_empty() && suffix.type_filters.is_empty() && suffix.filters.is_empty() {
         return filter;
     }
 
-    match filter {
+    let branch_suffix = SearchSuffixConstraints {
+        properties: suffix.properties.clone(),
+        type_filters: suffix.type_filters.clone(),
+        filters: Vec::new(),
+    };
+
+    let filter = match filter {
         TargetFilter::Any => {
             TargetFilter::Typed(apply_search_suffix_to_typed(TypedFilter::default(), suffix))
         }
@@ -1243,16 +1396,28 @@ fn apply_search_suffix_constraints(
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters
                 .into_iter()
-                .map(|branch| apply_search_suffix_constraints(branch, suffix))
+                .map(|branch| apply_search_suffix_constraints(branch, &branch_suffix))
                 .collect(),
         },
         TargetFilter::And { filters } => TargetFilter::And {
             filters: filters
                 .into_iter()
-                .map(|branch| apply_search_suffix_constraints(branch, suffix))
+                .map(|branch| apply_search_suffix_constraints(branch, &branch_suffix))
                 .collect(),
         },
         other => other,
+    };
+
+    if suffix.filters.is_empty() {
+        filter
+    } else {
+        let mut filters = vec![filter];
+        for suffix_filter in &suffix.filters {
+            if !filters.contains(suffix_filter) {
+                filters.push(suffix_filter.clone());
+            }
+        }
+        TargetFilter::And { filters }
     }
 }
 
@@ -1515,6 +1680,17 @@ fn parse_chosen_name_reference_suffix(
         tag("that have the same name as the chosen "),
         tag("that has the same name as the chosen "),
         tag("with the same name as the chosen "),
+    ))
+    .parse(input)?;
+    let (rest, _) =
+        take_till1::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.').parse(rest)?;
+    Ok((rest, ()))
+}
+
+fn parse_noted_name_search_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("with a name noted as "),
+        tag("with a name you noted for "),
     ))
     .parse(input)?;
     let (rest, _) =
@@ -1822,6 +1998,9 @@ fn parse_search_filter_suffixes(
             || tag::<_, _, OracleError<'_>>("puts ")
                 .parse(remaining)
                 .is_ok()
+            || tag::<_, _, OracleError<'_>>("exile ")
+                .parse(remaining)
+                .is_ok()
             || tag::<_, _, OracleError<'_>>("instead")
                 .parse(remaining)
                 .is_ok()
@@ -1839,8 +2018,25 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with that name").parse(remaining) {
-            suffix.properties.push(FilterProp::SameName);
+        // CR 201.2 + CR 608.2c: "with that/the chosen name" in search filters
+        // refers to a resolving card-name choice stored on the source, not the
+        // source object's own name.
+        if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("with that name"),
+            tag("with the chosen name"),
+        ))
+        .parse(remaining)
+        {
+            suffix.filters.push(TargetFilter::HasChosenName);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        // Draft-note search filters (Aether Searcher / Smuggler Captain) are
+        // already unsupported by their draft-note abilities. Consume the suffix
+        // here so the search filter does not add a misleading target-fallback
+        // warning on top of the real unsupported draft mechanic.
+        if let Ok((rest, _)) = parse_noted_name_search_suffix(remaining) {
             remaining = rest.trim_start();
             continue;
         }
@@ -2187,6 +2383,7 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
     if scan_contains_phrase(lower, "onto the battlefield") {
         Zone::Battlefield
     } else if scan_contains_phrase(lower, "exile it")
+        || scan_contains_phrase(lower, "exile them")
         || scan_contains_phrase(lower, "exile that card")
         || scan_contains_phrase(lower, "exile the card")
     {
@@ -2208,6 +2405,125 @@ mod tests {
     use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost};
+
+    #[test]
+    fn named_filter_anchors_on_card_named_and_stops_at_conjunction() {
+        // CR 201.2: "card named X" → Named X, with internal commas preserved.
+        let f = parse_search_named_filter("card named altanak, the thrice-called");
+        assert!(
+            matches!(&f, Some(TargetFilter::Typed(t)) if t.properties.iter().any(|p| matches!(p, FilterProp::Named { name } if name == "altanak, the thrice-called"))),
+            "comma-bearing name must be preserved, got {f:?}"
+        );
+
+        // Agency Outfitter: "named X and/or a card named Y" must not over-consume
+        // across the conjunction into one bogus filter.
+        let f = parse_search_named_filter(
+            "card named magnifying glass and/or a card named thinking cap",
+        );
+        assert!(
+            matches!(&f, Some(TargetFilter::Typed(t)) if t.properties.iter().any(|p| matches!(p, FilterProp::Named { name } if name == "magnifying glass"))),
+            "must stop at and/or, got {f:?}"
+        );
+
+        // "and put …" destination is a terminator.
+        let f = parse_search_named_filter(
+            "card named god-pharaoh's gift and put it onto the battlefield",
+        );
+        assert!(
+            matches!(&f, Some(TargetFilter::Typed(t)) if t.properties.iter().any(|p| matches!(p, FilterProp::Named { name } if name == "god-pharaoh's gift"))),
+            "got {f:?}"
+        );
+
+        // Card names containing "and" must NOT be truncated — a bare " and " is
+        // a terminator only when it introduces a follow-up action.
+        for (input, want) in [
+            ("card named sword of fire and ice", "sword of fire and ice"),
+            ("card named gisa and geralf", "gisa and geralf"),
+            (
+                "card named sword of fire and ice and put it onto the battlefield",
+                "sword of fire and ice",
+            ),
+        ] {
+            let f = parse_search_named_filter(input);
+            assert!(
+                matches!(&f, Some(TargetFilter::Typed(t)) if t.properties.iter().any(|p| matches!(p, FilterProp::Named { name } if name == want))),
+                "name with 'and' mishandled for {input:?}: got {f:?}"
+            );
+        }
+
+        // Aether Searcher: "card with a name noted ... cards named X" is not a
+        // name-equality template — must bail (not anchored on "card named ").
+        assert_eq!(
+            parse_search_named_filter(
+                "card with a name noted as you drafted cards named aether searcher"
+            ),
+            None
+        );
+
+        // A plain type filter is not a named filter.
+        assert_eq!(parse_search_named_filter("creature card"), None);
+    }
+
+    #[test]
+    fn multi_zone_tutor_detection_and_named_filter() {
+        // CR 701.23a: God-Pharaoh's-Gift-class tutors search graveyard + hand +
+        // library for a named card. The zone list and the "named X" filter must
+        // both parse, regardless of comma-separated zone ordering / "and/or".
+        let mut ctx = ParseContext::default();
+        for lower in [
+            "search your graveyard, hand, and/or library for a card named god-pharaoh's gift",
+            "search your graveyard, hand, and/or library for a card named altanak, the thrice-called",
+            "search your graveyard, hand, and/or library for an aura card",
+        ] {
+            let details = parse_search_library_details(lower, &mut ctx);
+            assert_eq!(
+                details.source_zones,
+                vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+                "multi-zone detection failed for {lower:?}"
+            );
+        }
+
+        // Named filter preserves the full card name, including internal commas.
+        let details = parse_search_library_details(
+            "search your graveyard, hand, and/or library for a card named altanak, the thrice-called",
+            &mut ctx,
+        );
+        assert!(
+            matches!(&details.filter, TargetFilter::Typed(t) if t.properties.iter().any(|p| matches!(p, FilterProp::Named { name } if name == "altanak, the thrice-called"))),
+            "expected Named filter with full name, got {:?}",
+            details.filter
+        );
+
+        // Ordinary single-zone library tutor stays library-only.
+        let single =
+            parse_search_library_details("search your library for a creature card", &mut ctx);
+        assert_eq!(single.source_zones, vec![Zone::Library]);
+    }
+
+    #[test]
+    fn multi_zone_chosen_name_exile_search_has_exile_destination() {
+        // CR 201.2 + CR 701.23a + CR 701.18a: Unmoored Ego / The Stone Brain
+        // search multiple hidden zones for cards matching the chosen name, then
+        // exile the found cards. "and exile them" is the continuation action,
+        // not an unmatched search-filter suffix.
+        let lower = "choose a card name. search target opponent's graveyard, hand, and library for up to four cards with that name and exile them";
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(lower, &mut ctx);
+
+        assert_eq!(
+            details.source_zones,
+            vec![Zone::Graveyard, Zone::Hand, Zone::Library]
+        );
+        assert!(details.up_to);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 4 });
+        assert_filter_contains(&details.filter, &TargetFilter::HasChosenName);
+        assert_eq!(parse_search_destination(lower), Zone::Exile);
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched"
+        )));
+    }
 
     #[test]
     fn cultivate_lowers_to_split_destination() {
@@ -2404,7 +2720,7 @@ mod tests {
     }
 
     #[test]
-    fn build_search_suffix_constraints_includes_basic_and_same_name() {
+    fn build_search_suffix_constraints_includes_basic_and_chosen_name() {
         let suffix =
             build_search_suffix_constraints(" with that name", true, &mut ParseContext::default());
         assert!(suffix.properties.iter().any(|property| matches!(
@@ -2413,10 +2729,7 @@ mod tests {
                 value: crate::types::card_type::Supertype::Basic
             }
         )));
-        assert!(suffix
-            .properties
-            .iter()
-            .any(|property| matches!(property, FilterProp::SameName)));
+        assert!(suffix.filters.contains(&TargetFilter::HasChosenName));
     }
 
     #[test]
@@ -2456,19 +2769,20 @@ mod tests {
             true,
             &mut ParseContext::default(),
         );
-        let TargetFilter::Typed(typed) = filter else {
-            panic!("expected Typed filter, got {filter:?}");
+        let TargetFilter::And { filters } = filter else {
+            panic!("expected And filter, got {filter:?}");
         };
-        assert!(typed.properties.iter().any(|property| matches!(
-            property,
-            FilterProp::HasSupertype {
-                value: crate::types::card_type::Supertype::Basic
-            }
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(typed)
+                if typed.properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic
+                    }
+                ))
         )));
-        assert!(typed
-            .properties
-            .iter()
-            .any(|property| matches!(property, FilterProp::SameName)));
+        assert!(filters.contains(&TargetFilter::HasChosenName));
     }
 
     #[test]
@@ -3600,6 +3914,29 @@ mod tests {
             ),
             "expected {expected:?} color filter, got {tf:?}"
         );
+    }
+
+    fn assert_filter_contains(filter: &TargetFilter, expected: &TargetFilter) {
+        match filter {
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                assert!(
+                    filters
+                        .iter()
+                        .any(|filter| filter == expected || filter_contains(filter, expected)),
+                    "expected {expected:?} in {filter:?}"
+                );
+            }
+            other => assert_eq!(other, expected),
+        }
+    }
+
+    fn filter_contains(filter: &TargetFilter, expected: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+                .iter()
+                .any(|filter| filter == expected || filter_contains(filter, expected)),
+            other => other == expected,
+        }
     }
 
     /// CR 608.2c + CR 701.23: Gifts Ungiven — "search your library for up to

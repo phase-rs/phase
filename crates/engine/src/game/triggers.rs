@@ -13092,6 +13092,7 @@ pub mod tests {
                     target_player: None,
                     selection_constraint: SearchSelectionConstraint::None,
                     split: None,
+                    source_zones: vec![crate::types::zones::Zone::Library],
                 },
             ));
         trigger.batched = true;
@@ -13191,6 +13192,7 @@ pub mod tests {
                     target_player: None,
                     selection_constraint: SearchSelectionConstraint::None,
                     split: None,
+                    source_zones: vec![crate::types::zones::Zone::Library],
                 },
             ));
         trigger.batched = true;

@@ -1559,7 +1559,9 @@ pub(crate) fn deterministic_choice(
 
     // Combat decisions: delegate to specialized combat AI
     if let WaitingFor::DeclareAttackers {
-        valid_attacker_ids, ..
+        valid_attacker_ids,
+        valid_attack_targets,
+        ..
     } = &state.waiting_for
     {
         let attacks = choose_attackers_with_targets_with_profile(
@@ -1568,6 +1570,7 @@ pub(crate) fn deterministic_choice(
             &config.profile,
             config.combat_lookahead,
             Some(valid_attacker_ids),
+            Some(valid_attack_targets),
         );
         return Some(GameAction::DeclareAttackers { attacks });
     }
@@ -1615,7 +1618,9 @@ fn deterministic_combat_choice(
     profile: &crate::config::AiProfile,
 ) -> Option<GameAction> {
     if let WaitingFor::DeclareAttackers {
-        valid_attacker_ids, ..
+        valid_attacker_ids,
+        valid_attack_targets,
+        ..
     } = &state.waiting_for
     {
         let attacks = choose_attackers_with_targets_with_profile(
@@ -1624,6 +1629,7 @@ fn deterministic_combat_choice(
             profile,
             false,
             Some(valid_attacker_ids),
+            Some(valid_attack_targets),
         );
         return Some(GameAction::DeclareAttackers { attacks });
     }

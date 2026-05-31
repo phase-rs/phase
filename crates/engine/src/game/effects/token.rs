@@ -1731,6 +1731,7 @@ fn lander_ability() -> AbilityDefinition {
             target_player: None,
             selection_constraint: SearchSelectionConstraint::default(),
             split: None,
+            source_zones: vec![crate::types::zones::Zone::Library],
         },
     )
     .sub_ability(

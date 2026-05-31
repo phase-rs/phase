@@ -121,6 +121,10 @@ pub(crate) struct SearchLibraryDetails {
     /// destinations (cultivate-class "put one onto the battlefield tapped and
     /// the other into your hand"). Lowered to `Effect::SearchLibrary.split`.
     pub(crate) split: Option<SearchDestinationSplit>,
+    /// CR 701.23a: Zones the search looks through. Defaults to `[Library]`;
+    /// God-Pharaoh's-Gift-class cards set `[Graveyard, Hand, Library]`. Lowered
+    /// to `Effect::SearchLibrary.source_zones`.
+    pub(crate) source_zones: Vec<Zone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -745,6 +749,9 @@ pub(crate) enum SearchCreationImperativeAst {
         /// onto the battlefield tapped and the other into your hand"). Lowered
         /// to `Effect::SearchLibrary.split`.
         split: Option<SearchDestinationSplit>,
+        /// CR 701.23a: Zones searched. `[Library]` for ordinary tutors;
+        /// `[Graveyard, Hand, Library]` for God-Pharaoh's-Gift-class cards.
+        source_zones: Vec<Zone>,
     },
     SearchOutsideGame {
         filter: TargetFilter,
