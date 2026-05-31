@@ -439,8 +439,9 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// CR 109.3: Parse "the greatest/fewest/total number of <type-phrase> that
-/// have/share [a] <quality> in common" into a grouped object-count quantity.
+/// CR 109.3 + CR 205.3m: Parse "the greatest/fewest/total number of
+/// <type-phrase> that have/share [a] <quality> in common" into a grouped
+/// object-count quantity.
 ///
 /// The "in common" wrapper is not a target predicate: it asks for the size of
 /// quality buckets within the already-matched population. Keep it separate from

@@ -1153,17 +1153,17 @@ fn resolve_ref(
             }
             usize_to_i32_saturating(signatures.len())
         }
-        // CR 109.3: Group the matching object population by a shared
-        // characteristic and aggregate the resulting bucket sizes. Each object
-        // contributes once to each distinct value it has for `quality`;
-        // objects with no value for that quality contribute to no bucket.
+        // CR 109.3 + CR 205.3m: Group the matching object population by a
+        // shared characteristic, such as creature type, and aggregate the
+        // resulting bucket sizes. Each object contributes once to each distinct
+        // value it has for `quality`; objects with no value for that quality
+        // contribute to no bucket.
         QuantityRef::ObjectCountBySharedQuality {
             filter,
             quality,
             aggregate,
         } => {
-            let mut buckets: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
+            let mut buckets: HashMap<String, HashSet<ObjectId>> = HashMap::new();
             for id in object_count_matching_ids(state, filter, &filter_ctx, source_id) {
                 let Some(obj) = state.objects.get(&id) else {
                     continue;
@@ -1173,23 +1173,29 @@ fn resolve_ref(
                     quality,
                     &state.all_creature_types,
                 ) {
-                    *buckets.entry(value).or_default() += 1;
+                    buckets.entry(value).or_default().insert(id);
                 }
             }
 
             match aggregate {
                 AggregateFunction::Max => buckets
                     .values()
-                    .copied()
+                    .map(HashSet::len)
                     .max()
                     .map_or(0, usize_to_i32_saturating),
                 AggregateFunction::Min => buckets
                     .values()
-                    .copied()
+                    .map(HashSet::len)
                     .min()
                     .map_or(0, usize_to_i32_saturating),
                 AggregateFunction::Sum => {
-                    usize_to_i32_saturating(buckets.values().copied().sum::<usize>())
+                    let unique_objects: HashSet<ObjectId> = buckets
+                        .values()
+                        .filter(|bucket| bucket.len() >= 2)
+                        .flatten()
+                        .copied()
+                        .collect();
+                    usize_to_i32_saturating(unique_objects.len())
                 }
             }
         }
@@ -4311,7 +4317,30 @@ mod tests {
                 PlayerId(0),
                 source,
             ),
-            10
+            4
+        );
+    }
+
+    #[test]
+    fn resolve_object_count_by_shared_quality_sum_deduplicates_multityped_objects() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec![
+            "Elf".to_string(),
+            "Warrior".to_string(),
+            "Goblin".to_string(),
+        ];
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Elf Warrior", &["Elf", "Warrior"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Elf", &["Elf"]);
+        add_creature_with_subtypes(&mut state, PlayerId(0), "Goblin", &["Goblin"]);
+
+        assert_eq!(
+            resolve_quantity(
+                &state,
+                &shared_quality_count_expr(AggregateFunction::Sum, SharedQuality::CreatureType),
+                PlayerId(0),
+                ObjectId(0),
+            ),
+            2
         );
     }
 
