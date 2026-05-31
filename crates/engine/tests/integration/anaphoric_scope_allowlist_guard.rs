@@ -180,7 +180,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "dark tutelage",
     "darkstar augur",
     "daxos of meletis",
-    "dead before sunrise",
     "deadshot",
     "death",
     "death watch",
@@ -452,14 +451,17 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        258,
-        "Expected exactly 258 cards retaining ObjectScope::Anaphoric. PR #1451 (resolve fall-through dynamic quantities to typed refs) re-scoped 8 dynamic-quantity 'its power' anaphora off the Anaphoric arm onto typed quantity refs (a-heartfire hero, aspiring champion, evereth viceroy of plunder, flaming tyrannosaurus, gau feral youth, giggling skitterspike, heartfire hero, sly spy) -- a correctness improvement, not a regression (each retains its power reference as a typed ref, none Unimplemented). The allowlist last synced at 266 (#1393) and drifted because this tripwire self-skips in CI. count moved to {}.",
+        257,
+        "Expected exactly 257 cards retaining ObjectScope::Anaphoric. PR #1451 \
+         re-scoped 8 dynamic-quantity 'its power' anaphora off the Anaphoric \
+         arm onto typed quantity refs; PR #1522 re-scoped Dead Before Sunrise \
+         through the recipient/subject rewrite. Count moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        258,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 258 cards."
+        257,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 257 cards."
     );
 }
 
