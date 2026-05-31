@@ -1,9 +1,10 @@
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, CardTypeSetSource, CastManaSpentMetric,
     CombatRelationSubject, ControllerRef, CounterMoveSelection, Effect, FilterProp,
-    GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, ObjectScope,
-    PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
-    TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+    MultiTargetSpec, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
+    RestrictionPlayerScope, SpellContext, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -1176,27 +1177,21 @@ fn collect_target_slots(
                 // ability-wide "up to one" (`optional_targeting`) — may legally
                 // choose zero targets, so an empty legal-target set is acceptable.
                 // Only abilities that require at least one target error out here.
-                if legal_targets.is_empty() && !ability.targeting_is_optional() {
-                    return Err(EngineError::ActionNotAllowed(
-                        "No legal targets available".to_string(),
-                    ));
-                }
                 if let Some(spec) = ability.multi_target.as_ref() {
-                    if multi_target_max_needs_quantity_choice(state, ability, spec) {
-                        return Err(EngineError::ActionNotAllowed(
-                            "Target count requires a resolved quantity before target selection"
-                                .to_string(),
-                        ));
-                    }
-                    let slot_count =
-                        multi_target_slot_count(state, ability, spec, legal_targets.len());
-                    for slot_index in 0..slot_count {
+                    let bounds =
+                        resolve_multi_target_bounds(state, ability, spec, legal_targets.len())?;
+                    for slot_index in 0..bounds.max {
                         slots.push(TargetSelectionSlot {
                             legal_targets: legal_targets.clone(),
-                            optional: slot_index >= spec.min,
+                            optional: slot_index >= bounds.min,
                         });
                     }
                 } else {
+                    if legal_targets.is_empty() && !ability.optional_targeting {
+                        return Err(EngineError::ActionNotAllowed(
+                            "No legal targets available".to_string(),
+                        ));
+                    }
                     slots.push(TargetSelectionSlot {
                         legal_targets,
                         optional: ability.optional_targeting,
@@ -1244,21 +1239,71 @@ fn pair_with_legal_choices(
 fn resolve_multi_target_max(
     state: &GameState,
     ability: &ResolvedAbility,
-    spec: &crate::types::ability::MultiTargetSpec,
+    spec: &MultiTargetSpec,
 ) -> Option<usize> {
     spec.max
         .as_ref()
         .map(|expr| resolve_quantity_with_targets(state, expr, ability).max(0) as usize)
 }
 
-fn multi_target_max_needs_quantity_choice(
+fn resolve_multi_target_min(
     state: &GameState,
     ability: &ResolvedAbility,
-    spec: &crate::types::ability::MultiTargetSpec,
+    spec: &MultiTargetSpec,
+) -> usize {
+    resolve_quantity_with_targets(state, &spec.min, ability).max(0) as usize
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MultiTargetBounds {
+    pub min: usize,
+    pub max: usize,
+}
+
+/// CR 115.1d + CR 601.2c: Resolve a multi-target count after any required
+/// quantity choices have been announced, then cap optional slots at the live
+/// legal-target set while preserving the required minimum.
+pub(crate) fn resolve_multi_target_bounds(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    spec: &MultiTargetSpec,
+    legal_target_count: usize,
+) -> Result<MultiTargetBounds, EngineError> {
+    if multi_target_needs_quantity_choice(state, ability, spec) {
+        return Err(EngineError::ActionNotAllowed(
+            "Target count requires a resolved quantity before target selection".to_string(),
+        ));
+    }
+
+    let min = resolve_multi_target_min(state, ability, spec);
+    let raw_max = resolve_multi_target_max(state, ability, spec).unwrap_or(legal_target_count);
+    if raw_max < min {
+        return Err(EngineError::ActionNotAllowed(
+            "Multi-target maximum is below its minimum".to_string(),
+        ));
+    }
+    if legal_target_count < min {
+        return Err(EngineError::ActionNotAllowed(
+            "Not enough legal targets available".to_string(),
+        ));
+    }
+
+    Ok(MultiTargetBounds {
+        min,
+        max: raw_max.min(legal_target_count),
+    })
+}
+
+fn multi_target_needs_quantity_choice(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    spec: &MultiTargetSpec,
 ) -> bool {
-    spec.max
-        .as_ref()
-        .is_some_and(|expr| quantity_expr_has_unresolved_variable(state, ability, expr))
+    quantity_expr_has_unresolved_variable(state, ability, &spec.min)
+        || spec
+            .max
+            .as_ref()
+            .is_some_and(|expr| quantity_expr_has_unresolved_variable(state, ability, expr))
 }
 
 fn quantity_expr_has_unresolved_variable(
@@ -1302,9 +1347,11 @@ fn ability_target_legality_needs_chosen_x_inner(ability: &ResolvedAbility) -> bo
     triggers::extract_target_filter_from_effect(&ability.effect)
         .is_some_and(|filter| target_filter_needs_chosen_x(ability, filter))
         || ability.multi_target.as_ref().is_some_and(|spec| {
-            spec.max
-                .as_ref()
-                .is_some_and(|expr| quantity_expr_has_unresolved_x(ability, expr))
+            quantity_expr_has_unresolved_x(ability, &spec.min)
+                || spec
+                    .max
+                    .as_ref()
+                    .is_some_and(|expr| quantity_expr_has_unresolved_x(ability, expr))
         })
         || ability
             .sub_ability
@@ -1361,18 +1408,6 @@ fn quantity_expr_contains_x(expr: &QuantityExpr) -> bool {
         }
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
     }
-}
-
-fn multi_target_slot_count(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    spec: &crate::types::ability::MultiTargetSpec,
-    legal_target_count: usize,
-) -> usize {
-    resolve_multi_target_max(state, ability, spec)
-        .map(|max_targets| max_targets.max(spec.min))
-        .unwrap_or(legal_target_count)
-        .min(legal_target_count)
 }
 
 /// CR 109.4 + CR 115.1: Returns true if `effect` needs a companion
@@ -1882,13 +1917,15 @@ fn collect_target_slot_specs(
                 if let Some(spec) = ability.multi_target.as_ref() {
                     let legal_targets =
                         legal_targets_for_ability_filter(state, ability, filter, &[]);
-                    let slot_count =
-                        multi_target_slot_count(state, ability, spec, legal_targets.len());
-                    for slot_index in 0..slot_count {
-                        specs.push(TargetSlotSpec {
-                            filter: filter.clone(),
-                            optional: slot_index >= spec.min,
-                        });
+                    if let Ok(bounds) =
+                        resolve_multi_target_bounds(state, ability, spec, legal_targets.len())
+                    {
+                        for slot_index in 0..bounds.max {
+                            specs.push(TargetSlotSpec {
+                                filter: filter.clone(),
+                                optional: slot_index >= bounds.min,
+                            });
+                        }
                     }
                 } else {
                     specs.push(TargetSlotSpec {
@@ -3058,27 +3095,21 @@ fn assign_targets_recursive(
         && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
     {
         if let Some(spec) = ability.multi_target.as_ref() {
-            if multi_target_max_needs_quantity_choice(state, ability, spec) {
-                return Err(EngineError::InvalidAction(
-                    "Target count requires a resolved quantity before target selection".to_string(),
-                ));
-            }
             let remaining_minimum = ability
                 .sub_ability
                 .as_deref()
-                .map(minimum_targets_in_chain)
+                .map(|sub| minimum_targets_in_chain(state, sub))
                 .unwrap_or(0);
             let remaining_after_current = targets.len().saturating_sub(*next_target);
             // Issue #321: cap at this node's own resolved `multi_target` max so a
             // node does not claim a downstream `up to N` effect's optional
             // targets. Mirrors the cap in `assign_selected_slots_recursive`.
-            let node_max = resolve_multi_target_max(state, ability, spec)
-                .map(|max_targets| max_targets.max(spec.min))
-                .unwrap_or(remaining_after_current);
+            let bounds = resolve_multi_target_bounds(state, ability, spec, remaining_after_current)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
             let current_count = remaining_after_current
                 .saturating_sub(remaining_minimum)
-                .min(node_max);
-            if current_count < spec.min {
+                .min(bounds.max);
+            if current_count < bounds.min {
                 return Err(EngineError::InvalidAction(
                     "Incorrect number of multi-target selections".to_string(),
                 ));
@@ -3285,7 +3316,7 @@ fn assign_selected_slots_recursive(
             let remaining_minimum = ability
                 .sub_ability
                 .as_deref()
-                .map(minimum_targets_in_chain)
+                .map(|sub| minimum_targets_in_chain(state, sub))
                 .unwrap_or(0);
             let remaining_after_current = selected_slots.len().saturating_sub(*next_slot);
             // Issue #321: A multi-target node must consume only as many slots as
@@ -3297,19 +3328,18 @@ fn assign_selected_slots_recursive(
             // Betor's "+1/+1 counters" PutCounter) to the graveyard-return
             // target as well. Cap at this node's max so each effect resolves
             // against exactly its own chosen targets (CR 601.2c).
-            let node_max = resolve_multi_target_max(state, ability, spec)
-                .map(|max_targets| max_targets.max(spec.min))
-                .unwrap_or(remaining_after_current);
+            let bounds = resolve_multi_target_bounds(state, ability, spec, remaining_after_current)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
             let current_slots = remaining_after_current
                 .saturating_sub(remaining_minimum)
-                .min(node_max);
+                .min(bounds.max);
             let end_slot = *next_slot + current_slots;
             let Some(window) = selected_slots.get(*next_slot..end_slot) else {
                 return Err(EngineError::InvalidAction(
                     "Missing required target".to_string(),
                 ));
             };
-            if window.len() < spec.min || window[..spec.min].iter().any(Option::is_none) {
+            if window.len() < bounds.min || window[..bounds.min].iter().any(Option::is_none) {
                 return Err(EngineError::InvalidAction(
                     "Missing required target".to_string(),
                 ));
@@ -3511,7 +3541,7 @@ fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbil
     chain_has_target_sink(sub_ability)
 }
 
-fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
+fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usize {
     let attach_targets = if let Effect::Attach { attachment, target } = &ability.effect {
         if ability.optional_targeting {
             0
@@ -3584,7 +3614,7 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
             .as_ref()
             .filter(|spec| spec.max.is_some())
         {
-            spec.min
+            resolve_multi_target_min(state, ability, spec)
         } else if ability.optional_targeting {
             0
         } else {
@@ -3601,19 +3631,22 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
         + current;
 
     let rest = if defers_sub_ability_target_selection(&ability.effect) {
-        minimum_targets_after_deferred_effect(ability.sub_ability.as_deref())
+        minimum_targets_after_deferred_effect(state, ability.sub_ability.as_deref())
     } else {
         ability
             .sub_ability
             .as_deref()
-            .map(minimum_targets_in_chain)
+            .map(|sub| minimum_targets_in_chain(state, sub))
             .unwrap_or(0)
     };
 
     current + rest
 }
 
-fn minimum_targets_after_deferred_effect(sub_ability: Option<&ResolvedAbility>) -> usize {
+fn minimum_targets_after_deferred_effect(
+    state: &GameState,
+    sub_ability: Option<&ResolvedAbility>,
+) -> usize {
     let Some(sub_ability) = sub_ability else {
         return 0;
     };
@@ -3621,9 +3654,9 @@ fn minimum_targets_after_deferred_effect(sub_ability: Option<&ResolvedAbility>) 
         return 0;
     }
     if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
-        return minimum_targets_after_deferred_effect(sub_ability.sub_ability.as_deref());
+        return minimum_targets_after_deferred_effect(state, sub_ability.sub_ability.as_deref());
     }
-    minimum_targets_in_chain(sub_ability)
+    minimum_targets_in_chain(state, sub_ability)
 }
 
 /// CR 700.2a: The controller of a modal spell or activated ability chooses the mode(s)
@@ -6675,6 +6708,52 @@ mod tests {
 
         let slots = build_target_slots(&state, &ability).expect("chosen X should resolve max");
         assert_eq!(slots.len(), 1);
+    }
+
+    #[test]
+    fn build_target_slots_resolves_exact_dynamic_multi_target_min() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        for index in 0..3 {
+            let creature = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(index + 1),
+                PlayerId(0),
+                format!("Creature {index}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::exact(x));
+
+        assert!(build_target_slots(&state, &ability).is_err());
+        ability.chosen_x = Some(2);
+
+        let slots = build_target_slots(&state, &ability).expect("chosen X should resolve bounds");
+        assert_eq!(slots.len(), 2);
+        assert!(slots.iter().all(|slot| !slot.optional));
+
+        ability.chosen_x = Some(4);
+        assert!(build_target_slots(&state, &ability).is_err());
     }
 
     #[test]

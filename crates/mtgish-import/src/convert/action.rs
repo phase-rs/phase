@@ -1362,36 +1362,25 @@ fn distributed_target_to_target_filter(
         });
     };
 
-    let fixed_max = |n: &GameNumber, idiom: &'static str| -> ConvResult<usize> {
-        match quantity::convert(n)? {
-            QuantityExpr::Fixed { value } if value >= 0 => Ok(value as usize),
-            other => Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "MultiTargetSpec",
-                needed_variant: format!("{idiom} dynamic target count: {other:?}"),
-            }),
-        }
+    let dynamic_max = |n: &GameNumber, min: usize| -> ConvResult<MultiTargetSpec> {
+        let max = quantity::convert(n)?;
+        Ok(MultiTargetSpec::bounded(min, max))
     };
 
     match target {
-        DistributedTarget::BetweenOneAndNumberAnyTargets(n) => Ok((
-            TargetFilter::Any,
-            MultiTargetSpec::fixed(1, fixed_max(n, "BetweenOneAndNumberAnyTargets")?),
-        )),
-        DistributedTarget::UptoNumberAnyTargets(n) => Ok((
-            TargetFilter::Any,
-            MultiTargetSpec::fixed(0, fixed_max(n, "UptoNumberAnyTargets")?),
-        )),
+        DistributedTarget::BetweenOneAndNumberAnyTargets(n) => {
+            Ok((TargetFilter::Any, dynamic_max(n, 1)?))
+        }
+        DistributedTarget::UptoNumberAnyTargets(n) => Ok((TargetFilter::Any, dynamic_max(n, 0)?)),
         DistributedTarget::AnyNumberOfAnyTargets => {
             Ok((TargetFilter::Any, MultiTargetSpec::unlimited(1)))
         }
-        DistributedTarget::BetweenOneAndNumberTargetPermanents(n, permanents) => Ok((
-            convert_permanents(permanents)?,
-            MultiTargetSpec::fixed(1, fixed_max(n, "BetweenOneAndNumberTargetPermanents")?),
-        )),
-        DistributedTarget::UptoNumberTargetPermanents(n, permanents) => Ok((
-            convert_permanents(permanents)?,
-            MultiTargetSpec::fixed(0, fixed_max(n, "UptoNumberTargetPermanents")?),
-        )),
+        DistributedTarget::BetweenOneAndNumberTargetPermanents(n, permanents) => {
+            Ok((convert_permanents(permanents)?, dynamic_max(n, 1)?))
+        }
+        DistributedTarget::UptoNumberTargetPermanents(n, permanents) => {
+            Ok((convert_permanents(permanents)?, dynamic_max(n, 0)?))
+        }
         DistributedTarget::AnyNumberOfTargetPermanents(permanents) => Ok((
             convert_permanents(permanents)?,
             MultiTargetSpec::unlimited(1),

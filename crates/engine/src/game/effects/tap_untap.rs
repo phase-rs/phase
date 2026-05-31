@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
@@ -215,14 +214,16 @@ fn prompt_resolution_tap_untap_choice(
         .copied()
         .filter(|id| crate::game::filter::matches_target_filter(state, *id, target, &ctx))
         .collect();
-    let max_count = spec
-        .max
-        .as_ref()
-        .map(|qty| resolve_quantity_with_targets(state, qty, ability).max(0) as usize)
-        .unwrap_or(eligible.len())
-        .min(eligible.len());
+    let Ok(bounds) = crate::game::ability_utils::resolve_multi_target_bounds(
+        state,
+        ability,
+        spec,
+        eligible.len(),
+    ) else {
+        return false;
+    };
 
-    if max_count == 0 && spec.min == 0 {
+    if bounds.max == 0 && bounds.min == 0 {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -233,9 +234,9 @@ fn prompt_resolution_tap_untap_choice(
     state.waiting_for = WaitingFor::EffectZoneChoice {
         player: ability.controller,
         cards: eligible,
-        count: max_count,
-        min_count: spec.min.min(max_count),
-        up_to: spec.min == 0,
+        count: bounds.max,
+        min_count: bounds.min,
+        up_to: bounds.min != bounds.max,
         source_id: ability.source_id,
         effect_kind,
         zone: Zone::Battlefield,

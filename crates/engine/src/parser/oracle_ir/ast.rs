@@ -925,7 +925,7 @@ pub(crate) enum PutImperativeAst {
         /// CR 107.1c + CR 608.2c: Cardinality for non-targeted zone-change
         /// choices made during resolution, e.g. "put any number of creature
         /// cards from your hand onto the battlefield."
-        choice_count: Option<MultiTargetSpec>,
+        choice_count: Option<Box<MultiTargetSpec>>,
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.

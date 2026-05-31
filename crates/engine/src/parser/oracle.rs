@@ -4058,10 +4058,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
         Duration, FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
-        ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtStat, PtValue,
-        PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode, SharedQuality,
-        SharedQualityRelation, ShieldKind, StaticCondition, TargetFilter, TriggerCondition,
-        TypeFilter, TypedFilter,
+        MultiTargetSpec, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount,
+        PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+        RoundingMode, SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition,
+        TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -4567,6 +4567,32 @@ mod tests {
             }
             other => panic!("expected all-creature -X/-X pump, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn immoral_bargain_full_oracle_parses_exact_x_targets_and_required_x_sacrifice() {
+        let r = parse(
+            "As an additional cost to cast this spell, sacrifice X creatures.\nDestroy X target nonland permanents.",
+            "Immoral Bargain",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+
+        assert_eq!(
+            r.additional_cost,
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                count: u32::MAX,
+            }))
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        assert_eq!(r.abilities[0].multi_target, Some(MultiTargetSpec::exact(x)));
     }
 
     #[test]

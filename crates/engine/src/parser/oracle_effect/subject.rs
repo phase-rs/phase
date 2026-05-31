@@ -659,6 +659,14 @@ pub(super) fn parse_subject_application(
             return Some(application);
         }
     }
+    if let Some((count, target_text)) = super::strip_exact_target_prefix(lower.as_str()) {
+        let consumed = lower.len() - target_text.len();
+        let target_text = &subject[consumed..];
+        let (filter, _) = parse_target_with_ctx(target_text, ctx);
+        let mut application = subject_filter_application(filter, false)?;
+        application.multi_target = Some(MultiTargetSpec::exact(count));
+        return Some(application);
+    }
     // CR 115.1d: "any number of target creatures" — variable-count targeting.
     // Strip "any number of " prefix, delegate to parse_target for the filter,
     // and attach MultiTargetSpec { min: 0, max: None } (unlimited).

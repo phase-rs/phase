@@ -25,10 +25,10 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 use std::collections::HashSet;
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets, auto_select_targets_for_ability,
-    begin_target_selection, begin_target_selection_for_ability, build_resolved_from_def,
-    build_target_slots, compute_unavailable_modes, flatten_targets_in_chain,
-    has_legal_target_assignment_for_ability, modal_choice_for_player,
+    ability_target_legality_needs_chosen_x, assign_targets_in_chain, auto_select_targets,
+    auto_select_targets_for_ability, begin_target_selection, begin_target_selection_for_ability,
+    build_resolved_from_def, build_target_slots, compute_unavailable_modes,
+    flatten_targets_in_chain, has_legal_target_assignment_for_ability, modal_choice_for_player,
     target_constraints_from_modal,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
@@ -90,6 +90,20 @@ pub(crate) fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, 
         let exact = count as usize;
         (exact, exact)
     }
+}
+
+pub(crate) fn sacrifice_cost_bounds_with_chosen_x(
+    count: u32,
+    eligible_len: usize,
+    chosen_x: Option<u32>,
+) -> (usize, usize) {
+    if count == u32::MAX {
+        if let Some(value) = chosen_x {
+            let exact = value as usize;
+            return (exact, exact);
+        }
+    }
+    sacrifice_cost_bounds(count, eligible_len)
 }
 
 /// Emit `BecomesTarget` and `CrimeCommitted` events for each target.
@@ -5664,6 +5678,58 @@ fn continue_with_prepared(
         }
     }
 
+    // CR 601.2b/c/f: When target cardinality depends on an announced X, defer
+    // target selection until that X is chosen from the spell's required
+    // additional cost or mana cost.
+    if ability_target_legality_needs_chosen_x(&resolved) {
+        if let Some(required_cost) =
+            casting_costs::required_additional_cost_can_declare_x(state, player, prepared.object_id)
+        {
+            return casting_costs::begin_required_cost_before_targets(
+                state,
+                player,
+                prepared.object_id,
+                prepared.card_id,
+                resolved,
+                prepared.mana_cost,
+                required_cost,
+                prepared.casting_variant,
+                prepared.cast_timing_permission,
+                prepared
+                    .ability_def
+                    .as_ref()
+                    .and_then(|a| a.distribute.clone()),
+                prepared.origin_zone,
+                prepared.payment_mode,
+                events,
+            );
+        }
+        if casting_costs::cost_has_x(&prepared.mana_cost) {
+            let mut pending_x = PendingCast::new(
+                prepared.object_id,
+                prepared.card_id,
+                resolved,
+                prepared.mana_cost.clone(),
+            );
+            pending_x.casting_variant = prepared.casting_variant;
+            pending_x.cast_timing_permission = prepared.cast_timing_permission;
+            pending_x.distribute = prepared
+                .ability_def
+                .as_ref()
+                .and_then(|ability| ability.distribute.clone());
+            pending_x.target_constraints = prepared
+                .ability_def
+                .as_ref()
+                .map(|ability| ability.target_constraints.clone())
+                .unwrap_or_default();
+            pending_x.origin_zone = prepared.origin_zone;
+            pending_x.payment_mode = prepared.payment_mode;
+            pending_x.deferred_target_selection = true;
+            state.pending_cast = Some(Box::new(pending_x));
+            return casting_costs::enter_payment_step(state, player, None, events);
+        }
+    }
+
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
         let target_constraints = prepared
@@ -5942,7 +6008,14 @@ pub fn spell_has_legal_targets(
                 )
             }
         }
-        Err(_) => false,
+        Err(_) => {
+            ability_target_legality_needs_chosen_x(&resolved)
+                && (casting_costs::required_additional_cost_can_declare_x(
+                    &simulated, player, obj.id,
+                )
+                .is_some()
+                    || casting_costs::cost_has_x(&obj.mana_cost))
+        }
     }
 }
 
@@ -8161,7 +8234,14 @@ pub fn can_activate_ability_now(
                     &ability_def.target_constraints,
                 )
         }
-        Err(_) => false,
+        Err(_) => {
+            ability_target_legality_needs_chosen_x(&resolved)
+                && ability_def.cost.as_ref().is_some_and(|cost| {
+                    casting_costs::extract_x_mana_cost(cost).is_some()
+                        || find_non_self_sacrifice_cost(cost)
+                            .is_some_and(|(count, _)| count == u32::MAX)
+                })
+        }
     }
 }
 
@@ -9301,9 +9381,10 @@ mod tests {
         ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
         CostCategory, FilterProp, GainLifePlayer, GameRestriction, KickerVariant, ManaContribution,
         ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
-        ModalSelectionConstraint, ObjectProperty, ProhibitedActivity, PtValue, QuantityExpr,
-        QuantityRef, RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint,
-        StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtValue,
+        QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
+        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -11328,6 +11409,222 @@ mod tests {
             "X=4 should mark 4 damage on the target (actual={})",
             target.damage_marked
         );
+    }
+
+    #[test]
+    fn x_cost_exact_multi_target_spell_chooses_x_before_targets() {
+        let mut state = setup_game_at_main_phase();
+        let target_a = create_object(
+            &mut state,
+            CardId(920),
+            PlayerId(1),
+            "Target A".to_string(),
+            Zone::Battlefield,
+        );
+        let target_b = create_object(
+            &mut state,
+            CardId(921),
+            PlayerId(1),
+            "Target B".to_string(),
+            Zone::Battlefield,
+        );
+        for target in [target_a, target_b] {
+            state
+                .objects
+                .get_mut(&target)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(922),
+            PlayerId(0),
+            "Synthetic Builder's Bane".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            );
+            ability.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }));
+            Arc::make_mut(&mut obj.abilities).push(ability);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X],
+                generic: 0,
+            };
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(922),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        let max = match result.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => max,
+            other => panic!("expected ChooseXValue before target selection, got {other:?}"),
+        };
+        assert_eq!(max, 3);
+
+        assert!(
+            apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).is_err(),
+            "X=3 should be rejected before mutating the pending cast when only two targets exist"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }));
+        assert!(
+            state
+                .pending_cast
+                .as_ref()
+                .is_some_and(|pending| pending.ability.chosen_x.is_none()),
+            "failed prevalidation must not stamp chosen_x"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
+        let WaitingFor::TargetSelection {
+            target_slots,
+            selection,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "expected exact-X target selection after ChooseX, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(target_slots.len(), 2);
+        assert!(target_slots.iter().all(|slot| !slot.optional));
+        assert_eq!(selection.current_slot, 0);
+        assert!(selection.selected_slots.is_empty());
+    }
+
+    #[test]
+    fn required_x_sacrifice_spell_selects_targets_before_sacrificing() {
+        let mut state = setup_game_at_main_phase();
+        let sacrifice_a = create_object(
+            &mut state,
+            CardId(930),
+            PlayerId(0),
+            "Sacrifice A".to_string(),
+            Zone::Battlefield,
+        );
+        let sacrifice_b = create_object(
+            &mut state,
+            CardId(931),
+            PlayerId(0),
+            "Sacrifice B".to_string(),
+            Zone::Battlefield,
+        );
+        let target_a = create_object(
+            &mut state,
+            CardId(932),
+            PlayerId(1),
+            "Target A".to_string(),
+            Zone::Battlefield,
+        );
+        let target_b = create_object(
+            &mut state,
+            CardId(933),
+            PlayerId(1),
+            "Target B".to_string(),
+            Zone::Battlefield,
+        );
+        for object_id in [sacrifice_a, sacrifice_b, target_a, target_b] {
+            state
+                .objects
+                .get_mut(&object_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(934),
+            PlayerId(0),
+            "Synthetic Immoral Bargain".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            );
+            ability.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            }));
+            Arc::make_mut(&mut obj.abilities).push(ability);
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    ..Default::default()
+                }),
+                count: u32::MAX,
+            }));
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(934),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        match state.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(max, 2),
+            ref other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::TargetSelection { .. }),
+            "targets must be selected before the required sacrifice cost is paid, got {:?}",
+            state.waiting_for
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
+            },
+        )
+        .unwrap();
+        match state.waiting_for {
+            WaitingFor::SacrificeForCost {
+                count, min_count, ..
+            } => {
+                assert_eq!(count, 2);
+                assert_eq!(min_count, 2);
+            }
+            ref other => panic!("expected exact sacrifice prompt after targets, got {other:?}"),
+        }
     }
 
     /// Debt to the Deathless regression (GitHub #315): `{X}{W}{W}{B}{B}`

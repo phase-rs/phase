@@ -17,7 +17,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::{
     begin_target_selection_for_ability, build_target_slots, compute_unavailable_modes,
-    modal_choice_for_player,
+    has_legal_target_assignment_for_ability, modal_choice_for_player,
 };
 use super::casting;
 use super::casting_costs;
@@ -2465,6 +2465,29 @@ fn apply_action(
             }
             let player = *player;
             let convoke_mode = *convoke_mode;
+            if let Some(pending) = state.pending_cast.as_ref() {
+                if pending.deferred_target_selection {
+                    // CR 601.2c + CR 601.2f: A chosen X that determines target
+                    // count must have a legal target assignment before it is
+                    // locked into the pending cast.
+                    let mut trial = pending.as_ref().clone();
+                    trial.ability.set_chosen_x_recursive(value);
+                    trial.cost.concretize_x(value);
+                    let target_slots = build_target_slots(state, &trial.ability)?;
+                    if !target_slots.is_empty()
+                        && !has_legal_target_assignment_for_ability(
+                            state,
+                            &trial.ability,
+                            &target_slots,
+                            &trial.target_constraints,
+                        )
+                    {
+                        return Err(EngineError::InvalidAction(format!(
+                            "X={value} has no legal target assignment"
+                        )));
+                    }
+                }
+            }
             let pending = state.pending_cast.as_mut().ok_or_else(|| {
                 EngineError::InvalidAction("No pending cast awaiting X".to_string())
             })?;

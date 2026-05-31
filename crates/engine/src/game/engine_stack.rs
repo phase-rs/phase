@@ -9,7 +9,7 @@ use super::ability_utils::{
     assign_selected_slots_in_chain, assign_targets_in_chain, choose_target_for_ability,
     flatten_targets_in_chain, validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
-use super::casting_targets::extract_fixed_distribution_total;
+use super::casting_targets::extract_distribution_total;
 use super::effects;
 use super::engine::{resume_pending_continuation_if_priority, EngineError};
 use super::triggers::PendingTrigger;
@@ -39,7 +39,9 @@ pub(super) fn finalize_trigger_target_selection(
     // counters among its targets, the controller announces that division while
     // putting the ability on the stack, after targets have been chosen.
     if let Some(unit) = distribute {
-        if let Some(total) = extract_fixed_distribution_total(&trigger.ability.effect) {
+        if let Some(total) =
+            extract_distribution_total(state, &trigger.ability, &trigger.ability.effect)
+        {
             if assigned_targets.len() == 1 {
                 trigger.ability.distribution = Some(vec![(assigned_targets[0].clone(), total)]);
             } else {
