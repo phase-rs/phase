@@ -768,10 +768,10 @@ pub(crate) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
 /// Searcher), where "named" is not the search-target template — neither begins
 /// with "card named ".
 ///
-/// Card names can contain commas (Altanak, the Thrice-Called), so the name is
-/// never split on punctuation — only at the earliest conjunction that joins a
-/// second clause or named card (" and/or ", " and ", " then "). A trailing
-/// "and put …" destination is covered by the " and " terminator.
+/// Card names can contain commas (Altanak, the Thrice-Called) AND the word
+/// "and" (Sword of Fire and Ice, Gisa and Geralf), so the name is never split
+/// on punctuation, and a bare " and " is NOT a boundary — only a clause-joining
+/// conjunction terminates it (see [`parse_name_terminator`]).
 ///
 /// Kept separate from the name extractors in `oracle_target.rs` / `condition.rs`
 /// on purpose: those split on `,`/`.`, which would truncate comma-bearing names.
@@ -779,21 +779,50 @@ fn parse_search_named_filter(text: &str) -> Option<TargetFilter> {
     let (after, _) = tag::<_, _, OracleError<'_>>("card named ")
         .parse(text)
         .ok()?;
-    // CR 201.2: The name runs to the earliest clause-joining conjunction; pick
-    // the shortest take_until result so a later " and " can't swallow an earlier
-    // " and/or " (Agency Outfitter's "named X and/or a card named Y").
-    let name = [" and/or ", " and ", " then "]
-        .iter()
-        .filter_map(|term| take_until::<_, _, OracleError<'_>>(*term).parse(after).ok())
-        .map(|(_, before_term)| before_term)
-        .min_by_key(|candidate| candidate.len())
-        .unwrap_or(after);
-    let name = name.trim_end_matches('.').trim();
+    // CR 201.2: The name runs to the earliest *clause-joining* terminator. Scan
+    // at word boundaries (every terminator begins with a space) and stop at the
+    // first position where `parse_name_terminator` matches, so a " and " that is
+    // part of the name ("Fire and Ice") is preserved.
+    let name_end = after
+        .char_indices()
+        .filter(|&(_, c)| c == ' ')
+        .find(|&(idx, _)| parse_name_terminator(&after[idx..]).is_ok())
+        .map_or(after.len(), |(idx, _)| idx);
+    let name = after[..name_end].trim_end_matches('.').trim();
     (!name.is_empty()).then(|| {
         TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Named {
             name: name.to_string(),
         }]))
     })
+}
+
+/// CR 201.2 + CR 701.18a: Match a clause-joining terminator that ends a card
+/// name in "card named X …". A bare " and " is NOT a terminator (it may be part
+/// of the name — "Fire and Ice", "Gisa and Geralf"); " and " only ends the name
+/// when it introduces a follow-up *action* (" and put/reveal/shuffle/…"). The
+/// disjunction (" and/or ") and sequence (" then ") connectives always end it.
+fn parse_name_terminator(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    alt((
+        value((), tag(" and/or ")),
+        value((), tag(" then ")),
+        value(
+            (),
+            (
+                tag(" and "),
+                alt((
+                    tag("put"),
+                    tag("reveal"),
+                    tag("shuffle"),
+                    tag("exile"),
+                    tag("play"),
+                    tag("cast"),
+                    tag("attach"),
+                    tag("return"),
+                )),
+            ),
+        ),
+    ))
+    .parse(input)
 }
 
 /// CR 701.23a: Match a separator between zones in a zone list — handles commas,
@@ -2350,6 +2379,23 @@ mod tests {
             matches!(&f, Some(TargetFilter::Typed(t)) if t.properties.iter().any(|p| matches!(p, FilterProp::Named { name } if name == "god-pharaoh's gift"))),
             "got {f:?}"
         );
+
+        // Card names containing "and" must NOT be truncated — a bare " and " is
+        // a terminator only when it introduces a follow-up action.
+        for (input, want) in [
+            ("card named sword of fire and ice", "sword of fire and ice"),
+            ("card named gisa and geralf", "gisa and geralf"),
+            (
+                "card named sword of fire and ice and put it onto the battlefield",
+                "sword of fire and ice",
+            ),
+        ] {
+            let f = parse_search_named_filter(input);
+            assert!(
+                matches!(&f, Some(TargetFilter::Typed(t)) if t.properties.iter().any(|p| matches!(p, FilterProp::Named { name } if name == want))),
+                "name with 'and' mishandled for {input:?}: got {f:?}"
+            );
+        }
 
         // Aether Searcher: "card with a name noted ... cards named X" is not a
         // name-equality template — must bail (not anchored on "card named ").
