@@ -862,6 +862,14 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         (None, None) => None,
     };
 
+    if def.condition.as_ref().is_some_and(
+        crate::parser::oracle_effect::trigger_condition_references_controller_life_gained,
+    ) {
+        if let Some(ability) = def.execute.as_deref_mut() {
+            crate::parser::oracle_effect::rewrite_gained_life_that_many_distribution_refs(ability);
+        }
+    }
+
     // CR 109.4 + CR 603.7c: Surface TargetFilter::Player when execute
     // references ControllerRef::TargetPlayer.
     if def.valid_target.is_none() {

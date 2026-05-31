@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    AbilityCost, AbilityTag, AdditionalCost, Effect, ModalChoice, QuantityExpr, TargetRef,
-    TargetSelectionMode,
+    AbilityCost, AbilityTag, AdditionalCost, Effect, ModalChoice, QuantityExpr, ResolvedAbility,
+    TargetRef, TargetSelectionMode,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
@@ -206,7 +206,7 @@ pub(crate) fn handle_select_targets(
     // WaitingFor::DistributeAmong. For non-X spells, extract the fixed total now.
     // For X-spells, distribution is deferred to after mana payment (engine.rs).
     if let Some(ref unit) = pending.distribute {
-        if let Some(total) = extract_fixed_distribution_total(&ability.effect) {
+        if let Some(total) = extract_distribution_total(state, &ability, &ability.effect) {
             let assigned_targets = flatten_targets_in_chain(&ability);
             // Store ability + targets on pending_cast for post-distribution resumption.
             let mut pending_dist = PendingCast::new(
@@ -493,6 +493,25 @@ pub(super) fn extract_fixed_distribution_total(effect: &Effect) -> Option<u32> {
         } => Some(*value as u32),
         _ => None,
     }
+}
+
+/// CR 601.2d + CR 603.3d: Resolve the distribution pool for damage/counter division.
+pub(super) fn extract_distribution_total(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    effect: &Effect,
+) -> Option<u32> {
+    if let Some(fixed) = extract_fixed_distribution_total(effect) {
+        return Some(fixed);
+    }
+    let count_expr = match effect {
+        Effect::DealDamage { amount, .. } => amount,
+        Effect::PutCounter { count, .. } | Effect::AddCounter { count, .. } => count,
+        _ => return None,
+    };
+    let (inner, _) = count_expr.peel_up_to();
+    let total = super::quantity::resolve_quantity_with_targets(state, inner, ability).max(0) as u32;
+    (total > 0).then_some(total)
 }
 
 /// CR 702.142b + CR 702.177a: If the activated ability at `ability_index` on

@@ -63,6 +63,7 @@ mod integration_landfall;
 mod jace_wielder_empty_library_win;
 mod json_smoke_test;
 mod kaito_integration;
+mod lathiel_end_step_counters_repro;
 mod kodama_anti_recursion_intervening_if;
 mod krark_clan_ironworks_castability;
 mod leyline_taps_for_mana_repro;

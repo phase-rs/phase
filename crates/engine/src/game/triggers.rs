@@ -2733,7 +2733,9 @@ fn dispatch_pending_trigger_context(
                 events_out,
             );
             if let Some(unit) = trigger.distribute.clone() {
-                if let Some(total) = super::casting_targets::extract_fixed_distribution_total(
+                if let Some(total) = super::casting_targets::extract_distribution_total(
+                    state,
+                    &trigger.ability,
                     &trigger.ability.effect,
                 ) {
                     let assigned_targets =

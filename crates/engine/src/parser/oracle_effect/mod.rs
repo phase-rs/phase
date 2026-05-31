@@ -11967,6 +11967,105 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
     }
 }
 
+/// True when a trigger's intervening-if references the controller gaining life
+/// this turn (Lathiel / Ocelot Pride class).
+pub(crate) fn trigger_condition_references_controller_life_gained(
+    condition: &crate::types::ability::TriggerCondition,
+) -> bool {
+    use crate::types::ability::TriggerCondition;
+    match condition {
+        TriggerCondition::GainedLife { .. } => true,
+        TriggerCondition::QuantityComparison { lhs, .. } => {
+            quantity_expr_references_controller_life_gained(lhs)
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => conditions
+            .iter()
+            .any(trigger_condition_references_controller_life_gained),
+        TriggerCondition::Not { condition } => {
+            trigger_condition_references_controller_life_gained(condition)
+        }
+        _ => false,
+    }
+}
+
+fn quantity_expr_references_controller_life_gained(expr: &QuantityExpr) -> bool {
+    use crate::types::ability::{PlayerScope, QuantityRef};
+    match expr {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller,
+                },
+        } => true,
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_references_controller_life_gained(inner),
+        QuantityExpr::Sum { exprs } => exprs
+            .iter()
+            .any(quantity_expr_references_controller_life_gained),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_references_controller_life_gained(left)
+                || quantity_expr_references_controller_life_gained(right)
+        }
+        _ => false,
+    }
+}
+
+/// CR 609.3 + CR 119.3: "distribute up to that many ..." on end-step life-gain
+/// triggers anaphorizes "that many" to life gained this turn, not
+/// `EventContextAmount` (which has no scalar on a phase trigger).
+pub(crate) fn rewrite_gained_life_that_many_distribution_refs(def: &mut AbilityDefinition) {
+    use crate::types::ability::{PlayerScope, QuantityRef};
+    if def.distribute.is_none() {
+        if let Some(sub) = def.sub_ability.as_mut() {
+            rewrite_gained_life_that_many_distribution_refs(sub);
+        }
+        if let Some(else_branch) = def.else_ability.as_mut() {
+            rewrite_gained_life_that_many_distribution_refs(else_branch);
+        }
+        return;
+    }
+
+    fn rewrite_qty(expr: &mut QuantityExpr) {
+        match expr {
+            QuantityExpr::Ref { qty } if matches!(*qty, QuantityRef::EventContextAmount) => {
+                *qty = QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller,
+                };
+            }
+            QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::UpTo { max: inner }
+            | QuantityExpr::Power {
+                exponent: inner, ..
+            } => rewrite_qty(inner),
+            QuantityExpr::Sum { exprs } => {
+                for inner in exprs {
+                    rewrite_qty(inner);
+                }
+            }
+            QuantityExpr::Difference { left, right } => {
+                rewrite_qty(left);
+                rewrite_qty(right);
+            }
+            _ => {}
+        }
+    }
+
+    each_quantity_expr_mut(&mut def.effect, &mut rewrite_qty);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_gained_life_that_many_distribution_refs(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_gained_life_that_many_distribution_refs(else_branch);
+    }
+}
+
 /// CR 107.1a: Back-apply a rounding mode to every `DivideRounded` in an ability
 /// tree. Used by `parse_effect_chain_ir` after stripping a trailing
 /// "Round down each time" / "Round up each time" sentence (Pox Plague), so
@@ -17603,7 +17702,13 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
     let (after_lower, _) = tag::<_, _, OracleError<'_>>("distribute ")
         .parse(lower)
         .ok()?;
-    let (count_expr, rest_lower) = super::oracle_util::parse_count_expr(after_lower)?;
+    let (count_expr, rest_lower) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_lower) {
+            let (inner, rest) = super::oracle_util::parse_count_expr(rest)?;
+            (QuantityExpr::up_to(inner), rest)
+        } else {
+            super::oracle_util::parse_count_expr(after_lower)?
+        };
 
     // CR 122.1 + CR 122.1b: shared counter-type combinator handles multi-word
     // keyword counter names. Keyword counters aren't a printed distribute
