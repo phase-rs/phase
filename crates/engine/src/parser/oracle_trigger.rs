@@ -10049,6 +10049,8 @@ fn parse_phase_keyword(input: &str) -> nom::IResult<&str, Phase, OracleError<'_>
     .parse(input)
 }
 
+/// CR 505.1: "main phase" collectively names the precombat and postcombat
+/// main phases without selecting one concrete `Phase` value.
 fn parse_generic_main_phase_keyword(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     value((), pair(tag("main phase"), opt(tag("s")))).parse(input)
 }
