@@ -24,6 +24,7 @@ mod lethality_awareness;
 mod life_total_resource;
 mod mana_efficiency;
 pub mod mulligan;
+mod planeswalker_loyalty;
 mod plus_one_counters;
 mod ramp_timing;
 mod reactive_self_protection;
