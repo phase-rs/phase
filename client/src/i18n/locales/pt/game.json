@@ -6,7 +6,8 @@
     "faceDownName": "Carta virada para baixo",
     "loading": "Carregando {{name}}",
     "unimplemented": "Não implementado: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Virada"
   },
   "preview": {
     "holdCtrlBack": "Segure Ctrl para a face traseira",
@@ -214,6 +215,9 @@
     "radAriaLabel_one": "{{count}} marcador de radiação",
     "radAriaLabel_other": "{{count}} marcadores de radiação",
     "radTooltip": "Marcadores de radiação: {{count}}",
+    "experienceAriaLabel_one": "{{count}} contador de experiência",
+    "experienceAriaLabel_other": "{{count}} contadores de experiência",
+    "experienceTooltip": "Contadores de experiência: {{count}}",
     "speedAriaLabel": "Velocidade {{value}}",
     "speedTooltip": "Velocidade: {{value}}",
     "companion": "Companheiro"
@@ -388,6 +392,7 @@
     "chooseTargetOf": "Escolha o alvo {{current}} de {{total}}",
     "chooseTarget": "Escolha um alvo",
     "noLegalTargets": "Nenhum alvo válido disponível",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "até um {{target}}",
     "one": "um {{target}}",
     "nounPlayer": "jogador",
@@ -1279,7 +1284,9 @@
     "searchSubtitle": "Digite para buscar em todas as cartas",
     "searchPlaceholder": "Buscar por nome...",
     "noCardsFound": "Nenhuma carta encontrada",
-    "buttonSubtitle": "Selecione uma opção"
+    "buttonSubtitle": "Selecione uma opção",
+    "filterPlaceholder": "Filtrar opções...",
+    "noOptionsMatch": "Nenhuma opção corresponde"
   },
   "nonFatalPanic": {
     "heading": "Aviso do motor (não fatal)",
