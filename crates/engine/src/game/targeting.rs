@@ -332,7 +332,7 @@ pub fn check_fizzle(original_targets: &[TargetRef], legal_targets: &[TargetRef])
 
 /// Resolve event-context TargetFilter variants using the current trigger event.
 /// These variants auto-resolve at effect resolution time from `state.current_trigger_event`
-/// without requiring player selection (CR 603.7c).
+/// without requiring player selection (CR 603.2).
 ///
 /// Returns `Some(TargetRef)` if the event context can provide a target,
 /// `None` if the filter is not an event-context variant or no event is available.
@@ -573,15 +573,13 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
         }
         TargetFilter::ParentTarget => {
             let event = event?;
-            // CR 603.7c: On a spell-cast trigger, "that spell" / "copy it"
-            // (Mendicant Core, Guidelight) is the spell that caused the trigger,
-            // not a player-chosen target or `stack.last()`.
-            extract_source_from_event(event)
-                .map(TargetRef::Object)
-                .or_else(|| blocked_attacker_from_event(event, source_id).map(TargetRef::Object))
+            blocked_attacker_from_event(event, source_id).map(TargetRef::Object)
         }
         TargetFilter::StackSpell => {
             let event = event?;
+            // CR 601.2i + CR 603.2: On a spell-cast trigger, "that spell" /
+            // "copy it" (Mendicant Core, Guidelight) is the spell that caused
+            // the trigger, not an intervening triggered ability above it.
             extract_source_from_event(event).map(TargetRef::Object)
         }
         // CR 506.3d: "defending player" — look up from combat state using the source creature.
@@ -1594,7 +1592,7 @@ mod tests {
     }
 
     #[test]
-    fn stack_spell_and_parent_target_resolve_spell_cast_trigger() {
+    fn stack_spell_resolves_spell_cast_trigger() {
         let mut state = GameState::new_two_player(42);
         let spell_id = ObjectId(10);
         state.current_trigger_event = Some(crate::types::events::GameEvent::SpellCast {
@@ -1602,13 +1600,10 @@ mod tests {
             object_id: spell_id,
             controller: PlayerId(0),
         });
-        for filter in [TargetFilter::StackSpell, TargetFilter::ParentTarget] {
-            assert_eq!(
-                resolve_event_context_target(&state, &filter, ObjectId(20)),
-                Some(TargetRef::Object(spell_id)),
-                "{filter:?}"
-            );
-        }
+        assert_eq!(
+            resolve_event_context_target(&state, &TargetFilter::StackSpell, ObjectId(20)),
+            Some(TargetRef::Object(spell_id))
+        );
     }
 
     #[test]
