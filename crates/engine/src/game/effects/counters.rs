@@ -1857,6 +1857,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: lki_counters,
             },
         );

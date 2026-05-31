@@ -40,6 +40,10 @@ fn player_context_target(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> Option<TargetRef> {
+    if matches!(target_filter, TargetFilter::SourceChosenPlayer) {
+        return super::source_chosen_player(state, ability).map(TargetRef::Player);
+    }
+
     if matches!(
         target_filter,
         TargetFilter::Controller

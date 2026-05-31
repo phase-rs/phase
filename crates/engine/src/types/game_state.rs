@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ContinuousModification, CostPaidObjectSnapshot, DelayedTriggerCondition, Duration, EffectKind,
-    GameRestriction, KeywordAction, KickerVariant, ModalChoice, ResolvedAbility,
-    SearchDestinationSplit, SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef,
-    TriggerCondition,
+    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, DelayedTriggerCondition,
+    Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant, ModalChoice,
+    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
+    TargetFilter, TargetRef, TriggerCondition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -168,6 +168,11 @@ pub struct LKISnapshot {
     /// CR 400.7: Colors as they last existed in the public zone.
     #[serde(default)]
     pub colors: Vec<ManaColor>,
+    /// CR 400.7: Persisted choices as they last existed in the public zone.
+    /// Source-linked abilities use this after the source leaves before a
+    /// linked "the chosen player" instruction resolves.
+    #[serde(default)]
+    pub chosen_attributes: Vec<ChosenAttribute>,
     /// CR 400.7: Counters as they last existed on the object.
     /// Used by `TriggerCondition::HadCounters` for "if it had counters on it" patterns.
     #[serde(default)]

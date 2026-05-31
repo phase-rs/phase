@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction,
-    ContinuousModification, DelayedTriggerCondition, Effect, ManaProduction, ModalChoice,
-    ParsedCondition, QuantityExpr, ReplacementDefinition, SolveCondition, SpellCastingOption,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypedFilter,
+    ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
+    ChosenSubtypeKind, ContinuousModification, DelayedTriggerCondition, Effect, ManaProduction,
+    ModalChoice, ParsedCondition, QuantityExpr, ReplacementDefinition, SolveCondition,
+    SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypedFilter,
 };
 use crate::types::keywords::{ActivationCadence, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
@@ -537,6 +537,86 @@ fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<Stat
         return vec![def];
     }
     parse_static_line_multi(line)
+}
+
+fn reconcile_self_chosen_type_statics(result: &mut ParsedAbilities, types: &[String]) {
+    let Some(chosen_kind) = chosen_subtype_kind_from_persisted_choice(result)
+        .or_else(|| chosen_kind_from_card_types(types))
+    else {
+        return;
+    };
+
+    for static_def in &mut result.statics {
+        let is_self_chosen_type_static = static_def.affected == Some(TargetFilter::SelfRef)
+            && static_def
+                .description
+                .as_deref()
+                .is_some_and(is_self_chosen_type_description);
+        if !is_self_chosen_type_static {
+            continue;
+        }
+        for modification in &mut static_def.modifications {
+            if let ContinuousModification::AddChosenSubtype { kind } = modification {
+                *kind = chosen_kind.clone();
+            }
+        }
+    }
+}
+
+fn chosen_kind_from_card_types(types: &[String]) -> Option<ChosenSubtypeKind> {
+    if types.iter().any(|card_type| card_type == "Creature") {
+        Some(ChosenSubtypeKind::CreatureType)
+    } else if types.iter().any(|card_type| card_type == "Land") {
+        Some(ChosenSubtypeKind::BasicLandType)
+    } else {
+        None
+    }
+}
+
+fn chosen_subtype_kind_from_persisted_choice(
+    result: &ParsedAbilities,
+) -> Option<ChosenSubtypeKind> {
+    result
+        .replacements
+        .iter()
+        .filter_map(|replacement| replacement.execute.as_deref())
+        .find_map(chosen_subtype_kind_from_ability)
+        .or_else(|| {
+            result
+                .abilities
+                .iter()
+                .find_map(chosen_subtype_kind_from_ability)
+        })
+}
+
+fn chosen_subtype_kind_from_ability(def: &AbilityDefinition) -> Option<ChosenSubtypeKind> {
+    match def.effect.as_ref() {
+        Effect::Choose {
+            choice_type: ChoiceType::CreatureType,
+            persist: true,
+        } => Some(ChosenSubtypeKind::CreatureType),
+        Effect::Choose {
+            choice_type: ChoiceType::BasicLandType,
+            persist: true,
+        } => Some(ChosenSubtypeKind::BasicLandType),
+        _ => def
+            .sub_ability
+            .as_deref()
+            .and_then(chosen_subtype_kind_from_ability),
+    }
+}
+
+fn is_self_chosen_type_description(description: &str) -> bool {
+    let lower = description.to_lowercase();
+    let parsed = alt((
+        tag::<_, _, OracleError<'_>>("~ is"),
+        tag("this creature is"),
+        tag("this land is"),
+        tag("this permanent is"),
+    ))
+    .parse(lower.as_str())
+    .and_then(|(rest, _)| tag(" the chosen type").parse(rest));
+    parsed.is_ok()
 }
 
 fn push_same_is_true_static_tail<F>(
@@ -2943,6 +3023,8 @@ pub(crate) fn parse_oracle_ir(
             .push(make_unimplemented_with_effect(&line, nom_effect));
         i += 1;
     }
+
+    reconcile_self_chosen_type_statics(&mut result, types);
 
     // Architectural rule: the parser must never silently discard Oracle
     // text. Run the swallow audit against the parsed result so any unrep-

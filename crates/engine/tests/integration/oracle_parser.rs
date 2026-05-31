@@ -1,6 +1,7 @@
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
 use engine::types::ability::{
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, Effect, TargetFilter, TypeFilter,
+    ChosenSubtypeKind, ContinuousModification, ControllerRef, DamageModification,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, TargetFilter, TypeFilter,
 };
 use engine::types::keywords::Keyword;
 use engine::types::statics::StaticMode;
@@ -272,6 +273,136 @@ fn xenograft_full_oracle_applies_chosen_type_to_creatures_you_control() {
     assert!(
         unimplemented.is_empty(),
         "Xenograft wording should not fall through to an unimplemented ability: {unimplemented:?}"
+    );
+}
+
+#[test]
+fn roaming_throne_self_static_uses_creature_chosen_type() {
+    let result = parse(
+        "As Roaming Throne enters, choose a creature type.\nRoaming Throne is the chosen type in addition to its other types.\nIf a triggered ability of another creature you control of the chosen type triggers, it triggers an additional time.",
+        "Roaming Throne",
+        &[],
+        &["Artifact", "Creature"],
+        &["Golem"],
+    );
+
+    assert!(result.statics.iter().any(|static_def| {
+        static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType
+                }
+            )
+        })
+    }));
+}
+
+#[test]
+fn thran_portal_self_static_uses_basic_land_chosen_type() {
+    let result = parse(
+        "This land enters tapped unless you control two or fewer other lands.\nAs this land enters, choose a basic land type.\nThis land is the chosen type in addition to its other types.\nMana abilities of this land cost an additional 1 life to activate.",
+        "Thran Portal",
+        &[],
+        &["Land"],
+        &[],
+    );
+
+    assert!(result.statics.iter().any(|static_def| {
+        static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::BasicLandType
+                }
+            )
+        })
+    }));
+}
+
+#[test]
+fn steely_resolve_grants_shroud_keyword_to_chosen_type_creatures() {
+    let result = parse(
+        "As Steely Resolve enters, choose a creature type.\nCreatures of the chosen type have shroud.",
+        "Steely Resolve",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+
+    let static_def = result
+        .statics
+        .iter()
+        .find(|static_def| {
+            static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Shroud
+                    }
+                )
+            })
+        })
+        .expect("expected chosen-type creatures to gain shroud as a keyword");
+
+    assert_eq!(static_def.mode, StaticMode::Continuous);
+    match &static_def.affected {
+        Some(TargetFilter::Typed(filter)) => {
+            assert!(filter.type_filters.contains(&TypeFilter::Creature));
+            assert!(filter
+                .properties
+                .contains(&FilterProp::IsChosenCreatureType));
+        }
+        other => panic!("expected chosen-type creature filter, got {other:?}"),
+    }
+}
+
+#[test]
+fn stuffy_doll_damage_trigger_uses_source_chosen_player() {
+    let result = parse(
+        "As Stuffy Doll enters, choose a player.\nIndestructible\nWhenever Stuffy Doll is dealt damage, it deals that much damage to the chosen player.",
+        "Stuffy Doll",
+        &[Keyword::Indestructible],
+        &["Artifact", "Creature"],
+        &["Toy"],
+    );
+
+    let trigger = result
+        .triggers
+        .iter()
+        .find_map(|trigger| trigger.execute.as_deref())
+        .expect("expected damage trigger");
+
+    match trigger.effect.as_ref() {
+        Effect::DealDamage {
+            target: TargetFilter::SourceChosenPlayer,
+            ..
+        } => {}
+        other => panic!("expected damage to source chosen player, got {other:?}"),
+    }
+}
+
+#[test]
+fn sawhorn_nemesis_damage_replacement_scopes_to_source_chosen_player() {
+    let result = parse(
+        "As Sawhorn Nemesis enters, choose a player.\nIf a source would deal damage to the chosen player or a permanent they control, it deals double that damage instead.",
+        "Sawhorn Nemesis",
+        &[],
+        &["Creature"],
+        &["Dinosaur"],
+    );
+
+    let replacement = result
+        .replacements
+        .iter()
+        .find(|replacement| replacement.damage_modification == Some(DamageModification::Double))
+        .expect("expected double-damage replacement");
+
+    assert_eq!(
+        replacement.damage_target_filter,
+        Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
+            player: DamageTargetPlayerScope::SourceChosenPlayer,
+        })
     );
 }
 

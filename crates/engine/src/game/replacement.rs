@@ -2,10 +2,10 @@ use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Effect, PostReplacementContinuation,
-    PreventionAmount, QuantityExpr, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ShieldKind, TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, ChosenAttribute, CombatDamageScope, ControllerRef,
+    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect,
+    PostReplacementContinuation, PreventionAmount, QuantityExpr, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, ShieldKind, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -2187,32 +2187,41 @@ fn matches_damage_target_filter(
     filter: &DamageTargetFilter,
     target: &TargetRef,
     repl_controller: PlayerId,
+    repl_source: ObjectId,
     state: &GameState,
 ) -> bool {
     fn player_scope_matches(
         scope: &DamageTargetPlayerScope,
         player: PlayerId,
         repl_controller: PlayerId,
+        repl_source: ObjectId,
+        state: &GameState,
     ) -> bool {
         match scope {
             DamageTargetPlayerScope::Any => true,
             DamageTargetPlayerScope::Opponent => player != repl_controller,
             DamageTargetPlayerScope::Controller => player == repl_controller,
+            DamageTargetPlayerScope::SourceChosenPlayer => {
+                source_chosen_player(state, repl_source).is_some_and(|chosen| player == chosen)
+            }
             DamageTargetPlayerScope::Specific(specific) => player == *specific,
         }
     }
 
     match filter {
         DamageTargetFilter::Player { player } => match target {
-            TargetRef::Player(pid) => player_scope_matches(player, *pid, repl_controller),
+            TargetRef::Player(pid) => {
+                player_scope_matches(player, *pid, repl_controller, repl_source, state)
+            }
             TargetRef::Object(_) => false,
         },
         DamageTargetFilter::PlayerOrPermanentsControlledBy { player } => match target {
-            TargetRef::Player(pid) => player_scope_matches(player, *pid, repl_controller),
-            TargetRef::Object(oid) => state
-                .objects
-                .get(oid)
-                .is_some_and(|obj| player_scope_matches(player, obj.controller, repl_controller)),
+            TargetRef::Player(pid) => {
+                player_scope_matches(player, *pid, repl_controller, repl_source, state)
+            }
+            TargetRef::Object(oid) => state.objects.get(oid).is_some_and(|obj| {
+                player_scope_matches(player, obj.controller, repl_controller, repl_source, state)
+            }),
         },
         DamageTargetFilter::CreatureOnly => match target {
             TargetRef::Player(_) => false,
@@ -2222,6 +2231,29 @@ fn matches_damage_target_filter(
                 .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature)),
         },
     }
+}
+
+/// CR 607.2d + CR 614.1a: Damage replacements can refer to the player chosen
+/// for the replacement source ("the chosen player"). If no linked choice exists,
+/// the replacement does not apply to that source-chosen scope.
+fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| {
+            obj.chosen_attributes.iter().find_map(|attr| match attr {
+                ChosenAttribute::Player(player) => Some(*player),
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            state.lki_cache.get(&source_id).and_then(|lki| {
+                lki.chosen_attributes.iter().find_map(|attr| match attr {
+                    ChosenAttribute::Player(player) => Some(*player),
+                    _ => None,
+                })
+            })
+        })
 }
 
 // --- Pipeline functions ---
@@ -2724,7 +2756,13 @@ pub fn find_applicable_replacements(
                     // CR 614.1a: Damage target filter — restricts which damage recipients trigger this replacement.
                     if let Some(ref tf) = repl_def.damage_target_filter {
                         if let ProposedEvent::Damage { target, .. } = event {
-                            if !matches_damage_target_filter(tf, target, obj.controller, state) {
+                            if !matches_damage_target_filter(
+                                tf,
+                                target,
+                                obj.controller,
+                                obj.id,
+                                state,
+                            ) {
                                 continue;
                             }
                         }
@@ -2921,7 +2959,13 @@ pub fn find_applicable_replacements(
                 }
                 if let Some(ref tf) = repl_def.damage_target_filter {
                     if let ProposedEvent::Damage { target, .. } = event {
-                        if !matches_damage_target_filter(tf, target, PlayerId(0), state) {
+                        if !matches_damage_target_filter(
+                            tf,
+                            target,
+                            PlayerId(0),
+                            ObjectId(0),
+                            state,
+                        ) {
                             continue;
                         }
                     }
@@ -4098,8 +4142,8 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, GainLifePlayer, QuantityExpr,
-        ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
+        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, GainLifePlayer,
+        QuantityExpr, ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
     };
     use crate::types::game_state::DamageRecord;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -6773,6 +6817,108 @@ mod tests {
         assert!(
             !candidates.is_empty(),
             "Should match damage to opponent's permanent"
+        );
+    }
+
+    #[test]
+    fn damage_target_filter_source_chosen_player_scopes_replacement() {
+        let repl = damage_repl(DamageModification::Double).damage_target_filter(
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::SourceChosenPlayer,
+            },
+        );
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+        let registry = build_replacement_registry();
+
+        let chosen_player_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            !find_applicable_replacements(&state, &chosen_player_damage, &registry).is_empty(),
+            "damage to the source's chosen player should match"
+        );
+
+        let unchosen_player_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &unchosen_player_damage, &registry).is_empty(),
+            "damage to another player should not match"
+        );
+    }
+
+    #[test]
+    fn damage_target_filter_source_chosen_player_matches_their_permanent() {
+        let repl = damage_repl(DamageModification::Double).damage_target_filter(
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::SourceChosenPlayer,
+            },
+        );
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+
+        let chosen_permanent = GameObject::new(
+            ObjectId(60),
+            CardId(3),
+            PlayerId(1),
+            "Chosen Player Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(60), chosen_permanent);
+        state.battlefield.push_back(ObjectId(60));
+
+        let other_permanent = GameObject::new(
+            ObjectId(61),
+            CardId(4),
+            PlayerId(0),
+            "Other Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(61), other_permanent);
+        state.battlefield.push_back(ObjectId(61));
+
+        let registry = build_replacement_registry();
+        let chosen_permanent_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(60)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            !find_applicable_replacements(&state, &chosen_permanent_damage, &registry).is_empty(),
+            "damage to a permanent the source's chosen player controls should match"
+        );
+
+        let other_permanent_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(61)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &other_permanent_damage, &registry).is_empty(),
+            "damage to another player's permanent should not match"
         );
     }
 
