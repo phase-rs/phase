@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetRef, TypedFilter,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -157,6 +157,25 @@ pub fn resolve(
             ..
         }
     );
+    let self_ref_target = matches!(
+        &ability.effect,
+        Effect::Destroy {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    );
+    if self_ref_target && ability.targets.is_empty() {
+        match destroy_single_object(
+            state,
+            ability.source_id,
+            ability.source_id,
+            cant_regenerate,
+            events,
+        ) {
+            DestroyOutcome::Completed | DestroyOutcome::Skipped => {}
+            DestroyOutcome::NeedsChoice => return Ok(()),
+        }
+    }
     for target in &ability.targets {
         if let TargetRef::Object(obj_id) = target {
             match destroy_single_object(state, *obj_id, ability.source_id, cant_regenerate, events)
@@ -287,6 +306,33 @@ mod tests {
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!state.battlefield.contains(&obj_id));
+        assert!(state.players[0].graveyard.contains(&obj_id));
+    }
+
+    #[test]
+    fn destroy_self_ref_moves_source_to_graveyard() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Experimental Frenzy".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::SelfRef,
+                cant_regenerate: false,
+            },
+            Vec::new(),
+            obj_id,
             PlayerId(0),
         );
         let mut events = Vec::new();

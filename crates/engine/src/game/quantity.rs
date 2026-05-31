@@ -1253,20 +1253,42 @@ fn resolve_ref(
         // zone selection + the `OtherThanTriggerObject` exclusion). Selvala-class
         // "each other creature's power" excludes the triggering object via the
         // shared helper, so count and aggregate population are identical.
+        //
+        // CR 608.2h + CR 400.7: For look-back aggregates over non-battlefield
+        // objects (Oversimplify: "the total power of creatures they controlled
+        // that were exiled this way"), the live object's `power`/`toughness`
+        // are `None` because the at-exile layer values are not maintained off
+        // battlefield. Fall back to the LKI snapshot captured by
+        // `change_zone` on leaving the battlefield (`game/zones.rs:65-92`),
+        // which holds the post-layer-7 values from the moment of departure —
+        // exactly what the "as they last existed on the battlefield" ruling
+        // requires. `ManaValue` doesn't need LKI: the printed mana cost is
+        // stable across zones.
         QuantityRef::Aggregate {
             function,
             property,
             filter,
         } => {
             let ids = object_count_matching_ids(state, filter, &filter_ctx, source_id);
-            let values = ids.iter().filter_map(|&id| {
-                state.objects.get(&id).map(|obj| match property {
-                    ObjectProperty::Power => obj.power.unwrap_or(0),
-                    ObjectProperty::Toughness => obj.toughness.unwrap_or(0),
-                    // CR 202.3e: mana_value() excludes X.
-                    ObjectProperty::ManaValue => u32_to_i32_saturating(obj.mana_cost.mana_value()),
+            let extract = |id: ObjectId| -> Option<i32> {
+                let live = state.objects.get(&id).and_then(|obj| match property {
+                    ObjectProperty::Power => obj.power,
+                    ObjectProperty::Toughness => obj.toughness,
+                    // CR 202.3e: mana_value() excludes X. Always live — printed
+                    // value is stable across zones, no LKI fallback needed.
+                    ObjectProperty::ManaValue => {
+                        Some(u32_to_i32_saturating(obj.mana_cost.mana_value()))
+                    }
+                });
+                live.or_else(|| {
+                    state.lki_cache.get(&id).and_then(|lki| match property {
+                        ObjectProperty::Power => lki.power,
+                        ObjectProperty::Toughness => lki.toughness,
+                        ObjectProperty::ManaValue => Some(u32_to_i32_saturating(lki.mana_value)),
+                    })
                 })
-            });
+            };
+            let values = ids.iter().filter_map(|&id| extract(id));
             match function {
                 AggregateFunction::Max => values.max().unwrap_or(0),
                 AggregateFunction::Min => values.min().unwrap_or(0),
@@ -8590,5 +8612,86 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(0)), 0);
+    }
+
+    /// CR 608.2h + CR 400.7: `Aggregate{Sum, Power}` over an exile-link filter
+    /// must read the LKI-cached at-exile power, not the live `obj.power`
+    /// (which is `None` off battlefield because the layer system does not
+    /// maintain P/T for non-battlefield objects).
+    ///
+    /// This is the Oversimplify regression test: pre-fix, the aggregate
+    /// returned 0 for every exiled creature because `obj.power.unwrap_or(0)`
+    /// silently collapsed. The fix at `resolve_ref`'s `Aggregate` arm chains
+    /// `state.lki_cache.get(&id)` after the live read.
+    #[test]
+    fn aggregate_power_lki_fallback_for_exiled_creatures() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Oversimplify".to_string(),
+            Zone::Stack,
+        );
+
+        // Two exiled creatures with no live power (off battlefield), each
+        // having an LKI snapshot. The aggregate must sum the LKI values.
+        for (card_id, power, toughness) in [(51, 3i32, 3i32), (52, 5, 5)] {
+            let exiled = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                format!("Exiled {card_id}"),
+                Zone::Exile,
+            );
+            // Live power is None (the runtime path that exiles a battlefield
+            // creature unsets `power` because the layer system stops applying).
+            {
+                let obj = state.objects.get_mut(&exiled).unwrap();
+                obj.power = None;
+                obj.toughness = None;
+                obj.card_types.core_types.push(CoreType::Creature);
+            }
+            state.lki_cache.insert(
+                exiled,
+                crate::types::game_state::LKISnapshot {
+                    name: format!("Exiled {card_id}"),
+                    power: Some(power),
+                    toughness: Some(toughness),
+                    base_power: Some(power),
+                    base_toughness: Some(toughness),
+                    mana_value: 0,
+                    controller: PlayerId(0),
+                    owner: PlayerId(0),
+                    card_types: vec![CoreType::Creature],
+                    subtypes: vec![],
+                    supertypes: vec![],
+                    keywords: vec![],
+                    colors: vec![],
+                    counters: Default::default(),
+                },
+            );
+            state.exile_links.push(ExileLink {
+                source_id: source,
+                exiled_id: exiled,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+        }
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                filter: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::creature()),
+                        TargetFilter::ExiledBySource,
+                    ],
+                },
+            },
+        };
+
+        // 3 + 5 = 8 from LKI; pre-fix this returned 0 because obj.power was None.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 8);
     }
 }

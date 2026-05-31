@@ -518,6 +518,17 @@ pub fn initialize_game(
 
     let mut state = GameState::new(format_config, count, seed);
     state.debug_mode = true;
+    // Sandbox capability: in a P2P-host (WASM-authoritative) game, the
+    // `submit_action` gate checks `debug_permitted`, mirroring server-core's
+    // WebSocket gate. server-core seeds every seat when `allow_debug_actions`
+    // is set (session.rs); the WASM host must do the same or sandbox Debug
+    // actions are rejected for everyone — the host included. Every seat is
+    // permitted by default; the host's grant/revoke flow still narrows it.
+    if state.format_config.allow_debug_actions {
+        for i in 0..count {
+            state.debug_permitted.insert(PlayerId(i));
+        }
+    }
     state.match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
         serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
             .unwrap_or_else(|_| MatchConfig::default())

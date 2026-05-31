@@ -77,6 +77,7 @@ mod mycoloth_upkeep_trigger;
 mod mystic_forge_regression;
 mod old_growth_troll_return_as_aura;
 mod oracle_parser;
+mod oversimplify_per_player_fractal;
 mod peter_parker_modal_back_face_cast;
 mod plaguecrafter_etb_class;
 mod ponder_decline_shuffle_regression;

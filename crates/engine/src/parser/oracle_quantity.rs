@@ -4876,4 +4876,52 @@ mod tests {
             }
         );
     }
+
+    /// CR 122.1 + CR 607.2a + CR 109.5: Oversimplify's "the total power of
+    /// creatures they controlled that were exiled this way" composite
+    /// quantity. Lowers to `Aggregate{Sum, Power, And[Typed{Creature,
+    /// ScopedPlayer}, ExiledBySource]}`. Building-block test, not a card
+    /// test — any future card with the same "<filter> they controlled that
+    /// were exiled this way" shape must parse through this exact path.
+    #[test]
+    fn total_power_of_creatures_they_controlled_exiled_this_way() {
+        let qty = parse_quantity_ref(
+            "the total power of creatures they controlled that were exiled this way",
+        )
+        .expect("composite quantity must parse");
+        let expected = QuantityRef::Aggregate {
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::Power,
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                    ),
+                    TargetFilter::ExiledBySource,
+                ],
+            },
+        };
+        assert_eq!(qty, expected);
+    }
+
+    /// Same composite shape with "you controlled" — verifies the controller
+    /// axis is parameterized correctly across "you / they / an opponent".
+    #[test]
+    fn total_toughness_of_creatures_you_controlled_exiled_this_way() {
+        let qty = parse_quantity_ref(
+            "the total toughness of creatures you controlled that were exiled this way",
+        )
+        .expect("composite quantity must parse");
+        let expected = QuantityRef::Aggregate {
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::Toughness,
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    TargetFilter::ExiledBySource,
+                ],
+            },
+        };
+        assert_eq!(qty, expected);
+    }
 }
