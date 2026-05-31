@@ -7432,11 +7432,68 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         }
     }
 
-    // CR 608.2c: Verb carry-forward for "up to N [other] target X" clauses in compound actions.
-    // When the sub-text starts with "up to" and parsed as Unimplemented, prepend
-    // the verb from the primary effect and re-parse. Handles "destroy target artifact
-    // or enchantment and up to one other target artifact or enchantment" (Relic Crush)
-    // where "up to one other target ..." lacks a verb.
+    // CR 122.1 + CR 115.6: Counter-clause carry-forward for a second targeted
+    // PutCounter conjunct. "put an everything counter on each of up to one
+    // target land and up to one target creature" (Omo, Queen of Vesuva) splits
+    // on " and " into the verbless sub-text "up to one target creature". The
+    // generic verb-only carry-forward below would reparse "put up to one target
+    // creature" — which has no counter phrase and stays Unimplemented. Instead,
+    // when the primary effect is a PutCounter, reuse its counter_type/count and
+    // build the second PutCounter sibling directly against the trailing target,
+    // carrying its own "up to N" multi_target. Mirrors `try_parse_tap_goad_compound`'s
+    // direct sub-effect construction.
+    if matches!(sub_clause.effect, Effect::Unimplemented { .. })
+        && tag::<_, _, OracleError<'_>>("up to ")
+            .parse(sub_lower.as_str())
+            .is_ok()
+    {
+        if let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = &primary_effect
+        {
+            // CR 115.1d: strip the "up to N" / "each of up to N" cardinality from
+            // the sub-text and emit the corresponding MultiTargetSpec, mirroring
+            // `resolve_counter_placement_target`'s own up-to handling.
+            let (target_text, up_to_spec): (&str, Option<MultiTargetSpec>) =
+                if let Some(((), after_up_to)) =
+                    super::oracle_nom::bridge::nom_on_lower(sub_text, sub_lower.as_str(), |i| {
+                        value((), alt((tag("each of up to "), tag("up to ")))).parse(i)
+                    })
+                {
+                    match parse_multi_target_count_expr(
+                        &sub_lower[sub_lower.len() - after_up_to.len()..],
+                    ) {
+                        Ok((after_qty, max)) => (
+                            &sub_text[sub_text.len() - after_qty.len()..],
+                            Some(MultiTargetSpec::up_to(max)),
+                        ),
+                        Err(_) => (sub_text, None),
+                    }
+                } else {
+                    (sub_text, None)
+                };
+            let (sub_target, sub_rem) =
+                parse_target_with_ctx(target_text.trim_start(), &mut continuation_ctx);
+            if sub_rem.trim().is_empty() && !matches!(sub_target, TargetFilter::Any) {
+                sub_clause = ParsedEffectClause {
+                    effect: Effect::PutCounter {
+                        counter_type: counter_type.clone(),
+                        count: count.clone(),
+                        target: sub_target,
+                    },
+                    duration: None,
+                    sub_ability: None,
+                    distribute: None,
+                    multi_target: up_to_spec,
+                    condition: None,
+                    optional: false,
+                    unless_pay: None,
+                };
+            }
+        }
+    }
     if matches!(sub_clause.effect, Effect::Unimplemented { .. })
         && tag::<_, _, OracleError<'_>>("up to ")
             .parse(sub_lower.as_str())
@@ -7571,12 +7628,27 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // remains optional (e.g. "up to one other target artifact or enchantment").
     sub_ability.multi_target = sub_clause.multi_target;
 
+    // CR 115.1d: Recover the PRIMARY clause's "up to N" cardinality, which
+    // `try_parse_verb_and_target` discards when it lowers a PutCounter to a
+    // `ZoneCounterProxy`. Without this the primary target of e.g. Omo, Queen of
+    // Vesuva ("...on each of up to one target land and up to one target
+    // creature") would be wrongly mandatory. Re-derive it from the consumed
+    // primary-clause prefix via the same building block that produced it.
+    let primary_multi_target = if matches!(&primary_effect, Effect::PutCounter { .. }) {
+        let primary_clause = &text[..text.len() - remainder.len()];
+        let primary_lower = primary_clause.to_ascii_lowercase();
+        counter::try_parse_put_counter(&primary_lower, primary_clause, &mut ctx.clone())
+            .and_then(|(_, _, multi)| multi)
+    } else {
+        None
+    };
+
     Some(ParsedEffectClause {
         effect: primary_effect,
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
         distribute: None,
-        multi_target: None,
+        multi_target: primary_multi_target,
         condition: None,
         optional: false,
         unless_pay: None,

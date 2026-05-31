@@ -11238,6 +11238,10 @@ pub enum ContinuousModification {
     /// CR 305.6 + CR 305.7: Adds all five basic land types in addition to
     /// existing types. Used by Prismatic Omen, Dryad of the Ilysian Grove.
     AddAllBasicLandTypes,
+    /// CR 205.3i + CR 305.7: grants every land type (all 17 land subtypes) and
+    /// their mana abilities, additive. Distinct from AddAllBasicLandTypes
+    /// (CR 305.6, 5 basic types). Omo, Queen of Vesuva. Layer 4.
+    AddAllLandTypes,
     /// Adds the source object's chosen subtype (creature type or basic land type).
     /// Resolved at layer evaluation time from the source's `chosen_attributes`.
     AddChosenSubtype {
