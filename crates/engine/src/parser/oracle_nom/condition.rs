@@ -1050,7 +1050,7 @@ fn parse_exactly_n_counters(input: &str) -> OracleResult<'_, (u32, Option<u32>)>
 ///
 /// Fails if the input does not contain `" counter"` before end of string,
 /// or if the token slice is empty (that case is the caller's `Any` branch).
-fn parse_typed_counter_noun(input: &str) -> OracleResult<'_, CounterMatch> {
+pub(crate) fn parse_typed_counter_noun(input: &str) -> OracleResult<'_, CounterMatch> {
     let (rest_after_noun, type_slice) = take_until(" counter").parse(input)?;
     if type_slice.is_empty() {
         // Fail so the caller's `Any` branch (bare "counter[s]") can try.
