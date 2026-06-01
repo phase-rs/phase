@@ -7460,16 +7460,21 @@ fn pay_ability_cost_inner(
         // any zone) are still handled by the catch-all below.
         AbilityCost::Exile {
             filter: Some(TargetFilter::SelfRef),
-            zone: Some(z),
+            zone,
             count: 1,
         } => {
             let obj = state.objects.get(&source_id).ok_or_else(|| {
                 EngineError::InvalidAction("Source object not found for exile cost".to_string())
             })?;
-            if obj.zone != *z {
-                return Err(EngineError::ActionNotAllowed(format!(
-                    "Cannot exile self for cost: source is not in {z:?}"
-                )));
+            // CR 117.1: an explicit zone validates the source's location; a
+            // missing zone exiles the source from whatever zone it is currently
+            // in (e.g. a land's "Exile this land" paid from the battlefield).
+            if let Some(z) = zone {
+                if obj.zone != *z {
+                    return Err(EngineError::ActionNotAllowed(format!(
+                        "Cannot exile self for cost: source is not in {z:?}"
+                    )));
+                }
             }
             super::zones::move_to_zone(state, source_id, Zone::Exile, events);
         }
