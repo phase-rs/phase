@@ -16668,6 +16668,82 @@ mod tests {
         assert!(!spell_objects_available_to_cast(&state, PlayerId(0)).contains(&obj_id));
     }
 
+    /// CR 601.2a + issue #1583 — Evelyn's permission is "Once each turn." After
+    /// the player has already played a collection-counter card this turn
+    /// (Evelyn's once-per-turn slot recorded in `exile_play_permissions_used`),
+    /// a second such card — even one owned by an opponent — is no longer
+    /// castable this turn, because `live_collection_counter_play_permission_source`
+    /// skips a used source. The card becomes castable again once the slot frees.
+    #[test]
+    fn collection_counter_play_permission_is_once_per_turn() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(0),
+            "Evelyn, the Covetous".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::Other(
+                "LinkedCollectionCounterPlayPermission".to_string(),
+            )));
+
+        // An opponent-owned (PlayerId(1)) exiled spell with a collection counter,
+        // exiled by an ability PlayerId(0) controlled — the reported scenario.
+        let exiled = create_object(
+            &mut state,
+            CardId(41),
+            PlayerId(1),
+            "Opponent Exiled Sorcery".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&exiled).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.counters.insert(
+                crate::types::counter::CounterType::Generic("collection".to_string()),
+                1,
+            );
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.casting_permissions
+                .push(CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to: PlayerId(0),
+                    frequency: CastFrequency::OncePerTurn,
+                    source_id: Some(source),
+                    exiled_by_ability_controller: Some(PlayerId(0)),
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                });
+        }
+
+        // Castable before Evelyn's once-per-turn slot is consumed.
+        assert!(spell_objects_available_to_cast(&state, PlayerId(0)).contains(&exiled));
+
+        // CR 601.2a: simulate having already played a collection-counter card
+        // this turn — Evelyn's source slot is recorded as used.
+        state.exile_play_permissions_used.insert(source);
+        assert!(
+            !spell_objects_available_to_cast(&state, PlayerId(0)).contains(&exiled),
+            "second collection-counter card must not be castable once the \
+             once-per-turn permission source is used"
+        );
+
+        // Freeing the slot (e.g. at the next turn's cleanup) re-enables it.
+        state.exile_play_permissions_used.remove(&source);
+        assert!(spell_objects_available_to_cast(&state, PlayerId(0)).contains(&exiled));
+    }
+
     #[test]
     fn activated_ability_with_target_defers_cost_until_target_selection() {
         let mut state = setup_game_at_main_phase();
