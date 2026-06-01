@@ -4309,11 +4309,10 @@ pub mod tests {
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
         AggregateFunction, ChosenAttribute, ChosenSubtypeKind, CommanderOwnership, Comparator,
         ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
-        FilterProp, GainLifePlayer, KickerVariant, MultiTargetSpec, PaymentCost, PlayerFilter,
-        PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticCondition,
-        StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerConstraint,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        FilterProp, KickerVariant, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint,
+        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
+        TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -6625,7 +6624,7 @@ pub mod tests {
                 AbilityKind::Database,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             )),
         );
@@ -9256,7 +9255,7 @@ pub mod tests {
                         AbilityKind::Spell,
                         Effect::GainLife {
                             amount: QuantityExpr::Fixed { value: 2 },
-                            player: GainLifePlayer::Controller,
+                            player: TargetFilter::Controller,
                         },
                     ))
                     .description("When this creature dies, you gain 2 life.".to_string()),
@@ -15092,7 +15091,7 @@ pub mod tests {
                 AbilityKind::Database,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         {
@@ -15157,7 +15156,7 @@ pub mod tests {
                 AbilityKind::Database,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         let obj = state.objects.get_mut(&observer).unwrap();
@@ -15251,7 +15250,7 @@ pub mod tests {
                 AbilityKind::Database,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         let obj = state.objects.get_mut(&observer).unwrap();

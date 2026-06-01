@@ -57,8 +57,7 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords::has_keyword;
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{
-    ContinuousModification, Duration, Effect, GainLifePlayer, QuantityExpr, StaticDefinition,
-    TargetFilter,
+    ContinuousModification, Duration, Effect, QuantityExpr, StaticDefinition, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, TransientContinuousEffect};
@@ -724,15 +723,15 @@ fn tce_matches_pump(
 
 /// Gain-life-when-comfortable: controller's current life ≥
 /// `LIFE_DIMINISHING_RETURNS`, and the life gain is directed at the
-/// controller (the default `GainLifePlayer::Controller`).
+/// controller (the default `TargetFilter::Controller`).
 fn gain_life_redundancy(
     state: &GameState,
     source_id: ObjectId,
     ai_player: PlayerId,
     amount: &QuantityExpr,
-    player: &GainLifePlayer,
+    player: &TargetFilter,
 ) -> Option<(f64, i64, i64)> {
-    if !matches!(player, GainLifePlayer::Controller) {
+    if !matches!(player, TargetFilter::Controller) {
         return None;
     }
     let controller = state
@@ -1091,7 +1090,7 @@ mod tests {
             "Lifegainer",
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 2 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
 
@@ -1116,7 +1115,7 @@ mod tests {
             "Lifegainer",
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 2 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
 

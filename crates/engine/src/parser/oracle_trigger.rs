@@ -14935,7 +14935,7 @@ mod tests {
                 // subject by a post-hoc `player_scope` override.
                 assert_eq!(
                     player,
-                    &crate::types::ability::GainLifePlayer::Controller,
+                    &crate::types::ability::TargetFilter::Controller,
                     "Exquisite Blood: 'you gain' recipient must be the ability controller"
                 );
             }

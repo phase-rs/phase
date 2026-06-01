@@ -1,6 +1,5 @@
 use crate::types::ability::{
-    ControllerRef, Effect, GainLifePlayer, ManaProduction, PtValue, QuantityExpr, TargetFilter,
-    TypedFilter,
+    ControllerRef, Effect, ManaProduction, PtValue, QuantityExpr, TargetFilter, TypedFilter,
 };
 use crate::types::mana::ManaColor;
 use crate::types::Zone;
@@ -143,14 +142,6 @@ fn resolve_defined(params: &ForgeParams) -> TargetFilter {
     }
 }
 
-/// Check if `Defined$` targets an opponent rather than the controller.
-fn defined_is_opponent(params: &ForgeParams) -> bool {
-    matches!(
-        params.get("Defined"),
-        Some("Opponent") | Some("OpponentOfTriggered")
-    )
-}
-
 // CR 120.2b: Deal damage as an effect of a spell or ability.
 fn translate_deal_damage(
     params: &ForgeParams,
@@ -180,16 +171,12 @@ fn translate_gain_life(
     resolver: &mut SvarResolver,
 ) -> Result<Effect, ForgeTranslateError> {
     let amount = resolve_quantity(params, "LifeAmount", resolver);
-    // Forge Defined$ determines who gains life. GainLifePlayer only has
-    // Controller and TargetedController — opponent gains aren't expressible
-    // in the current type, so we stay with Controller for non-opponent cases.
-    let player = if defined_is_opponent(params) {
-        // TODO: GainLifePlayer doesn't have an Opponent variant; this stays
-        // as Controller until the engine type is extended.
-        GainLifePlayer::Controller
-    } else {
-        GainLifePlayer::Controller
-    };
+    // Forge Defined$ determines who gains life. `player` is now a TargetFilter,
+    // so the opponent case can be expressed as
+    // `TargetFilter::Typed { controller: ControllerRef::Opponent }`.
+    // CR 119.3: Delegate to resolve_defined so Defined$Opponent, Targeted, etc.
+    // all map to the correct TargetFilter variant.
+    let player = resolve_defined(params);
     Ok(Effect::GainLife { amount, player })
 }
 

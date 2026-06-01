@@ -11,8 +11,8 @@ use crate::types::ability::{
     AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
     ContinuousModification, ControllerRef, CountScope, CounterSourceRider, DelayedTriggerCondition,
     DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal, FilterProp,
-    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
+    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation,
     SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition,
     TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
@@ -1771,16 +1771,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::GainLife { amount, player } => {
             d.push(("amount".into(), fmt_quantity(amount)));
-            if !matches!(player, GainLifePlayer::Controller) {
-                d.push((
-                    "player".into(),
-                    match player {
-                        GainLifePlayer::TargetedController => "target's controller",
-                        GainLifePlayer::TargetPlayer => "target player",
-                        GainLifePlayer::Controller => unreachable!(),
-                    }
-                    .into(),
-                ));
+            if !player.is_context_ref() {
+                d.push(("player".into(), fmt_target(player)));
             }
         }
         Effect::LoseLife { amount, .. } => {

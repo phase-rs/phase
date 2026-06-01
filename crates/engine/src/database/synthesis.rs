@@ -10,7 +10,7 @@ use crate::types::ability::{
     ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
     CardPlayMode, CastVariantPaid, ChoiceType, Comparator, ContinuousModification, ControllerRef,
     CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp,
-    GainLifePlayer, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
     ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
     PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticDefinition,
@@ -2894,7 +2894,7 @@ fn build_extort_trigger() -> TriggerDefinition {
             amount: QuantityExpr::Ref {
                 qty: QuantityRef::PreviousEffectAmount,
             },
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         },
     );
     let execute = AbilityDefinition::new(AbilityKind::Spell, drain_effect)
@@ -7321,7 +7321,7 @@ mod extort_synthesis_tests {
                 qty: QuantityRef::PreviousEffectAmount
             }
         ));
-        assert!(matches!(player, GainLifePlayer::Controller));
+        assert!(matches!(player, TargetFilter::Controller));
     }
 
     #[test]
@@ -7382,7 +7382,7 @@ mod extort_synthesis_tests {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount,
                 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,

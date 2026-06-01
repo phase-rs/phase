@@ -9653,8 +9653,8 @@ mod tests {
         AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
         BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
         ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
-        CostCategory, FilterProp, GainLifePlayer, GameRestriction, KickerVariant, ManaContribution,
-        ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
+        CostCategory, FilterProp, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
+        ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
         ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtValue,
         QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
         SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
@@ -12097,7 +12097,7 @@ mod tests {
                         amount: QuantityExpr::Ref {
                             qty: QuantityRef::PreviousEffectAmount,
                         },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 )),
             );
@@ -14423,7 +14423,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 3 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 )
                 .cost(AbilityCost::Composite {
@@ -14573,7 +14573,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 )
                 .cost(AbilityCost::Mana {
@@ -18693,7 +18693,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -20574,7 +20574,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
             )],
             trigger_definitions: Default::default(),

@@ -9,10 +9,10 @@
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, GainLifePlayer, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
-    QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
-    TargetFilter, TriggerDefinition, TypedFilter,
+    FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
+    MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    SearchSelectionConstraint, SharedQuality, StaticDefinition, TargetFilter, TriggerDefinition,
+    TypedFilter,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
@@ -2625,7 +2625,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         },
         Action::GainLife(n) => Effect::GainLife {
             amount: quantity::convert(n)?,
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         },
         Action::LoseLife(n) => Effect::LoseLife {
             amount: quantity::convert(n)?,
@@ -3624,7 +3624,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             };
             Effect::GainLife {
                 amount,
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             }
         }
 
@@ -5339,13 +5339,13 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
         // The `target_filter` parameter is consumed implicitly: the
         // engine reads the announced player from `ability.targets` via
         // `target_player()` when `player` is `TargetPlayer`. The filter
-        // value itself doesn't carry through (`GainLifePlayer` is enum-
+        // value itself doesn't carry through (`` is enum-
         // tagged, not filter-parameterized) — this branch only fires
         // for target-player refs which all map to the same announced
         // slot, so the loss of `target_filter` distinction is sound.
         Effect::GainLife { amount, .. } => Effect::GainLife {
             amount,
-            player: GainLifePlayer::TargetPlayer,
+            player: TargetFilter::Player,
         },
         // CR 119.3 + CR 115.2: "Target player loses N life."
         Effect::LoseLife { amount, .. } => Effect::LoseLife {
