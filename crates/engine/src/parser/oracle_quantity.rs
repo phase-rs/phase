@@ -1556,6 +1556,46 @@ fn filter_is_nontrivial_for_tracked_set(filter: &crate::types::ability::TargetFi
     }
 }
 
+/// CR 608.2c + CR 400.7: Try to parse a "for each <filter> [that was/were]
+/// destroyed/sacrificed this way" clause. Returns `FilteredTrackedSetSize`
+/// when the type-phrase prefix is nontrivial (NonToken, controller-restricted,
+/// etc.); returns `None` to fall through to plain `TrackedSetSize` otherwise.
+///
+/// Uses `terminated(take_until(suffix), tag(suffix))` to split at each
+/// recognized suffix, then delegates the prefix to `parse_type_phrase`.
+fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
+    // Each suffix is tried in order; the first complete match wins.
+    // Longer/more-specific suffixes must come before shorter ones so
+    // "that was destroyed this way" is preferred over "destroyed this way".
+    let suffixes: &[&str] = &[
+        " that was destroyed this way",
+        " that were destroyed this way",
+        " destroyed this way",
+        " that was sacrificed this way",
+        " that were sacrificed this way",
+        " sacrificed this way",
+    ];
+    for &suffix in suffixes {
+        // terminated(take_until(suffix), tag(suffix)) parses the noun-phrase
+        // prefix, then consumes the suffix exactly, leaving an empty remainder.
+        let result: OracleResult<'_, &str> =
+            terminated(take_until(suffix), tag(suffix)).parse(lower);
+        if let Ok(("", filter_phrase)) = result {
+            let (filter, remainder) =
+                crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
+            if remainder.trim().is_empty() && filter_is_nontrivial_for_tracked_set(&filter) {
+                return Some(QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(filter),
+                });
+            }
+            // A suffix matched but the filter is trivial or the phrase
+            // didn't fully consume — fall through to TrackedSetSize.
+            return None;
+        }
+    }
+    None
+}
+
 fn try_parse_counters_removed_this_way(lower: &str) -> bool {
     crate::parser::oracle_nom::primitives::scan_at_word_boundaries(lower, |input| {
         let (rest, _) = alt((
@@ -1852,29 +1892,13 @@ fn parse_for_each_clause_with_they_controller(
         }
         // CR 608.2c + CR 400.7: "nontoken creature you controlled that was
         // destroyed this way" — tracked set members matching the filter prefix.
-        // Strip "that was [verb] this way" / "[verb]ed this way" suffixes, then
-        // parse the remaining noun phrase as a filter. Only emit
-        // `FilteredTrackedSetSize` when the filter is non-trivial (e.g. NonToken,
-        // specific controller); plain "creature destroyed this way" falls through
-        // to the unfiltered `TrackedSetSize`.
-        for suffix in &[
-            " that was destroyed this way",
-            " that were destroyed this way",
-            " destroyed this way",
-            " that was sacrificed this way",
-            " that were sacrificed this way",
-            " sacrificed this way",
-        ] {
-            if let Some(filter_phrase) = lower.strip_suffix(suffix) {
-                let (filter, remainder) =
-                    crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
-                if remainder.trim().is_empty() && filter_is_nontrivial_for_tracked_set(&filter) {
-                    return Some(QuantityRef::FilteredTrackedSetSize {
-                        filter: Box::new(filter),
-                    });
-                }
-                break;
-            }
+        // Use terminated(take_until(suffix), tag(suffix)) to split the clause
+        // at each recognized suffix and parse the prefix as a type filter.
+        // Only emit `FilteredTrackedSetSize` when the filter is non-trivial
+        // (e.g. NonToken, specific controller); plain "creature destroyed this
+        // way" falls through to the unfiltered `TrackedSetSize`.
+        if let Some(qty) = parse_filtered_destroyed_this_way(&lower) {
+            return Some(qty);
         }
         return Some(QuantityRef::TrackedSetSize);
     }
