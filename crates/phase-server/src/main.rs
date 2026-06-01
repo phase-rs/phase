@@ -3071,7 +3071,6 @@ async fn handle_client_message(
                         mgr.reserve_seat(
                             &game_code,
                             display_name.unwrap_or_else(|| "Player".to_string()),
-                            password.is_some(),
                         )
                     };
                     match reserve_result {

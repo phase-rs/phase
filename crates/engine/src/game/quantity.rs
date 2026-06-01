@@ -1610,18 +1610,27 @@ fn resolve_ref(
         //      "that many" for Ur-Dragon-style batched triggers; without it
         //      the `extract_amount_from_event` cascade below falls through to
         //      0 on `AttackersDeclared` and similar batched events.
-        //   2. `extract_amount_from_event(current_trigger_event)` — scalar
+        //   2. CR 706.4: `die_result_this_resolution` — a die rolled
+        //      earlier in THIS resolution (no results table) outranks the
+        //      triggering event's own amount, so "roll a d20. <effect> equal to
+        //      the result" consumes the roll, not the combat damage / life
+        //      change that triggered it.
+        //   3. `extract_amount_from_event(current_trigger_event)` — scalar
         //      events with an inherent amount (damage dealt, life changed,
         //      cards drawn, counters added/removed, die rolls).
-        //   3. `last_effect_counts_by_player` — APNAP per-player counts from
+        //   4. `last_effect_counts_by_player` — APNAP per-player counts from
         //      the preceding effect in the same resolution.
-        //   4. `last_effect_count` / `last_effect_amount` — sub_ability
+        //   5. `last_effect_count` / `last_effect_amount` — sub_ability
         //      continuation fallbacks (e.g. "discard up to N, then draw that
         //      many"; "dealt excess damage this way, add that much {R}").
-        //   5. `0` — undefined.
+        //   6. `0` — undefined.
         QuantityRef::EventContextAmount => state
             .current_trigger_match_count
             .map(u32_to_i32_saturating)
+            // CR 706.4: A die rolled earlier in THIS resolution outranks the
+            // triggering event's own amount, so "roll a d20. <effect> equal to the result"
+            // consumes the roll, not the combat damage / life change that triggered it.
+            .or_else(|| state.die_result_this_resolution.map(i32::from))
             .or_else(|| {
                 state
                     .current_trigger_event
@@ -7669,6 +7678,66 @@ mod tests {
             qty: QuantityRef::EventContextAmount,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 7);
+    }
+
+    /// CR 706.4: A die rolled earlier in the resolution outranks the
+    /// triggering event's intrinsic amount, so "roll a d20. <effect> equal to
+    /// the result" consumes the roll (17), not the combat damage (6). This is
+    /// the building-block guard for Ancient Copper/Gold/Silver Dragon and
+    /// Adorable Kitten (issue #1602).
+    #[test]
+    fn resolve_event_context_amount_prefers_die_result_over_event() {
+        let mut state = GameState::new_two_player(42);
+        state.die_result_this_resolution = Some(17);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 6,
+            is_combat: true,
+            excess: 0,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)),
+            17
+        );
+    }
+
+    /// CR 706.4: With no die rolled this resolution, the cascade
+    /// falls through to the triggering event's amount as before — the new slot
+    /// must not regress event-extracted resolution.
+    #[test]
+    fn resolve_event_context_amount_falls_through_when_no_die_result() {
+        let mut state = GameState::new_two_player(42);
+        state.die_result_this_resolution = None;
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 6,
+            is_combat: true,
+            excess: 0,
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 6);
+    }
+
+    /// CR 603.2c + CR 706.2: The batched-trigger match-count still outranks a
+    /// die result — the die slot is inserted BELOW match-count in the cascade,
+    /// so a "one or more <FILTER>" batched trigger keeps its filtered-subject
+    /// "that many" semantics even when a die was rolled this resolution.
+    #[test]
+    fn resolve_event_context_amount_match_count_outranks_die_result() {
+        let mut state = GameState::new_two_player(42);
+        state.current_trigger_match_count = Some(3);
+        state.die_result_this_resolution = Some(17);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);
     }
 
     #[test]

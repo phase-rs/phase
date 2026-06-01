@@ -4716,6 +4716,19 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_amount: Option<i32>,
 
+    /// CR 706.2: The actual result (natural + modifiers, clamped at 0) of the
+    /// most recent die roll within the current ability resolution. Set by
+    /// `roll_die::resolve` immediately after emitting `GameEvent::DieRolled`, read by
+    /// `QuantityRef::EventContextAmount` so an inline "equal to the result" sub_ability
+    /// (CR 706.4 — no results table) consumes the rolled value rather than the
+    /// numeric amount of the triggering event (e.g. combat damage). Resolution-scoped:
+    /// cleared at `apply()` entry and at every depth-0 chain entry, so it is `Some`
+    /// only between the roll and the sub_ability that reads it. Follows the
+    /// `last_effect_amount` PartialEq-OMISSION pattern: NOT compared in the
+    /// hand-written `PartialEq` (safe — always cleared at comparison boundaries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_result_this_resolution: Option<u8>,
+
     /// Count from the most recent interactive effect resolution (e.g., number of cards
     /// actually discarded in a DiscardChoice). Used as fallback for EventContextAmount
     /// in sub_ability continuations where current_trigger_event has no amount.
@@ -5200,6 +5213,7 @@ impl GameState {
             last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
+            die_result_this_resolution: None,
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
             clause_minimum_snapshot: None,

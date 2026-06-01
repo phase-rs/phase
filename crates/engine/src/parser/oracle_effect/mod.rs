@@ -9729,6 +9729,30 @@ fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: Ob
     }
 }
 
+fn bind_damage_clause_source(
+    effect: &mut Effect,
+    damage_source_ref: DamageSource,
+    power_scope: ObjectScope,
+) -> bool {
+    match effect {
+        Effect::DealDamage {
+            amount,
+            damage_source,
+            ..
+        }
+        | Effect::DamageAll {
+            amount,
+            damage_source,
+            ..
+        } => {
+            rewrite_event_source_power_to_object_power(amount, power_scope);
+            *damage_source = Some(damage_source_ref);
+            true
+        }
+        _ => false,
+    }
+}
+
 fn rewrite_filter_controller(filter: &mut TargetFilter, from: &ControllerRef, to: &ControllerRef) {
     match filter {
         TargetFilter::Typed(tf) if tf.controller.as_ref() == Some(from) => {
@@ -9789,6 +9813,20 @@ fn wrap_target_subject_damage(
     subject: &SubjectPhraseAst,
 ) -> Option<ParsedEffectClause> {
     let subject_target = subject.target.as_ref()?;
+    if matches!(subject_target, TargetFilter::TriggeringSource) {
+        // CR 603.6 + CR 120.1: "that creature deals damage equal to its
+        // power" in a zone-change trigger binds both the damage source and
+        // anaphoric power reference to the moved object.
+        if bind_damage_clause_source(
+            &mut clause.effect,
+            DamageSource::TriggeringSource,
+            ObjectScope::EventSource,
+        ) {
+            return Some(clause);
+        }
+        return None;
+    }
+
     // CR 608.2c + CR 120.1: "target creature deals damage equal to its
     // power..." makes the chosen source object, not the spell card, deal the
     // damage. "Its power" is therefore the first target's current power.
@@ -9798,24 +9836,12 @@ fn wrap_target_subject_damage(
     // (CR 702.16), wither/infect (CR 120.3b/d), and damage-source replacements
     // (CR 614). The 2015-06-22 Chandra's Ignition rulings codify this for
     // the multi-recipient case (DamageAll).
-    match &mut clause.effect {
-        Effect::DealDamage {
-            amount,
-            damage_source,
-            ..
-        } => {
-            rewrite_event_source_power_to_object_power(amount, ObjectScope::Target);
-            *damage_source = Some(DamageSource::Target);
-        }
-        Effect::DamageAll {
-            amount,
-            damage_source,
-            ..
-        } => {
-            rewrite_event_source_power_to_object_power(amount, ObjectScope::Target);
-            *damage_source = Some(DamageSource::Target);
-        }
-        _ => return None,
+    if !bind_damage_clause_source(
+        &mut clause.effect,
+        DamageSource::Target,
+        ObjectScope::Target,
+    ) {
+        return None;
     }
 
     let mut damage_ability = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
@@ -9875,6 +9901,21 @@ fn parse_subject_exile_top_count(pred_lower: &str) -> QuantityExpr {
 /// the subject's targeting information.
 fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
     let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected).clone();
+    // CR 603.6 + CR 120.1: "that creature/permanent deals damage equal to
+    // its power..." in an ETB trigger makes the triggering object, not the
+    // trigger source permanent, the damage source. Keep the parsed damage
+    // recipient target intact ("to any target") while rebinding both the
+    // source metadata and anaphoric "its power" to the triggering source.
+    if matches!(subject_filter, TargetFilter::TriggeringSource)
+        && bind_damage_clause_source(
+            effect,
+            DamageSource::TriggeringSource,
+            ObjectScope::EventSource,
+        )
+    {
+        return;
+    }
+
     match effect {
         // CR 601.2c + CR 121.1: "Target player draws ..." — each Draw mode of a
         // modal spell is its own targeting instance. The imperative path emits

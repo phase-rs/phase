@@ -12,6 +12,7 @@ pub mod env;
 pub mod lobby;
 pub mod protocol;
 pub mod reservation_auth;
+pub mod validation;
 
 pub use broker::{
     check_build_commit, Broker, BuildCommitCheck, ClientHelloInfo, ConnState, Outbound,
@@ -29,3 +30,4 @@ pub use reservation_auth::{
     conn_holds_reservation, consume_owned_reservation, release_owned_reservation,
     ReservationConsume, ReservationRelease, NOT_OWNED_RESERVATION,
 };
+pub use validation::validate_lobby_message;

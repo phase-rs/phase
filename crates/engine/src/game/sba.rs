@@ -56,37 +56,34 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
     for _ in 0..MAX_SBA_ITERATIONS {
         let mut any_performed = false;
 
-        // CR 704.5a: A player with 0 or less life loses the game.
-        check_player_life(state, events, &mut any_performed);
+        // CR 704.3 + CR 104.4a + CR 704.5a-c + CR 704.6c: Every player-loss
+        // condition met in this single SBA check forms ONE simultaneous event.
+        // Collect all losers across the conditions, then eliminate them together
+        // so the game-over check sees the true post-event living set — a draw
+        // (winner: None) when all remaining players lose at once, instead of
+        // crowning whichever player happened to be eliminated first.
+        // CR 704.5a-c + CR 704.6c: collect every player-loss SBA from this
+        // check before applying any of them.
+        let mut losers: Vec<PlayerId> = collect_life_losers(state);
+        losers.extend(collect_draw_from_empty_losers(state));
+        losers.extend(collect_poison_losers(state));
+        losers.extend(collect_commander_damage_losers(state));
 
-        // If game is over, stop immediately
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return;
-        }
+        // A player can meet several loss conditions at once — dedup so each is
+        // eliminated (and emits PlayerLost) exactly once.
+        losers.sort_unstable();
+        losers.dedup();
+        if !losers.is_empty() {
+            any_performed = true;
+            for &loser in &losers {
+                events.push(GameEvent::PlayerLost { player_id: loser });
+            }
+            super::elimination::eliminate_players_simultaneously(state, &losers, events);
 
-        // CR 704.5b: A player who attempted to draw from an empty library loses the game.
-        check_draw_from_empty(state, events, &mut any_performed);
-
-        // If game is over, stop immediately
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return;
-        }
-
-        // CR 704.5c: A player with ten or more poison counters loses the game.
-        check_poison_counters(state, events, &mut any_performed);
-
-        // If game is over, stop immediately
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return;
-        }
-
-        // CR 704.6c: A player who has been dealt 21 or more combat damage by the same
-        // commander loses the game.
-        check_commander_damage(state, events, &mut any_performed);
-
-        // If game is over, stop immediately
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return;
+            // If the game ended (a sole winner or a CR 104.4a draw), stop now.
+            if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+                return;
+            }
         }
 
         // CR 903.9a: A commander in graveyard or exile (since last SBA check) may
@@ -355,71 +352,47 @@ fn static_affects_player(
     }
 }
 
-/// CR 704.5a: A player with 0 or less life loses the game.
-fn check_player_life(state: &mut GameState, events: &mut Vec<GameEvent>, any_performed: &mut bool) {
-    // Collect all players who should be eliminated (check all, not just first)
-    // CR 104.3b: Skip players protected by CantLoseTheGame.
-    //
-    // Player-phasing exclusion: a phased-out player can't lose the game from
-    // 0-or-less life — they're treated as though they don't exist for SBA
-    // purposes (mirrors CR 702.26b for permanents, applied to players).
-    let to_eliminate: Vec<PlayerId> = state
+/// CR 704.5a: A player with 0 or less life loses the game. Pure collector — the
+/// SBA driver batches all loss conditions into a single simultaneous event
+/// (CR 704.3) so simultaneous deaths can resolve to a draw (CR 104.4a).
+///
+/// CR 104.3b: Skip players protected by CantLoseTheGame.
+///
+/// Player-phasing exclusion: a phased-out player can't lose the game from
+/// 0-or-less life — they're treated as though they don't exist for SBA
+/// purposes (mirrors CR 702.26b for permanents, applied to players).
+fn collect_life_losers(state: &GameState) -> Vec<PlayerId> {
+    state
         .players
         .iter()
         .filter(|p| !p.is_eliminated && !p.is_phased_out() && p.life <= 0)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
-        .collect();
-
-    for loser in to_eliminate {
-        events.push(GameEvent::PlayerLost { player_id: loser });
-        super::elimination::eliminate_player(state, loser, events);
-        *any_performed = true;
-    }
+        .collect()
 }
 
-/// CR 704.5b: A player who attempted to draw from an empty library loses the game.
-fn check_draw_from_empty(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    any_performed: &mut bool,
-) {
-    // CR 104.3b: Skip players protected by CantLoseTheGame.
-    let to_eliminate: Vec<PlayerId> = state
+/// CR 704.5b: A player who attempted to draw from an empty library loses the
+/// game. Pure collector (see `collect_life_losers`).
+fn collect_draw_from_empty_losers(state: &GameState) -> Vec<PlayerId> {
+    state
         .players
         .iter()
         .filter(|p| !p.is_eliminated && p.drew_from_empty_library)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
-        .collect();
-
-    for loser in to_eliminate {
-        events.push(GameEvent::PlayerLost { player_id: loser });
-        super::elimination::eliminate_player(state, loser, events);
-        *any_performed = true;
-    }
+        .collect()
 }
 
-/// CR 704.5c: A player with ten or more poison counters loses the game.
-fn check_poison_counters(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    any_performed: &mut bool,
-) {
-    // CR 104.3b: Skip players protected by CantLoseTheGame.
-    let to_eliminate: Vec<PlayerId> = state
+/// CR 704.5c: A player with ten or more poison counters loses the game. Pure
+/// collector (see `collect_life_losers`).
+fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
+    state
         .players
         .iter()
         .filter(|p| !p.is_eliminated && p.poison_counters >= 10)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
-        .collect();
-
-    for loser in to_eliminate {
-        events.push(GameEvent::PlayerLost { player_id: loser });
-        super::elimination::eliminate_player(state, loser, events);
-        *any_performed = true;
-    }
+        .collect()
 }
 
 /// CR 903.9a: If a commander is in a graveyard or exile (and was put there
@@ -445,31 +418,22 @@ fn check_commander_zone_return(state: &mut GameState) {
 }
 
 /// CR 704.6c: A player dealt 21+ combat damage by the same commander loses.
-fn check_commander_damage(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    any_performed: &mut bool,
-) {
+/// Pure collector (see `collect_life_losers`).
+fn collect_commander_damage_losers(state: &GameState) -> Vec<PlayerId> {
     let threshold = match state.format_config.commander_damage_threshold {
         Some(t) => t as u32,
-        None => return, // Not a Commander format
+        None => return Vec::new(), // Not a Commander format
     };
 
-    // Collect players who should be eliminated
     // CR 104.3b: Skip players protected by CantLoseTheGame.
-    let to_eliminate: Vec<PlayerId> = state
+    state
         .commander_damage
         .iter()
         .filter(|entry| entry.damage >= threshold)
         .map(|entry| entry.player)
         .filter(|pid| !state.eliminated_players.contains(pid))
         .filter(|pid| !player_has_cant_lose(state, *pid))
-        .collect();
-
-    for player_id in to_eliminate {
-        super::elimination::eliminate_player(state, player_id, events);
-        *any_performed = true;
-    }
+        .collect()
 }
 
 /// CR 704.5f: A creature with toughness 0 or less is put into its owner's graveyard.
@@ -2772,6 +2736,65 @@ mod tests {
         assert!(
             state.players[1].is_eliminated,
             "Opponent of CantLoseTheGame controller should still be eliminated"
+        );
+    }
+
+    #[test]
+    fn sba_simultaneous_life_loss_is_a_draw() {
+        // CR 104.4a + CR 704.3: both players at <=0 life in one SBA check lose
+        // simultaneously → the game is a DRAW (winner: None), not a win for the
+        // player processed first.
+        let mut state = setup();
+        state.players[0].life = 0;
+        state.players[1].life = 0;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
+            "both players at 0 life simultaneously must be a draw, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    #[test]
+    fn sba_single_life_loss_yields_sole_winner() {
+        // Only one player loses → the other wins (single-loser behavior intact).
+        let mut state = setup();
+        state.players[1].life = 0;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
+            "a single player at 0 life leaves the other as sole winner, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    #[test]
+    fn sba_mixed_life_and_poison_loss_is_a_draw() {
+        // CR 704.3: loss conditions of DIFFERENT kinds in the same SBA check are
+        // still one simultaneous event — one player at 0 life and the other at
+        // 10 poison both lose at once → draw.
+        let mut state = setup();
+        state.players[0].life = 0;
+        state.players[1].poison_counters = 10;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
+            "life-loss + poison-loss in one SBA check is a simultaneous draw, got {:?}",
+            state.waiting_for
         );
     }
 
