@@ -16904,6 +16904,21 @@ mod tests {
     }
 
     #[test]
+    fn trigger_becomes_target_opponent_controls_sets_controller_source() {
+        // CR 115.1: the same spell-or-ability controller grammar supports
+        // opponent-scoped source restrictions.
+        let def = parse_trigger_line(
+            "Whenever this creature becomes the target of a spell or ability an opponent controls, draw a card.",
+            "Opponent-Scoped Observer",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(
+            def.valid_source,
+            Some(becomes_target_source_filter(ControllerRef::Opponent))
+        );
+    }
+
+    #[test]
     fn trigger_becomes_target_of_aura_spell_only() {
         let def = parse_trigger_line(
             "Whenever this creature becomes the target of an Aura spell, you draw a card.",
