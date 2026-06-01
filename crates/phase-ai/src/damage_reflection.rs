@@ -100,13 +100,13 @@ fn deal_damage_can_target_opponent_player(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Player | TargetFilter::Any => true,
         TargetFilter::Typed(tf) => {
-            tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Planeswalker))
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Planeswalker))
                 || (tf.type_filters.is_empty()
                     && matches!(tf.controller, Some(ControllerRef::Opponent)))
         }
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(deal_damage_can_target_opponent_player),
+        TargetFilter::Or { filters } => filters.iter().any(deal_damage_can_target_opponent_player),
         _ => false,
     }
 }
@@ -142,16 +142,16 @@ pub fn opponent_creature_reflection_penalty(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, TargetFilter, TriggerDefinition, TypedFilter,
     };
     use engine::types::card_type::CoreType;
-    use engine::types::triggers::TriggerMode;
-    use engine::types::zones::Zone;
-    use engine::game::zones::create_object;
     use engine::types::game_state::GameState;
     use engine::types::identifiers::CardId;
     use engine::types::player::PlayerId;
+    use engine::types::triggers::TriggerMode;
+    use engine::types::zones::Zone;
 
     fn spiteful_trigger() -> TriggerDefinition {
         TriggerDefinition::new(TriggerMode::DamageReceived)

@@ -406,12 +406,12 @@ fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
             {
                 let opponents = players::opponents(ctx.state, ctx.ai_player);
                 if opponents.len() > 1 {
-                    if let Some(weakest) = opponents.iter().min_by_key(|&&p| {
-                        ctx.state.players[p.0 as usize].life
-                    }) {
+                    if let Some(weakest) = opponents
+                        .iter()
+                        .min_by_key(|&&p| ctx.state.players[p.0 as usize].life)
+                    {
                         if *player_id == *weakest {
-                            return 12.0
-                                + threat_level(ctx.state, ctx.ai_player, *player_id) * 4.0;
+                            return 12.0 + threat_level(ctx.state, ctx.ai_player, *player_id) * 4.0;
                         }
                     }
                 }
