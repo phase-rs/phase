@@ -220,8 +220,8 @@ impl GameScenario {
 
     /// Add generic named cards to the top of a player's library.
     ///
-    /// The last supplied name becomes the current top card, matching the engine's
-    /// library-top convention (`Vec::last()` / pop-from-end flows).
+    /// The first supplied name becomes the current top card, matching the
+    /// engine's library-top convention (`library[0]`).
     pub fn with_library_top(&mut self, player: PlayerId, names_top_first: &[&str]) -> &mut Self {
         for &name in names_top_first.iter().rev() {
             self.add_card_to_library_top(player, name);
@@ -239,8 +239,9 @@ impl GameScenario {
             name.to_string(),
             Zone::Library,
         );
-        // CR 402.2: `library[0]` is the top — `create_object` appends to the
-        // bottom, so re-seat this card at index 0 for deterministic top tests.
+        // Engine convention: `library[0]` is the top. `create_object` appends
+        // to the bottom, so re-seat this card at index 0 for deterministic top
+        // tests.
         let player_state = self
             .state
             .players
