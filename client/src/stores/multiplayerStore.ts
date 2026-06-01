@@ -375,13 +375,21 @@ function closeHostWebSocket(): void {
   }
 }
 
-function isServerHostingActive(get: () => MultiplayerState): boolean {
-  return (
-    hostWs != null &&
-    hostWs.readyState === WebSocket.OPEN &&
+function activeServerHostingSocket(get: () => MultiplayerState): WebSocket | null {
+  if (hostWs) {
+    if (hostWs.readyState !== WebSocket.OPEN) {
+      throw new Error("Host connection is not active.");
+    }
+    return hostWs;
+  }
+  if (
     get().hostingStatus === "waiting" &&
-    get().hostGameCode != null
-  );
+    get().hostGameCode != null &&
+    !activeP2PHostAdapter
+  ) {
+    throw new Error("Host connection is not active.");
+  }
+  return null;
 }
 
 async function runP2PSeatMutation(
@@ -1047,8 +1055,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       seatMutateAsync: async (mutation) => {
-        if (isServerHostingActive(get)) {
-          hostWs!.send(JSON.stringify({
+        const serverSocket = activeServerHostingSocket(get);
+        if (serverSocket) {
+          serverSocket.send(JSON.stringify({
             type: "SeatMutate",
             data: { mutation },
           }));

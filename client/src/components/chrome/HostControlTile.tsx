@@ -254,9 +254,11 @@ export function HostControlTile() {
   const playerSlots = useMultiplayerStore((s) => s.playerSlots);
   const hostSession = useMultiplayerStore((s) => s.hostSession);
   const seatMutate = useMultiplayerStore((s) => s.seatMutate);
+  const seatMutateAsync = useMultiplayerStore((s) => s.seatMutateAsync);
   const startLobbyWithCurrentPlayers = useMultiplayerStore(
     (s) => s.startLobbyWithCurrentPlayers,
   );
+  const showToast = useMultiplayerStore((s) => s.showToast);
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
@@ -330,7 +332,7 @@ export function HostControlTile() {
       for (const slot of waitingSeats) {
         const deck = pickRandomAiDeck();
         if (!deck) return;
-        await useMultiplayerStore.getState().seatMutateAsync({
+        await seatMutateAsync({
           type: "SetKind",
           data: {
             seatIndex: slot.playerId,
@@ -338,11 +340,9 @@ export function HostControlTile() {
           },
         });
       }
-      await useMultiplayerStore.getState().seatMutateAsync({ type: "Start" });
+      await seatMutateAsync({ type: "Start" });
     })().catch((err) => {
-      useMultiplayerStore.getState().showToast(
-        err instanceof Error ? err.message : String(err),
-      );
+      showToast(err instanceof Error ? err.message : String(err));
     });
   };
 
@@ -437,9 +437,7 @@ export function HostControlTile() {
                       type="button"
                       onClick={() => {
                         void startLobbyWithCurrentPlayers().catch((err) => {
-                          useMultiplayerStore.getState().showToast(
-                            err instanceof Error ? err.message : String(err),
-                          );
+                          showToast(err instanceof Error ? err.message : String(err));
                         });
                       }}
                       className="rounded border border-emerald-500/20 px-2 py-1 text-xs font-medium text-emerald-300"
