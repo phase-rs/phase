@@ -1974,8 +1974,36 @@ fn partner_types_compatible(
     }
 }
 
-/// CR 702.124: Check if a partner type matches the other face by subtype.
-/// Doctor's Companion pairs with any Doctor; Choose a Background pairs with any Background.
+/// CR 702.124m: Doctor's companion pairs with a legendary Time Lord Doctor
+/// creature card that has no other creature types.
+fn is_time_lord_doctor_commander(face: &CardFace) -> bool {
+    if !face.card_type.supertypes.contains(&Supertype::Legendary)
+        || !face.card_type.core_types.contains(&CoreType::Creature)
+    {
+        return false;
+    }
+    if !is_commander_eligible(face) {
+        return false;
+    }
+    let subtypes = &face.card_type.subtypes;
+    // MTGJSON may emit the single two-word subtype or the split pair.
+    if subtypes
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("Time Lord Doctor"))
+    {
+        return subtypes.len() == 1;
+    }
+    subtypes.len() == 2
+        && subtypes.iter().any(|s| s.eq_ignore_ascii_case("Doctor"))
+        && subtypes.iter().any(|s| s.eq_ignore_ascii_case("Time Lord"))
+        && subtypes
+            .iter()
+            .all(|s| s.eq_ignore_ascii_case("Doctor") || s.eq_ignore_ascii_case("Time Lord"))
+}
+
+/// CR 702.124k + CR 702.124m: Check if a partner type matches the other face by subtype.
+/// Doctor's Companion pairs with a Time Lord Doctor commander; Choose a Background
+/// pairs with any Background.
 fn subtype_partner_match(
     partner_type: &crate::types::keywords::PartnerType,
     other_face: &CardFace,
@@ -1983,11 +2011,7 @@ fn subtype_partner_match(
     use crate::types::keywords::PartnerType;
 
     match partner_type {
-        PartnerType::DoctorsCompanion => other_face
-            .card_type
-            .subtypes
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case("Doctor")),
+        PartnerType::DoctorsCompanion => is_time_lord_doctor_commander(other_face),
         PartnerType::ChooseABackground => other_face
             .card_type
             .subtypes
@@ -2000,6 +2024,11 @@ fn subtype_partner_match(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::database::mtgjson::load_atomic_cards;
+    use crate::database::synthesis::build_oracle_face;
+    use crate::types::keywords::PartnerType;
 
     fn test_db_json() -> String {
         serde_json::json!({
@@ -3542,7 +3571,7 @@ mod tests {
             vec![],
         );
         // Can pair with a Doctor
-        let doctor = partner_face("The Thirteenth Doctor", vec![], vec!["Doctor"]);
+        let doctor = partner_face("The Thirteenth Doctor", vec![], vec!["Time Lord", "Doctor"]);
         assert!(are_valid_partners(&amy, &doctor));
 
         // Can pair with Rory Williams
@@ -3595,6 +3624,81 @@ mod tests {
         assert!(can_pair_commanders(&db, "The Eleventh Doctor", "Amy Pond"));
         // Unknown names resolve to no pairing rather than panicking.
         assert!(!can_pair_commanders(&db, "Amy Pond", "Nonexistent Card"));
+    }
+
+    /// Regression for issue #1500: Doctor's Companion must survive MTGJSON
+    /// synthesis and pair with a Time Lord Doctor commander.
+    #[test]
+    fn amy_pond_pairs_with_eleventh_doctor_from_mtgjson() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/AtomicCards.json");
+        if !path.exists() {
+            return;
+        }
+        let atomic = load_atomic_cards(&path).expect("AtomicCards.json should load");
+        let amy_json = atomic
+            .data
+            .get("Amy Pond")
+            .and_then(|faces| faces.first())
+            .expect("Amy Pond should exist in MTGJSON");
+        let doctor_json = atomic
+            .data
+            .get("The Eleventh Doctor")
+            .and_then(|faces| faces.first())
+            .expect("The Eleventh Doctor should exist in MTGJSON");
+
+        let amy = build_oracle_face(amy_json, None);
+        let doctor = build_oracle_face(doctor_json, None);
+
+        assert!(
+            amy.keywords
+                .iter()
+                .any(|kw| matches!(kw, Keyword::Partner(PartnerType::DoctorsCompanion))),
+            "Amy Pond should carry Doctor's Companion after synthesis; got {:?}",
+            amy.keywords
+        );
+        assert!(
+            are_valid_partners(&amy, &doctor),
+            "Amy Pond and The Eleventh Doctor should form a legal co-commander pair \
+             (doctor subtypes: {:?})",
+            doctor.card_type.subtypes
+        );
+
+        let db = CardDatabase::from_mtgjson(&path).expect("db load");
+        assert!(
+            can_pair_commanders(&db, "Amy Pond", "The Eleventh Doctor"),
+            "full MTGJSON database load must agree on Doctor's Companion pairing"
+        );
+        assert!(
+            can_pair_commanders(&db, "Amy Pond", "Eleventh Doctor"),
+            "deck lists that omit the leading article must still pair"
+        );
+    }
+
+    #[test]
+    fn doctors_companion_rejects_non_doctor_subtypes() {
+        let companion = partner_face(
+            "Amy Pond",
+            vec![Keyword::Partner(PartnerType::DoctorsCompanion)],
+            vec![],
+        );
+        let human_doctor = partner_face("Not A Real Doctor", vec![], vec!["Human", "Doctor"]);
+        assert!(!are_valid_partners(&companion, &human_doctor));
+
+        let non_creature_doctor = CardFace {
+            name: "Noncreature Doctor".to_string(),
+            is_commander: true,
+            card_type: crate::types::card_type::CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Time Lord".to_string(), "Doctor".to_string()],
+            },
+            ..CardFace::default()
+        };
+        assert!(!are_valid_partners(&companion, &non_creature_doctor));
+
+        let unified = partner_face("The Eleventh Doctor", vec![], vec!["Time Lord Doctor"]);
+        assert!(are_valid_partners(&companion, &unified));
     }
 
     #[test]
