@@ -14,7 +14,7 @@
 //! - `TypeFilter::Subtype(String)` at `ability.rs:794`;
 //!   `TypedFilter::get_subtype()` at `ability.rs:1061`.
 //! - `Effect::Token { types: Vec<String>, .. }` at `ability.rs:2131`.
-//! - `StaticMode::ReduceCost { spell_filter: Option<TargetFilter>, .. }`
+//! - `StaticMode::ModifyCost { spell_filter: Option<TargetFilter>, .. }`
 //!   at `statics.rs:136`.
 //! - `TriggerDefinition.execute: Option<Box<AbilityDefinition>>`
 //!   at `ability.rs:4520`.
@@ -37,7 +37,7 @@ use engine::types::ability::{
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
-use engine::types::statics::StaticMode;
+use engine::types::statics::{CostModifyMode, StaticMode};
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -301,11 +301,12 @@ fn trigger_is_etb_payoff_for(t: &engine::types::ability::TriggerDefinition, trib
     filter_references_tribe_you_control(filter, tribe)
 }
 
-/// True if this face has a `ReduceCost` static whose `spell_filter` references
+/// True if this face has a `ModifyCost` (Reduce) static whose `spell_filter` references
 /// the tribe's subtype.
 fn is_cost_reducer(face: &CardFace, tribe: &str) -> bool {
     face.static_abilities.iter().any(|s| {
-        if let StaticMode::ReduceCost {
+        if let StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             spell_filter: Some(filter),
             ..
         } = &s.mode
@@ -402,7 +403,7 @@ mod tests {
     };
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
-    use engine::types::statics::StaticMode;
+    use engine::types::statics::{CostModifyMode, StaticMode};
     use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
 
@@ -547,7 +548,8 @@ mod tests {
         let mut reducer = creature_face("Elf Cost Reducer", vec!["Elf"]);
         reducer
             .static_abilities
-            .push(StaticDefinition::new(StaticMode::ReduceCost {
+            .push(StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount: ManaCost::generic(1),
                 spell_filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
                     "Elf".to_string(),

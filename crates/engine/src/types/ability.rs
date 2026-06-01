@@ -2492,6 +2492,14 @@ pub enum TargetFilter {
     SpecificPlayer {
         id: PlayerId,
     },
+    /// CR 102.1 + CR 103.1: living player seated immediately to controller's
+    /// left/right; clockwise turn order, right = previous seat; resolved
+    /// against `state.seat_order`. The recipient is computed at the resolver
+    /// (`game::players::neighbor`), never selected as an interactive target
+    /// slot.
+    Neighbor {
+        direction: SeatDirection,
+    },
     /// CR 115.10 + CR 608.2c: The current player being affected by an
     /// "each player/opponent" instruction during resolution. This is not the
     /// ability controller; "you" and "your" still refer to `controller`.
@@ -3345,6 +3353,21 @@ pub struct CostPaidObjectSnapshot {
     pub lki: LKISnapshot,
 }
 
+/// CR 102.1 + CR 103.1: Seating direction relative to a player. The game's
+/// default turn order proceeds clockwise (CR 103.1); the next player in turn
+/// order is seated to the active player's left (CR 101.4). Thus walking
+/// forward through `seat_order` is `Left`, and walking backward is `Right`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SeatDirection {
+    /// The living player seated immediately to the controller's left — the
+    /// next player in turn order (CR 101.4). Forward through `seat_order`.
+    Left,
+    /// The living player seated immediately to the controller's right — the
+    /// previous player in turn order. Backward through `seat_order`.
+    Right,
+}
+
 /// CR 102.1 / CR 102.2 / CR 109.5: Relative player set for player filters that
 /// compose with an independent condition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4013,7 +4036,7 @@ pub enum StaticCondition {
     /// "as long as enchanted creature is face down" gated statics (Unable to Scream, etc.).
     EnchantedIsFaceDown,
     /// CR 702.166a + CR 601.2f: True when an optional additional cost (Bargain) was paid
-    /// for the spell currently being cast. Gates self-spell `ReduceCost` statics like
+    /// for the spell currently being cast. Gates self-spell `ModifyCost` statics like
     /// Hamlet Glutton's "This spell costs {2} less to cast if it's bargained." Evaluated
     /// against the in-flight cast's `additional_cost_paid` flag (`state.pending_cast`).
     AdditionalCostPaid,
@@ -4054,6 +4077,12 @@ pub enum ParsedCondition {
     /// CR 702.142a: This creature attacked this turn (Boast activation restriction).
     SourceAttackedThisTurn,
     SourceIsCreature,
+    /// CR 301.5 + CR 602.5b: The source is attached to an object with the
+    /// required core type. Used for activation restrictions such as
+    /// Reconfigure's "only if this permanent is attached to a creature."
+    SourceAttachedTo {
+        required_type: CoreType,
+    },
     SourceUntappedAttachedTo {
         required_type: CoreType,
     },
@@ -7355,6 +7384,10 @@ impl TargetFilter {
                 | TargetFilter::TriggeringPlayer
                 | TargetFilter::TriggeringSource
                 | TargetFilter::DefendingPlayer
+                // CR 102.1 + CR 103.1: the seating neighbor is computed at the
+                // resolver (`game::players::neighbor`), never declared as a
+                // chosen target slot — so it is a context ref.
+                | TargetFilter::Neighbor { .. }
                 | TargetFilter::AttachedTo
                 | TargetFilter::CostPaidObject
                 | TargetFilter::ParentTarget
@@ -8444,6 +8477,11 @@ pub enum AbilityTag {
     Exhaust,
     /// CR 702.107a: This ability originated from an Outlast keyword definition.
     Outlast,
+    /// CR 702.29a + CR 702.29e: This ability originated from a Cycling (or
+    /// Typecycling) keyword definition. Used so the activation pipeline can emit
+    /// a `GameEvent::Cycled` (CR 702.29c) that "When you cycle this card"
+    /// triggers match.
+    Cycling,
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.

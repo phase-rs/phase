@@ -817,11 +817,7 @@ fn target_filter_has_targets_property(filter: &TargetFilter) -> bool {
 
 fn static_has_target_gated_cost_modification(def: &StaticDefinition) -> bool {
     match &def.mode {
-        StaticMode::ReduceCost {
-            spell_filter: Some(filter),
-            ..
-        }
-        | StaticMode::RaiseCost {
+        StaticMode::ModifyCost {
             spell_filter: Some(filter),
             ..
         } => target_filter_has_targets_property(filter),
@@ -1149,7 +1145,7 @@ fn detect_dynamic_qty(
         // CR 601.2f / CR 117.7: spell- and ability-cost reductions whose
         // {N} amount is multiplied by a dynamic count of objects, zone
         // contents, mana value, etc. The carrier is the `dynamic_count`
-        // field on `StaticMode::ReduceCost` and `StaticMode::RaiseCost`,
+        // field on `StaticMode::ModifyCost` (Reduce / Raise modes),
         // populated with `ObjectCount` / `ZoneCardCount` / `Devotion` /
         // `ManaValue` typed quantity refs.
         "\"dynamic_count\":{",

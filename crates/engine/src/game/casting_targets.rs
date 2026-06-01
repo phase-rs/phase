@@ -591,6 +591,20 @@ pub(crate) fn emit_keyword_ability_event_if_tagged(
         return;
     };
     if let Some(ability_tag) = def.ability_tag {
+        // CR 702.29c: Cycling does not use the generic `KeywordAbilityActivated`
+        // path — activating it emits a dedicated `GameEvent::Cycled` so "When you
+        // cycle this card" triggers fire. The card has already been discarded to
+        // the graveyard as the cycling cost (the zone the trigger fires from).
+        // The cost also emitted a `Discarded` event, so "whenever you discard"
+        // and "cycle or discard" (CR 702.29d, matched on `Discarded`) still fire
+        // exactly once.
+        if ability_tag == AbilityTag::Cycling {
+            events.push(GameEvent::Cycled {
+                player_id: player,
+                object_id: source_id,
+            });
+            return;
+        }
         let is_mana_ability =
             ability_tag == AbilityTag::Exhaust && super::mana_abilities::is_mana_ability(def);
         events.push(GameEvent::KeywordAbilityActivated {

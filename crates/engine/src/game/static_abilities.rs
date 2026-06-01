@@ -79,7 +79,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // triggered and are unaffected by this variant.
     // CR 702.8a: CastWithFlash — card may be cast at instant speed.
     registry.insert(StaticMode::CastWithFlash, handle_rule_mod);
-    // CR 601.2f: ReduceCost/RaiseCost are data-carrying variants — runtime checks are
+    // CR 601.2f: ModifyCost (Reduce/Raise modes) is a data-carrying variant — runtime checks are
     // in game/casting.rs::apply_battlefield_cost_modifiers(). Coverage support is via
     // is_data_carrying_static() in game/coverage.rs.
     // Note: ReduceAbilityCost runtime checks are in game/keywords.rs::apply_ability_cost_reduction().
@@ -259,7 +259,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     //   - ChangesZoneAll            → `TriggerMode::ChangesZoneAll`
     //   - PreventDamage             → `Effect::PreventDamage`
     //   - DamageReduction / cost-mod variants → typed `StaticMode` variants
-    //     (`ReduceCost`, `RaiseCost`, `DefilerCostReduction`, etc.)
+    //     (`ModifyCost`, `DefilerCostReduction`, etc.)
     //   - ETBReplacement / LeavesPlay → `ReplacementDefinition`
     //     (ChangeZone / Moved events)
     //
