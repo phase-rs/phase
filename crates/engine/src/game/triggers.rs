@@ -2840,32 +2840,86 @@ fn dispatch_pending_trigger_context(
     }
 }
 
+/// CR 608.2e + issue #1793: True end-of-resolution boundary for draining
+/// `deferred_triggers`. Mid-resolution `Priority` from player-scope iteration,
+/// `repeat_for`, or replacement continuations must not drain (or offer CR
+/// 603.3b ordering) until those continuations finish.
+pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
+    if state.deferred_triggers.is_empty() {
+        return false;
+    }
+    if is_pending_trigger_construction_active(state) {
+        return false;
+    }
+    if state.pending_continuation.is_some() {
+        return false;
+    }
+    if state.pending_repeat_iteration.is_some() {
+        return false;
+    }
+    if state.post_replacement_continuation.is_some() {
+        return false;
+    }
+    if state.pending_change_zone_iteration.is_some() {
+        return false;
+    }
+    // CR 603.3b + issue #1793: observer triggers parked during a spell's
+    // resolution must wait until that spell leaves the stack — draining while
+    // a `Spell` entry remains would offer ordering mid player_scope iteration.
+    if state
+        .stack
+        .iter()
+        .any(|entry| matches!(entry.kind, StackEntryKind::Spell { .. }))
+    {
+        return false;
+    }
+    true
+}
+
 /// CR 113.2c + CR 603.2 + CR 603.3b: Drain the deferred-trigger queue after
 /// the active `pending_trigger` has been resolved (target chosen, mode
-/// chosen, distribution assigned) and pushed to the stack. Each queued
-/// trigger is dispatched FIFO. If one of them pauses on player input, the
-/// caller returns the resulting `WaitingFor` (already set on `state`) and the
-/// queue retains the still-unprocessed remainder. If the queue fully drains,
-/// returns the events produced (caller appends them to its own event vec).
+/// chosen, distribution assigned) and pushed to the stack. When 2+ triggers
+/// from the same controller are queued, the controller chooses their order
+/// (CR 603.3b) before dispatch. If one of them pauses on player input, the
+/// caller returns the resulting `WaitingFor` and the queue retains the
+/// still-unprocessed remainder.
 ///
-/// Returns `Some(waiting_for)` if the drain paused on a deferred trigger
-/// needing input (its target-selection / mode-choice / distribute-among
-/// `WaitingFor` to enter), or `None` if every deferred trigger reached the
-/// stack and the caller should continue with its existing `WaitingFor`
+/// Returns `Some(waiting_for)` if the drain paused on ordering, target
+/// selection, or distribute-among, or `None` if every deferred trigger reached
+/// the stack and the caller should continue with its existing `WaitingFor`
 /// (typically `Priority`).
 pub(crate) fn drain_deferred_trigger_queue(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
 ) -> Option<crate::types::game_state::WaitingFor> {
-    while !state.deferred_triggers.is_empty() {
-        let next = state.deferred_triggers.remove(0);
-        if dispatch_pending_trigger_context(state, next, events_out) {
-            // Paused on player input — the dispatcher set
-            // `state.pending_trigger` (and `state.waiting_for` for
-            // distribute-among). Defer to the engine's existing transition
-            // logic: for target/mode selection the caller invokes
-            // `begin_pending_trigger_target_selection`; for distribute-among
-            // the dispatcher already set `state.waiting_for`.
+    if !should_drain_deferred_triggers_now(state) {
+        return None;
+    }
+
+    let pending = std::mem::take(&mut state.deferred_triggers);
+    match begin_trigger_ordering(state, pending) {
+        TriggerOrderingDisposition::PromptForChoice(wf) => {
+            let wf = *wf;
+            state.waiting_for = wf.clone();
+            Some(wf)
+        }
+        TriggerOrderingDisposition::NoChoiceNeeded(pending) => {
+            dispatch_deferred_triggers_in_order(state, pending, events_out)
+        }
+    }
+}
+
+/// Dispatch an already-ordered deferred batch. On pause, park the tail back
+/// into `deferred_triggers` for a later drain at a true resolution boundary.
+fn dispatch_deferred_triggers_in_order(
+    state: &mut GameState,
+    pending: Vec<PendingTriggerContext>,
+    events_out: &mut Vec<GameEvent>,
+) -> Option<crate::types::game_state::WaitingFor> {
+    let mut iter = pending.into_iter();
+    while let Some(trigger_context) = iter.next() {
+        if dispatch_pending_trigger_context(state, trigger_context, events_out) {
+            state.deferred_triggers.extend(iter);
             if matches!(
                 state.waiting_for,
                 crate::types::game_state::WaitingFor::DistributeAmong { .. }
@@ -12925,6 +12979,97 @@ pub mod tests {
         );
     }
 
+    fn make_draw_pending_trigger(
+        state: &mut GameState,
+        name: &str,
+        controller: PlayerId,
+    ) -> PendingTriggerContext {
+        let source_id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        PendingTriggerContext::single(PendingTrigger {
+            source_id,
+            controller,
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source_id,
+                controller,
+            ),
+            timestamp: 0,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+        })
+    }
+
+    /// Issue #1793: mid-resolution continuations must not drain (or reorder)
+    /// parked deferred triggers at intermediate Priority settles.
+    #[test]
+    fn issue_1793_pending_continuation_blocks_deferred_drain() {
+        use crate::types::game_state::PendingContinuation;
+
+        let mut state = setup();
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
+        ];
+        state.pending_continuation =
+            Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(9999),
+                PlayerId(0),
+            ))));
+        let mut events = Vec::new();
+
+        assert!(
+            !should_drain_deferred_triggers_now(&state),
+            "continuation in flight — must not drain deferred triggers yet"
+        );
+        assert!(
+            drain_deferred_trigger_queue(&mut state, &mut events).is_none(),
+            "drain must be a no-op while pending_continuation is set"
+        );
+        assert_eq!(state.deferred_triggers.len(), 2);
+    }
+
+    /// Issue #1793: at a true resolution boundary, 2+ same-controller deferred
+    /// triggers must surface CR 603.3b ordering before dispatch.
+    #[test]
+    fn issue_1793_deferred_drain_surfaces_order_triggers() {
+        let mut state = setup();
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
+        ];
+        let mut events = Vec::new();
+
+        let wf = drain_deferred_trigger_queue(&mut state, &mut events)
+            .expect("two same-controller deferred triggers require ordering");
+        assert!(
+            matches!(wf, WaitingFor::OrderTriggers { .. }),
+            "expected OrderTriggers, got {wf:?}"
+        );
+        assert!(state.deferred_triggers.is_empty());
+    }
+
     /// Issue #610 — Kratos, Stoic Father. A YouAttack trigger carrying a
     /// `valid_card` attacker-type filter (`Subtype "God"`) must fire iff at least
     /// one *God* attacks (CR 508.1 + CR 506.2 + CR 603.2c). Drives the real
@@ -14745,6 +14890,9 @@ pub mod tests {
                     )
                     .expect("opponent discards a card");
                     discards += 1;
+                }
+                WaitingFor::OrderTriggers { .. } => {
+                    super::drain_order_triggers_with_identity(&mut state);
                 }
                 WaitingFor::Priority { .. } if state.stack.is_empty() => break,
                 WaitingFor::Priority { .. } => {

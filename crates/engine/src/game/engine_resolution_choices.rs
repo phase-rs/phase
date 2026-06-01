@@ -43,8 +43,16 @@ fn batch_or_drain_observer_triggers(
     event_slice_end: usize,
 ) -> Option<WaitingFor> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        // B1: this action settled — `run_post_action_pipeline` scans this
-        // action's own events; only the prior parked queue needs draining.
+        // B1: this action settled. Merge this slice's observer triggers into
+        // the parked queue before draining — otherwise the last segment's
+        // triggers (e.g. the final Syphon Mind opponent discard) never enter
+        // `deferred_triggers` and are lost when ordering runs (issue #1793).
+        let trigger_events: Vec<GameEvent> = events[event_slice_start..event_slice_end]
+            .iter()
+            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .cloned()
+            .collect();
+        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
         super::triggers::drain_deferred_trigger_queue(state, events)
     } else {
         // B2: paused — `run_post_action_pipeline` will not scan this action.

@@ -614,14 +614,15 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // landed us back at Priority (no further replacement choice), B1-drain the
         // deferred observer triggers parked during earlier pause segments plus the
         // ones this resume produced; otherwise leave them parked for the next drain.
+        let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+            .iter()
+            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .cloned()
+            .collect();
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
             crate::game::triggers::drain_deferred_trigger_queue(state, events);
         } else {
-            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
-                .iter()
-                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-                .cloned()
-                .collect();
             crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
         }
     }
