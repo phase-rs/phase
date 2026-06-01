@@ -770,13 +770,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
-        // CR 303.4 + CR 303.4g: Return-as-Aura attach pick — the engine only
-        // installs this state when `legal_targets` is non-empty, so picking
-        // the first candidate is always a legal fallback.
+        // CR 303.4 + CR 303.4g: Aura attach pick — the engine only installs
+        // this state when `legal_targets` is non-empty, so picking the first
+        // candidate is always a legal fallback.
         WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => {
-            legal_targets.first().map(|&id| GameAction::ChooseTarget {
-                target: Some(engine::types::ability::TargetRef::Object(id)),
-            })
+            legal_targets
+                .first()
+                .cloned()
+                .map(|target| GameAction::ChooseTarget {
+                    target: Some(target),
+                })
         }
 
         // Phyrexian payment: preserve each shard's only legal route when there
