@@ -18,6 +18,7 @@ mod bracket_signals;
 mod braids_arisen_nightmare_decline;
 mod brigid_mana_ability;
 mod chain_of_smog_copy;
+mod chatterstorm_storm;
 mod cleave_text_changing_cost;
 mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;
