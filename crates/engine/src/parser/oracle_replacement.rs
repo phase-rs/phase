@@ -3472,6 +3472,17 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         ));
     }
 
+    // "a spell" — any spell is the source; no typed filter (Benevolent Unicorn).
+    // Must precede `parse_type_phrase`, which maps bare "spell" to Card.
+    if subject == "spell" {
+        return None;
+    }
+
+    // "a source" with no qualifier — no filter needed (matches any source)
+    if subject == "source" {
+        return None;
+    }
+
     // CR 614.1a: Typed damage sources ("creature you control with a +1/+1
     // counter on it", "Giant source you control", …) — delegate to the shared
     // type-phrase parser (Uncivil Unrest, Torbran-adjacent prints).
@@ -3480,12 +3491,6 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         return Some(filter);
     }
 
-    // "a source" with no qualifier — no filter needed (matches any source)
-    if subject == "source" {
-        return None;
-    }
-
-    // "a spell" — no source filter (handled as general case for now)
     None
 }
 
