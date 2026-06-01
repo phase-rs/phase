@@ -1880,6 +1880,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: mass_target,
+            enters_under: None,
             enter_tapped: false,
         }
     } else {
@@ -7354,6 +7355,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Battlefield,
+                            enters_under: d.enters_under,
                             enter_tapped: d.enter_tapped,
                         },
                         rem,
@@ -7380,6 +7382,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Hand,
+                            enters_under: None,
                             enter_tapped: false,
                         },
                         rem,
@@ -7395,6 +7398,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: d.zone,
+                            enters_under: None,
                             enter_tapped: false,
                         },
                         rem,
@@ -12840,6 +12844,7 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
                 },
                 FilterProp::SameNameAsParentTarget,
             ])),
+            enters_under: None,
             enter_tapped,
         },
     )));
@@ -19348,6 +19353,7 @@ mod tests {
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Exile,
                     target: TargetFilter::Player,
+                    enters_under: None,
                     enter_tapped: false,
                 }
             ),
@@ -19408,6 +19414,7 @@ mod tests {
                     origin: Some(Zone::Exile),
                     destination: Zone::Graveyard,
                     target: TargetFilter::ExiledBySource,
+                    enters_under: None,
                     enter_tapped: false,
                 }
             ),
@@ -20065,10 +20072,32 @@ mod tests {
                 e,
                 Effect::ChangeZoneAll {
                     destination: Zone::Battlefield,
+                    enters_under: None,
                     ..
                 }
             ),
             "return-all-to-battlefield must lower to ChangeZoneAll, got {e:?}"
+        );
+    }
+
+    /// CR 110.2a: Mass return-to-battlefield text can override the default
+    /// controller. Rise of the Dark Realms class must preserve "under your
+    /// control" on `ChangeZoneAll`, not only on single-object `ChangeZone`.
+    #[test]
+    fn effect_return_all_to_battlefield_under_your_control_preserves_controller_override() {
+        let e = parse_effect(
+            "Return all creature cards from all graveyards to the battlefield under your control",
+        );
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZoneAll {
+                    destination: Zone::Battlefield,
+                    enters_under: Some(ControllerRef::You),
+                    ..
+                }
+            ),
+            "mass return under your control must preserve enters_under, got {e:?}"
         );
     }
 
@@ -21556,6 +21585,7 @@ mod tests {
                 origin: Some(Zone::Hand),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
+                enters_under: None,
                 enter_tapped: false,
             }
         ));
@@ -21570,6 +21600,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
+                enters_under: None,
                 enter_tapped: false,
             }
         ));
@@ -39133,6 +39164,7 @@ mod snapshot_tests {
             origin,
             destination,
             target,
+            enters_under,
             enter_tapped,
         } = &*same_name.effect
         else {
@@ -39140,6 +39172,7 @@ mod snapshot_tests {
         };
         assert_eq!(*origin, Some(Zone::Graveyard));
         assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(*enters_under, None);
         assert!(*enter_tapped);
         let TargetFilter::Typed(tail) = target else {
             panic!("expected typed same-name tail, got {target:?}");

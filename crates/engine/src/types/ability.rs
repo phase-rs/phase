@@ -5498,6 +5498,11 @@ pub enum Effect {
         destination: Zone,
         #[serde(default = "default_target_filter_none")]
         target: TargetFilter,
+        /// CR 110.2a: Controller override on mass ETB zone changes. `Some(ref)`
+        /// routes each entering object to the player resolved from `ref`.
+        /// `None` leaves each object under its default controller.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under: Option<ControllerRef>,
         /// CR 110.5b: When true, objects enter the battlefield tapped during
         /// a mass zone move.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
