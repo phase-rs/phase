@@ -31,6 +31,9 @@ use lobby_broker::{
 };
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::draft_session::DraftSessionManager;
+use server_core::draft_wire_guard::{
+    guard_create_draft_with_settings, guard_join_draft_with_password, guard_reconnect_draft,
+};
 use server_core::lobby::RegisterGameRequest;
 use server_core::protocol::{
     build_commit, ClientMessage, ServerMessage, ServerMode, MIN_SUPPORTED_PROTOCOL,
@@ -3828,6 +3831,20 @@ async fn handle_client_message(
                 "CreateDraftWithSettings"
             );
 
+            if let Err(reason) = guard_create_draft_with_settings(
+                &display_name,
+                &set_code,
+                &password,
+                timer_seconds,
+                pod_size,
+            ) {
+                let msg = ServerMessage::DraftActionRejected { reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             if !draft_pools.contains_set(&set_code) {
                 let msg = ServerMessage::DraftActionRejected {
                     reason: format!("No draft pool data for set: {set_code}"),
@@ -3938,6 +3955,16 @@ async fn handle_client_message(
             password,
         } => {
             info!(draft = %draft_code, joiner = %display_name, "JoinDraftWithPassword");
+
+            if let Err(reason) =
+                guard_join_draft_with_password(&draft_code, &display_name, &password)
+            {
+                let msg = ServerMessage::DraftActionRejected { reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
 
             let result = {
                 let mut mgr = draft_state.lock().await;
@@ -4109,6 +4136,14 @@ async fn handle_client_message(
             player_token,
         } => {
             info!(draft = %draft_code, "ReconnectDraft attempt");
+
+            if let Err(reason) = guard_reconnect_draft(&draft_code, &player_token) {
+                let msg = ServerMessage::DraftActionRejected { reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
 
             let result = {
                 let mut mgr = draft_state.lock().await;
