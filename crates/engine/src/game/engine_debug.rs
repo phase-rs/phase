@@ -189,6 +189,21 @@ pub fn apply_debug_action(
             validate_object_mut(state, object_id)?.tapped = tapped;
         }
 
+        DebugAction::SetPrepared {
+            object_id,
+            prepared,
+        } => {
+            // CR 722.3a/b: Route through the single authority so the
+            // prepare-face gate and Became(Un)Prepared events are honored
+            // instead of writing `obj.prepared` directly.
+            validate_object_mut(state, object_id)?;
+            if prepared {
+                super::effects::prepare::prepare_object(state, object_id, events);
+            } else {
+                super::effects::prepare::unprepare_object(state, object_id, events);
+            }
+        }
+
         DebugAction::SetController {
             object_id,
             controller,
