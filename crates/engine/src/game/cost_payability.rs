@@ -164,12 +164,13 @@ impl AbilityCost {
                 filter,
             } => {
                 if matches!(filter, Some(TargetFilter::SelfRef)) {
-                    // CR 117.1: "Exile this <self>" as a cost exiles the source
-                    // from its current zone. An explicit zone ("from your
-                    // graveyard/hand") gates payability on that zone; a missing
-                    // zone means the source's current zone — the ability is only
-                    // active where the source functions (e.g. a land's "Exile
-                    // this land" is paid from the battlefield), NOT the hand.
+                    // CR 118.3 + CR 602.1a: "Exile this <self>" as an
+                    // activation cost needs the source available to pay that
+                    // cost. An explicit zone ("from your graveyard/hand")
+                    // gates payability on that zone; a missing zone means the
+                    // source's current zone — the ability is only active where
+                    // the source functions (e.g. a land's "Exile this land"
+                    // is paid from the battlefield), NOT the hand.
                     return match zone {
                         Some(z) => state.objects.get(&source).is_some_and(|o| o.zone == *z),
                         None => state.objects.contains_key(&source),
@@ -591,11 +592,11 @@ mod tests {
         .is_payable(&state, P0, ObjectId(0)));
     }
 
-    /// CR 117.1 + #1547 (Ominous Cemetery): a self-exile cost with no explicit
-    /// zone ("Exile this land") is paid from the source's CURRENT zone — the
-    /// battlefield — not the hand. This previously defaulted to `Zone::Hand`, so
-    /// a permanent's "Exile this <self>" activated-ability cost was wrongly
-    /// reported unpayable from play (the ability never offered).
+    /// CR 118.3 + CR 602.1a: a self-exile cost with no explicit zone ("Exile
+    /// this land") is paid from the source's current zone — the battlefield —
+    /// not the hand. This previously defaulted to `Zone::Hand`, so a
+    /// permanent's "Exile this <self>" activated-ability cost was wrongly
+    /// reported unpayable from play.
     #[test]
     fn self_exile_cost_without_zone_payable_from_battlefield() {
         let mut scenario = GameScenario::new();
