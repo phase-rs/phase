@@ -395,10 +395,11 @@ pub fn build_target_slots_labelled(
 /// Returns `None` if the ability has no targets.
 pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
     ability.targets.iter().find_map(|t| match t {
-        // CR 400.7 (issue #1582): If the parent target has left the battlefield
-        // — e.g. a token Recoil bounced to hand, which then ceases to exist per
-        // CR 111.7 before the chained "that player discards" resolves — fall
-        // back to last-known information so the player anaphor still resolves.
+        // CR 608.2h (issue #1582): If the parent target has left the
+        // battlefield — e.g. a token Recoil bounced to hand, which then ceases
+        // to exist per CR 704.5d before the chained "that player discards"
+        // resolves — fall back to last-known information so the player anaphor
+        // still resolves.
         TargetRef::Object(id) => state
             .objects
             .get(id)
@@ -414,13 +415,13 @@ pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) ->
 /// per CR 108.3 (owner is the player who started the game with the card in their
 /// deck). Used by `TargetFilter::ParentTargetOwner` for "its owner" anaphors —
 /// e.g., Enslave's "enchanted creature deals 1 damage to its owner" once a
-/// parent-target slot has been bound. Falls back to last-known information
-/// (CR 400.7) when the object has ceased to exist. Returns `None` only if the
+/// parent-target slot has been bound. Falls back to last-known information (CR
+/// 608.2h) when the object has ceased to exist. Returns `None` only if the
 /// ability has no targets, or an object target is absent from both the live
 /// object map and the LKI cache.
 pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
     ability.targets.iter().find_map(|t| match t {
-        // CR 400.7 (issue #1582): Mirror the controller lookup — fall back to
+        // CR 608.2h (issue #1582): Mirror the controller lookup — fall back to
         // last-known information so "its owner" still resolves after the
         // referenced object (e.g. a bounced token) has ceased to exist.
         TargetRef::Object(id) => state
@@ -4018,13 +4019,13 @@ mod tests {
         );
     }
 
-    /// CR 608.2c + CR 111.7 (issue #1582): Recoil reads "Return target permanent
-    /// to its owner's hand. Then that player discards a card." When the bounced
-    /// permanent is a TOKEN, it ceases to exist as a state-based action (CR
-    /// 111.7) after returning to hand, so the live object is gone before the
-    /// chained discard resolves. The "that player" anaphor
+    /// CR 608.2c + CR 608.2h + CR 704.5d (issue #1582): Recoil reads "Return
+    /// target permanent to its owner's hand. Then that player discards a card."
+    /// When the bounced permanent is a token, it ceases to exist as a
+    /// state-based action after returning to hand, so the live object is gone
+    /// before the chained discard resolves. The "that player" anaphor
     /// (`ParentTargetController` / `ParentTargetOwner`) must therefore resolve
-    /// through last-known information (CR 400.7) rather than the now-removed
+    /// through last-known information (CR 608.2h) rather than the now-removed
     /// object — otherwise the discard silently resolves against the wrong player
     /// (or no one), which is exactly the reported bug.
     #[test]
@@ -4038,6 +4039,7 @@ mod tests {
             "Goblin".to_string(),
             Zone::Battlefield,
         );
+        state.objects.get_mut(&token).unwrap().is_token = true;
 
         let ability = ResolvedAbility::new(
             Effect::Discard {
@@ -4059,14 +4061,17 @@ mod tests {
         );
         assert_eq!(parent_target_owner(&ability, &state), Some(PlayerId(1)));
 
-        // Bounce to hand snapshots LKI (CR 400.7), then the token ceases to
-        // exist (CR 111.7): remove it from the live object map.
+        // Bounce to hand snapshots LKI, then SBA removes the token (CR 704.5d).
         let mut events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, token, Zone::Hand, &mut events);
-        state.objects.remove(&token);
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+        assert!(
+            !state.objects.contains_key(&token),
+            "CR 704.5d: bounced token must cease to exist"
+        );
         assert!(
             state.lki_cache.contains_key(&token),
-            "battlefield exit must snapshot last-known information (CR 400.7)"
+            "battlefield exit must snapshot last-known information for CR 608.2h"
         );
 
         // The fix: player anaphors resolve via LKI once the object is gone.
