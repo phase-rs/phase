@@ -5,12 +5,15 @@ import { useTranslation } from "react-i18next";
 import type {
   ManaType,
   PhyrexianShard,
-  SerializedAbilityCost,
   ShardChoice,
 } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { manaCostToShards, SHARD_ABBREVIATION } from "../../viewmodel/costLabel.ts";
+import {
+  abilityCostToManaShards,
+  manaCostToShards,
+  SHARD_ABBREVIATION,
+} from "../../viewmodel/costLabel.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { ManaBadge } from "./ManaBadge.tsx";
 import { ManaSymbol } from "./ManaSymbol.tsx";
@@ -23,25 +26,6 @@ const MANA_ORDER: ManaType[] = ["White", "Blue", "Black", "Red", "Green", "Color
 // has already been replaced with generic by the time this UI renders.
 function hasAmbiguousCost(shards: string[]): boolean {
   return shards.some((s) => s.includes("/"));
-}
-
-function extractManaCostFromAbilityCost(cost: SerializedAbilityCost | undefined): { shards: string[]; generic: number } | null {
-  if (!cost) return null;
-  // `SerializedAbilityCost` mirrors Rust AbilityCost with serde tag="type".
-  // We only care about the Mana component that drives ManaPayment.
-  if (cost.type === "Mana") {
-    const inner = (cost as { cost?: { type?: string; shards?: string[]; generic?: number } }).cost;
-    if (!inner || inner.type === "Free") return null;
-    return { shards: inner.shards ?? [], generic: inner.generic ?? 0 };
-  }
-  if (cost.type === "Composite" || cost.type === "OneOf") {
-    const parts = (cost as { costs?: SerializedAbilityCost[] }).costs ?? [];
-    for (const part of parts) {
-      const found = extractManaCostFromAbilityCost(part);
-      if (found) return found;
-    }
-  }
-  return null;
 }
 
 export function ManaPaymentUI() {
@@ -83,12 +67,8 @@ export function ManaPaymentUI() {
       // Activated-ability mana payment: prefer `activation_cost` when present.
       // The engine reuses PendingCast for both spell casts and activated abilities;
       // for the latter, the mana to be paid is stored on `activation_cost`.
-      const activation = extractManaCostFromAbilityCost(gameState.pending_cast.activation_cost);
-      if (activation) {
-        const shards: string[] = [];
-        if (activation.generic > 0) shards.push(String(activation.generic));
-        for (const shard of activation.shards) shards.push(SHARD_ABBREVIATION[shard] ?? shard);
-        return shards;
+      if (gameState.pending_cast.activation_cost) {
+        return abilityCostToManaShards(gameState.pending_cast.activation_cost) ?? [];
       }
       return manaCostToShards(gameState.pending_cast.cost);
     }
