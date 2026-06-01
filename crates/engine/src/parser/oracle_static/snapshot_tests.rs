@@ -626,17 +626,19 @@ fn parses_splinter_source_restricted_doubler() {
     }
 }
 
-/// CR 603.2d: A disjunctive source ("a Shaman or another Wizard you
-/// control", Harmonic Prodigy) exceeds `parse_type_phrase`'s single-clause
-/// model. Parsing only the first disjunct would drop "or Wizard" AND the
-/// "you control" scope, yielding a controller-less `Subtype(Shaman)` that
-/// doubles an *opponent's* Shaman's triggers. The parser must instead leave
-/// `affected` unset, falling back to the controller-scoped "all your
-/// triggers" default (the pre-restriction behavior) rather than mis-scoping.
-/// Discriminating: without the disjunction guard this parses to
-/// `affected == Some(Typed { Subtype(Shaman), controller: None })` and fails.
+/// CR 603.2d: A disjunctive source ("a Shaman or another Wizard
+/// you control", Harmonic Prodigy) is a top-level type union sharing one
+/// trailing controller scope. The doubler `affected` filter MUST be the
+/// controller-scoped `Or` of both disjuncts — doubling triggers from a Shaman
+/// *or* a Wizard you control, and nothing else.
+///
+/// Discriminating: the prior single-clause model dropped "or Wizard" AND the
+/// "you control" scope, so a naive parse yielded a controller-less
+/// `Subtype(Shaman)`; the conservative guard then suppressed the filter
+/// entirely (`affected == None`), which over-doubles *every* controlled
+/// permanent's triggers. Both wrong outcomes fail the assertions below.
 #[test]
-fn harmonic_prodigy_disjunctive_source_falls_back_to_no_filter() {
+fn harmonic_prodigy_disjunctive_source_doubles_shaman_or_wizard() {
     let def = parse_static_line(
             "If a triggered ability of a Shaman or another Wizard you control triggers, that ability triggers an additional time.",
         )
@@ -647,11 +649,63 @@ fn harmonic_prodigy_disjunctive_source_falls_back_to_no_filter() {
             cause: TriggerCause::Any
         }
     );
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!(
+            "disjunctive source must produce a controller-scoped `Or` of both \
+             disjuncts, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filters.len(), 2, "expected two disjuncts, got {filters:?}");
+
+    // Every branch must be a `Typed` clause scoped to the doubler's controller —
+    // the shared "you control" suffix is distributed to both, so the doubler
+    // never doubles an opponent's Shaman or Wizard.
+    let mut subtypes = Vec::new();
+    let mut wizard_is_another = false;
+    let mut shaman_is_plain = false;
+    for branch in filters {
+        let TargetFilter::Typed(tf) = branch else {
+            panic!("expected Typed disjunct, got {branch:?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "each disjunct must keep the shared `you control` scope, got {tf:?}"
+        );
+        for type_filter in &tf.type_filters {
+            if let TypeFilter::Subtype(name) = type_filter {
+                subtypes.push(name.clone());
+                let is_another = tf.properties.contains(&FilterProp::Another);
+                // The "another Wizard" designation carries FilterProp::Another,
+                // excluding the doubler itself from its own Wizard clause...
+                if name == "Wizard" && is_another {
+                    wizard_is_another = true;
+                }
+                // ...but "a Shaman" has no such designation. Pin the asymmetry:
+                // disjuncts are parsed independently and only the controller is
+                // distributed across the union, so a leg-local "another" must NOT
+                // leak onto the Shaman branch. Guards a future refactor that might
+                // route the union through property distribution.
+                if name == "Shaman" && !is_another {
+                    shaman_is_plain = true;
+                }
+            }
+        }
+    }
+    subtypes.sort();
+    assert_eq!(
+        subtypes,
+        vec!["Shaman".to_string(), "Wizard".to_string()],
+        "expected a Shaman branch and a Wizard branch"
+    );
     assert!(
-        def.affected.is_none(),
-        "disjunctive source must not produce a single-disjunct `affected` \
-             filter (would mis-scope to an uncontrolled Shaman); got {:?}",
-        def.affected
+        wizard_is_another,
+        "the Wizard branch must carry the `another` designation"
+    );
+    assert!(
+        shaman_is_plain,
+        "the Shaman branch must NOT carry the `another` designation"
     );
 }
 
@@ -679,5 +733,133 @@ fn panharmonicon_doubler_has_no_source_filter() {
         def.affected.is_none(),
         "bare 'permanent you control' source must leave affected None, got {:?}",
         def.affected
+    );
+}
+
+/// CR 603.2d: Echoes of Eternity — a second real disjunctive doubler beyond
+/// Harmonic Prodigy. "a colorless spell you control or another colorless
+/// permanent you control" must produce a controller-scoped two-branch `Or`, with
+/// the trailing "another ... permanent" disjunct carrying FilterProp::Another.
+/// Discriminating: the prior single-clause-or-bail behavior left `affected` None
+/// here too, over-doubling every controlled trigger.
+#[test]
+fn echoes_of_eternity_colorless_disjunctive_doubler() {
+    let def = parse_static_line(
+            "If a triggered ability of a colorless spell you control or another colorless permanent you control triggers, that ability triggers an additional time.",
+        )
+        .expect("expected DoubleTriggers static for Echoes of Eternity");
+    assert_eq!(
+        def.mode,
+        StaticMode::DoubleTriggers {
+            cause: TriggerCause::Any
+        }
+    );
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!(
+            "disjunctive source must produce a controller-scoped `Or`, got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(filters.len(), 2, "expected two disjuncts, got {filters:?}");
+    let mut any_branch_is_another = false;
+    for branch in filters {
+        let TargetFilter::Typed(tf) = branch else {
+            panic!("expected Typed disjunct, got {branch:?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "each disjunct must keep the shared `you control` scope, got {tf:?}"
+        );
+        if tf.properties.contains(&FilterProp::Another) {
+            any_branch_is_another = true;
+        }
+    }
+    assert!(
+        any_branch_is_another,
+        "the `another colorless permanent` branch must carry FilterProp::Another"
+    );
+}
+
+/// CR 603.2d: Delney, Streetwise Lookout — the doubler source "a creature you
+/// control with power 2 or less" embeds "or" inside a power suffix, NOT a type
+/// disjunction. The fix must keep it a single restrictive clause (Creature +
+/// you control + the power restriction), never mistaking the suffix "or" for a
+/// disjunct connector. Discriminating: the prior `scan_contains(.., "or ")`
+/// guard matched the suffix "or" and bailed to `None`, over-doubling every
+/// controlled trigger; a buggy connector split would instead yield an `Or`.
+#[test]
+fn delney_power_suffix_or_is_not_a_disjunction() {
+    let def = parse_static_line(
+            "If a triggered ability of a creature you control with power 2 or less triggers, that ability triggers an additional time.",
+        )
+        .expect("expected DoubleTriggers static for Delney");
+    assert_eq!(
+        def.mode,
+        StaticMode::DoubleTriggers {
+            cause: TriggerCause::Any
+        }
+    );
+    let Some(TargetFilter::Typed(tf)) = def.affected.as_ref() else {
+        panic!(
+            "`power N or less` must stay one typed clause, not None or Or; got {:?}",
+            def.affected
+        );
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "expected a Creature restriction, got {:?}",
+        tf.type_filters
+    );
+    assert!(
+        !tf.properties.is_empty(),
+        "expected the `power 2 or less` restriction to be parsed, got no properties"
+    );
+}
+
+/// CR 603.2d: A three-way Oxford-comma type union exercises the `, or ` and bare
+/// `, ` connector arms of `doubler_disjunct_connector`. No live card uses them
+/// yet, but they share the union path with the two-way "or" form — this locks
+/// them so a future simplification dropping those arms is caught. Each of the
+/// three disjuncts must become its own controller-scoped branch.
+#[test]
+fn three_way_oxford_disjunctive_doubler_source() {
+    let def = parse_static_line(
+            "If a triggered ability of a Shaman, a Wizard, or a Cleric you control triggers, that ability triggers an additional time.",
+        )
+        .expect("expected DoubleTriggers static");
+    let Some(TargetFilter::Or { filters }) = def.affected.as_ref() else {
+        panic!("expected a three-branch `Or`, got {:?}", def.affected);
+    };
+    assert_eq!(
+        filters.len(),
+        3,
+        "expected three disjuncts, got {filters:?}"
+    );
+    let mut subtypes = Vec::new();
+    for branch in filters {
+        let TargetFilter::Typed(tf) = branch else {
+            panic!("expected Typed disjunct, got {branch:?}");
+        };
+        assert_eq!(
+            tf.controller,
+            Some(ControllerRef::You),
+            "every disjunct must keep the shared `you control` scope, got {tf:?}"
+        );
+        for type_filter in &tf.type_filters {
+            if let TypeFilter::Subtype(name) = type_filter {
+                subtypes.push(name.clone());
+            }
+        }
+    }
+    subtypes.sort();
+    assert_eq!(
+        subtypes,
+        vec![
+            "Cleric".to_string(),
+            "Shaman".to_string(),
+            "Wizard".to_string()
+        ]
     );
 }

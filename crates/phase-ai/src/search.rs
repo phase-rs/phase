@@ -542,6 +542,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseTopOrBottom { top: true })
         }
 
+        // CR 701.30b: clash opponent choice — fall back to the first candidate.
+        WaitingFor::ClashChooseOpponent { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseClashOpponent { opponent }),
+
         // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
         WaitingFor::CastOffer {
             kind: CastOfferKind::Adventure { .. },

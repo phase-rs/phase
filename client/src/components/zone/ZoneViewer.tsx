@@ -9,7 +9,7 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { getPlayerZoneIds, getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
@@ -41,7 +41,6 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
   const dispatchAction = useGameDispatch();
-  const currentPlayerId = usePerspectivePlayerId();
   const canActForWaitingState = useCanActForWaitingState();
   const zoneIds = useMemo(
     () => getPlayerZoneIds(gameState, zone, playerId),
@@ -53,7 +52,6 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
     return zoneIds.map((id) => objects[id]).filter(Boolean);
   }, [objects, zoneIds]);
 
-  const isMyZone = playerId === currentPlayerId;
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
   const currentLegalTargets = useMemo(() => {
@@ -107,10 +105,17 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
             {cards.map((obj) => {
               // CR 702.81a + CR 702.143a + CR 715.3a + CR 702.62a + CR 702.170d + CR 702.185a:
               // Engine surfaces a CastSpell-family action for every legally
-              // castable owner-viewed graveyard/exile card (Retrace, Adventure,
-              // Foretell, Suspend, Plot, Warp, etc.). The zone viewer surfaces
-              // whatever the engine reports — no per-mechanic permission inspection.
-              const castActions = (zone === "graveyard" || zone === "exile") && isMyZone && hasPriority
+              // castable graveyard/exile card (Retrace, Adventure, Foretell,
+              // Suspend, Plot, Warp, etc.). The zone viewer surfaces whatever
+              // the engine reports — no per-mechanic permission inspection.
+              //
+              // CR 715.3d / CR 400.7i: this includes opponent-OWNED cards in
+              // exile the viewer was granted permission to play (Hostage Taker,
+              // Gonti, Thief of Sanity). Those live in the owner's exile pile,
+              // so castability must NOT be gated on the pile belonging to the
+              // viewer — `legalActionsByObject` (engine authority, keyed to the
+              // player the permission was granted to) is the sole gate.
+              const castActions = (zone === "graveyard" || zone === "exile") && hasPriority
                 ? playOrCastActionsForObject(legalActionsByObject, obj.id)
                 : [];
               const isValidTarget = currentLegalTargets.has(obj.id);

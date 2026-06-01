@@ -7,6 +7,7 @@ import type { AnimationStep } from "../animation/types";
 import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
+import { flashInGameRolls } from "./diceContest";
 import { useAnimationStore } from "../stores/animationStore";
 import { isMultiplayerMode, useGameStore, legalResultState, saveGame, saveCheckpoints } from "../stores/gameStore";
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
@@ -229,6 +230,11 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
     const turnNumber = newState.players[turnPlayerId]?.turns_taken ?? 1;
     useUiStore.getState().flashTurnBanner(bannerText, turnNumber);
   }
+
+  // 5b. Surface in-game dice/coin rolls out-of-band (DiceRollOverlay), the same
+  // way the turn banner bypasses the animation queue. These events are marked
+  // NON_VISUAL so normalizeEvents skips them below.
+  flashInGameRolls(events);
 
   // 6. Normalize events into animation steps
   const pacingMultipliers = usePreferencesStore.getState().pacingMultipliers;

@@ -3737,6 +3737,7 @@ pub(crate) fn check_trigger_condition(
             // CR 508.6: a set-valued attacked-this-turn predicate has no
             // single-player "whose turn" semantic.
             | PlayerFilter::OpponentAttackedThisTurn
+            | PlayerFilter::OpponentAttackedBySourceThisTurn
             | PlayerFilter::All
             | PlayerFilter::HighestSpeed
             | PlayerFilter::ZoneChangedThisWay
@@ -16407,6 +16408,28 @@ mod dedup_regression_tests {
         id
     }
 
+    fn install_harmonic_prodigy(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(102),
+            PlayerId(0),
+            "Harmonic Prodigy".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::parser::oracle_static::parse_static_line(
+                    "If a triggered ability of a Shaman or another Wizard you control triggers, that ability triggers an additional time.",
+                )
+                .expect("expected Harmonic Prodigy trigger-doubler static"),
+            );
+        id
+    }
+
     /// CR 603.2d: Splinter's source filter ("a Ninja creature you control")
     /// doubles a Ninja source's trigger to 2 instances.
     #[test]
@@ -16494,6 +16517,77 @@ mod dedup_regression_tests {
         assert_eq!(
             observer_triggers, 1,
             "Splinter must NOT double a non-Ninja source's trigger — only Ninja sources qualify"
+        );
+    }
+
+    /// CR 603.2d: Harmonic Prodigy's parsed disjunctive source filter must
+    /// double triggers from another Wizard you control.
+    #[test]
+    fn harmonic_prodigy_parsed_static_doubles_wizard_source_trigger() {
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Wizard".to_string());
+        }
+
+        let _harmonic = install_harmonic_prodigy(&mut state);
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 2,
+            "Harmonic Prodigy's parsed Wizard branch must double the source trigger"
+        );
+    }
+
+    /// CR 603.2d: Harmonic Prodigy's parsed disjunctive source filter must not
+    /// fall back to the controller-only `affected: None` shape; unrelated
+    /// controlled sources still produce one trigger.
+    #[test]
+    fn harmonic_prodigy_parsed_static_does_not_double_unrelated_source_trigger() {
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Cleric".to_string());
+        }
+
+        let _harmonic = install_harmonic_prodigy(&mut state);
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 1,
+            "Harmonic Prodigy must not double unrelated controlled source triggers"
         );
     }
 
