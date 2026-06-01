@@ -31,7 +31,29 @@
     "damage": "Obrażenia: {{amount}}",
     "ptDeltaFrom": "{{delta}} od {{source}}",
     "colors": "Kolory: {{colors}}",
-    "colorless": "Bezbarwny"
+    "colorless": "Bezbarwny",
+    "chosen": {
+      "title": "Wybrane",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Gracz {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Nieznane",
+      "kind": {
+        "color": "Kolor",
+        "creatureType": "Typ stwora",
+        "basicLandType": "Typ podstawowego lądu",
+        "cardType": "Typ karty",
+        "oddOrEven": "Parzyste lub nieparzyste",
+        "cardName": "Nazwa karty",
+        "number": "Liczba",
+        "player": "Gracz",
+        "twoColors": "Dwa kolory",
+        "tributeOutcome": "Tribute",
+        "keyword": "Słowo kluczowe",
+        "label": "Etykieta",
+        "fallback": "Wybór"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Wyczyść atakujących",

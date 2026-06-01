@@ -1871,13 +1871,13 @@ pub enum WaitingFor {
         remaining: Vec<ObjectId>,
         pending_effect: Box<ResolvedAbility>,
     },
-    /// CR 303.4 + CR 303.4a + CR 303.4g + CR 614.12 + CR 115.1b: After a
-    /// return-as-Aura sub-effect resolves and finds 2+ legal objects matching
-    /// the parsed enchant filter, the controller picks which permanent the
-    /// returned object attaches to. This is a CHOICE (CR 303.4f / 303.4g), not
-    /// a target (CR 115.1b applies to Aura spells being cast — return-as-Aura
-    /// is a sub-effect of a different ability), so hexproof / shroud /
-    /// protection do NOT filter `legal_targets`.
+    /// CR 303.4 + CR 303.4a + CR 303.4f + CR 303.4g + CR 614.12 + CR 115.1b:
+    /// After a return-as-Aura sub-effect or a non-spell Aura battlefield entry
+    /// finds 2+ legal objects or players matching the parsed enchant filter,
+    /// the controller picks which host the Aura attaches to. This is a CHOICE
+    /// (CR 303.4f / CR 303.4g), not a target (CR 115.1b applies to Aura spells
+    /// being cast), so hexproof / shroud / protection do NOT filter
+    /// `legal_targets`.
     ///
     /// **Forward-looking note (per add-engine-variant gate):** if a fourth
     /// resolution-time-pick `WaitingFor` variant is added (e.g., a future
@@ -1889,18 +1889,18 @@ pub enum WaitingFor {
     ReturnAsAuraTarget {
         player: PlayerId,
         source_id: ObjectId,
-        /// The host object that was just returned to the battlefield by the
-        /// preceding `Effect::ChangeZone` and that this `Effect::ReturnAsAura`
-        /// is converting into an Aura.
+        /// The Aura object on the battlefield awaiting a controller-selected
+        /// enchant host.
         returned_id: ObjectId,
-        /// Battlefield objects (excluding `returned_id`) that satisfy the
-        /// parsed `enchant_filter`. Built via `filter::matches_target_filter`
-        /// — hexproof / shroud / protection are intentionally NOT applied
-        /// here (CR 303.4 / CR 115.1b distinction).
-        legal_targets: Vec<ObjectId>,
+        /// Battlefield objects (excluding `returned_id`) or players that
+        /// satisfy the parsed `enchant_filter`. Built via
+        /// `filter::matches_target_filter` / `player_matches_target_filter` —
+        /// hexproof / shroud / protection are intentionally NOT applied here
+        /// (CR 303.4 / CR 115.1b distinction).
+        legal_targets: Vec<TargetRef>,
         /// The `ResolvedAbility` that emitted this picker; cloned so
-        /// `finalize_attach` can re-read `effect.enchant_filter` and
-        /// `effect.grants` after the pick lands.
+        /// return-as-Aura can re-read `effect.enchant_filter` / `effect.grants`,
+        /// and generic Aura entry can preserve source metadata for completion.
         pending_effect: Box<ResolvedAbility>,
     },
     EquipTarget {

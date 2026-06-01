@@ -1446,8 +1446,12 @@ fn collect_pending_triggers(
                     );
                     storm_ability.repeat_for = Some(QuantityExpr::Fixed { value: copy_count });
                     let storm_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
-                        .description("Storm".to_string())
-                        .condition(TriggerCondition::WasCast { zone: None });
+                        .description("Storm".to_string());
+                    // CR 702.40a: Storm fires when the spell is cast. The
+                    // WasCast intervening-if is intentionally omitted: this
+                    // synthesized trigger is only collected from SpellCast,
+                    // which is only emitted for an actual cast, so cast-ness is
+                    // already implied by the trigger event itself.
                     let timestamp = state.next_timestamp() as u32;
                     pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: *cast_obj_id,
@@ -2109,13 +2113,20 @@ fn dispatch_collected_triggers(state: &mut GameState, pending: Vec<PendingTrigge
 /// re-checked when the triggered ability *resolves* (`stack.rs`), not only
 /// when it is collected. Clearing it on all objects here would make every
 /// `WasCast`-conditioned ETB trigger (Wedding Ring's token-copy, Discover
-/// ETBs) silently do nothing at resolution. It is still cleared for
-/// non-battlefield objects (a fizzled stack spell, an object that bounced)
-/// since their cast provenance is no longer meaningful, and is cleared on
-/// battlefield exit by `reset_for_battlefield_exit`.
+/// ETBs) silently do nothing at resolution. It is equally preserved for
+/// objects still on the **Stack**: a spell on the stack has live cast
+/// provenance, and its own cast-triggered abilities re-check their `WasCast`
+/// intervening-if when they resolve (`stack.rs`, CR 603.4) while the source
+/// spell is still on the stack — Cascade (CR 702.85a: "functions only while
+/// the spell with cascade is on the stack"), Storm, and dynamically-granted
+/// Casualty. Clearing it for stack objects here made every such cast-triggered
+/// ability silently do nothing at resolution. It is still cleared for
+/// objects in other zones (a fizzled spell that has left the stack, an object
+/// that bounced) since their cast provenance is no longer meaningful, and is
+/// cleared on battlefield exit by `reset_for_battlefield_exit`.
 fn clear_post_collection_transients(state: &mut GameState) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        if obj.zone != Zone::Battlefield {
+        if !matches!(obj.zone, Zone::Battlefield | Zone::Stack) {
             obj.cast_from_zone = None;
         }
         obj.mana_spent_to_cast = false;

@@ -2914,11 +2914,12 @@ fn apply_action(
                 &mut events,
             )?
         }
-        // CR 303.4 + CR 303.4g + CR 115.1: Player picked the permanent to
-        // enchant for a `Effect::ReturnAsAura` sub-effect. The picker is a
-        // CHOICE (not a target), so the action shape mirrors
-        // `WaitingFor::ExploreChoice` — `GameAction::ChooseTarget { target:
-        // Some(Object(id)) }` with `id` drawn from `legal_targets`.
+        // CR 303.4 + CR 303.4f + CR 303.4g + CR 115.1: Player picked the
+        // permanent to enchant for a return-as-Aura sub-effect or a non-spell
+        // Aura battlefield entry. The picker is a CHOICE (not a target), so
+        // the action shape mirrors
+        // `WaitingFor::ExploreChoice` — `GameAction::ChooseTarget` with the
+        // chosen `TargetRef` drawn from `legal_targets`.
         (
             WaitingFor::ReturnAsAuraTarget {
                 player,
@@ -2933,10 +2934,10 @@ fn apply_action(
                 return Err(EngineError::WrongPlayer);
             }
             let chosen = match target {
-                Some(TargetRef::Object(id)) if legal_targets.contains(&id) => id,
+                Some(target) if legal_targets.contains(&target) => target.clone(),
                 _ => {
                     return Err(EngineError::InvalidAction(
-                        "ReturnAsAuraTarget: invalid or missing legal Object target".to_string(),
+                        "ReturnAsAuraTarget: invalid or missing legal target".to_string(),
                     ));
                 }
             };
@@ -2949,8 +2950,45 @@ fn apply_action(
                     grants,
                 } => (enchant_filter.clone(), grants.clone()),
                 _ => {
+                    let old_target = match chosen {
+                        TargetRef::Object(chosen_id) => {
+                            super::effects::attach::attach_to(state, returned, chosen_id)
+                        }
+                        TargetRef::Player(chosen_player) => {
+                            super::effects::attach::attach_to_player(state, returned, chosen_player)
+                        }
+                    };
+                    if let Some(old_target) = old_target {
+                        events.push(crate::types::events::GameEvent::Unattached {
+                            attachment_id: returned,
+                            old_target,
+                        });
+                    }
+                    let resumes_change_zone_iteration =
+                        state.pending_change_zone_iteration.is_some();
+                    if !resumes_change_zone_iteration {
+                        events.push(crate::types::events::GameEvent::EffectResolved {
+                            kind: crate::types::ability::EffectKind::ChangeZone,
+                            source_id: pending.source_id,
+                        });
+                    }
+                    state.waiting_for = WaitingFor::Priority {
+                        player: active_player,
+                    };
+                    state.priority_player = active_player;
+                    effects::drain_pending_continuation(state, &mut events);
+                    return Ok(ActionResult {
+                        events,
+                        waiting_for: state.waiting_for.clone(),
+                        log_entries: vec![],
+                    });
+                }
+            };
+            let chosen = match chosen {
+                TargetRef::Object(id) => id,
+                TargetRef::Player(_) => {
                     return Err(EngineError::InvalidAction(
-                        "ReturnAsAuraTarget: pending_effect is not ReturnAsAura".to_string(),
+                        "ReturnAsAuraTarget: ReturnAsAura requires an object host".to_string(),
                     ));
                 }
             };
@@ -20626,6 +20664,76 @@ mod mdfc_land_tests {
             modal_actions.len(),
             2,
             "Expected 2 ChooseModalFace candidates"
+        );
+    }
+
+    // CR 712.11b + CR 903.8: A spell//spell Modal DFC commander (Esika, God of
+    // the Tree // The Prismatic Bridge) cast from the command zone must offer the
+    // face choice so the player can put either face on the stack (#1548). The
+    // choice was previously gated to the hand, so only the front face was
+    // castable from the command zone.
+    #[test]
+    fn mdfc_commander_cast_from_command_zone_offers_face_choice() {
+        let mut state = setup_game_at_main_phase();
+        state.format_config.command_zone = true;
+        let obj_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Esika, God of the Tree".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_commander = true;
+            obj.card_types = make_creature_type();
+            obj.back_face = Some(make_back_face(
+                "The Prismatic Bridge",
+                CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Enchantment],
+                    subtypes: vec![],
+                },
+                Some(LayoutKind::Modal),
+            ));
+        }
+
+        let cast_actions = crate::ai_support::legal_actions(&state)
+            .iter()
+            .filter(|action| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == obj_id)
+            })
+            .count();
+        assert_eq!(
+            cast_actions, 1,
+            "the MDFC commander must be offered as castable from the command zone"
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(100),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(result.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+            "spell//spell MDFC commander cast from the command zone must offer \
+             ModalFaceChoice, got {:?}",
+            result.waiting_for
+        );
+
+        // Both faces must be offered (front: Esika; back: The Prismatic Bridge).
+        let candidates = crate::ai_support::legal_actions(&state);
+        let modal_actions = candidates
+            .iter()
+            .filter(|c| matches!(c, GameAction::ChooseModalFace { .. }))
+            .count();
+        assert_eq!(
+            modal_actions, 2,
+            "both MDFC commander faces must be offered from the command zone"
         );
     }
 

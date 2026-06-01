@@ -3825,6 +3825,28 @@ pub(super) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyw
     }
 }
 
+/// CR 608.2c: Parse "Repeat this process for <keyword list>." — Kathril, Aspect
+/// Warper. Returns the keyword list; the chunk loop wraps it in
+/// `SpecialClause::RepeatProcessForKeywords` and lowering replicates the
+/// antecedent conditional keyword-counter clause once per keyword. Mirrors
+/// `try_parse_same_is_true_continuation`; covers every "repeat this process for
+/// <list>" card, not Kathril alone.
+pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Keyword>> {
+    let lower = text.to_lowercase();
+    let (keywords, rest) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = tag("repeat this process for ").parse(i)?;
+        parse_keyword_list(i)
+    })?;
+    // The sentence must be fully consumed by the keyword list (modulo a trailing
+    // period) — a leftover tail means this is some other "repeat this process …"
+    // form (e.g. "repeat this process any number of times") and must not match.
+    if rest.trim().trim_end_matches('.').is_empty() {
+        Some(keywords)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

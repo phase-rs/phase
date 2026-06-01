@@ -133,6 +133,14 @@ pub enum ProposedEvent {
         from: Zone,
         to: Zone,
         cause: Option<ObjectId>,
+        /// CR 303.4f: When an Aura enters the battlefield by a non-spell
+        /// effect and the effect does not specify what it enchants, the
+        /// controller chooses a legal object or player as it enters. The
+        /// ChangeZone pipeline resolves that choice before delivery and carries
+        /// the chosen host here so the battlefield entry and attachment are one
+        /// event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attach_to: Option<AttachTarget>,
         /// Explicit ETB tap-state override carried through the replacement pipeline.
         /// `Unspecified` preserves any non-replacement tapped seed from the originating effect.
         #[serde(default)]
@@ -339,6 +347,7 @@ impl ProposedEvent {
             from,
             to,
             cause,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,

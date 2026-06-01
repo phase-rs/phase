@@ -404,10 +404,10 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             ..
         } => legal_targets
             .iter()
-            .map(|&target_id| {
+            .map(|target| {
                 candidate(
                     GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(target_id)),
+                        target: Some(target.clone()),
                     },
                     TacticalClass::Selection,
                     Some(*player),

@@ -41,10 +41,10 @@ use super::subject;
 use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
-    attach_same_is_true_keywords, collapse_ephemeral_color_choice_mana,
-    contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
-    fold_cast_copy_of_card_defs, mark_uses_tracked_set, parse_effect_clause,
-    parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
+    attach_repeat_process_keywords, attach_same_is_true_keywords,
+    collapse_ephemeral_color_choice_mana, contains_explicit_tracked_set_pronoun,
+    contains_implicit_tracked_set_pronoun, fold_cast_copy_of_card_defs, mark_uses_tracked_set,
+    parse_effect_clause, parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
     publishes_tracked_set_from_resolution, refine_damage_target_remainder,
     rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
     scan_contains_phrase, stamp_delayed_returns, target_filter_controller_ref,
@@ -307,6 +307,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     }
                     SpecialClause::SameIsTrueFor(keywords) => {
                         attach_same_is_true_keywords(&mut defs, keywords);
+                        true
+                    }
+                    SpecialClause::RepeatProcessForKeywords(keywords) => {
+                        attach_repeat_process_keywords(&mut defs, keywords);
                         true
                     }
                 }

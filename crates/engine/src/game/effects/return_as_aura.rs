@@ -37,7 +37,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
-    TargetFilter,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::{CoreType, SubtypeSet};
 use crate::types::events::GameEvent;
@@ -178,7 +178,7 @@ pub fn resolve(
         player: ability.controller,
         source_id: ability.source_id,
         returned_id,
-        legal_targets: candidates,
+        legal_targets: candidates.into_iter().map(TargetRef::Object).collect(),
         pending_effect: Box::new(ability.clone()),
     };
     events.push(GameEvent::EffectResolved {
