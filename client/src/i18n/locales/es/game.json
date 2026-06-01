@@ -29,6 +29,7 @@
     "fromSource": "(de {{source}})",
     "basePT": "(base {{power}}/{{toughness}})",
     "damage": "Daño: {{amount}}",
+    "activateCost": "Activar — {{cost}}",
     "ptDeltaFrom": "{{delta}} de {{source}}",
     "colors": "Colores: {{colors}}",
     "colorless": "Incoloro",

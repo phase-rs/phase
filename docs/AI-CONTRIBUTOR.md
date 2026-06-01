@@ -286,9 +286,8 @@ None.
 <!-- If Step 6 surfaced a failure the LLM could not resolve, replace `None.` above with the failure details. -->
 ```
 
-**Labels:** Applied automatically by the `auto-label-ai-contribution` workflow on PR open/edit/synchronize. Fork PRs cannot self-label, so do not pass `--label` to `gh pr create`.
+**Labels:** The `auto-label-ai-contribution` workflow may apply `needs-maintainer` on PR open/edit/synchronize. Fork PRs cannot self-label, so do not pass `--label` to `gh pr create`.
 
-- `ai-contribution` — applied to any PR with a `card/*` head branch or matching template signature.
 - `needs-maintainer` — added when **any** of:
   - `Track:` is `Non-developer`, or
   - the `## Scope Expansion`, `## Validation Failures`, or `## CI Failures` heading has content other than the literal default `None.`, or
@@ -373,8 +372,8 @@ Steps:
 7. git push to my fork and open a PR with title "Add <Card Name>" (or
    "Partial: <Card Name>" only if validation or CI failures were unresolved).
    Body must follow the template in docs/AI-CONTRIBUTOR.md. Do NOT pass
-   --label flags — the upstream auto-labeler applies ai-contribution and
-   needs-maintainer automatically based on the branch name and body content.
+   --label flags — the upstream auto-labeler may apply needs-maintainer
+   automatically based on the branch name and body content.
 8. Print the PR URL and exit.
 
 Tier gates: identify your model. If you are Standard tier (claude-sonnet-4-6,

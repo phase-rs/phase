@@ -185,6 +185,11 @@ export function formatCost(cost: SerializedCost): string {
     case "Blight": return `Blight ${cost.count ?? 1}`;
     case "CollectEvidence":
       return `Collect evidence ${cost.amount ?? 0}`;
+    case "ReturnToHand": {
+      const count = formatQuantity(cost.count, 1);
+      const noun = quantityIsPlural(cost.count) ? "permanents" : "permanent";
+      return `Return ${count} ${noun}`;
+    }
     case "Composite":
       return (cost.costs ?? []).map(formatCost).join(", ");
     case "OneOf":
@@ -195,8 +200,14 @@ export function formatCost(cost: SerializedCost): string {
 }
 
 export function abilityLabel(ability: SerializedAbility | null | undefined): string {
-  const cost = ability?.cost;
-  return cost ? formatCost(cost) : "0";
+  if (!ability) return "0";
+  if (ability.description) {
+    const colon = ability.description.indexOf(":");
+    const costText = colon > 0 ? ability.description.slice(0, colon).trim() : ability.description;
+    if (costText) return costText;
+  }
+  const cost = ability.cost;
+  return cost ? formatCost(cost as SerializedCost) : "0";
 }
 
 // Maps ManaColor names to MTG mana symbol abbreviations.

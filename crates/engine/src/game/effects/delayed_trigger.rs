@@ -425,6 +425,7 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 origin: Some(Zone::Exile),
                 destination: *destination,
                 target: TargetFilter::TrackedSet { id: real_id },
+                enters_under: None,
                 enter_tapped: false,
             };
         }
@@ -638,6 +639,7 @@ mod tests {
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
+                enters_under: None,
                 enter_tapped: false,
             },
         );
