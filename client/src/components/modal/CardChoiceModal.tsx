@@ -9,6 +9,7 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import type {
+  ExileCostSourceZone,
   GameObject,
   ManaCost,
   ManaType,
@@ -17,6 +18,7 @@ import type {
   OutsideGameSelection,
   TargetFilter,
   WaitingFor,
+  Zone,
 } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { CancelButton, ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
@@ -45,19 +47,10 @@ type OutsideGameChoice = Extract<WaitingFor, { type: "OutsideGameChoice" }>;
 type ChooseFromZoneChoice = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
 type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
 type DrawnThisTurnTopdeckChoice = Extract<WaitingFor, { type: "DrawnThisTurnTopdeckChoice" }>;
-type DiscardToHandSize = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
-type SacrificeForCost = Extract<WaitingFor, { type: "SacrificeForCost" }>;
-type SacrificeForManaAbility = Extract<WaitingFor, { type: "SacrificeForManaAbility" }>;
-type DiscardForManaAbility = Extract<WaitingFor, { type: "DiscardForManaAbility" }>;
-type ExileForManaAbility = Extract<WaitingFor, { type: "ExileForManaAbility" }>;
+type PayCost = Extract<WaitingFor, { type: "PayCost" }>;
 type MultiTargetSelection = Extract<WaitingFor, { type: "MultiTargetSelection" }>;
-type ParadigmCastOffer = Extract<WaitingFor, { type: "ParadigmCastOffer" }>;
 type PayManaAbilityMana = Extract<WaitingFor, { type: "PayManaAbilityMana" }>;
-type ReturnToHandForCost = Extract<WaitingFor, { type: "ReturnToHandForCost" }>;
-type RemoveCounterForCost = Extract<WaitingFor, { type: "RemoveCounterForCost" }>;
 type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
-type BeholdForCost = Extract<WaitingFor, { type: "BeholdForCost" }>;
-type ExileForCost = Extract<WaitingFor, { type: "ExileForCost" }>;
 type CollectEvidenceChoice = Extract<WaitingFor, { type: "CollectEvidenceChoice" }>;
 type HarmonizeTapChoice = Extract<WaitingFor, { type: "HarmonizeTapChoice" }>;
 type PairChoice = Extract<WaitingFor, { type: "PairChoice" }>;
@@ -219,45 +212,27 @@ export function CardChoiceModal() {
     case "DiscardToHandSize":
       if (!canActForWaitingState) return null;
       return <DiscardModal data={waitingFor.data} />;
-    case "DiscardForCost":
+    case "PayCost":
       if (!canActForWaitingState) return null;
-      return <DiscardModal data={waitingFor.data} title={t("cardChoice.discard.titleAdditionalCost")} canCancel />;
-    case "SacrificeForCost":
-      if (!canActForWaitingState) return null;
-      return <SacrificeModal key={waitingFor.data.permanents.join(",")} data={waitingFor.data} />;
-    case "SacrificeForManaAbility":
-      if (!canActForWaitingState) return null;
-      return <SacrificeForManaAbilityModal data={waitingFor.data} />;
-    case "DiscardForManaAbility":
-      if (!canActForWaitingState) return null;
-      return <DiscardModal data={waitingFor.data} title={t("cardChoice.discard.titleManaAbility")} />;
-    case "ExileForManaAbility":
-      if (!canActForWaitingState) return null;
-      return <ExileForManaAbilityModal data={waitingFor.data} />;
+      return <PayCostDispatch data={waitingFor.data} />;
     case "MultiTargetSelection":
       if (!canActForWaitingState) return null;
       return <MultiTargetSelectionModal data={waitingFor.data} />;
-    case "ParadigmCastOffer":
+    case "CastOffer":
       if (!canActForWaitingState) return null;
-      return <ParadigmCastOfferModal data={waitingFor.data} />;
+      if (waitingFor.data.kind.type === "Paradigm") {
+        return <ParadigmCastOfferModal offers={waitingFor.data.kind.offers} />;
+      }
+      return null;
     case "PayManaAbilityMana":
       if (!canActForWaitingState) return null;
       return <PayManaAbilityManaModal data={waitingFor.data} />;
     case "CopyRetarget":
       // Handled by TargetingOverlay + battlefield clicks (ChooseTarget slot-by-slot).
       return null;
-    case "ReturnToHandForCost":
-      if (!canActForWaitingState) return null;
-      return <ReturnToHandModal key={waitingFor.data.permanents.join(",")} data={waitingFor.data} />;
-    case "RemoveCounterForCost":
-      if (!canActForWaitingState) return null;
-      return <RemoveCounterModal key={waitingFor.data.permanents.join(",")} data={waitingFor.data} />;
     case "BlightChoice":
       if (!canActForWaitingState) return null;
       return <BlightModal data={waitingFor.data} />;
-    case "BeholdForCost":
-      if (!canActForWaitingState) return null;
-      return <BeholdModal data={waitingFor.data} />;
     case "CrewVehicle":
       if (!canActForWaitingState) return null;
       return <CrewModal data={waitingFor.data} />;
@@ -267,9 +242,6 @@ export function CardChoiceModal() {
     case "SaddleMount":
       if (!canActForWaitingState) return null;
       return <SaddleModal data={waitingFor.data} />;
-    case "ExileForCost":
-      if (!canActForWaitingState) return null;
-      return <ExileForCostDispatch data={waitingFor.data} />;
     case "CollectEvidenceChoice":
       if (!canActForWaitingState) return null;
       return <CollectEvidenceModal data={waitingFor.data} />;
@@ -1468,14 +1440,18 @@ function DrawnThisTurnTopdeckModal({ data }: { data: DrawnThisTurnTopdeckChoice[
 
 // ── Sacrifice Modal ──────────────────────────────────────────────────────────
 
-function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
+function SacrificeModal({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
+  const isVariable = data.min_count !== data.count;
+  const subtitle = isVariable
+    ? t("cardChoice.effectZone.subtitleSacrificeUpTo", { count: data.count })
+    : t("cardChoice.sacrifice.subtitle", { count: data.count });
   return (
     <PermanentCostModal
       data={data}
-      choices={data.permanents}
+      choices={data.choices}
       title={t("cardChoice.sacrifice.title")}
-      subtitle={t("cardChoice.sacrifice.subtitle", { count: data.count })}
+      subtitle={subtitle}
       label={t("cardChoice.badges.sacrifice")}
       selectedClassName="z-10 ring-2 ring-red-400/80"
       overlayClassName="absolute inset-0 flex items-center justify-center rounded-lg bg-red-500/20"
@@ -1484,7 +1460,7 @@ function SacrificeModal({ data }: { data: SacrificeForCost["data"] }) {
   );
 }
 
-function SacrificeForManaAbilityModal({ data }: { data: SacrificeForManaAbility["data"] }) {
+function SacrificeForManaAbilityModal({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -1521,7 +1497,7 @@ function SacrificeForManaAbilityModal({ data }: { data: SacrificeForManaAbility[
       footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.sacrificeCount", { selected: selected.size, count: data.count })} />}
     >
       <ScrollableCardStrip>
-        {data.permanents.map((id, index) => {
+        {data.choices.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           const isSelected = selected.has(id);
@@ -1560,7 +1536,7 @@ function SacrificeForManaAbilityModal({ data }: { data: SacrificeForManaAbility[
 
 // ── Exile For Mana Ability Modal ──────────────────────────────────────────────
 
-function ExileForManaAbilityModal({ data }: { data: ExileForManaAbility["data"] }) {
+function ExileForManaAbilityModal({ data, zone }: { data: PayCost["data"]; zone: Zone }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -1586,7 +1562,7 @@ function ExileForManaAbilityModal({ data }: { data: ExileForManaAbility["data"] 
   if (!objects) return null;
 
   const isReady = selected.size === data.count;
-  const sourceLabel = t(`cardChoice.exileForManaAbility.sources.${data.zone}`);
+  const sourceLabel = t(`cardChoice.exileForManaAbility.sources.${zone}`);
 
   return (
     <ChoiceOverlay
@@ -1595,7 +1571,7 @@ function ExileForManaAbilityModal({ data }: { data: ExileForManaAbility["data"] 
       footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={t("cardChoice.buttons.exileCount", { selected: selected.size, count: data.count })} />}
     >
       <ScrollableCardStrip>
-        {data.cards.map((id, index) => {
+        {data.choices.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           const isSelected = selected.has(id);
@@ -1694,7 +1670,11 @@ function MultiTargetSelectionModal({ data }: { data: MultiTargetSelection["data"
 
 // ── Paradigm Cast Offer Modal ─────────────────────────────────────────────────
 
-function ParadigmCastOfferModal({ data }: { data: ParadigmCastOffer["data"] }) {
+function ParadigmCastOfferModal({
+  offers,
+}: {
+  offers: ObjectId[];
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
@@ -1724,7 +1704,7 @@ function ParadigmCastOfferModal({ data }: { data: ParadigmCastOffer["data"] }) {
       }
     >
       <ScrollableCardStrip>
-        {data.offers.map((id, index) => {
+        {offers.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
           return (
@@ -1749,12 +1729,12 @@ function ParadigmCastOfferModal({ data }: { data: ParadigmCastOffer["data"] }) {
 
 // ── Pay Mana Ability Mana Modal ───────────────────────────────────────────────
 
-function ReturnToHandModal({ data }: { data: ReturnToHandForCost["data"] }) {
+function ReturnToHandModal({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
   return (
     <PermanentCostModal
       data={data}
-      choices={data.permanents}
+      choices={data.choices}
       title={t("cardChoice.returnToHand.title")}
       subtitle={t("cardChoice.returnToHand.subtitle", { count: data.count })}
       label={t("cardChoice.badges.return")}
@@ -1765,12 +1745,12 @@ function ReturnToHandModal({ data }: { data: ReturnToHandForCost["data"] }) {
   );
 }
 
-function RemoveCounterModal({ data }: { data: RemoveCounterForCost["data"] }) {
+function RemoveCounterModal({ data }: { data: PayCost["data"] }) {
   const { t } = useTranslation("game");
   return (
     <PermanentCostModal
       data={data}
-      choices={data.permanents}
+      choices={data.choices}
       title={t("cardChoice.removeCounter.title")}
       subtitle={t("cardChoice.removeCounter.subtitle")}
       label={t("cardChoice.removeCounter.label")}
@@ -1791,12 +1771,7 @@ function PermanentCostModal({
   overlayClassName,
   badgeClassName,
 }: {
-  data:
-    | SacrificeForCost["data"]
-    | ReturnToHandForCost["data"]
-    | RemoveCounterForCost["data"]
-    | ExileForManaAbility["data"]
-    | SacrificeForManaAbility["data"];
+  data: PayCost["data"];
   choices: ObjectId[];
   title: string;
   subtitle: string;
@@ -2460,11 +2435,17 @@ function ExileForCostModal({
   );
 }
 
-function ExileForCostDispatch({ data }: { data: ExileForCost["data"] }) {
+function ExileForCostDispatch({
+  data,
+  zone,
+}: {
+  data: PayCost["data"];
+  zone: ExileCostSourceZone;
+}) {
   const { t } = useTranslation("game");
   let title: string;
   let sourceLabel: string;
-  switch (data.zone) {
+  switch (zone) {
     case "Hand":
       title = t("cardChoice.exileForCost.titleAlternative");
       sourceLabel = t("cardChoice.exileForCost.sourceHand");
@@ -2476,7 +2457,7 @@ function ExileForCostDispatch({ data }: { data: ExileForCost["data"] }) {
   }
   return (
     <ExileForCostModal
-      cards={data.cards}
+      cards={data.choices}
       count={data.count}
       title={title}
       subtitle={t("cardChoice.exileForCost.subtitle", { count: data.count, source: sourceLabel })}
@@ -2485,9 +2466,15 @@ function ExileForCostDispatch({ data }: { data: ExileForCost["data"] }) {
   );
 }
 
-function BeholdModal({ data }: { data: BeholdForCost["data"] }) {
+function BeholdModal({
+  data,
+  action,
+}: {
+  data: PayCost["data"];
+  action: "ChooseOrReveal" | "ExileChosen";
+}) {
   const { t } = useTranslation("game");
-  const exilesChosen = data.action === "ExileChosen";
+  const exilesChosen = action === "ExileChosen";
   return (
     <ExileForCostModal
       cards={data.choices}
@@ -2497,6 +2484,49 @@ function BeholdModal({ data }: { data: BeholdForCost["data"] }) {
       confirmLabel={exilesChosen ? t("cardChoice.behold.labelExile") : t("cardChoice.behold.labelBehold")}
     />
   );
+}
+
+// CR 118.3 + CR 601.2b + CR 605.3b: single dispatch for the unified `PayCost`
+// state — branch on `kind.type` to the matching cost-selection modal. The
+// `key` forces a fresh selection set when the eligible-object list changes.
+function PayCostDispatch({ data }: { data: PayCost["data"] }) {
+  const { t } = useTranslation("game");
+  const isManaAbility = data.resume.type === "ManaAbility";
+  const choicesKey = data.choices.join(",");
+  switch (data.kind.type) {
+    case "Discard":
+      return (
+        <DiscardModal
+          data={{ ...data, cards: data.choices }}
+          title={
+            isManaAbility
+              ? t("cardChoice.discard.titleManaAbility")
+              : t("cardChoice.discard.titleAdditionalCost")
+          }
+          canCancel={!isManaAbility}
+        />
+      );
+    case "Sacrifice":
+      return isManaAbility ? (
+        <SacrificeForManaAbilityModal data={data} />
+      ) : (
+        <SacrificeModal key={choicesKey} data={data} />
+      );
+    case "ReturnToHand":
+      return <ReturnToHandModal key={choicesKey} data={data} />;
+    case "RemoveCounter":
+      return <RemoveCounterModal key={choicesKey} data={data} />;
+    case "TapCreatures":
+      // Tap-creature costs are resolved by battlefield clicks + TargetingOverlay,
+      // not a modal (mirrors the pre-collapse behavior).
+      return null;
+    case "Behold":
+      return <BeholdModal data={data} action={data.kind.action} />;
+    case "ExileFromZone":
+      return <ExileForCostDispatch data={data} zone={data.kind.zone} />;
+    case "ExileFromManaZone":
+      return <ExileForManaAbilityModal data={data} zone={data.kind.zone} />;
+  }
 }
 
 function manaValueOfShard(shard: string): number {
@@ -2627,7 +2657,7 @@ function DiscardModal({
   title,
   canCancel = false,
 }: {
-  data: (DiscardToHandSize["data"] | DiscardForManaAbility["data"]) & {
+  data: { cards: ObjectId[]; count: number } & {
     up_to?: boolean;
     unless_filter?: TargetFilter;
   };

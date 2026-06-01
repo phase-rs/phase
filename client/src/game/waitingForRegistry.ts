@@ -44,31 +44,25 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "DefilerPayment",
     "ModeChoice",
     "AbilityModeChoice",
-    "AdventureCastChoice",
     "ModalFaceChoice",
     "AlternativeCastChoice",
     "CastingVariantChoice",
     "ChoosePermanentTypeSlot",
-    "DiscardForCost",
-    "SacrificeForCost",
-    "ReturnToHandForCost",
-    "RemoveCounterForCost",
+    // CR 118.3 + CR 601.2b + CR 605.3b: unified cost-payment selection
+    // (replaces the 11 old per-cost variants; dispatches on `kind`).
+    "PayCost",
     "BlightChoice",
-    "BeholdForCost",
-    "TapCreaturesForSpellCost",
-    "ExileForCost",
     "HarmonizeTapChoice",
     "CollectEvidenceChoice",
     // Multi-step target / offer choices rendered by CardChoiceModal.
     "MultiTargetSelection", // verified rendered: CardChoiceModal.tsx:216 case → :218 → MultiTargetSelectionModal (:1448)
-    "ParadigmCastOffer", // verified rendered: CardChoiceModal.tsx:219 case → :221 → ParadigmCastOfferModal (:1515)
+    // CR 715.3a + CR 702.94a + CR 702.35a + CR 702.85a + CR 701.57a + CR 702.xxx:
+    // unified special-cast offer (Adventure / Miracle / Madness / Cascade /
+    // Discover / Paradigm); dispatches on `data.kind.type`.
+    "CastOffer",
     // Note: `PopulateChoice` is intentionally NOT registered — it has no
     // renderer anywhere in client/src/, so the safety-net modal must fire for it.
-    // Mana abilities
-    "TapCreaturesForManaAbility",
-    "DiscardForManaAbility",
-    "ExileForManaAbility",
-    "SacrificeForManaAbility",
+    // Mana abilities (cost-selection prompts now route through PayCost above).
     "PayManaAbilityMana",
     "ChooseManaColor",
     // Combat
@@ -113,8 +107,6 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "DamageSourceChoice",
     "DiscardToHandSize",
     "MiracleReveal",
-    "MiracleCastOffer",
-    "MadnessCastOffer",
     "TributeChoice",
     "PairChoice",
     "OpponentMayChoice",
@@ -124,10 +116,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "WardDiscardChoice",
     "WardSacrificeChoice",
     "UnlessBounceChoice",
-    "DiscoverChoice",
     "RevealUntilKeptChoice",
     "RepeatDecision",
-    "CascadeChoice",
     "VoteChoice",
     "SeparatePilesPartition",
     "SeparatePilesChoice",

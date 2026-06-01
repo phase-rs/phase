@@ -263,7 +263,9 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
             // unrecognized (CR 603.2b fallback). Stay safe via unclassified.
             None => return (keys, true),
         },
-        TriggerMode::PhaseIn | TriggerMode::PhaseOut | TriggerMode::PhaseOutAll => {
+        // CR 702.26c: Phasing triggers fire when a permanent phases in.
+        TriggerMode::PhaseIn => push(TriggerEventKey::PhaseIn),
+        TriggerMode::PhaseOut | TriggerMode::PhaseOutAll => {
             return (keys, true);
         }
         TriggerMode::TurnBegin => push(TriggerEventKey::TurnStarted),
@@ -509,8 +511,9 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
             push(TriggerEventKey::CardsDrawn);
         }
         GameEvent::PermanentUntapped { .. } => push(TriggerEventKey::Untaps),
+        // CR 702.26c: Phasing triggers fire when a permanent phases in.
+        GameEvent::PermanentPhasedIn { .. } => push(TriggerEventKey::PhaseIn),
         GameEvent::PermanentPhasedOut { .. }
-        | GameEvent::PermanentPhasedIn { .. }
         | GameEvent::PlayerPhasedOut { .. }
         | GameEvent::PlayerPhasedIn { .. } => {}
         GameEvent::LandPlayed { .. } => {}
@@ -966,5 +969,22 @@ mod tests {
         assert!(keys.contains(&TriggerEventKey::BeginningOfPhase(
             crate::types::phase::Phase::Upkeep
         )));
+    }
+
+    #[test]
+    fn phase_in_uses_narrow_trigger_key_for_def_and_event() {
+        let def = TriggerDefinition::new(TriggerMode::PhaseIn);
+        let (keys, route) = keys_from_trigger_def(&def);
+        assert!(keys.contains(&TriggerEventKey::PhaseIn));
+        assert!(!route);
+
+        let state = GameState::new_two_player(42);
+        let event_keys = keys_from_event(
+            &GameEvent::PermanentPhasedIn {
+                object_id: crate::types::identifiers::ObjectId(1),
+            },
+            &state,
+        );
+        assert!(event_keys.contains(&TriggerEventKey::PhaseIn));
     }
 }

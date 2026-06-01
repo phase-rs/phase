@@ -33,6 +33,12 @@ interface PermanentCardProps {
   objectId: number;
   attachmentsLiftedByAncestor?: boolean;
   onPrimaryClickOverride?: () => void;
+  /** When this card is the visible representative of a collapsed identical-permanent
+   *  group (see GroupedPermanent collapsed mode), the full list of object ids it
+   *  stands in for. Rendered as `data-grouped-ids` so DOM-driven animations
+   *  (card slam, position lookup) can resolve a non-rendered swarm member to this
+   *  visible card instead of silently no-op'ing. */
+  coveredIds?: number[];
 }
 
 const EXILE_GHOST_OFFSET_PX = 20;
@@ -101,7 +107,7 @@ function objectIdFromRelatedTarget(target: EventTarget | null): number | null {
   return Number.isFinite(objectId) ? objectId : null;
 }
 
-export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride }: PermanentCardProps) {
+export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false, onPrimaryClickOverride, coveredIds }: PermanentCardProps) {
   const { t } = useTranslation("game");
   const isMobile = useIsMobile();
   const playerId = usePlayerId();
@@ -187,7 +193,9 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   const canTapForMana = manaTappableObjectIds.has(objectId);
   const isActivatable = hasActivatableAbility || canTapForMana;
   const tapCreatureCostChoice = useGameStore((s) =>
-    (s.waitingFor?.type === "TapCreaturesForManaAbility" || s.waitingFor?.type === "TapCreaturesForSpellCost") && s.waitingFor.data.player === playerId
+    s.waitingFor?.type === "PayCost"
+    && s.waitingFor.data.kind.type === "TapCreatures"
+    && s.waitingFor.data.player === playerId
       ? s.waitingFor.data
       : null,
   );
@@ -365,8 +373,8 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     // to activate Equip and reattach it. Stop the bubble so the attachment's
     // own intent (target / activate / select) wins cleanly.
     if (obj.attached_to !== null) e.stopPropagation();
-    // TapCreaturesForManaAbility is mid-cost resolution — check before combat mode
-    // so clicks land even when DeclareAttackers combat mode is active.
+    // A PayCost TapCreatures prompt is mid-cost resolution — check before combat
+    // mode so clicks land even when DeclareAttackers combat mode is active.
     if (isSelectableForManaCost && tapCreatureCostChoice) {
       if (
         isSelectedForManaCost
@@ -458,6 +466,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     <motion.div
       ref={cardRef}
       data-object-id={objectId}
+      data-grouped-ids={coveredIds && coveredIds.length > 1 ? coveredIds.join(" ") : undefined}
       data-card-hover
       layoutId={`permanent-${objectId}`}
       className="relative inline-flex w-fit cursor-pointer overflow-visible rounded-lg self-end select-none"

@@ -166,7 +166,7 @@ fn create_gift_token(
         obj.reset_for_battlefield_entry(state.turn_number);
     }
 
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     crate::game::restrictions::record_battlefield_entry(state, obj_id);
     crate::game::restrictions::record_token_created(state, obj_id);
 

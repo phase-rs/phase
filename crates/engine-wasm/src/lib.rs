@@ -518,6 +518,17 @@ pub fn initialize_game(
 
     let mut state = GameState::new(format_config, count, seed);
     state.debug_mode = true;
+    // Sandbox capability: in a P2P-host (WASM-authoritative) game, the
+    // `submit_action` gate checks `debug_permitted`, mirroring server-core's
+    // WebSocket gate. server-core seeds every seat when `allow_debug_actions`
+    // is set (session.rs); the WASM host must do the same or sandbox Debug
+    // actions are rejected for everyone — the host included. Every seat is
+    // permitted by default; the host's grant/revoke flow still narrows it.
+    if state.format_config.allow_debug_actions {
+        for i in 0..count {
+            state.debug_permitted.insert(PlayerId(i));
+        }
+    }
     state.match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
         serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
             .unwrap_or_else(|_| MatchConfig::default())
@@ -799,7 +810,7 @@ fn handle_debug_create_card(
         );
         let obj = state.objects.get_mut(&obj_id).expect("just created");
         engine::game::printed_cards::apply_card_face_to_object(obj, &face);
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
 
         // Hydrate `back_face` for dual-faced spawns (MDFC, Transform, Adventure,
         // Omen, Meld, Prepare). `apply_card_face_to_object` only writes the named
@@ -879,8 +890,11 @@ fn handle_debug_create_card(
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
     match with_state(|state| {
+        // Single-player WASM: the human is always PlayerId(0). Scope web-slinging
+        // costs to the human's own hand even on this raw/unfiltered path.
         to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
             state,
+            Some(PlayerId(0)),
         ))
     }) {
         Ok(val) => val,
@@ -898,6 +912,7 @@ pub fn get_filtered_game_state(viewer: u8) -> JsValue {
         let filtered = filter_state_for_viewer(state, PlayerId(viewer));
         to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
             &filtered,
+            Some(PlayerId(viewer)),
         ))
     }) {
         Ok(val) => val,
@@ -1218,6 +1233,11 @@ struct BatchResolveResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     log_entries: Vec<engine::types::log::GameLogEntry>,
     items_resolved: u32,
+    /// Stack depth at this chunk's entry. The frontend latches the FIRST
+    /// chunk's `total` as the storm-origin denominator for "resolving X of Y"
+    /// progress (this per-chunk value shrinks across chunks, so only the first
+    /// is the true origin total). Display-only; carries no rules meaning.
+    total: u32,
 }
 
 #[derive(serde::Deserialize)]
@@ -1342,6 +1362,7 @@ pub fn resolve_all(
             waiting_for: state.waiting_for.clone(),
             log_entries: all_log_entries,
             items_resolved,
+            total: initial_stack_len as u32,
         }))
     })?
 }

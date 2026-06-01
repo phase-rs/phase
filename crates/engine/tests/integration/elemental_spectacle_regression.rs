@@ -2,9 +2,7 @@ use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::zones::create_object;
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{
-    Effect, GainLifePlayer, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
-};
+use engine::types::ability::{Effect, QuantityExpr, QuantityRef, TargetFilter, TypeFilter};
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
@@ -80,7 +78,7 @@ fn elemental_spectacle_counts_distinct_controlled_permanent_colors_for_tokens() 
             amount: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount { .. },
             },
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         }
     ));
 

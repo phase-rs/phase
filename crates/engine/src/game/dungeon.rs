@@ -227,7 +227,7 @@ pub fn room_effects(
             lose.sub_ability = Some(Box::new(simple(
                 Effect::GainLife {
                     amount: fixed(1),
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
                 source_id,
                 controller,
@@ -268,7 +268,7 @@ pub fn room_effects(
             simple(
                 Effect::GainLife {
                     amount: fixed(1),
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
                 source_id,
                 controller,
@@ -967,6 +967,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             target_player: None,
             selection_constraint: SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![crate::types::zones::Zone::Library],
         },
         source_id,
         controller,

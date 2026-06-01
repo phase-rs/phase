@@ -415,7 +415,24 @@ export class P2PDraftHost {
         break;
       }
       case "draft_match_result": {
-        // T-57-06: validate matchId exists before processing
+        const hostView = await this.adapter.getViewForSeat(0);
+        const pairing = hostView.pairings.find(
+          (p) => p.match_id === msg.matchId && p.round === hostView.current_round,
+        );
+        if (!pairing) {
+          this.guestSessions.get(seat)?.send({
+            type: "draft_error",
+            reason: "Unknown match",
+          });
+          return;
+        }
+        if (pairing.seat_a !== seat && pairing.seat_b !== seat) {
+          this.guestSessions.get(seat)?.send({
+            type: "draft_error",
+            reason: "Not a participant in this match",
+          });
+          return;
+        }
         await this.reportMatchResult(msg.matchId, msg.winnerSeat);
         break;
       }

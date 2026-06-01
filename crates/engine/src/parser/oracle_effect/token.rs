@@ -386,7 +386,15 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     if let Some(count_expression) = extract_token_count_expression(suffix) {
         if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "count")
         {
+            // CR 706.2: "the result" (die roll / coin flip) flows through
+            // `EventContextAmount`, consistent with `oracle_quantity.rs:1176`.
+            // `parse_event_context_quantity` only fires when `parse_cda_quantity`
+            // returns None and itself returns None for unrecognized phrases, so
+            // it strictly widens coverage without disturbing existing matches.
             count = crate::parser::oracle_quantity::parse_cda_quantity(&count_expression)
+                .or_else(|| {
+                    crate::parser::oracle_quantity::parse_event_context_quantity(&count_expression)
+                })
                 .unwrap_or(QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: count_expression,
@@ -1074,6 +1082,52 @@ mod tests {
         );
     }
 
+    /// Issue #1424 — The Scarab God activated: 4/4 black Zombie copy exceptions.
+    /// CR 707.9d: with no "in addition to its other types" carve-out, color and
+    /// creature subtypes REPLACE the copied values — `SetColor` (not `AddColor`)
+    /// and `RemoveAllSubtypes { Creature }` + `AddType { Creature }`.
+    #[test]
+    fn scarab_god_copy_token_carries_pt_color_and_zombie_modifications() {
+        let effect = try_parse_token(
+            "create a token that's a copy of it, except it's a 4/4 black zombie",
+            "Create a token that's a copy of it, except it's a 4/4 black Zombie.",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert!(additional_modifications.contains(&ContinuousModification::SetPower { value: 4 }));
+        assert!(
+            additional_modifications.contains(&ContinuousModification::SetToughness { value: 4 })
+        );
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetColor { colors }
+                if colors == &vec![ManaColor::Black]
+        )));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature
+            }
+        )));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            }
+        )));
+        assert!(additional_modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddSubtype { subtype } if subtype == "Zombie"
+        )));
+    }
+
     #[test]
     fn copy_token_half_pt_exception_emits_dynamic_modifications() {
         let effect = try_parse_token(
@@ -1396,6 +1450,30 @@ mod tests {
             }
             other => panic!("Expected Token effect, got {:?}", other),
         }
+    }
+
+    /// CR 706.2: "create a number of Treasure tokens equal to the result"
+    /// (Bucknard's Everfull Purse). "the result" of the die roll flows through
+    /// `EventContextAmount`, not a `Variable("count")` fallback. Regression for
+    /// the count→0 bug where the count was a stringly-typed Variable.
+    #[test]
+    fn token_count_equal_to_the_result_is_event_context_amount() {
+        let effect = try_parse_token(
+            "create a number of treasure tokens equal to the result",
+            "Create a number of Treasure tokens equal to the result",
+            &mut ParseContext::default(),
+        )
+        .expect("expected Token effect");
+        let Effect::Token { count, .. } = effect else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+            "die-roll result count must resolve to EventContextAmount, not Variable"
+        );
     }
 
     #[test]

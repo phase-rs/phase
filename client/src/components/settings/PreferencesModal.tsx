@@ -6,7 +6,12 @@ import { audioManager } from "../../audio/AudioManager.ts";
 import { cacheThemeManifest, clearThemeCache } from "../../audio/audioCache.ts";
 import { BUILT_IN_THEMES, findManifest, validateThemeManifest } from "../../audio/themeRegistry.ts";
 import { PLANESWALKER_THEME } from "../../audio/planeswalkerTheme.ts";
-import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import {
+  CARD_PREVIEW_HOVER_DELAY_MAX,
+  CARD_PREVIEW_HOVER_DELAY_MIN,
+  CARD_PREVIEW_HOVER_DELAY_STEP,
+  usePreferencesStore,
+} from "../../stores/preferencesStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import {
   ANIMATION_SPEED_DEFAULT,
@@ -23,6 +28,7 @@ import {
 } from "../../animation/types.ts";
 import type {
   ArtChainEntry,
+  CardPreviewMode,
   CardSizePreference,
   LogDefaultState,
 } from "../../stores/preferencesStore.ts";
@@ -56,6 +62,7 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
 ];
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
+const CARD_PREVIEW_MODES: CardPreviewMode[] = ["follow", "side", "shift"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
 
@@ -165,6 +172,10 @@ export function PreferencesModal({
   const setShowKeywordStrip = usePreferencesStore((s) => s.setShowKeywordStrip);
   const battlefieldPeekOnHover = usePreferencesStore((s) => s.battlefieldPeekOnHover) ?? true;
   const setBattlefieldPeekOnHover = usePreferencesStore((s) => s.setBattlefieldPeekOnHover);
+  const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode) ?? "follow";
+  const setCardPreviewMode = usePreferencesStore((s) => s.setCardPreviewMode);
+  const cardPreviewHoverDelayMs = usePreferencesStore((s) => s.cardPreviewHoverDelayMs) ?? 0;
+  const setCardPreviewHoverDelayMs = usePreferencesStore((s) => s.setCardPreviewHoverDelayMs);
   const artChain = usePreferencesStore((s) => s.artChain);
   const addArtChainEntry = usePreferencesStore((s) => s.addArtChainEntry);
   const removeArtChainEntry = usePreferencesStore((s) => s.removeArtChainEntry);
@@ -383,6 +394,46 @@ export function PreferencesModal({
                       <span className="text-sm text-slate-200">{t("visual.showOpponentBoard")}</span>
                     </label>
                   </SettingGroup>
+
+                  <SettingGroup label={t("visual.cardPreview")}>
+                    <SegmentedControl
+                      options={CARD_PREVIEW_MODES}
+                      value={cardPreviewMode}
+                      onChange={setCardPreviewMode}
+                      renderLabel={(opt) => t(`visual.cardPreviewOptions.${opt}`)}
+                    />
+                    <p className="mt-1.5 text-xs text-slate-400">
+                      {t(`visual.cardPreviewHint.${cardPreviewMode}`)}
+                    </p>
+                  </SettingGroup>
+
+                  {/* Hover latency only applies to the hover-driven modes; the
+                      "shift" bind-key mode is keypress-triggered, so the control
+                      is mutually exclusive with it and hidden in that mode. */}
+                  {cardPreviewMode !== "shift" && (
+                    <SettingGroup label={t("visual.cardPreviewDelay")}>
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                        <input
+                          type="range"
+                          min={CARD_PREVIEW_HOVER_DELAY_MIN}
+                          max={CARD_PREVIEW_HOVER_DELAY_MAX}
+                          step={CARD_PREVIEW_HOVER_DELAY_STEP}
+                          value={cardPreviewHoverDelayMs}
+                          onChange={(e) => setCardPreviewHoverDelayMs(Number(e.target.value))}
+                          aria-label={t("visual.cardPreviewDelay")}
+                          className="flex-1 accent-cyan-500"
+                        />
+                        <span className="font-mono text-xs tabular-nums text-slate-400 sm:w-20 sm:text-right">
+                          {cardPreviewHoverDelayMs === 0
+                            ? t("visual.cardPreviewDelayInstant")
+                            : t("visual.cardPreviewDelayValue", { ms: cardPreviewHoverDelayMs })}
+                        </span>
+                      </div>
+                      <p className="mt-1.5 text-xs text-slate-400">
+                        {t("visual.cardPreviewDelayHint")}
+                      </p>
+                    </SettingGroup>
+                  )}
 
                   <SettingGroup label={t("visual.cardArtPreferences")}>
                     <ArtChainEditor

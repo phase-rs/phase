@@ -33,7 +33,14 @@ pub fn choose_attackers_with_targets(
     state: &GameState,
     player: PlayerId,
 ) -> Vec<(ObjectId, AttackTarget)> {
-    choose_attackers_with_targets_with_profile(state, player, &AiProfile::default(), false, None)
+    choose_attackers_with_targets_with_profile(
+        state,
+        player,
+        &AiProfile::default(),
+        false,
+        None,
+        None,
+    )
 }
 
 pub fn choose_attackers_with_targets_with_profile(
@@ -42,6 +49,7 @@ pub fn choose_attackers_with_targets_with_profile(
     profile: &AiProfile,
     combat_lookahead: bool,
     valid_attacker_ids: Option<&[ObjectId]>,
+    valid_attack_targets: Option<&[AttackTarget]>,
 ) -> Vec<(ObjectId, AttackTarget)> {
     let opponents = players::opponents(state, player);
     if opponents.is_empty() {
@@ -116,29 +124,26 @@ pub fn choose_attackers_with_targets_with_profile(
 
         let is_unblockable = has_cant_be_blocked(state, obj);
         let has_lifelink = obj.has_keyword(&Keyword::Lifelink);
+        let is_commander = obj.is_commander;
 
         if is_unblockable || opponent_blockers.is_empty() {
             attacking_ids.push(id);
             continue;
         }
 
-        let best_blocker_value = opponent_blockers
-            .iter()
-            .filter(|&&bid| can_block_pair(state, bid, id))
-            .map(|&bid| (bid, evaluate_creature(state, bid)))
-            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        match best_blocker_value {
+        // CR 509.1a: Evaluate the attack against the defender's *best* block, not
+        // its cheapest creature. Assuming the defender chump-trades with its
+        // weakest body let the AI swing doomed creatures into a "favorable trade"
+        // the defender would never offer — it instead kills the attacker for free
+        // with a first-striker or a larger body (gamestate1: a 1/1 animated land
+        // sent into a 2/1 first strike).
+        match defender_best_block(state, id, my_value, &opponent_blockers) {
             None => attacking_ids.push(id),
-            Some((blocker_id, blocker_value)) => {
-                // CR 702.7b + CR 702.4b + CR 702.2c: Use keyword-aware combat
-                // evaluation (first strike, double strike, deathtouch) instead of
-                // raw P/T comparison.
-                let blocker_obj = state.objects.get(&blocker_id).unwrap();
-                let (blocker_kills_attacker, blocker_survives) =
-                    evaluate_block_outcome(blocker_obj, obj);
-                let kills_blocker = !blocker_survives;
-                let attacker_survives = !blocker_kills_attacker;
+            Some(DefenderBlock {
+                blocker_value,
+                kills_blocker,
+                attacker_survives,
+            }) => {
                 let free_damage = kills_blocker && attacker_survives;
                 let favorable_trade = kills_blocker && my_value <= blocker_value;
                 if should_attack_given_objective(
@@ -147,7 +152,8 @@ pub fn choose_attackers_with_targets_with_profile(
                     favorable_trade,
                     has_lifelink,
                     my_power,
-                    profile,
+                    attacker_survives,
+                    is_commander,
                 ) {
                     attacking_ids.push(id);
                 }
@@ -166,21 +172,44 @@ pub fn choose_attackers_with_targets_with_profile(
             CombatObjective::PreserveAdvantage | CombatObjective::Race
         )
     {
-        let mut valued: Vec<(ObjectId, f64)> = candidates
+        // CR 903.8: exclude the commander from the desperation alpha-strike for
+        // the same reason the per-creature gate does — don't trade it away.
+        // Alpha-strike only fires under PreserveAdvantage|Race when the per-loop
+        // gate rejected every candidate, so any commander here was a
+        // `!free_damage` rejection: `is_commander` is equivalent to the loop's
+        // `is_commander && !free_damage && objective != PushLethal`. Filter
+        // BEFORE the cost/benefit math so unblocked_power/worst_loss_value match
+        // the actual swing set. (A goaded commander is re-added by the
+        // must-attack union below, which runs after this block.)
+        let alpha_candidates: Vec<ObjectId> = candidates
             .iter()
-            .map(|&id| (id, evaluate_creature(state, id)))
+            .copied()
+            .filter(|&id| {
+                !state
+                    .objects
+                    .get(&id)
+                    .map(|o| o.is_commander)
+                    .unwrap_or(false)
+            })
             .collect();
-        valued.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        let blocked_count = opponent_blockers.len();
-        let unblocked_power: i32 = valued[blocked_count..]
-            .iter()
-            .filter_map(|&(id, _)| state.objects.get(&id)?.power)
-            .sum();
-        let worst_loss_value: f64 = valued[..blocked_count].iter().map(|&(_, v)| v).sum();
+        if alpha_candidates.len() > opponent_blockers.len() {
+            let mut valued: Vec<(ObjectId, f64)> = alpha_candidates
+                .iter()
+                .map(|&id| (id, evaluate_creature(state, id)))
+                .collect();
+            valued.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        if unblocked_power as f64 > worst_loss_value {
-            attacking_ids = candidates.clone();
+            let blocked_count = opponent_blockers.len();
+            let unblocked_power: i32 = valued[blocked_count..]
+                .iter()
+                .filter_map(|&(id, _)| state.objects.get(&id)?.power)
+                .sum();
+            let worst_loss_value: f64 = valued[..blocked_count].iter().map(|&(_, v)| v).sum();
+
+            if unblocked_power as f64 > worst_loss_value {
+                attacking_ids = alpha_candidates;
+            }
         }
     }
 
@@ -263,14 +292,115 @@ pub fn choose_attackers_with_targets_with_profile(
         }
     }
 
-    // Single opponent: all attackers go to the same target
+    // Single opponent: attackers go to the player, except a "kill it or ignore
+    // it" planeswalker redirect (see redirect_attackers_to_planeswalker).
     if opponents.len() == 1 {
-        let target = AttackTarget::Player(opponents[0]);
-        return attacking_ids.into_iter().map(|id| (id, target)).collect();
+        let opp = opponents[0];
+        let opponent_life = state.players[opp.0 as usize].life;
+        return redirect_attackers_to_planeswalker(
+            state,
+            &attacking_ids,
+            valid_attack_targets,
+            objective,
+            opp,
+            opponent_life,
+        );
     }
 
-    // Multi-opponent: assign attack targets
+    // Multi-opponent: assign attack targets (planeswalker redirect deferred).
     assign_attack_targets(state, player, &opponents, attacking_ids)
+}
+
+/// Single-opponent planeswalker redirect (CR 508.1: legality of attacking a
+/// planeswalker is decided by the engine, which surfaces every legal target in
+/// `valid_attack_targets` — this only *chooses* among them).
+///
+/// Policy: when not pushing lethal and the full swing isn't near-lethal at the
+/// face, redirect the *fewest large* attackers needed to KILL the
+/// highest-loyalty opponent planeswalker (largest-power-first), provided at
+/// least one attacker still hits the player. Otherwise every attacker goes to
+/// the player. "Kill it or ignore it" — never dribble partial loyalty damage,
+/// never empty the face, never dilute a lethal race. Loyalty is a rough
+/// entrenchment proxy, not a true threat score (deferred refinement).
+fn redirect_attackers_to_planeswalker(
+    state: &GameState,
+    attacking_ids: &[ObjectId],
+    valid_attack_targets: Option<&[AttackTarget]>,
+    objective: CombatObjective,
+    opponent: PlayerId,
+    opponent_life: i32,
+) -> Vec<(ObjectId, AttackTarget)> {
+    let player_target = AttackTarget::Player(opponent);
+    let all_at_player = || -> Vec<(ObjectId, AttackTarget)> {
+        attacking_ids
+            .iter()
+            .map(|&id| (id, player_target))
+            .collect()
+    };
+
+    // Don't dilute a lethal / near-lethal swing at the face.
+    if objective == CombatObjective::PushLethal {
+        return all_at_player();
+    }
+    let total_power: i32 = attacking_ids
+        .iter()
+        .filter_map(|&id| state.objects.get(&id)?.power)
+        .sum();
+    if total_power >= opponent_life {
+        return all_at_player();
+    }
+
+    // Highest-loyalty attackable opponent planeswalker from the engine's list.
+    let Some(targets) = valid_attack_targets else {
+        return all_at_player();
+    };
+    let best_pw = targets
+        .iter()
+        .filter_map(|t| match t {
+            AttackTarget::Planeswalker(id) => {
+                let loyalty = state.objects.get(id)?.loyalty.unwrap_or(0);
+                (loyalty > 0).then_some((*id, loyalty as i32))
+            }
+            _ => None,
+        })
+        .max_by_key(|&(_, loyalty)| loyalty);
+    let Some((pw_id, loyalty)) = best_pw else {
+        return all_at_player();
+    };
+
+    // Largest-power-first: the fewest big attackers that sum to >= loyalty.
+    let mut by_power: Vec<(ObjectId, i32)> = attacking_ids
+        .iter()
+        .filter_map(|&id| Some((id, state.objects.get(&id)?.power.unwrap_or(0))))
+        .collect();
+    by_power.sort_by_key(|b| std::cmp::Reverse(b.1));
+
+    let mut redirected: Vec<ObjectId> = Vec::new();
+    let mut acc: i32 = 0;
+    for (id, power) in &by_power {
+        if acc >= loyalty {
+            break;
+        }
+        redirected.push(*id);
+        acc += power;
+    }
+
+    // Kill-it-or-ignore-it: bail if we can't kill it or doing so empties the face.
+    if acc < loyalty || redirected.len() == attacking_ids.len() {
+        return all_at_player();
+    }
+
+    let pw_target = AttackTarget::Planeswalker(pw_id);
+    attacking_ids
+        .iter()
+        .map(|&id| {
+            if redirected.contains(&id) {
+                (id, pw_target)
+            } else {
+                (id, player_target)
+            }
+        })
+        .collect()
 }
 
 fn preferred_attack_opponent(
@@ -1015,11 +1145,27 @@ fn should_attack_given_objective(
     favorable_trade: bool,
     has_lifelink: bool,
     attacker_power: i32,
-    _profile: &AiProfile,
+    attacker_survives: bool,
+    is_commander: bool,
 ) -> bool {
-    // Lifelink creates a life swing: opponent loses N, you gain N = 2N effective swing.
-    // This makes marginal attacks worthwhile, especially while racing.
-    let lifelink_bonus = has_lifelink && attacker_power > 0;
+    // CR 903.8: a commander recast from the command zone costs an extra {2} per
+    // prior cast (commander tax), and trading it away surrenders the player's
+    // most valuable permanent. Don't trade the commander in combat — only swing
+    // it into a block when it survives (free_damage) or when pushing lethal.
+    // Unblockable / no-blocker commander swings are handled by the earlier
+    // branch (before this function is reached), so this only suppresses trades.
+    if is_commander && !free_damage && objective != CombatObjective::PushLethal {
+        return false;
+    }
+    // CR 702.15b: lifelink gains life whenever the creature *deals* combat
+    // damage — including a value-unfavorable simultaneous trade, and a
+    // first-strike pinger that then dies. So life IS still gained on a bad
+    // trade; this is a VALUE decision, not a rules claim: don't let the lifelink
+    // swing justify throwing the creature away for nothing (it dies, the blocker
+    // lives, no kill). Pursue the swing only when the attack is otherwise
+    // non-losing — free damage, a favorable trade, or the attacker survives.
+    let lifelink_bonus =
+        has_lifelink && attacker_power > 0 && (free_damage || favorable_trade || attacker_survives);
     match objective {
         CombatObjective::PushLethal => true,
         CombatObjective::Stabilize => free_damage || lifelink_bonus,
@@ -1361,6 +1507,68 @@ fn can_block_with_engine_map(
     }
 }
 
+/// The block a rational defending player would commit against one attacker,
+/// described from the ATTACKER's point of view.
+struct DefenderBlock {
+    /// Value of the blocking creature the defender chooses.
+    blocker_value: f64,
+    /// Whether the attacker kills that blocker in the exchange.
+    kills_blocker: bool,
+    /// Whether the attacker survives the exchange.
+    attacker_survives: bool,
+}
+
+/// CR 509.1a: Choose the block the defending player would actually make against
+/// a single attacker. A rational defender maximizes its own value — it kills the
+/// attacker when that is value-positive, preferring a blocker that survives the
+/// exchange (a "free" kill via first strike or a larger body, CR 702.7b) and
+/// otherwise the cheapest creature whose loss the kill justifies. Returns `None`
+/// when no creature can legally block (the attack connects unimpeded).
+///
+/// This deliberately models the defender's *best* block rather than its cheapest
+/// creature. The cheapest-blocker model let the AI swing doomed creatures on the
+/// false premise of a favorable trade the defender would sidestep — e.g. a 1/1
+/// attacker into a 2/1 first-striker that eats it for free while a 2/1 token sat
+/// nearby looking like an even trade.
+fn defender_best_block(
+    state: &GameState,
+    attacker_id: ObjectId,
+    attacker_value: f64,
+    blockers: &[ObjectId],
+) -> Option<DefenderBlock> {
+    let attacker = state.objects.get(&attacker_id)?;
+    blockers
+        .iter()
+        .filter(|&&bid| can_block_pair(state, bid, attacker_id))
+        .filter_map(|&bid| {
+            let blocker = state.objects.get(&bid)?;
+            let blocker_value = evaluate_creature(state, bid);
+            // CR 702.7b + CR 702.4b + CR 702.2c: keyword-aware outcome (first
+            // strike, double strike, deathtouch), not a raw P/T comparison.
+            let (blocker_kills_attacker, blocker_survives) =
+                evaluate_block_outcome(blocker, attacker);
+            // Defender utility: the attacker value it removes (only if the block
+            // is lethal) minus the value of its own blocker (only if that blocker
+            // dies). A free kill scores `attacker_value`; a trade nets the
+            // difference; a chump that dies for nothing scores negative.
+            let defender_gain = (if blocker_kills_attacker {
+                attacker_value
+            } else {
+                0.0
+            }) - (if blocker_survives { 0.0 } else { blocker_value });
+            Some((
+                defender_gain,
+                DefenderBlock {
+                    blocker_value,
+                    kills_blocker: !blocker_survives,
+                    attacker_survives: !blocker_kills_attacker,
+                },
+            ))
+        })
+        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(_, outcome)| outcome)
+}
+
 /// Evaluate whether a single blocker kills the attacker and/or survives combat,
 /// accounting for first strike (CR 702.7), double strike (CR 702.4), and
 /// deathtouch (CR 702.2).
@@ -1512,6 +1720,32 @@ mod tests {
         id
     }
 
+    /// Battlefield planeswalker for `owner` with the given starting loyalty.
+    /// Used to drive the planeswalker-attack redirect through the real engine
+    /// path: `get_valid_attack_targets` classifies it as an attackable PW.
+    fn add_planeswalker(state: &mut GameState, owner: PlayerId, loyalty: u32) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.loyalty = Some(loyalty);
+        obj.entered_battlefield_turn = Some(1);
+        id
+    }
+
+    /// Engine-derived legal attack targets — the same list the live
+    /// `WaitingFor::DeclareAttackers` carries. Deriving from the engine (rather
+    /// than hand-building) proves the engine offers the PW and the AI consumes
+    /// it, not just that the AI routes to a target we injected.
+    fn valid_targets(state: &GameState) -> Vec<AttackTarget> {
+        engine::game::combat::get_valid_attack_targets(state)
+    }
+
     /// Issue #484 (P0) — E2E: a goaded creature the value heuristic would skip
     /// MUST still be declared as an attacker, and the resulting declaration must
     /// be accepted by the engine. Drives the real AI → engine pipeline.
@@ -1624,6 +1858,49 @@ mod tests {
         assert!(
             !attackers.contains(&small),
             "Should skip 1/1 into 5/5 when life is equal"
+        );
+    }
+
+    /// Regression (gamestate1): the AI must evaluate an attack against the
+    /// defender's *best* block, not its cheapest creature. A 2/2 attacker faces a
+    /// 1/1 chump (which it would profitably eat) and a 3/3 (which kills it for
+    /// free). The old min-value-blocker model picked the 1/1, saw "free damage,"
+    /// and attacked — but the defender blocks with the 3/3 and the 2/2 dies for
+    /// nothing. The live bug was the first-strike variant (1/1 land into a 2/1
+    /// first-striker); a larger body is the same "kills and survives" class and
+    /// makes a value-independent, deterministic test.
+    #[test]
+    fn does_not_attack_when_a_better_blocker_kills_for_free() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 2, 2, vec![]);
+        // Cheapest blocker: a 1/1 the attacker would profitably trade up against.
+        add_creature(&mut state, PlayerId(1), "Squirrel", 1, 1, vec![]);
+        // Best blocker: a 3/3 that kills the 2/2 and survives — a free kill.
+        add_creature(&mut state, PlayerId(1), "Centaur", 3, 3, vec![]);
+
+        let attackers = choose_attackers(&state, PlayerId(0));
+        assert!(
+            !attackers.contains(&attacker),
+            "AI must not attack a 2/2 when the defender holds a 3/3 that eats it \
+             for free, even though a 1/1 chump is also available"
+        );
+    }
+
+    /// Companion to the regression above: when the defender's *best* block is
+    /// still a losing chump (a 1/1 in front of a 4/4), the attack is correctly
+    /// declared — the rational-defender model must not become so pessimistic that
+    /// it refuses profitable swings.
+    #[test]
+    fn attacks_when_best_block_is_only_a_chump() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Rhino", 4, 4, vec![]);
+        add_creature(&mut state, PlayerId(1), "Squirrel", 1, 1, vec![]);
+        add_creature(&mut state, PlayerId(1), "Goblin", 1, 1, vec![]);
+
+        let attackers = choose_attackers(&state, PlayerId(0));
+        assert!(
+            attackers.contains(&attacker),
+            "AI should attack a 4/4 when every available block is a chump it survives"
         );
     }
 
@@ -2646,6 +2923,253 @@ mod tests {
         assert!(
             !blockers.is_empty(),
             "5/5 wall must block 3/3 bear; got empty assignment"
+        );
+    }
+
+    // ───────────────────────── #8 lifelink block correctness ─────────────────
+
+    /// #8: a lifelinker must NOT attack into a pure loss (it dies, the blocker
+    /// lives, no kill) just for the life swing. Discriminating: reverting the
+    /// `(free_damage || favorable_trade || attacker_survives)` gate in
+    /// `should_attack_given_objective` flips this — the old code attacked.
+    #[test]
+    fn lifelink_does_not_attack_into_pure_loss() {
+        let mut state = setup();
+        let lifelinker = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Vamp",
+            2,
+            2,
+            vec![Keyword::Lifelink],
+        );
+        // 3/4 wall: kills the 2/2, survives (2 < 4). Pure loss.
+        add_creature(&mut state, PlayerId(1), "Wall", 3, 4, vec![]);
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        assert!(
+            !attacks.iter().any(|(id, _)| *id == lifelinker),
+            "lifelinker must not be thrown into a pure-loss block for life gain"
+        );
+    }
+
+    /// #8 guard (don't over-correct): a lifelinker that SURVIVES the block (2/5
+    /// into a 3/3 — survives, deals 2, gains 2) should still attack. Confirms
+    /// the gate only suppresses pure losses, not all lifelink swings.
+    #[test]
+    fn lifelink_still_attacks_when_surviving() {
+        let mut state = setup();
+        let lifelinker = add_creature(
+            &mut state,
+            PlayerId(0),
+            "Vamp",
+            2,
+            5,
+            vec![Keyword::Lifelink],
+        );
+        add_creature(&mut state, PlayerId(1), "Bear", 3, 3, vec![]);
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        assert!(
+            attacks.iter().any(|(id, _)| *id == lifelinker),
+            "a surviving lifelinker should still attack"
+        );
+    }
+
+    // ───────────────────────── #6 commander trade avoidance ──────────────────
+
+    /// #6: the AI must not trade its commander into an even block (both die),
+    /// forcing commander tax — while a vanilla creature in the same spot SHOULD
+    /// trade. Discriminating: removing the commander gate makes the commander
+    /// attack (the 3/3-vs-3/3 is a `favorable_trade`).
+    #[test]
+    fn commander_does_not_trade_into_equal_block() {
+        let mut state = setup();
+        let commander = add_creature(&mut state, PlayerId(0), "General", 3, 3, vec![]);
+        state.objects.get_mut(&commander).unwrap().is_commander = true;
+        let bear = add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        add_creature(&mut state, PlayerId(1), "Blocker", 3, 3, vec![]);
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        assert!(
+            !attacks.iter().any(|(id, _)| *id == commander),
+            "commander must not trade into an equal block"
+        );
+        assert!(
+            attacks.iter().any(|(id, _)| *id == bear),
+            "a vanilla creature in the same spot should still trade"
+        );
+    }
+
+    /// B1 regression: the commander must also be excluded from the desperation
+    /// ALPHA-STRIKE fallback (which re-adds the whole candidate set). A swarm of
+    /// bears still alpha-strikes; the commander stays home. Discriminating:
+    /// reverting to `attacking_ids = candidates.clone()` re-adds the commander.
+    #[test]
+    fn commander_excluded_from_alpha_strike() {
+        let mut state = setup();
+        let commander = add_creature(&mut state, PlayerId(0), "General", 2, 2, vec![]);
+        state.objects.get_mut(&commander).unwrap().is_commander = true;
+        // Five 3/3 bears: enough excess unblocked power to justify the
+        // alpha-strike even after the single 0/4 wall "blocks" one body.
+        let mut bears = Vec::new();
+        for _ in 0..5 {
+            bears.push(add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]));
+        }
+        add_creature(&mut state, PlayerId(1), "Wall", 0, 4, vec![]);
+
+        let attacks = choose_attackers_with_targets(&state, PlayerId(0));
+        assert!(
+            !attacks.iter().any(|(id, _)| *id == commander),
+            "commander must be excluded from the alpha-strike swing"
+        );
+        assert!(
+            bears.iter().any(|b| attacks.iter().any(|(id, _)| id == b)),
+            "the bear swarm should still alpha-strike (the swing fires without the commander)"
+        );
+    }
+
+    // ───────────────────────── #5 attacking planeswalkers ────────────────────
+
+    /// #5: with no lethal/near-lethal at the face, redirect the FEWEST large
+    /// attackers needed to kill the opp planeswalker (largest-power-first),
+    /// leaving the rest on the player. PW + targets derived from the engine.
+    #[test]
+    fn redirects_fewest_bodies_to_planeswalker() {
+        let mut state = setup();
+        let big = add_creature(&mut state, PlayerId(0), "Ogre", 5, 5, vec![]);
+        let small_a = add_creature(&mut state, PlayerId(0), "Cub", 2, 2, vec![]);
+        let small_b = add_creature(&mut state, PlayerId(0), "Cub", 2, 2, vec![]);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 3);
+        let targets = valid_targets(&state);
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &AiProfile::default(),
+            false,
+            None,
+            Some(&targets),
+        );
+
+        // The lone 5/5 (>= loyalty 3) goes at the planeswalker; the 2/2s at the player.
+        assert_eq!(
+            attacks.iter().find(|(id, _)| *id == big).map(|(_, t)| *t),
+            Some(AttackTarget::Planeswalker(pw)),
+            "the fewest-bodies killing subset (the 5/5) should hit the planeswalker"
+        );
+        for cub in [small_a, small_b] {
+            assert_eq!(
+                attacks.iter().find(|(id, _)| *id == cub).map(|(_, t)| *t),
+                Some(AttackTarget::Player(PlayerId(1))),
+                "spare attackers stay on the player"
+            );
+        }
+    }
+
+    /// #5 guard: if the swing can't KILL the planeswalker, don't dribble — send
+    /// everyone at the player.
+    #[test]
+    fn does_not_redirect_when_cannot_kill_pw() {
+        let mut state = setup();
+        add_creature(&mut state, PlayerId(0), "Cub", 2, 2, vec![]);
+        add_creature(&mut state, PlayerId(0), "Cub", 2, 2, vec![]);
+        add_planeswalker(&mut state, PlayerId(1), 6); // 4 total power < 6 loyalty
+        let targets = valid_targets(&state);
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &AiProfile::default(),
+            false,
+            None,
+            Some(&targets),
+        );
+        assert!(
+            attacks
+                .iter()
+                .all(|(_, t)| matches!(t, AttackTarget::Player(_))),
+            "can't-kill planeswalker → no dribble, all at player"
+        );
+    }
+
+    /// #5 guard: never empty the face — a lone attacker that could kill the PW
+    /// still goes at the player.
+    #[test]
+    fn does_not_redirect_when_would_empty_face() {
+        let mut state = setup();
+        add_creature(&mut state, PlayerId(0), "Ogre", 5, 5, vec![]);
+        add_planeswalker(&mut state, PlayerId(1), 3);
+        let targets = valid_targets(&state);
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &AiProfile::default(),
+            false,
+            None,
+            Some(&targets),
+        );
+        assert!(
+            attacks
+                .iter()
+                .all(|(_, t)| matches!(t, AttackTarget::Player(_))),
+            "redirecting the only attacker would empty the face → stay on player"
+        );
+    }
+
+    /// #5 guard: don't dilute a near-lethal swing (raw power >= opp life) into a
+    /// planeswalker, even when not formally PushLethal (a blocker is present).
+    #[test]
+    fn does_not_redirect_when_near_lethal() {
+        let mut state = setup();
+        state.players[1].life = 6;
+        add_creature(&mut state, PlayerId(0), "Brute", 4, 4, vec![]);
+        add_creature(&mut state, PlayerId(0), "Brute", 4, 4, vec![]);
+        add_creature(&mut state, PlayerId(1), "Chump", 0, 1, vec![]); // blocker → not PushLethal
+        add_planeswalker(&mut state, PlayerId(1), 3);
+        let targets = valid_targets(&state);
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &AiProfile::default(),
+            false,
+            None,
+            Some(&targets),
+        );
+        assert!(
+            attacks
+                .iter()
+                .any(|(_, t)| matches!(t, AttackTarget::Player(PlayerId(1)))),
+            "near-lethal swing should pressure the player, not the planeswalker"
+        );
+        assert!(
+            !attacks
+                .iter()
+                .any(|(_, t)| matches!(t, AttackTarget::Planeswalker(_))),
+            "no attacker should be diverted to the planeswalker when near-lethal"
+        );
+    }
+
+    /// #5 regression: no planeswalker present → targeting is unchanged (player).
+    #[test]
+    fn no_pw_target_single_opponent_unchanged() {
+        let mut state = setup();
+        let bear = add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        let targets = valid_targets(&state);
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &AiProfile::default(),
+            false,
+            None,
+            Some(&targets),
+        );
+        assert_eq!(
+            attacks.iter().find(|(id, _)| *id == bear).map(|(_, t)| *t),
+            Some(AttackTarget::Player(PlayerId(1))),
         );
     }
 }

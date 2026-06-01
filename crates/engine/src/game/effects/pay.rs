@@ -1077,7 +1077,7 @@ mod tests {
         let gain_life = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: crate::types::ability::GainLifePlayer::Controller,
+                player: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(500),

@@ -7,8 +7,6 @@ import { ManaCostSymbols } from "../mana/ManaCostSymbols.tsx";
 import { DialogShell } from "./DialogShell.tsx";
 
 type MiracleReveal = Extract<WaitingFor, { type: "MiracleReveal" }>;
-type MiracleCastOffer = Extract<WaitingFor, { type: "MiracleCastOffer" }>;
-type MadnessCastOffer = Extract<WaitingFor, { type: "MadnessCastOffer" }>;
 
 export function MiracleRevealModal() {
   const canActForWaitingState = useCanActForWaitingState();
@@ -29,24 +27,24 @@ export function MiracleRevealModal() {
     );
   }
 
-  if (waitingFor?.type === "MiracleCastOffer") {
-    const data = waitingFor.data as MiracleCastOffer["data"];
+  if (waitingFor?.type === "CastOffer" && waitingFor.data.kind.type === "Miracle") {
+    const kind = waitingFor.data.kind;
     return (
       <MiracleRevealContent
-        objectId={data.object_id}
-        cost={data.cost}
+        objectId={kind.object_id}
+        cost={kind.cost}
         dispatch={dispatch}
         phase="cast"
       />
     );
   }
 
-  if (waitingFor?.type === "MadnessCastOffer") {
-    const data = waitingFor.data as MadnessCastOffer["data"];
+  if (waitingFor?.type === "CastOffer" && waitingFor.data.kind.type === "Madness") {
+    const kind = waitingFor.data.kind;
     return (
       <MiracleRevealContent
-        objectId={data.object_id}
-        cost={data.cost}
+        objectId={kind.object_id}
+        cost={kind.cost}
         dispatch={dispatch}
         phase="madness"
       />

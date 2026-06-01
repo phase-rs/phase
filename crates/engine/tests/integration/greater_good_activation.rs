@@ -102,10 +102,16 @@ fn greater_good_draws_equal_to_sacrificed_power_then_discards_three() {
             ability_index: 0,
         })
         .expect("activating Greater Good must succeed");
-    assert_eq!(
-        runner.waiting_for_kind(),
-        "SacrificeForCost",
-        "activating a Sacrifice-cost ability must prompt for the sacrifice",
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            engine::types::WaitingFor::PayCost {
+                kind: engine::types::PayCostKind::Sacrifice,
+                ..
+            }
+        ),
+        "activating a Sacrifice-cost ability must prompt for the sacrifice, got {:?}",
+        runner.state().waiting_for,
     );
 
     runner
@@ -245,10 +251,16 @@ fn discard_cost_populates_cost_paid_object() {
             ability_index: 0,
         })
         .expect("activating the discard-cost ability must succeed");
-    assert_eq!(
-        runner.waiting_for_kind(),
-        "DiscardForCost",
-        "activating a Discard-cost ability must prompt for the discard",
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            engine::types::WaitingFor::PayCost {
+                kind: engine::types::PayCostKind::Discard,
+                ..
+            }
+        ),
+        "activating a Discard-cost ability must prompt for the discard, got {:?}",
+        runner.state().waiting_for,
     );
 
     runner
@@ -444,10 +456,16 @@ fn multi_sacrifice_cost_count_is_honored() {
     // Creature core type stripped by `.as_enchantment()`, so it does not match
     // the `TypeFilter::Creature` sacrifice filter.
     match &runner.state().waiting_for {
-        engine::types::WaitingFor::SacrificeForCost {
-            count, permanents, ..
+        engine::types::WaitingFor::PayCost {
+            kind: engine::types::PayCostKind::Sacrifice,
+            count,
+            choices: permanents,
+            ..
         } => {
-            assert_eq!(*count, 2, "SacrificeForCost must honor the cost's count: 2",);
+            assert_eq!(
+                *count, 2,
+                "PayCost Sacrifice must honor the cost's count: 2",
+            );
             assert_eq!(
                 permanents.len(),
                 2,
@@ -515,7 +533,11 @@ fn multi_sacrifice_cost_resolves_through_pipeline() {
         assert!(
             matches!(
                 &runner.state().waiting_for,
-                engine::types::WaitingFor::SacrificeForCost { count: 2, .. }
+                engine::types::WaitingFor::PayCost {
+                    kind: engine::types::PayCostKind::Sacrifice,
+                    count: 2,
+                    ..
+                }
             ),
             "the prompt must carry count: 2",
         );
@@ -536,9 +558,14 @@ fn multi_sacrifice_cost_resolves_through_pipeline() {
             Zone::Graveyard,
             "the second victim must be sacrificed to the graveyard",
         );
-        assert_ne!(
-            runner.waiting_for_kind(),
-            "SacrificeForCost",
+        assert!(
+            !matches!(
+                &runner.state().waiting_for,
+                engine::types::WaitingFor::PayCost {
+                    kind: engine::types::PayCostKind::Sacrifice,
+                    ..
+                }
+            ),
             "the ability must advance past the sacrifice cost",
         );
     }

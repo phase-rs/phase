@@ -65,7 +65,9 @@ pub fn resolve(
             // Record battlefield entry for restriction tracking.
             if destination == Zone::Battlefield {
                 crate::game::restrictions::record_battlefield_entry(state, obj_id);
-                state.layers_dirty = true;
+                // Battlefield entry: incremental re-derive candidate for this
+                // conjured object (escalates to Full if it sources effects/etc.).
+                crate::game::layers::mark_layers_entered(state, obj_id);
             }
 
             events.push(GameEvent::ObjectConjured {

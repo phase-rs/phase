@@ -7,7 +7,7 @@
 //! shows up in the report.
 
 use engine::types::ability::{CounterTriggerFilter, DamageKindFilter, TriggerConstraint};
-use engine::types::triggers::TriggerMode;
+use engine::types::triggers::{AttackTargetFilter, TriggerMode};
 use engine::types::{Phase, TargetFilter, TriggerDefinition, TypedFilter, Zone};
 
 use crate::convert::filter::{
@@ -708,6 +708,63 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
         Trigger::WhenACreatureSpecializes(filter) => {
             TriggerDefinition::new(TriggerMode::Specializes)
                 .valid_card(convert_permanents(filter)?)
+        }
+
+        // CR 508.3a: "Whenever [creature] attacks a player" — fires per attacker
+        // via TriggerMode::Attacks. attack_target_filter restricts to Player-type
+        // targets only; valid_target carries the defending-player scope when not
+        // AnyPlayer (e.g. "attacks an opponent" → Opponent controller ref).
+        Trigger::WhenACreatureAttacksAPlayer(filter, players) => {
+            let mut def = TriggerDefinition::new(TriggerMode::Attacks)
+                .valid_card(convert_permanents(filter)?);
+            def.attack_target_filter = Some(AttackTargetFilter::Player);
+            if !matches!(players.as_ref(), Players::AnyPlayer) {
+                let controller = players_to_controller(players)?;
+                def.valid_target =
+                    Some(TargetFilter::Typed(TypedFilter::default().controller(controller)));
+            }
+            def
+        }
+
+        // CR 508.3a: "Whenever [creature] attacks a player or a planeswalker
+        // they control" — same per-attacker firing as above but target may be
+        // either a defending player or a planeswalker they control.
+        Trigger::WhenACreatureAttacksAPlayerOrPlaneswalkerTheyControl(filter, players) => {
+            let mut def = TriggerDefinition::new(TriggerMode::Attacks)
+                .valid_card(convert_permanents(filter)?);
+            def.attack_target_filter = Some(AttackTargetFilter::PlayerOrPlaneswalker);
+            if !matches!(players.as_ref(), Players::AnyPlayer) {
+                let controller = players_to_controller(players)?;
+                def.valid_target =
+                    Some(TargetFilter::Typed(TypedFilter::default().controller(controller)));
+            }
+            def
+        }
+
+        // CR 508.3d: "Whenever one or more [X] creatures attack" — batched,
+        // fires once per attack step via TriggerMode::YouAttack. valid_card
+        // narrows to the creature subtype; valid_target=None defaults to the
+        // source-controller check inside match_you_attack.
+        Trigger::WhenAnyNumberOfCreaturesAttack(filter) => {
+            TriggerDefinition::new(TriggerMode::YouAttack)
+                .valid_card(convert_permanents(filter)?)
+        }
+
+        // CR 508.3d: "Whenever [player] attacks with one or more [X] creatures"
+        // — batched, fires once. valid_target carries the attacking-player scope
+        // so match_you_attack can verify which player is attacking.
+        // AnyPlayer → TargetFilter::Player (permissive); otherwise scoped by
+        // controller ref.
+        Trigger::WhenAPlayerAttacksWithAnyNumberOfCreatures(players, filter) => {
+            let mut def = TriggerDefinition::new(TriggerMode::YouAttack)
+                .valid_card(convert_permanents(filter)?);
+            def.valid_target = Some(if matches!(players.as_ref(), Players::AnyPlayer) {
+                TargetFilter::Player
+            } else {
+                let controller = players_to_controller(players)?;
+                TargetFilter::Typed(TypedFilter::default().controller(controller))
+            });
+            def
         }
 
         _ => {
