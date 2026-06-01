@@ -1381,6 +1381,33 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             return true;
         }
     }
+    // CR 119.3 + CR 121.1 + CR 608.2c: Conjugated third-person-singular player
+    // action verb + count argument. When the prior conjunct established a
+    // targeted player subject ("Target player draws X cards and loses X life"
+    // — Pact of the Serpent; "Target player draws a card and loses 1 life" —
+    // Shadrix Silverquill mode), the second conjunct's verb appears in the
+    // singular conjugation with the player subject elided. The verb axis is
+    // restricted to player-only actions: "draws N cards" (CR 121.1), "loses
+    // N life" (CR 119.3), "gains N life" (CR 119.3). These verbs never apply
+    // to non-player subjects in Magic — life is a player-only attribute (CR
+    // 119) and drawing is a player-only action (CR 121) — so the split is
+    // safe regardless of prior subject. The count discriminator (digits or
+    // X) keeps conjugated continuous-modifier forms ("gains flying", "loses
+    // all abilities") on the un-split path: those are never followed by a
+    // bare count token. Sibling-clause X-binding (`compute_sentence_where_x`)
+    // and player-subject inheritance (`carried_targeted_player_subject`)
+    // handle the rest once both chunks reach the chain loop.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("draws "),
+        tag("loses "),
+        tag("gains "),
+    ))
+    .parse(s)
+    {
+        if next_token_is_count(rest) {
+            return true;
+        }
+    }
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("get ").parse(s) {
         let rest = rest.trim_start();
         if alt((
