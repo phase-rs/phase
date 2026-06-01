@@ -8,6 +8,7 @@ import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
 import type { SourcePrinting } from "../../hooks/useCardImage";
 import type { ScryfallCard } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
 import { mouseHoverPreview } from "./hoverPreview";
@@ -448,9 +449,15 @@ export function DeckStack({
   const canAddCard = useMemo(
     () => (item: DeckStackItem) => {
       if (item.section !== "main") return false;
-      const typeLine = cardDataCache.get(item.name)?.type_line.toLowerCase() ?? "";
-      const isBasicLand = typeLine.includes("basic") && typeLine.includes("land");
-      return isBasicLand || item.count < 4;
+      // CR 100.2a: basic lands and cards whose Oracle text declares "a deck can
+      // have any number of cards named ~" (e.g. Relentless Rats, Rat Colony)
+      // are exempt from the per-card copy limit. Mirrors the guard inside
+      // useDeckBuilder.handleAddCard so the stack tile's + button doesn't
+      // disagree with the hook's add path.
+      const card = cardDataCache.get(item.name);
+      if (BASIC_LAND_NAMES.has(item.name)) return true;
+      if (hasUnlimitedCopies(card?.oracle_text)) return true;
+      return item.count < 4;
     },
     [cardDataCache],
   );
