@@ -1873,13 +1873,13 @@ pub enum WaitingFor {
         remaining: Vec<ObjectId>,
         pending_effect: Box<ResolvedAbility>,
     },
-    /// CR 303.4 + CR 303.4a + CR 303.4g + CR 614.12 + CR 115.1b: After a
-    /// return-as-Aura sub-effect resolves and finds 2+ legal objects matching
-    /// the parsed enchant filter, the controller picks which permanent the
-    /// returned object attaches to. This is a CHOICE (CR 303.4f / 303.4g), not
-    /// a target (CR 115.1b applies to Aura spells being cast — return-as-Aura
-    /// is a sub-effect of a different ability), so hexproof / shroud /
-    /// protection do NOT filter `legal_targets`.
+    /// CR 303.4 + CR 303.4a + CR 303.4f + CR 303.4g + CR 614.12 + CR 115.1b:
+    /// After a return-as-Aura sub-effect or a non-spell Aura battlefield entry
+    /// finds 2+ legal objects or players matching the parsed enchant filter,
+    /// the controller picks which host the Aura attaches to. This is a CHOICE
+    /// (CR 303.4f / CR 303.4g), not a target (CR 115.1b applies to Aura spells
+    /// being cast), so hexproof / shroud / protection do NOT filter
+    /// `legal_targets`.
     ///
     /// **Forward-looking note (per add-engine-variant gate):** if a fourth
     /// resolution-time-pick `WaitingFor` variant is added (e.g., a future
@@ -1891,18 +1891,18 @@ pub enum WaitingFor {
     ReturnAsAuraTarget {
         player: PlayerId,
         source_id: ObjectId,
-        /// The host object that was just returned to the battlefield by the
-        /// preceding `Effect::ChangeZone` and that this `Effect::ReturnAsAura`
-        /// is converting into an Aura.
+        /// The Aura object on the battlefield awaiting a controller-selected
+        /// enchant host.
         returned_id: ObjectId,
-        /// Battlefield objects (excluding `returned_id`) that satisfy the
-        /// parsed `enchant_filter`. Built via `filter::matches_target_filter`
-        /// — hexproof / shroud / protection are intentionally NOT applied
-        /// here (CR 303.4 / CR 115.1b distinction).
-        legal_targets: Vec<ObjectId>,
+        /// Battlefield objects (excluding `returned_id`) or players that
+        /// satisfy the parsed `enchant_filter`. Built via
+        /// `filter::matches_target_filter` / `player_matches_target_filter` —
+        /// hexproof / shroud / protection are intentionally NOT applied here
+        /// (CR 303.4 / CR 115.1b distinction).
+        legal_targets: Vec<TargetRef>,
         /// The `ResolvedAbility` that emitted this picker; cloned so
-        /// `finalize_attach` can re-read `effect.enchant_filter` and
-        /// `effect.grants` after the pick lands.
+        /// return-as-Aura can re-read `effect.enchant_filter` / `effect.grants`,
+        /// and generic Aura entry can preserve source metadata for completion.
         pending_effect: Box<ResolvedAbility>,
     },
     EquipTarget {
@@ -4477,6 +4477,12 @@ pub struct GameState {
     /// turn" (Militant Angel).
     #[serde(default)]
     pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
+    /// CR 508.6 + CR 508.1b: For each creature declared as an attacker this
+    /// turn, the defending players it attacked. This is the source-specific
+    /// counterpart to `attacked_defenders_this_turn` for text like "each player
+    /// this creature attacked this turn" (Angel of Destiny).
+    #[serde(default)]
+    pub creature_attacked_defenders_this_turn: HashMap<ObjectId, HashSet<PlayerId>>,
     /// CR 500.8 + CR 506.1: Number of combat phases that have begun this turn.
     /// Used by intervening-if triggers that only fire during the first combat phase.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -4724,6 +4730,19 @@ pub struct GameState {
     /// damage, counter removal). Read by QuantityRef::PreviousEffectAmount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_amount: Option<i32>,
+
+    /// CR 706.2: The actual result (natural + modifiers, clamped at 0) of the
+    /// most recent die roll within the current ability resolution. Set by
+    /// `roll_die::resolve` immediately after emitting `GameEvent::DieRolled`, read by
+    /// `QuantityRef::EventContextAmount` so an inline "equal to the result" sub_ability
+    /// (CR 706.4 — no results table) consumes the rolled value rather than the
+    /// numeric amount of the triggering event (e.g. combat damage). Resolution-scoped:
+    /// cleared at `apply()` entry and at every depth-0 chain entry, so it is `Some`
+    /// only between the roll and the sub_ability that reads it. Follows the
+    /// `last_effect_amount` PartialEq-OMISSION pattern: NOT compared in the
+    /// hand-written `PartialEq` (safe — always cleared at comparison boundaries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_result_this_resolution: Option<u8>,
 
     /// Count from the most recent interactive effect resolution (e.g., number of cards
     /// actually discarded in a DiscardChoice). Used as fallback for EventContextAmount
@@ -5040,6 +5059,17 @@ impl GameState {
             .is_some_and(|defenders| defenders.contains(&defender))
     }
 
+    /// CR 508.6: True if `attacker` was declared attacking `defender` this turn.
+    pub fn creature_attacked_player_this_turn(
+        &self,
+        attacker: ObjectId,
+        defender: PlayerId,
+    ) -> bool {
+        self.creature_attacked_defenders_this_turn
+            .get(&attacker)
+            .is_some_and(|defenders| defenders.contains(&defender))
+    }
+
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
         let players: Vec<Player> = (0..player_count)
@@ -5164,6 +5194,7 @@ impl GameState {
             players_attacked_this_turn: HashSet::new(),
             attacking_creatures_this_turn: HashMap::new(),
             attacked_defenders_this_turn: HashMap::new(),
+            creature_attacked_defenders_this_turn: HashMap::new(),
             combat_phases_started_this_turn: 0,
             creatures_attacked_this_turn: HashSet::new(),
             creatures_blocked_this_turn: HashSet::new(),
@@ -5209,6 +5240,7 @@ impl GameState {
             last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
+            die_result_this_resolution: None,
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
             clause_minimum_snapshot: None,
@@ -5456,6 +5488,8 @@ impl PartialEq for GameState {
             && self.players_attacked_this_turn == other.players_attacked_this_turn
             && self.attacking_creatures_this_turn == other.attacking_creatures_this_turn
             && self.attacked_defenders_this_turn == other.attacked_defenders_this_turn
+            && self.creature_attacked_defenders_this_turn
+                == other.creature_attacked_defenders_this_turn
             && self.combat_phases_started_this_turn == other.combat_phases_started_this_turn
             && self.creatures_attacked_this_turn == other.creatures_attacked_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn

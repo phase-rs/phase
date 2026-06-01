@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameObject, ManaCost } from "../../adapter/types.ts";
+import type { ChosenAttribute, GameObject, ManaCost, Zone } from "../../adapter/types.ts";
+import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
+import { abilityLabel } from "../../viewmodel/costLabel.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
@@ -553,7 +555,25 @@ function CardImagePreview({
   // mana cost (e.g. The Prismatic Bridge's {W}{U}{B}{R}{G} instead of Esika's
   // {1}{G}{G}). See cardImageLookup / back_face wiring.
   const effectiveCost = useGameStore((s) => obj ? s.spellCosts[String(obj.id)] : undefined);
-  const displayCost = showOtherFace ? otherFaceCost : (effectiveCost ?? obj?.mana_cost);
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const activateLabels = useMemo(() => {
+    if (!obj || obj.zone !== "Battlefield") return [];
+    return collectObjectActions(legalActionsByObject, obj.id)
+      .flatMap((action) => {
+        if (action.type !== "ActivateAbility") return [];
+        const ability = obj.abilities[action.data.ability_index];
+        return ability ? [abilityLabel(ability)] : [];
+      })
+      .filter((label, index, labels) => label && labels.indexOf(label) === index);
+  }, [legalActionsByObject, obj]);
+  const castManaZones: Zone[] = ["Hand", "Command", "Exile", "Graveyard", "Library"];
+  const showCastManaCost =
+    !showOtherFace && obj != null && castManaZones.includes(obj.zone);
+  const displayCost = showOtherFace
+    ? otherFaceCost
+    : showCastManaCost
+      ? (effectiveCost ?? obj?.mana_cost)
+      : null;
 
   if (isLoading || !src) {
     return (
@@ -590,7 +610,13 @@ function CardImagePreview({
           </div>
         )}
       </div>
-      {showInfoPanel && obj && <CardInfoPanel obj={obj} altAvailable={altAvailable} />}
+      {showInfoPanel && obj && (
+        <CardInfoPanel
+          obj={obj}
+          altAvailable={altAvailable}
+          activateLabels={activateLabels}
+        />
+      )}
       {backFaceHint && (
         <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">{backFaceHint}</div>
       )}
@@ -737,7 +763,15 @@ function ParsedAbilitiesPanel({ name, cardTypes, localizedTypeLine, parseDetails
   );
 }
 
-function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: boolean }) {
+function CardInfoPanel({
+  obj,
+  altAvailable,
+  activateLabels,
+}: {
+  obj: GameObject;
+  altAvailable: boolean;
+  activateLabels: string[];
+}) {
   const { t } = useTranslation("game");
   const ptDisplay = computePTDisplay(obj);
   const counters = Object.entries(obj.counters).filter(([type]) => type !== "loyalty");
@@ -759,6 +793,50 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
   const deref = { objects, transientContinuousEffects };
   const keywordSources = buildGrantedKeywordSources(attribution, obj.id, deref);
   const ptSources = buildPTSources(attribution, obj.id, deref);
+  const chosenAttributes = obj.chosen_attributes ?? [];
+
+  const formatChosenAttribute = (attribute: ChosenAttribute): { label: string; value: string } => {
+    switch (attribute.type) {
+      case "Color":
+        return { label: t("preview.chosen.kind.color"), value: attribute.value };
+      case "CreatureType":
+        return { label: t("preview.chosen.kind.creatureType"), value: attribute.value };
+      case "BasicLandType":
+        return { label: t("preview.chosen.kind.basicLandType"), value: attribute.value };
+      case "CardType":
+        return { label: t("preview.chosen.kind.cardType"), value: attribute.value };
+      case "OddOrEven":
+        return { label: t("preview.chosen.kind.oddOrEven"), value: attribute.value };
+      case "CardName":
+        return { label: t("preview.chosen.kind.cardName"), value: attribute.value };
+      case "Number":
+        return { label: t("preview.chosen.kind.number"), value: String(attribute.value) };
+      case "Player":
+        return {
+          label: t("preview.chosen.kind.player"),
+          value: t("preview.chosen.playerValue", { id: attribute.value }),
+        };
+      case "TwoColors":
+        return {
+          label: t("preview.chosen.kind.twoColors"),
+          value: t("preview.chosen.twoColorsValue", {
+            first: attribute.value[0],
+            second: attribute.value[1],
+          }),
+        };
+      case "TributeOutcome":
+        return { label: t("preview.chosen.kind.tributeOutcome"), value: attribute.value };
+      case "Keyword":
+        return {
+          label: t("preview.chosen.kind.keyword"),
+          value: getKeywordDisplayText(attribute.value),
+        };
+      case "Label":
+        return { label: t("preview.chosen.kind.label"), value: attribute.value };
+      default:
+        return { label: t("preview.chosen.kind.fallback"), value: t("preview.chosen.unknown") };
+    }
+  };
 
   return (
     <div className="relative w-full border-t border-gray-600 bg-gray-900/95 px-3 py-2 text-xs text-gray-200">
@@ -779,6 +857,14 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
       <div className="font-semibold text-gray-300">
         {formatTypeLine(obj.card_types)}
       </div>
+
+      {activateLabels.length > 0 && (
+        <div className="mt-1 text-cyan-300/90">
+          {activateLabels.map((label) => (
+            <div key={label}>{t("preview.activateCost", { cost: label })}</div>
+          ))}
+        </div>
+      )}
 
       {/* Keywords */}
       {keywords.length > 0 && (
@@ -846,6 +932,25 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
       {colorsChanged && (
         <div className="mt-1 text-gray-400">
           {t("preview.colors", { colors: obj.color.length > 0 ? obj.color.join(", ") : t("preview.colorless") })}
+        </div>
+      )}
+
+      {chosenAttributes.length > 0 && (
+        <div className="mt-1 text-gray-400">
+          <div className="font-semibold text-gray-300">{t("preview.chosen.title")}</div>
+          <div className="mt-0.5 space-y-0.5">
+            {chosenAttributes.map((attribute, index) => {
+              const formatted = formatChosenAttribute(attribute);
+              return (
+                <div key={`${attribute.type}-${index}`}>
+                  {t("preview.chosen.entry", {
+                    kind: formatted.label,
+                    value: formatted.value,
+                  })}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>

@@ -977,17 +977,20 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
 /// Parse "As ~ enters, choose a [type]" into a Moved replacement with persisted Choose.
 /// Skips lines that also contain shock land markers (handled by parse_shock_land).
 fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+    let has_phrase = |phrase: &'static str| {
+        nom_primitives::scan_at_word_boundaries(norm_lower, |input| {
+            tag::<_, _, OracleError<'_>>(phrase).parse(input)
+        })
+        .is_some()
+    };
+
     // Must have "as" + "enters" framing
-    if !nom_primitives::scan_contains(norm_lower, "as")
-        || !nom_primitives::scan_contains(norm_lower, "enters")
-    {
+    if !has_phrase("as ") || !has_phrase("enters") {
         return None;
     }
 
     // Don't match shock lands — they have their own handler
-    if nom_primitives::scan_contains(norm_lower, "you may pay")
-        && nom_primitives::scan_contains(norm_lower, "life")
-    {
+    if has_phrase("you may pay") && has_phrase("life") {
         return None;
     }
 
@@ -997,15 +1000,45 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     })?;
     let choice_type = try_parse_named_choice(choose_text)?;
 
+    let choose = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Choose {
+            choice_type,
+            persist: true,
+        },
+    );
+
+    // CR 614.1c + CR 614.1d: The Thriving land cycle ("This land enters tapped.
+    // As it enters, choose a color other than <C>.") layers TWO replacement
+    // effects on the same entry event — the enters-tapped modifier AND the
+    // choice. This handler is dispatched BEFORE the unconditional enters-tapped
+    // guard and returns early, so without composing here the tap is silently
+    // dropped (issue #1581). Compose them into one Moved replacement:
+    // `Tap { SelfRef }` (the enter_tapped event-modifier) followed by the
+    // `Choose` as post-replacement "real work" — exactly the shape the engine
+    // already resolves for Vesuva's "enter tapped as a copy"
+    // (`Tap { SelfRef }` -> `sub_ability(BecomeCopy)`). The modifier must come
+    // first so `EventModifiers` accumulates the tap before reaching the choice.
+    let enters_tapped = (has_phrase("enters tapped")
+        || has_phrase("enters the battlefield tapped"))
+        && !has_phrase("unless")
+        && !has_phrase("if you control");
+
+    let execute = if enters_tapped {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Tap {
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .sub_ability(choose)
+    } else {
+        choose
+    };
+
     Some(
         ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Choose {
-                    choice_type,
-                    persist: true,
-                },
-            ))
+            .execute(execute)
             .valid_card(TargetFilter::SelfRef)
             .description(original_text.to_string()),
     )
@@ -3472,12 +3505,25 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         ));
     }
 
+    // "a spell" — any spell is the source; no typed filter (Benevolent Unicorn).
+    // Must precede `parse_type_phrase`, which maps bare "spell" to Card.
+    if subject == "spell" {
+        return None;
+    }
+
     // "a source" with no qualifier — no filter needed (matches any source)
     if subject == "source" {
         return None;
     }
 
-    // "a spell" — no source filter (handled as general case for now)
+    // CR 614.1a: Typed damage sources ("creature you control with a +1/+1
+    // counter on it", "Giant source you control", …) — delegate to the shared
+    // type-phrase parser (Uncivil Unrest, Torbran-adjacent prints).
+    let (filter, rest) = parse_type_phrase(subject);
+    if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+        return Some(filter);
+    }
+
     None
 }
 
@@ -6825,6 +6871,49 @@ mod tests {
     }
 
     #[test]
+    fn enters_tapped_then_choose_color_composes_tap_and_choice() {
+        // CR 614.1c + CR 614.1d: Thriving land text ("This land enters
+        // tapped. As it enters, choose a color other than green.") must compose
+        // BOTH the enters-tapped modifier AND the colour choice into one Moved
+        // replacement: Tap { SelfRef } (modifier) -> sub_ability(Choose).
+        let def = parse_replacement_line(
+            "This land enters tapped. As it enters, choose a color other than green.",
+            "Thriving Grove",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().unwrap();
+        // Primary effect is the enters-tapped event modifier.
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef
+                }
+            ),
+            "primary effect must be Tap {{ SelfRef }} (enter_tapped modifier), got {:?}",
+            execute.effect
+        );
+        // The colour choice rides as the sub-ability "real work".
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("enters-tapped choose-colour must carry the Choose as a sub-ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Color { ref excluded },
+                    persist: true,
+                } if excluded == &vec![ManaColor::Green]
+            ),
+            "sub-ability must be Choose color (excluding Green), got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
     fn as_enters_choose_a_color_other_than_white() {
         let def = parse_replacement_line(
             "As this land enters, choose a color other than white.",
@@ -8626,6 +8715,35 @@ mod tests {
         assert_eq!(def.damage_source_filter, None); // any source
         assert_eq!(def.damage_target_filter, None); // any target
         assert_eq!(def.combat_scope, None); // all damage
+    }
+
+    #[test]
+    fn uncivil_unrest_double_damage_parses_creature_source_filter() {
+        let def = parse_replacement_line(
+            "If a creature you control with a +1/+1 counter on it would deal damage to a permanent or player, it deals double that damage instead.",
+            "Uncivil Unrest",
+        )
+        .expect("Uncivil Unrest replacement should parse");
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        let Some(TargetFilter::Typed(tf)) = def.damage_source_filter else {
+            panic!(
+                "expected typed damage source filter, got {:?}",
+                def.damage_source_filter
+            );
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                    ..
+                }
+            )),
+            "expected +1/+1 counter qualifier, got {:?}",
+            tf.properties
+        );
     }
 
     #[test]

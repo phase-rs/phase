@@ -2018,15 +2018,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         } else if obj.zone == Zone::Library && obj.owner == player {
             // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast with an
             // alt-cost rider (Bolas's Citadel: "pay life equal to its mana
-            // value rather than paying its mana cost"). The static lives on
-            // the granting permanent on the battlefield, not on the spell;
-            // resolve through `top_of_library_permission_source` to fetch it.
-            super::casting::top_of_library_permission_source(
-                state,
-                player,
-                Some(crate::types::ability::CardPlayMode::Cast),
-            )
-            .and_then(|(top_id, _src, alt)| if top_id == object_id { alt } else { None })
+            // value rather than paying its mana cost").
+            super::casting::top_of_library_alt_ability_cost_for_object(state, player, object_id)
         } else {
             None
         }
@@ -5119,7 +5112,7 @@ mod tests {
     #[test]
     fn cost_paid_multi_sacrifice_blood_artist_co_departed() {
         use crate::game::engine::apply_as_current;
-        use crate::types::ability::{GainLifePlayer, TargetFilter, TriggerDefinition};
+        use crate::types::ability::{TargetFilter, TriggerDefinition};
         use crate::types::phase::Phase;
         use crate::types::triggers::TriggerMode;
         use crate::types::GameAction;
@@ -5167,7 +5160,7 @@ mod tests {
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ));
             obj.trigger_definitions.push(trig.clone());
@@ -5279,7 +5272,7 @@ mod tests {
                 is unreadable. Shares Unit B's cross-action consumption gap. See plan Unit B."]
     fn cost_paid_multi_sacrifice_kicker_paused_under_observes() {
         use crate::game::engine::apply_as_current;
-        use crate::types::ability::{GainLifePlayer, TargetFilter, TriggerDefinition};
+        use crate::types::ability::{TargetFilter, TriggerDefinition};
         use crate::types::phase::Phase;
         use crate::types::triggers::TriggerMode;
         use crate::types::GameAction;
@@ -5327,7 +5320,7 @@ mod tests {
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ));
             obj.trigger_definitions.push(trig.clone());

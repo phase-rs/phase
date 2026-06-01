@@ -57,9 +57,20 @@ fn fill_runtime_fields(restriction: &mut GameRestriction, ability: &ResolvedAbil
 
     match restriction {
         GameRestriction::ProhibitActivity { expiry, .. } => {
-            if let Some(crate::types::ability::Duration::UntilNextTurnOf {
-                player: crate::types::ability::PlayerScope::Controller,
-            }) = ability.duration.as_ref()
+            // CR 514.2: "until [the end of] your next turn" restrictions expire
+            // relative to the controller's next turn. The restriction-expiry
+            // system tracks only `UntilPlayerNextTurn` (begin-of-next-turn), so
+            // both readings map to it here — the precise end-of-next-turn timing
+            // matters only for continuous effects / play-permissions (handled in
+            // the layer prune); no printed restriction uses "end of next turn".
+            if let Some(
+                crate::types::ability::Duration::UntilNextTurnOf {
+                    player: crate::types::ability::PlayerScope::Controller,
+                }
+                | crate::types::ability::Duration::UntilEndOfNextTurnOf {
+                    player: crate::types::ability::PlayerScope::Controller,
+                },
+            ) = ability.duration.as_ref()
             {
                 *expiry = RestrictionExpiry::UntilPlayerNextTurn {
                     player: ability.controller,

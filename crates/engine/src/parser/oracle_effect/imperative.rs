@@ -25,10 +25,9 @@ use crate::parser::oracle_static::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CategoryChooserScope, ChoiceType,
     Chooser, ContinuousModification, ControllerRef, CopyRetargetPermission, Duration, Effect,
-    FilterProp, GainLifePlayer, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool,
-    PaymentCost, PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr,
-    QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter,
-    TypedFilter, ZoneOwner,
+    FilterProp, LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PaymentCost, PlayerScope,
+    PreventionAmount, PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -654,7 +653,7 @@ pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect 
         },
         NumericImperativeAst::GainLife { amount } => Effect::GainLife {
             amount,
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         },
         NumericImperativeAst::LoseLife { amount } => Effect::LoseLife {
             amount,
@@ -1297,6 +1296,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: Zone::Battlefield,
+                        enters_under: d.enters_under,
                         enter_tapped: d.enter_tapped,
                     })
                 } else {
@@ -1323,6 +1323,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: Zone::Hand,
+                        enters_under: None,
                         enter_tapped: false,
                     })
                 } else {
@@ -1335,6 +1336,7 @@ pub(super) fn parse_targeted_action_ast(
                         target,
                         origin,
                         destination: d.zone,
+                        enters_under: None,
                         enter_tapped: false,
                     })
                 } else {
@@ -1531,6 +1533,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             origin,
             destination,
+            enters_under,
             enter_tapped,
         } => {
             let origin = if matches!(target, TargetFilter::ExiledBySource) {
@@ -1542,6 +1545,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 origin,
                 destination,
                 target,
+                enters_under,
                 enter_tapped,
             }
         }
@@ -2023,6 +2027,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
                 },
                 crate::types::ability::FilterProp::SameNameAsParentTarget,
             ])),
+            enters_under: None,
             enter_tapped: false,
         },
     }
@@ -3476,6 +3481,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     origin: Some(Zone::Exile),
                     destination,
                     target,
+                    enters_under: None,
                     enter_tapped,
                 }
             } else {
@@ -4193,6 +4199,7 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
         origin: Some(origin),
         destination: Zone::Library,
         target: TargetFilter::Controller,
+        enters_under: None,
         enter_tapped: false,
     }
 }
@@ -6601,6 +6608,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     origin,
                     destination: Zone::Exile,
                     target,
+                    enters_under: None,
                     enter_tapped: false,
                 }
             } else {
@@ -8138,6 +8146,7 @@ mod tests {
                 origin,
                 destination,
                 target: TargetFilter::Or { filters },
+                enters_under: None,
                 enter_tapped,
             } => {
                 assert_eq!(origin, None);

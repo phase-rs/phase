@@ -41,10 +41,10 @@ use super::subject;
 use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
-    attach_same_is_true_keywords, collapse_ephemeral_color_choice_mana,
-    contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
-    fold_cast_copy_of_card_defs, mark_uses_tracked_set, parse_effect_clause,
-    parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
+    attach_repeat_process_keywords, attach_same_is_true_keywords,
+    collapse_ephemeral_color_choice_mana, contains_explicit_tracked_set_pronoun,
+    contains_implicit_tracked_set_pronoun, fold_cast_copy_of_card_defs, mark_uses_tracked_set,
+    parse_effect_clause, parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
     publishes_tracked_set_from_resolution, refine_damage_target_remainder,
     rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
     scan_contains_phrase, stamp_delayed_returns, target_filter_controller_ref,
@@ -307,6 +307,10 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     }
                     SpecialClause::SameIsTrueFor(keywords) => {
                         attach_same_is_true_keywords(&mut defs, keywords);
+                        true
+                    }
+                    SpecialClause::RepeatProcessForKeywords(keywords) => {
+                        attach_repeat_process_keywords(&mut defs, keywords);
                         true
                     }
                 }
@@ -1568,6 +1572,28 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (Some(controls_scope), deconjugated);
     }
 
+    // CR 508.6 + CR 104.3e: A "[source] attacked this turn" relative clause after
+    // "each player" / "each opponent" restricts the affected set to the players
+    // the ability source creature attacked this turn — Angel of Destiny: "each
+    // player this creature attacked this turn loses the game". Resolved as the
+    // source-specific `OpponentAttackedBySourceThisTurn`, which excludes the
+    // controller and avoids widening to players attacked by other creatures.
+    // Like the "who controls" clause above, the relative clause MUST be consumed
+    // and reflected in the scope; dropping it would over-apply the loss to every
+    // player (the bug behind issue #1599). General over the predicate verb —
+    // "loses the game", "loses N life", etc. all compose.
+    let rest_attacked_lower = rest.to_lowercase();
+    if let Some(((), after_clause)) = nom_on_lower(rest, &rest_attacked_lower, |i| {
+        let (i, _) = alt((tag("this creature "), tag("~ "), tag("it "))).parse(i)?;
+        value((), tag("attacked this turn ")).parse(i)
+    }) {
+        let deconjugated = subject::deconjugate_verb(after_clause);
+        return (
+            Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
+            deconjugated,
+        );
+    }
+
     // Guard: static restriction predicates ("can't", "cannot", "don't", "may only",
     // "may not") belong to the static parser, not the imperative effect pipeline.
     // Intercepting them here would produce Unimplemented instead of typed static modes.
@@ -2079,8 +2105,10 @@ pub(super) fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
     if let Some((duration, rest)) = nom_on_lower(text, &lower, |i| {
         alt((
             value(Duration::UntilEndOfTurn, tag("until end of turn, ")),
+            // CR 514.2: "until the end of your next turn" persists through
+            // that turn's cleanup step.
             value(
-                Duration::UntilNextTurnOf {
+                Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
                 tag("until the end of your next turn, "),
@@ -2132,21 +2160,22 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         (" this turn", Duration::UntilEndOfTurn),
         (" until end of turn", Duration::UntilEndOfTurn),
         (
+            // CR 514.2: cleanup-pruned next-turn duration.
             " until the end of your next turn",
-            Duration::UntilNextTurnOf {
+            Duration::UntilEndOfNextTurnOf {
                 player: PlayerScope::Controller,
             },
         ),
         (" until end of combat", Duration::UntilEndOfCombat),
-        // CR 611.2a + CR 108.3: Third-person "their next turn" appears in grants
-        // whose grantee is not the ability's controller (Suspend Aggression:
-        // "its owner may play it"; Expedited Inheritance: "its controller may
-        // ... They may play those cards"). Theme D's `granted_to` binds to the
-        // grantee, so `UntilNextTurnOf { Controller }` is semantically "until
-        // the end of the grantee's next turn" at prune time.
+        // CR 514.2 + CR 611.2a + CR 108.3: Third-person "their next turn"
+        // appears in grants whose grantee is not the ability's controller
+        // (Suspend Aggression: "its owner may play it"; Expedited Inheritance:
+        // "its controller may ... They may play those cards"). Theme D's
+        // `granted_to` binds to the grantee, so `UntilNextTurnOf { Controller }`
+        // is semantically "until the end of the grantee's next turn" at prune time.
         (
             " until the end of their next turn",
-            Duration::UntilNextTurnOf {
+            Duration::UntilEndOfNextTurnOf {
                 player: PlayerScope::Controller,
             },
         ),

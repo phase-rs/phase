@@ -155,7 +155,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityKind, FilterProp, GainLifePlayer, QuantityExpr, TypedFilter,
+        AbilityCondition, AbilityKind, FilterProp, QuantityExpr, TypedFilter,
     };
     use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -691,7 +691,7 @@ mod tests {
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -761,7 +761,7 @@ mod tests {
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -826,7 +826,7 @@ mod tests {
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),

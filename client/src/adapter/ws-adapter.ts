@@ -303,7 +303,16 @@ export class WebSocketAdapter implements EngineAdapter {
       }
     };
 
-    socket.ws.send(JSON.stringify(setupFrame));
+    if (!this.send(setupFrame)) {
+      socket.close();
+      if (this.initReject) {
+        this.initReject(
+          new AdapterError("WS_CLOSED", "Failed to send setup frame", true),
+        );
+        this.initResolve = null;
+        this.initReject = null;
+      }
+    }
   }
 
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {
@@ -320,7 +329,14 @@ export class WebSocketAdapter implements EngineAdapter {
     return new Promise<SubmitResult>((resolve, reject) => {
       this.pendingResolve = resolve;
       this.pendingReject = reject;
-      this.send({ type: "Action", data: { action } });
+      // If the frame cannot be sent, the server will never reply, so clear the
+      // pending state and reject now instead of leaving the caller hanging.
+      if (!this.send({ type: "Action", data: { action } })) {
+        this.pendingResolve = null;
+        this.pendingReject = null;
+        this.emit({ type: "actionPendingChanged", pending: false });
+        reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+      }
     });
   }
 
@@ -463,8 +479,33 @@ export class WebSocketAdapter implements EngineAdapter {
     }, 5000);
   }
 
-  private send(msg: unknown): void {
-    this.ws?.send(JSON.stringify(msg));
+  /**
+   * Serialize and send a frame. Returns `false` (and emits an `error` event)
+   * instead of throwing when the socket is missing/closed or `WebSocket.send`
+   * throws, so callers — especially `submitAction` — can recover rather than
+   * leaving the adapter wedged. Mirrors the guarded send in `PeerSession`.
+   */
+  private send(msg: unknown): boolean {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      this.emit({
+        type: "error",
+        message: "Cannot send message: WebSocket is not open.",
+      });
+      return false;
+    }
+    try {
+      ws.send(JSON.stringify(msg));
+      return true;
+    } catch (err) {
+      this.emit({
+        type: "error",
+        message: `Failed to send message: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      });
+      return false;
+    }
   }
 
   /** Snapshot of the server's advertised identity, or null before ServerHello. */

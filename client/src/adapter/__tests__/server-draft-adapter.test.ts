@@ -138,6 +138,64 @@ describe("ServerDraftAdapter", () => {
     );
   });
 
+  it("rejects createDraft when the post-handshake setup frame cannot be sent", async () => {
+    MockWebSocket.last = null;
+    const setupFailingAdapter = new ServerDraftAdapter("ws://localhost:9374/ws");
+    const createPromise = setupFailingAdapter.createDraft({
+      displayName: "Alice",
+      setCode: "MKM",
+      kind: "Premier",
+      public: true,
+      tournamentFormat: "Swiss",
+      podPolicy: "Competitive",
+      podSize: 8,
+    });
+    await Promise.resolve();
+    const setupWs = MockWebSocket.last!;
+    setupWs.send
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => {
+        throw new Error("InvalidStateError");
+      });
+
+    setupWs.dispatchSynthetic("message", SERVER_HELLO);
+
+    await expect(createPromise).rejects.toThrow("Failed to send setup frame");
+  });
+
+  it("rejects submitAction and clears pending state when the socket throws on send", async () => {
+    const listener = vi.fn();
+    adapter.onEvent(listener);
+    ws.dispatchSynthetic(
+      "message",
+      JSON.stringify({
+        type: "DraftMatchStart",
+        data: {
+          match_id: "r1-t0",
+          round: 1,
+          game_code: "GAME01",
+          player_token: "gametok",
+          your_player: 0,
+          opponent_name: "Bob",
+        },
+      }),
+    );
+    ws.send.mockImplementationOnce(() => {
+      throw new Error("InvalidStateError");
+    });
+
+    await expect(
+      adapter.submitAction({ type: "PassPriority" }, 0),
+    ).rejects.toThrow("Failed to send action");
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "actionPendingChanged", pending: false }),
+    );
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "error" }),
+    );
+  });
+
   it("returns to between_rounds after GameOver", () => {
     // Enter match phase first.
     ws.dispatchSynthetic(

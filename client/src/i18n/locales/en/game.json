@@ -29,9 +29,32 @@
     "fromSource": "(from {{source}})",
     "basePT": "(base {{power}}/{{toughness}})",
     "damage": "Damage: {{amount}}",
+    "activateCost": "Activate — {{cost}}",
     "ptDeltaFrom": "{{delta}} from {{source}}",
     "colors": "Colors: {{colors}}",
-    "colorless": "Colorless"
+    "colorless": "Colorless",
+    "chosen": {
+      "title": "Chosen",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Player {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Unknown",
+      "kind": {
+        "color": "Color",
+        "creatureType": "Creature type",
+        "basicLandType": "Basic land type",
+        "cardType": "Card type",
+        "oddOrEven": "Odd or even",
+        "cardName": "Card name",
+        "number": "Number",
+        "player": "Player",
+        "twoColors": "Two colors",
+        "tributeOutcome": "Tribute",
+        "keyword": "Keyword",
+        "label": "Label",
+        "fallback": "Choice"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Clear Attackers",

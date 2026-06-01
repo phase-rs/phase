@@ -1446,8 +1446,12 @@ fn collect_pending_triggers(
                     );
                     storm_ability.repeat_for = Some(QuantityExpr::Fixed { value: copy_count });
                     let storm_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
-                        .description("Storm".to_string())
-                        .condition(TriggerCondition::WasCast { zone: None });
+                        .description("Storm".to_string());
+                    // CR 702.40a: Storm fires when the spell is cast. The
+                    // WasCast intervening-if is intentionally omitted: this
+                    // synthesized trigger is only collected from SpellCast,
+                    // which is only emitted for an actual cast, so cast-ness is
+                    // already implied by the trigger event itself.
                     let timestamp = state.next_timestamp() as u32;
                     pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: *cast_obj_id,
@@ -2109,13 +2113,20 @@ fn dispatch_collected_triggers(state: &mut GameState, pending: Vec<PendingTrigge
 /// re-checked when the triggered ability *resolves* (`stack.rs`), not only
 /// when it is collected. Clearing it on all objects here would make every
 /// `WasCast`-conditioned ETB trigger (Wedding Ring's token-copy, Discover
-/// ETBs) silently do nothing at resolution. It is still cleared for
-/// non-battlefield objects (a fizzled stack spell, an object that bounced)
-/// since their cast provenance is no longer meaningful, and is cleared on
-/// battlefield exit by `reset_for_battlefield_exit`.
+/// ETBs) silently do nothing at resolution. It is equally preserved for
+/// objects still on the **Stack**: a spell on the stack has live cast
+/// provenance, and its own cast-triggered abilities re-check their `WasCast`
+/// intervening-if when they resolve (`stack.rs`, CR 603.4) while the source
+/// spell is still on the stack — Cascade (CR 702.85a: "functions only while
+/// the spell with cascade is on the stack"), Storm, and dynamically-granted
+/// Casualty. Clearing it for stack objects here made every such cast-triggered
+/// ability silently do nothing at resolution. It is still cleared for
+/// objects in other zones (a fizzled spell that has left the stack, an object
+/// that bounced) since their cast provenance is no longer meaningful, and is
+/// cleared on battlefield exit by `reset_for_battlefield_exit`.
 fn clear_post_collection_transients(state: &mut GameState) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        if obj.zone != Zone::Battlefield {
+        if !matches!(obj.zone, Zone::Battlefield | Zone::Stack) {
             obj.cast_from_zone = None;
         }
         obj.mana_spent_to_cast = false;
@@ -3726,6 +3737,7 @@ pub(crate) fn check_trigger_condition(
             // CR 508.6: a set-valued attacked-this-turn predicate has no
             // single-player "whose turn" semantic.
             | PlayerFilter::OpponentAttackedThisTurn
+            | PlayerFilter::OpponentAttackedBySourceThisTurn
             | PlayerFilter::All
             | PlayerFilter::HighestSpeed
             | PlayerFilter::ZoneChangedThisWay
@@ -4298,11 +4310,10 @@ pub mod tests {
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
         AggregateFunction, ChosenAttribute, ChosenSubtypeKind, CommanderOwnership, Comparator,
         ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
-        FilterProp, GainLifePlayer, KickerVariant, MultiTargetSpec, PaymentCost, PlayerFilter,
-        PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, StaticCondition,
-        StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerConstraint,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        FilterProp, KickerVariant, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint,
+        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
+        TargetRef, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -6614,7 +6625,7 @@ pub mod tests {
                 AbilityKind::Database,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             )),
         );
@@ -9245,7 +9256,7 @@ pub mod tests {
                         AbilityKind::Spell,
                         Effect::GainLife {
                             amount: QuantityExpr::Fixed { value: 2 },
-                            player: GainLifePlayer::Controller,
+                            player: TargetFilter::Controller,
                         },
                     ))
                     .description("When this creature dies, you gain 2 life.".to_string()),
@@ -15081,7 +15092,7 @@ pub mod tests {
                 AbilityKind::Database,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         {
@@ -15146,7 +15157,7 @@ pub mod tests {
                 AbilityKind::Database,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         let obj = state.objects.get_mut(&observer).unwrap();
@@ -15240,7 +15251,7 @@ pub mod tests {
                 AbilityKind::Database,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         let obj = state.objects.get_mut(&observer).unwrap();
@@ -15311,6 +15322,7 @@ pub mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                enters_under: None,
                 enter_tapped: false,
             },
             Vec::new(),
@@ -15690,6 +15702,7 @@ pub mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Hand,
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
+                enters_under: None,
                 enter_tapped: false,
             },
             Vec::new(),
@@ -16395,6 +16408,28 @@ mod dedup_regression_tests {
         id
     }
 
+    fn install_harmonic_prodigy(state: &mut GameState) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(102),
+            PlayerId(0),
+            "Harmonic Prodigy".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::parser::oracle_static::parse_static_line(
+                    "If a triggered ability of a Shaman or another Wizard you control triggers, that ability triggers an additional time.",
+                )
+                .expect("expected Harmonic Prodigy trigger-doubler static"),
+            );
+        id
+    }
+
     /// CR 603.2d: Splinter's source filter ("a Ninja creature you control")
     /// doubles a Ninja source's trigger to 2 instances.
     #[test]
@@ -16482,6 +16517,77 @@ mod dedup_regression_tests {
         assert_eq!(
             observer_triggers, 1,
             "Splinter must NOT double a non-Ninja source's trigger — only Ninja sources qualify"
+        );
+    }
+
+    /// CR 603.2d: Harmonic Prodigy's parsed disjunctive source filter must
+    /// double triggers from another Wizard you control.
+    #[test]
+    fn harmonic_prodigy_parsed_static_doubles_wizard_source_trigger() {
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Wizard".to_string());
+        }
+
+        let _harmonic = install_harmonic_prodigy(&mut state);
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 2,
+            "Harmonic Prodigy's parsed Wizard branch must double the source trigger"
+        );
+    }
+
+    /// CR 603.2d: Harmonic Prodigy's parsed disjunctive source filter must not
+    /// fall back to the controller-only `affected: None` shape; unrelated
+    /// controlled sources still produce one trigger.
+    #[test]
+    fn harmonic_prodigy_parsed_static_does_not_double_unrelated_source_trigger() {
+        let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+        {
+            let obj = state.objects.get_mut(&observer).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Cleric".to_string());
+        }
+
+        let _harmonic = install_harmonic_prodigy(&mut state);
+
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![observer],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                observer,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+        let observer_triggers = state
+            .stack
+            .iter()
+            .filter(|e| e.source_id == observer)
+            .count();
+        assert_eq!(
+            observer_triggers, 1,
+            "Harmonic Prodigy must not double unrelated controlled source triggers"
         );
     }
 

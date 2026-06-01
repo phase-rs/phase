@@ -230,6 +230,11 @@ pub(crate) fn matches_player_scope(
                     PlayerFilter::OpponentAttackedThisTurn => {
                         p.id != controller && state.has_attacked(controller, p.id)
                     }
+                    // CR 508.6: opponent this source creature attacked this turn.
+                    PlayerFilter::OpponentAttackedBySourceThisTurn => {
+                        p.id != controller
+                            && state.creature_attacked_player_this_turn(source_id, p.id)
+                    }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
                             .players
@@ -479,11 +484,12 @@ fn drain_pending_repeat_until(state: &mut GameState) {
     }
 }
 
-/// CR 614.12b + CR 614.1c + CR 614.13: Resume a multi-target `ChangeZone`
-/// loop paused when an object's ETB triggered a per-permanent replacement
-/// choice (issue #535). Drives the remaining objects through
-/// `process_one_zone_move`; re-stashes and breaks on a further `NeedsChoice`;
-/// emits the trailing `EffectResolved` event when the loop completes.
+/// CR 303.4f + CR 614.12b + CR 614.1c + CR 614.13: Resume a multi-target
+/// `ChangeZone` loop paused when an object's ETB triggered a per-permanent
+/// replacement choice (issue #535) or an Aura host choice. Drives the
+/// remaining objects through `process_one_zone_move`; re-stashes and breaks on
+/// a further pause; emits the trailing `EffectResolved` event when the loop
+/// completes.
 fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<GameEvent>) {
     while let Some(pending) = state.pending_change_zone_iteration.take() {
         let crate::types::game_state::PendingChangeZoneIteration {
@@ -528,6 +534,26 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 state, &ctx, *obj_id, events,
             ) {
                 crate::game::effects::change_zone::ZoneMoveResult::Done => {}
+                crate::game::effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    state.pending_change_zone_iteration =
+                        Some(crate::types::game_state::PendingChangeZoneIteration {
+                            remaining: remaining[i + 1..].to_vec(),
+                            source_id: ctx.source_id,
+                            controller: ctx.controller,
+                            origin: ctx.origin,
+                            destination: ctx.destination,
+                            enter_transformed: ctx.enter_transformed,
+                            enter_tapped: ctx.enter_tapped,
+                            enters_under_player: ctx.enters_under_player,
+                            enters_attacking: ctx.enters_attacking,
+                            enter_with_counters: ctx.enter_with_counters.clone(),
+                            duration: ctx.duration.clone(),
+                            track_exiled_by_source: ctx.track_exiled_by_source,
+                            effect_kind,
+                        });
+                    paused = true;
+                    break;
+                }
                 crate::game::effects::change_zone::ZoneMoveResult::NeedsChoice(player) => {
                     state.pending_change_zone_iteration =
                         Some(crate::types::game_state::PendingChangeZoneIteration {
@@ -553,11 +579,11 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             }
         }
         if paused {
-            // CR 603.10a: paused again on a further replacement choice. Stamp the
-            // members this pass moved so any co-departing observer among them
-            // observes the rest, then B2-park their observer triggers: `waiting_for`
-            // is now a replacement choice (not Priority), so `run_post_action_pipeline`
-            // will not scan these events — deferring keeps issue #423 dies-triggers
+            // CR 603.10a: paused again on a further choice. Stamp the members
+            // this pass moved so any co-departing observer among them observes
+            // the rest, then B2-park their observer triggers: `waiting_for` is
+            // now a choice (not Priority), so `run_post_action_pipeline` will
+            // not scan these events — deferring keeps issue #423 dies-triggers
             // from being lost across the pause.
             crate::game::zones::stamp_simultaneous_from_slice(
                 state,
@@ -2780,6 +2806,10 @@ pub fn resolve_ability_chain(
         // impossible.
         state.last_vote_ballots = crate::im::Vector::new();
         state.last_effect_amount = None;
+        // CR 706.4: Clear the per-resolution die-roll result at depth-0 chain
+        // entry so a roll consumed by an inline sub_ability cannot leak into a
+        // later, unrelated resolution's EventContextAmount.
+        state.die_result_this_resolution = None;
         state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
         // CR 608.2e: The clause-local equalization snapshot is resolution-
@@ -4753,6 +4783,7 @@ fn scoped_player_matches_filter(
         PlayerFilter::DefendingPlayer
         | PlayerFilter::OpponentDealtCombatDamage { .. }
         | PlayerFilter::OpponentAttackedThisTurn
+        | PlayerFilter::OpponentAttackedBySourceThisTurn
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
@@ -5031,10 +5062,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
         CastingPermission, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
-        DelayedTriggerCondition, Duration, FilterProp, GainLifePlayer, ManaSpendPermission,
-        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-        QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
-        TypedFilter, UntilCondition,
+        DelayedTriggerCondition, Duration, FilterProp, ManaSpendPermission, ObjectProperty,
+        PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+        SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        UntilCondition,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -5072,6 +5103,75 @@ mod tests {
             handler: crate::types::ability::RuntimeHandler::NinjutsuFamily,
         };
         assert!(is_known_effect(&runtime));
+    }
+
+    /// CR 508.6: "each player this creature attacked this turn" must bind to
+    /// the source creature's own attacked-defender ledger, not the controller's
+    /// aggregate "you attacked" set.
+    #[test]
+    fn source_attacked_this_turn_player_filter_is_per_creature() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let angel = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Angel of Destiny".to_string(),
+            Zone::Battlefield,
+        );
+        let other_attacker = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Other Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        state
+            .attacked_defenders_this_turn
+            .entry(PlayerId(0))
+            .or_default()
+            .extend([PlayerId(1), PlayerId(2)]);
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(angel)
+            .or_default()
+            .insert(PlayerId(1));
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(other_attacker)
+            .or_default()
+            .insert(PlayerId(2));
+
+        assert!(
+            matches_player_scope(
+                &state,
+                PlayerId(2),
+                &PlayerFilter::OpponentAttackedThisTurn,
+                PlayerId(0),
+                angel,
+            ),
+            "the controller aggregate should include every player any creature attacked",
+        );
+        assert!(
+            !matches_player_scope(
+                &state,
+                PlayerId(2),
+                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                PlayerId(0),
+                angel,
+            ),
+            "Angel must not affect a player attacked only by a different creature",
+        );
+        assert!(
+            matches_player_scope(
+                &state,
+                PlayerId(1),
+                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                PlayerId(0),
+                angel,
+            ),
+            "Angel must still affect the player it attacked",
+        );
     }
 
     #[test]
@@ -5234,7 +5334,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: amount },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,
@@ -6047,7 +6147,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source,
@@ -6332,7 +6432,7 @@ mod tests {
                         scope: crate::types::ability::ObjectScope::CostPaidObject,
                     },
                 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -6855,7 +6955,7 @@ mod tests {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::PreviousEffectAmount,
                 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -7342,6 +7442,7 @@ mod tests {
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Hand,
                     target: TargetFilter::Any,
+                    enters_under: None,
                     enter_tapped: false,
                 },
                 vec![],
@@ -7592,6 +7693,7 @@ mod tests {
                             },
                         ],
                     },
+                    enters_under: None,
                     enter_tapped: false,
                 },
                 vec![],
@@ -7679,6 +7781,7 @@ mod tests {
                             },
                         ],
                     },
+                    enters_under: None,
                     enter_tapped: false,
                 },
                 vec![],
@@ -7740,6 +7843,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -8004,7 +8108,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
-                player: crate::types::ability::GainLifePlayer::default(),
+                player: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -8072,7 +8176,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
-                player: crate::types::ability::GainLifePlayer::default(),
+                player: crate::types::ability::TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -9531,6 +9635,7 @@ mod tests {
                 origin: Some(Zone::Exile),
                 destination: Zone::Graveyard,
                 target: TargetFilter::ExiledBySource,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -9591,6 +9696,7 @@ mod tests {
                 origin: Some(Zone::Exile),
                 destination: Zone::Graveyard,
                 target: TargetFilter::ExiledBySource,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -9666,6 +9772,7 @@ mod tests {
                 origin: Some(Zone::Exile),
                 destination: Zone::Graveyard,
                 target: TargetFilter::ExiledBySource,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -11757,7 +11864,7 @@ mod tests {
         let mut sub = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 100 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,
@@ -11773,7 +11880,7 @@ mod tests {
         let mut ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,

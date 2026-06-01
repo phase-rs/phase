@@ -1,7 +1,8 @@
 //! Duration combinators for Oracle text parsing.
 //!
-//! Parses duration phrases: "until end of turn", "until your next turn",
-//! "until end of combat", "for as long as [condition]", "this turn".
+//! Parses duration phrases: "until end of turn", "until the end of your/their
+//! next turn", "until your/their next turn", "until end of combat",
+//! "for as long as [condition]", "this turn".
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
@@ -15,22 +16,47 @@ use crate::types::ability::{Duration, PlayerScope};
 
 /// Parse a duration phrase from Oracle text.
 ///
-/// Matches "until end of turn", "until your next turn", "until end of combat",
-/// "for as long as [condition]", "this turn".
+/// Matches "until end of turn", "until the end of your/their next turn",
+/// "until your/their next turn", "until end of combat", "for as long as
+/// [condition]", "this turn".
 pub fn parse_duration(input: &str) -> OracleResult<'_, Duration> {
     alt((
         value(Duration::UntilEndOfTurn, tag("until end of turn")),
         value(Duration::UntilEndOfCombat, tag("until end of combat")),
-        value(
-            Duration::UntilNextTurnOf {
-                player: PlayerScope::Controller,
-            },
-            tag("until your next turn"),
-        ),
+        parse_until_end_of_next_turn,
+        parse_until_next_turn,
         value(Duration::UntilEndOfTurn, tag("this turn")),
         parse_for_as_long_as,
     ))
     .parse(input)
+}
+
+fn parse_next_turn_pronoun(input: &str) -> OracleResult<'_, PlayerScope> {
+    // CR 109.5 + CR 608.2c: in this shared duration parser, "your" and
+    // third-person "their" are both resolved by the caller's controller/grantee
+    // binding; runtime pruning currently arms Controller-scoped durations.
+    alt((
+        value(PlayerScope::Controller, tag("your")),
+        value(PlayerScope::Controller, tag("their")),
+    ))
+    .parse(input)
+}
+
+fn parse_until_end_of_next_turn(input: &str) -> OracleResult<'_, Duration> {
+    // CR 514.2: "until the end of [your/their] next turn" persists through the
+    // whole next turn (cleanup), distinct from "until [your/their] next turn"
+    // (beginning of next turn). Match before the shorter phrase.
+    let (rest, _) = tag("until the end of ").parse(input)?;
+    let (rest, player) = parse_next_turn_pronoun(rest)?;
+    let (rest, _) = tag(" next turn").parse(rest)?;
+    Ok((rest, Duration::UntilEndOfNextTurnOf { player }))
+}
+
+fn parse_until_next_turn(input: &str) -> OracleResult<'_, Duration> {
+    let (rest, _) = tag("until ").parse(input)?;
+    let (rest, player) = parse_next_turn_pronoun(rest)?;
+    let (rest, _) = tag(" next turn").parse(rest)?;
+    Ok((rest, Duration::UntilNextTurnOf { player }))
 }
 
 /// Parse "for as long as [condition]" into `Duration::ForAsLongAs`.
@@ -102,6 +128,30 @@ mod tests {
             }
         );
         assert_eq!(rest, " and");
+    }
+
+    #[test]
+    fn test_parse_duration_until_end_of_next_turn() {
+        let (rest, d) = parse_duration("until the end of their next turn.").unwrap();
+        assert_eq!(
+            d,
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(rest, ".");
+    }
+
+    #[test]
+    fn test_parse_duration_their_next_turn() {
+        let (rest, d) = parse_duration("until their next turn.").unwrap();
+        assert_eq!(
+            d,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(rest, ".");
     }
 
     #[test]

@@ -350,6 +350,7 @@ fn discard_applier(
             from: Zone::Hand,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -3735,6 +3736,17 @@ fn candidate_materiality(
         // Unknown definition — be conservative.
         return CandidateMateriality::Unconditional;
     };
+    // CR 615 + CR 616.1: A damage prevention shield modifies the damage amount,
+    // so it writes the `Damage` field and is order-material against any other
+    // `Damage` writer — a doubler (Furnace of Rath `Double`), Torbran (`Plus`),
+    // or another prevention shield — because prevent-then-double and
+    // double-then-prevent do not commute ((3-2)*2 = 2 vs (3*2)-2 = 4). A bare
+    // prevention shield leaves `execute`/`damage_modification` unset, so without
+    // this it fell through to `Disjoint` and the CR 616.1 order choice was
+    // silently skipped.
+    if matches!(repl_def.shield_kind, ShieldKind::Prevention { .. }) {
+        return CandidateMateriality::Writes(EventField::Damage);
+    }
     let Some(execute) = repl_def.execute.as_deref() else {
         // CR 616.1: a `null` `execute` is not a guaranteed no-op. A count-event
         // replacement (Doubling Season, Hardened Scales) modifies the count via
@@ -4046,6 +4058,8 @@ pub fn continue_replacement(
             });
             let post = if real_work.is_some() {
                 real_work
+            } else if EventModifiers::has_only_event_modifier(accept_effect.as_deref()) {
+                None
             } else {
                 accept_effect
             };
@@ -4123,8 +4137,8 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, GainLifePlayer,
-        QuantityExpr, ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
+        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, QuantityExpr,
+        ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
     };
     use crate::types::game_state::DamageRecord;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -4404,6 +4418,7 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -4646,6 +4661,51 @@ mod tests {
     }
 
     #[test]
+    fn prevention_shield_and_damage_doubler_prompt_for_order() {
+        // CR 615 + CR 616.1e: A prevention shield ("prevent the next 2") and a
+        // damage doubler (Furnace of Rath `Double`) both modify the amount of a
+        // single `ProposedEvent::Damage`, and they do NOT commute:
+        // (3-2)*2 = 2 vs (3*2)-2 = 4. The affected player must choose the order.
+        // Before the fix the prevention shield classified `Disjoint` (its
+        // `execute`/`damage_modification` are unset), so the set was deemed
+        // immaterial and the CR 616.1 order prompt was skipped.
+        let mut state = GameState::new_two_player(42);
+        let mut furnace = GameObject::new(
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Furnace of Rath".to_string(),
+            Zone::Battlefield,
+        );
+        furnace.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .damage_modification(DamageModification::Double)]
+            .into();
+        state.objects.insert(ObjectId(10), furnace);
+        state.battlefield.push_back(ObjectId(10));
+
+        // Global prevention shield ("prevent the next 2 damage").
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .prevention_shield(PreventionAmount::Next(2)),
+        );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::NeedsChoice(_)),
+            "prevention shield + doubler must prompt for order per CR 616.1e, got {result:?}"
+        );
+    }
+
+    #[test]
     fn gate_land_enters_tapped_and_prompts_color_without_modal() {
         // Issue #482 Defect A: a Gate land has two mandatory `Moved` ETB
         // replacements — `Tap SelfRef` (enters tapped) and a `Choose` (as it
@@ -4735,7 +4795,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ))
             .description("X".to_string());
@@ -4830,7 +4890,7 @@ mod tests {
                             qty: crate::types::ability::QuantityRef::EventContextAmount,
                         }),
                     },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -4876,7 +4936,7 @@ mod tests {
                         }),
                         offset: 1,
                     },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
@@ -5297,6 +5357,7 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -6254,6 +6315,7 @@ mod tests {
             from: Zone::Hand,
             to: Zone::Battlefield,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Tapped,
             enter_with_counters: Vec::new(),
             controller_override: None,

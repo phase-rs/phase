@@ -533,6 +533,7 @@ pub fn route_debug_create_to_battlefield(
         from,
         to: Zone::Battlefield,
         cause: None,
+        attach_to: None,
         enter_tapped: Default::default(),
         enter_with_counters: vec![],
         controller_override: None,

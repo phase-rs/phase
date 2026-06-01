@@ -1,6 +1,5 @@
 use crate::types::ability::{
-    ControllerRef, Effect, GainLifePlayer, ManaProduction, PtValue, QuantityExpr, TargetFilter,
-    TypedFilter,
+    ControllerRef, Effect, ManaProduction, PtValue, QuantityExpr, TargetFilter, TypedFilter,
 };
 use crate::types::mana::ManaColor;
 use crate::types::Zone;
@@ -143,12 +142,17 @@ fn resolve_defined(params: &ForgeParams) -> TargetFilter {
     }
 }
 
-/// Check if `Defined$` targets an opponent rather than the controller.
-fn defined_is_opponent(params: &ForgeParams) -> bool {
-    matches!(
-        params.get("Defined"),
-        Some("Opponent") | Some("OpponentOfTriggered")
-    )
+fn resolve_defined_life_player(params: &ForgeParams) -> TargetFilter {
+    match params.get("Defined") {
+        Some("Targeted") | Some("TargetedPlayer") => TargetFilter::Player,
+        Some("TriggeredCardController") | Some("TriggeredPlayer") => TargetFilter::TriggeringPlayer,
+        Some("ParentTarget") => TargetFilter::ParentTarget,
+        // There is no single implicit opponent player in multiplayer. Preserve
+        // the historical fallback until Forge import can express player scopes.
+        Some("Opponent") | Some("OpponentOfTriggered") => TargetFilter::Controller,
+        Some("You") | Some("Self") | None => TargetFilter::Controller,
+        Some(_) => TargetFilter::Controller,
+    }
 }
 
 // CR 120.2b: Deal damage as an effect of a spell or ability.
@@ -180,16 +184,9 @@ fn translate_gain_life(
     resolver: &mut SvarResolver,
 ) -> Result<Effect, ForgeTranslateError> {
     let amount = resolve_quantity(params, "LifeAmount", resolver);
-    // Forge Defined$ determines who gains life. GainLifePlayer only has
-    // Controller and TargetedController — opponent gains aren't expressible
-    // in the current type, so we stay with Controller for non-opponent cases.
-    let player = if defined_is_opponent(params) {
-        // TODO: GainLifePlayer doesn't have an Opponent variant; this stays
-        // as Controller until the engine type is extended.
-        GainLifePlayer::Controller
-    } else {
-        GainLifePlayer::Controller
-    };
+    // CR 119.3: `GainLife.player` is a player-resolved TargetFilter. Reuse only
+    // the `Defined$` cases that resolve to a player, not object filters.
+    let player = resolve_defined_life_player(params);
     Ok(Effect::GainLife { amount, player })
 }
 
@@ -609,9 +606,32 @@ mod tests {
         let mut resolver = make_resolver();
         let effect = translate_effect(&params, &mut resolver).unwrap();
         match effect {
-            Effect::GainLife { amount, .. } => {
+            Effect::GainLife { amount, player } => {
                 assert_eq!(amount, QuantityExpr::Fixed { value: 2 });
+                assert_eq!(player, TargetFilter::Controller);
             }
+            other => panic!("expected GainLife, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gain_life_defined_targeted_player() {
+        let params = parse_params("DB$ GainLife | Defined$ TargetedPlayer | LifeAmount$ 2");
+        let mut resolver = make_resolver();
+        let effect = translate_effect(&params, &mut resolver).unwrap();
+        match effect {
+            Effect::GainLife { player, .. } => assert_eq!(player, TargetFilter::Player),
+            other => panic!("expected GainLife, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_gain_life_defined_opponent_does_not_emit_object_filter() {
+        let params = parse_params("DB$ GainLife | Defined$ Opponent | LifeAmount$ 2");
+        let mut resolver = make_resolver();
+        let effect = translate_effect(&params, &mut resolver).unwrap();
+        match effect {
+            Effect::GainLife { player, .. } => assert_eq!(player, TargetFilter::Controller),
             other => panic!("expected GainLife, got {other:?}"),
         }
     }

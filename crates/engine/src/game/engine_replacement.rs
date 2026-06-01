@@ -1296,6 +1296,7 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Exile,
             cause: None,
+            attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -1797,6 +1798,7 @@ mod tests {
             from: Zone::Stack,
             to: Zone::Battlefield,
             cause: None,
+            attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -1974,6 +1976,7 @@ mod tests {
             from: Zone::Stack,
             to: Zone::Battlefield,
             cause: None,
+            attach_to: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -2117,7 +2120,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
             ),
             AbilityDefinition::new(

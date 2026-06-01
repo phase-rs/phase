@@ -2859,8 +2859,9 @@ async fn handle_client_message(
 
             let mut reservation_token = None;
             let mut reservation_expires_at_ms = None;
+            let mut reservation_counted_in_info = false;
 
-            let info = {
+            let mut info = {
                 let lob_guard = lobby.lock().await;
                 let lob = lob_guard.lobby();
 
@@ -2974,17 +2975,42 @@ async fn handle_client_message(
                 }
             }
 
-            if info.max_players > 0 && info.current_players >= info.max_players {
-                let msg = ServerMessage::Error {
-                    message: format!("Game {game_code} is full"),
-                };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
-                return;
-            }
-
             if reserve {
+                let already_reserved = if info.is_p2p {
+                    let mut lob = lobby.lock().await;
+                    identity.lobby_reservations.retain(|(code, token)| {
+                        if code != &game_code {
+                            return true;
+                        }
+                        lob.lobby_mut().has_active_reservation(code, token, &SysEnv)
+                    });
+                    identity
+                        .lobby_reservations
+                        .iter()
+                        .any(|(code, _)| code == &game_code)
+                } else {
+                    let mut mgr = state.lock().await;
+                    identity.seat_reservations.retain(|(code, token)| {
+                        if code != &game_code {
+                            return true;
+                        }
+                        mgr.has_active_reservation(code, token)
+                    });
+                    identity
+                        .seat_reservations
+                        .iter()
+                        .any(|(code, _)| code == &game_code)
+                };
+                if already_reserved {
+                    let msg = ServerMessage::Error {
+                        message: "You already hold a reservation for this game".to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+
                 if info.is_p2p {
                     let reserve_result = {
                         let mut lob = lobby.lock().await;
@@ -3027,7 +3053,6 @@ async fn handle_client_message(
                         mgr.reserve_seat(
                             &game_code,
                             display_name.unwrap_or_else(|| "Player".to_string()),
-                            password.is_some(),
                         )
                     };
                     match reserve_result {
@@ -3069,6 +3094,22 @@ async fn handle_client_message(
                         }
                     }
                 }
+                let latest_info = {
+                    let lob = lobby.lock().await;
+                    lob.lobby().join_target_info(&game_code)
+                };
+                if let Some(latest_info) = latest_info {
+                    info = latest_info;
+                    reservation_counted_in_info = true;
+                }
+            } else if info.max_players > 0 && info.current_players >= info.max_players {
+                let msg = ServerMessage::Error {
+                    message: format!("Game {game_code} is full"),
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
             }
 
             let msg = ServerMessage::JoinTargetInfo {
@@ -3077,8 +3118,9 @@ async fn handle_client_message(
                 format_config: info.format_config,
                 match_config: info.match_config,
                 player_count: info.max_players as u8,
-                filled_seats: (info.current_players + u32::from(reservation_token.is_some()))
-                    .min(info.max_players) as u8,
+                filled_seats: (info.current_players
+                    + u32::from(reservation_token.is_some() && !reservation_counted_in_info))
+                .min(info.max_players) as u8,
                 reservation_token,
                 reservation_expires_at_ms,
             };
@@ -3579,8 +3621,13 @@ async fn handle_client_message(
                     .collect::<Vec<_>>();
 
                 session.apply_seat_delta(seat_state, &delta, db.as_ref());
+                // Match `seat_reducer::apply_start` — token occupancy alone can
+                // disagree with seat kinds (reservations, mid-mutation slots).
+                let seat_state_after = session.seat_state();
                 let mut started = delta.now_started
-                    || (session.is_full() && session.start_when_full && session.is_pregame());
+                    || (seat_state_after.is_full()
+                        && session.start_when_full
+                        && session.is_pregame());
                 // Collect a bracket-violation message to broadcast after releasing the state lock.
                 // start_game guarantees no mutation on Err, so session state is untouched.
                 let bracket_error: Option<String> = if started {
