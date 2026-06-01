@@ -18,8 +18,8 @@ use crate::env::BrokerEnv;
 use crate::lobby::{LobbyManager, RegisterGameRequest};
 use crate::protocol::{LobbyClientMessage, LobbyServerMessage, ServerMode};
 use crate::reservation_auth::{
-    consume_owned_reservation, release_owned_reservation, ReservationConsume,
-    ReservationRelease, NOT_OWNED_RESERVATION,
+    consume_owned_reservation, release_owned_reservation, ReservationConsume, ReservationRelease,
+    NOT_OWNED_RESERVATION,
 };
 
 /// Capacity cap for the broker path. `LobbyManager` is otherwise unbounded —
