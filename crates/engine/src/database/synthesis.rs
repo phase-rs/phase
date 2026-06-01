@@ -3,7 +3,8 @@ use std::str::FromStr;
 use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
-use crate::parser::oracle_util::{apply_bracket_mode, BracketMode};
+use crate::parser::oracle_keyword::{keyword_display_name, parse_keyword_from_oracle};
+use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, BracketMode};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
     AdditionalCostPaymentSource, AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType,
@@ -3159,7 +3160,31 @@ fn is_modular_dies_transfer_trigger(t: &TriggerDefinition) -> bool {
 
 /// Idempotency-shape predicate for `synthesize_backup`'s ETB trigger.
 /// True iff `trigger` is a ChangesZone (→Battlefield) trigger on SelfRef
-/// whose execute body is `Effect::PutCounter` placing P1P1 counters on a creature target.
+/// whose execute body is `Effect::PutCounter` placing `expected_n` P1P1
+/// counters on a creature target.
+fn is_backup_etb_trigger_with_count(t: &TriggerDefinition, expected_n: u32) -> bool {
+    if !matches!(t.mode, TriggerMode::ChangesZone)
+        || t.destination != Some(Zone::Battlefield)
+        || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = t.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Fixed { value },
+            target: TargetFilter::Typed(tf),
+        } if *counter_type == CounterType::Plus1Plus1
+            && *value == expected_n as i32
+            && tf.type_filters.iter().any(|f| matches!(f, TypeFilter::Creature))
+    )
+}
+
+#[cfg(test)]
 fn is_backup_etb_trigger(t: &TriggerDefinition) -> bool {
     if !matches!(t.mode, TriggerMode::ChangesZone)
         || t.destination != Some(Zone::Battlefield)
@@ -3181,20 +3206,126 @@ fn is_backup_etb_trigger(t: &TriggerDefinition) -> bool {
     )
 }
 
+fn backup_granted_oracle_text(face: &CardFace) -> Option<String> {
+    let mut lines = face.oracle_text.as_deref()?.lines();
+    for line in lines.by_ref() {
+        let first_keyword = strip_reminder_text(line)
+            .split([',', ';'])
+            .next()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .and_then(|text| parse_keyword_from_oracle(&text));
+        if matches!(first_keyword, Some(Keyword::Backup(_))) {
+            let granted = lines.collect::<Vec<_>>().join("\n");
+            return Some(granted);
+        }
+    }
+    None
+}
+
+fn backup_grant_modifications(face: &CardFace) -> Vec<ContinuousModification> {
+    let Some(granted_text) = backup_granted_oracle_text(face) else {
+        return Vec::new();
+    };
+    if granted_text.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let types: Vec<String> = face
+        .card_type
+        .core_types
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let keyword_names: Vec<String> = face.keywords.iter().map(keyword_display_name).collect();
+    let parsed = parse_oracle_text(
+        &granted_text,
+        &face.name,
+        &keyword_names,
+        &types,
+        &face.card_type.subtypes,
+    );
+
+    let mut modifications = backup_keyword_modifications(&granted_text);
+    for keyword in parsed.extracted_keywords {
+        push_backup_keyword_modification(&mut modifications, keyword);
+    }
+    for definition in parsed.abilities {
+        modifications.push(ContinuousModification::GrantAbility {
+            definition: Box::new(definition),
+        });
+    }
+    for trigger in parsed.triggers {
+        modifications.push(ContinuousModification::GrantTrigger {
+            trigger: Box::new(trigger),
+        });
+    }
+    for definition in parsed.statics {
+        modifications.push(ContinuousModification::GrantStaticAbility {
+            definition: Box::new(definition),
+        });
+    }
+
+    modifications
+}
+
+fn backup_keyword_modifications(granted_text: &str) -> Vec<ContinuousModification> {
+    let mut modifications = Vec::new();
+    for line in granted_text.lines() {
+        let without_reminder = strip_reminder_text(line);
+        let parts: Vec<&str> = without_reminder
+            .split([',', ';'])
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        if parts.is_empty() {
+            continue;
+        }
+
+        let mut line_keywords = Vec::new();
+        for part in parts {
+            let lower = part.to_ascii_lowercase();
+            let Some(keyword) = parse_keyword_from_oracle(&lower) else {
+                line_keywords.clear();
+                break;
+            };
+            line_keywords.push(keyword);
+        }
+
+        for keyword in line_keywords {
+            push_backup_keyword_modification(&mut modifications, keyword);
+        }
+    }
+    modifications
+}
+
+fn push_backup_keyword_modification(
+    modifications: &mut Vec<ContinuousModification>,
+    keyword: Keyword,
+) {
+    if matches!(keyword, Keyword::Backup(_)) {
+        return;
+    }
+    let modification = ContinuousModification::AddKeyword { keyword };
+    if !modifications.contains(&modification) {
+        modifications.push(modification);
+    }
+}
+
 /// CR 702.165: Backup N — ETB triggered ability that places N +1/+1 counters
-/// on target creature and grants the source's other abilities to that creature
-/// until end of turn if it's another creature.
+/// on target creature and grants this creature's non-Backup abilities printed
+/// below that Backup ability to that creature until end of turn if it's another
+/// creature.
 ///
 /// Build-for-the-class: synthesized from `Keyword::Backup(N)` so every printed
-/// Backup card and every runtime-granted Backup (via `AddKeyword`) gets the same
-/// trigger. CR 702.165c: "If that's another creature, it gains this creature's
-/// other abilities until end of turn." The "other abilities" excludes Backup
-/// itself but includes all keywords (except Backup), activated abilities,
-/// triggered abilities, and static abilities.
+/// Backup card gets the same trigger. CR 702.165a/c: only abilities printed
+/// below the Backup ability are granted; abilities printed above Backup and
+/// abilities gained from effects are not.
 ///
-/// CR 702.165d: Multiple Backup instances trigger separately; the first to
-/// resolve places counters and grants abilities, later instances do nothing
-/// (no intervening-if guard needed since the CR doesn't specify one).
+/// CR 702.165d: The granted abilities are locked in when the triggered ability
+/// is put on the stack. In card-data synthesis, that means parsing the printed
+/// Oracle suffix below the first Backup line rather than copying the face's
+/// already-merged current ability vectors.
 pub fn synthesize_backup(face: &mut CardFace) {
     let backup_values: Vec<u32> = face
         .keywords
@@ -3208,45 +3339,7 @@ pub fn synthesize_backup(face: &mut CardFace) {
         return;
     }
 
-    // Idempotency: skip if a Backup ETB trigger already exists
-    let already_has_trigger = face.triggers.iter().any(is_backup_etb_trigger);
-    if already_has_trigger {
-        return;
-    }
-
-    // Build the ability-grant sub-ability
-    // CR 702.165c: grant "this creature's other abilities" (everything except Backup)
-    let mut modifications: Vec<ContinuousModification> = Vec::new();
-
-    // Grant non-Backup keywords
-    for kw in &face.keywords {
-        if !matches!(kw, Keyword::Backup(_)) {
-            modifications.push(ContinuousModification::AddKeyword {
-                keyword: kw.clone(),
-            });
-        }
-    }
-
-    // Grant activated abilities
-    for ability in &face.abilities {
-        modifications.push(ContinuousModification::GrantAbility {
-            definition: Box::new(ability.clone()),
-        });
-    }
-
-    // Grant triggered abilities
-    for trigger in &face.triggers {
-        modifications.push(ContinuousModification::GrantTrigger {
-            trigger: Box::new(trigger.clone()),
-        });
-    }
-
-    // Grant static abilities
-    for static_ability in &face.static_abilities {
-        modifications.push(ContinuousModification::GrantStaticAbility {
-            definition: Box::new(static_ability.clone()),
-        });
-    }
+    let modifications = backup_grant_modifications(face);
 
     // Build the GenericEffect for ability granting
     // CR 702.165c: "until end of turn" + "if that's another creature"
@@ -3267,57 +3360,64 @@ pub fn synthesize_backup(face: &mut CardFace) {
         })
     };
 
-    // Build the counter-placement primary ability
-    // CR 702.165a: "put N +1/+1 counters on target creature"
-    let counter_ability = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::PutCounter {
-            counter_type: CounterType::Plus1Plus1,
-            count: QuantityExpr::Fixed {
-                value: backup_values[0] as i32,
+    for &n in &backup_values {
+        let needed = backup_values.iter().filter(|value| **value == n).count();
+        let existing = face
+            .triggers
+            .iter()
+            .filter(|trigger| is_backup_etb_trigger_with_count(trigger, n))
+            .count();
+        if existing >= needed {
+            continue;
+        }
+
+        // Build the counter-placement primary ability
+        // CR 702.165a: "put N +1/+1 counters on target creature"
+        let counter_ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: n as i32 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
             },
-            target: TargetFilter::Typed(TypedFilter::creature()),
-        },
-    )
-    .description(format!(
-        "Put {} +1/+1 counter{} on target creature",
-        backup_values[0],
-        if backup_values[0] == 1 { "" } else { "s" }
-    ));
-
-    // Chain ability granting if needed, gated on "if that's another creature"
-    let counter_ability = if let Some(grant_effect) = grant_effect {
-        let grant_sub = AbilityDefinition::new(AbilityKind::Spell, grant_effect)
-            .condition(AbilityCondition::Not {
-                condition: Box::new(AbilityCondition::TargetMatchesFilter {
-                    filter: TargetFilter::SelfRef,
-                    use_lki: false,
-                }),
-            })
-            .description(
-                "If that's another creature, it gains this creature's other abilities until end of turn."
-                    .to_string(),
-            );
-        counter_ability.sub_ability(grant_sub)
-    } else {
-        counter_ability
-    };
-
-    // Build the ETB trigger
-    // CR 702.165a: "when this creature enters"
-    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
-        .destination(Zone::Battlefield)
-        .valid_card(TargetFilter::SelfRef)
-        .trigger_zones(vec![Zone::Battlefield])
-        .execute(counter_ability)
+        )
         .description(format!(
-            "CR 702.165: Backup {} — when this creature enters, put {} +1/+1 counter{} on target creature. If that's another creature, it gains this creature's other abilities until end of turn.",
-            backup_values[0],
-            backup_values[0],
-            if backup_values[0] == 1 { "" } else { "s" }
+            "Put {n} +1/+1 counter{} on target creature",
+            if n == 1 { "" } else { "s" }
         ));
 
-    face.triggers.push(trigger);
+        // Chain ability granting if needed, gated on "if that's another creature"
+        let counter_ability = if let Some(grant_effect) = grant_effect.clone() {
+            let grant_sub = AbilityDefinition::new(AbilityKind::Spell, grant_effect)
+                .condition(AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::TargetMatchesFilter {
+                        filter: TargetFilter::SelfRef,
+                        use_lki: false,
+                    }),
+                })
+                .description(
+                    "If that's another creature, it gains this creature's non-backup abilities printed below backup until end of turn."
+                        .to_string(),
+                );
+            counter_ability.sub_ability(grant_sub)
+        } else {
+            counter_ability
+        };
+
+        // Build the ETB trigger
+        // CR 702.165a: "when this creature enters"
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Battlefield)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Battlefield])
+            .execute(counter_ability)
+            .description(format!(
+                "CR 702.165: Backup {n} — when this creature enters, put {n} +1/+1 counter{} on target creature. If that's another creature, it gains this creature's non-backup abilities printed below backup until end of turn.",
+                if n == 1 { "" } else { "s" }
+            ));
+
+        face.triggers.push(trigger);
+    }
 }
 
 /// CR 702.58a: Graft N — represents both a static ability and a triggered
@@ -4227,9 +4327,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     // are in place and `Keyword::Station` has been normalized.
     synthesize_station(face);
     // CR 702.165: Backup — ETB trigger placing +1/+1 counters and granting
-    // other abilities until end of turn. Must run after all other synthesizers
-    // since it reads face.triggers/abilities/static_abilities to build the
-    // ability-grant sub-ability.
+    // non-Backup abilities printed below Backup until end of turn.
     synthesize_backup(face);
 }
 
@@ -9586,6 +9684,9 @@ mod backup_synthesis_tests {
     fn face_with_backup() -> CardFace {
         let mut face = CardFace {
             name: "Guardian Scalelord".to_string(),
+            oracle_text: Some(
+                "Backup 1\nFlying\nWhenever this creature attacks, draw a card.".to_string(),
+            ),
             keywords: vec![Keyword::Backup(1), Keyword::Flying],
             card_type: crate::types::card_type::CardType {
                 core_types: vec![CoreType::Creature],
@@ -9670,6 +9771,47 @@ mod backup_synthesis_tests {
         assert_eq!(second_count, 1, "second run should not add another trigger");
     }
 
+    /// CR 702.165a: Multiple Backup instances trigger separately.
+    #[test]
+    fn synthesize_backup_emits_one_trigger_per_instance() {
+        let mut face = CardFace {
+            name: "Conclave Sledge-Captain".to_string(),
+            oracle_text: Some(
+                "Backup 1, backup 1, backup 1\n\
+                 Trample\n\
+                 Whenever this creature deals combat damage to a player, put that many +1/+1 counters on it."
+                    .to_string(),
+            ),
+            keywords: vec![Keyword::Backup(1), Keyword::Backup(1), Keyword::Backup(1)],
+            card_type: crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            },
+            ..CardFace::default()
+        };
+
+        synthesize_backup(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_backup_etb_trigger_with_count(trigger, 1))
+                .count(),
+            3,
+            "each Backup instance must emit its own ETB trigger"
+        );
+
+        synthesize_backup(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_backup_etb_trigger_with_count(trigger, 1))
+                .count(),
+            3,
+            "synthesis remains idempotent for repeated Backup instances"
+        );
+    }
+
     /// A face without `Keyword::Backup` is unaffected.
     #[test]
     fn synthesize_backup_is_noop_without_keyword() {
@@ -9731,6 +9873,71 @@ mod backup_synthesis_tests {
             }
             other => panic!("expected GenericEffect, got {:?}", other),
         }
+    }
+
+    /// CR 702.165a/c: Backup grants only abilities printed below the Backup
+    /// line. Abilities printed above it, like Saiba Cryptomancer's flash, are
+    /// not granted.
+    #[test]
+    fn synthesize_backup_does_not_grant_abilities_printed_above_backup() {
+        let mut face = CardFace {
+            name: "Saiba Cryptomancer".to_string(),
+            oracle_text: Some(
+                "Flash\n\
+                 Backup 1\n\
+                 Hexproof"
+                    .to_string(),
+            ),
+            keywords: vec![Keyword::Flash, Keyword::Backup(1), Keyword::Hexproof],
+            card_type: crate::types::card_type::CardType {
+                core_types: vec![CoreType::Creature],
+                ..Default::default()
+            },
+            ..CardFace::default()
+        };
+
+        synthesize_backup(&mut face);
+
+        let backup_trigger = face
+            .triggers
+            .iter()
+            .find(|trigger| is_backup_etb_trigger(trigger))
+            .expect("Backup ETB trigger");
+        let grant_sub = backup_trigger
+            .execute
+            .as_ref()
+            .and_then(|execute| execute.sub_ability.as_ref())
+            .expect("Backup ability grant");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*grant_sub.effect
+        else {
+            panic!("expected GenericEffect grant, got {:?}", grant_sub.effect);
+        };
+        let modifications = &static_abilities[0].modifications;
+
+        assert!(
+            modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Hexproof
+                    }
+                )
+            }),
+            "Backup should grant Hexproof printed below Backup"
+        );
+        assert!(
+            !modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flash
+                    }
+                )
+            }),
+            "Backup must not grant Flash printed above Backup"
+        );
     }
 
     /// CR 702.165c: Ability granting is gated on "if that's another creature".
