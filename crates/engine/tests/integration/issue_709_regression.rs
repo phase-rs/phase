@@ -1,9 +1,18 @@
 //! Regression for issue #709: Marchesa (Dethrone), Gisa Glorious Resurrector,
 //! Uncivil Unrest — keywords/replacements/triggers reported not working.
 
+use engine::database::synthesis::synthesize_all;
+use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
 use engine::types::ability::{ContinuousModification, DamageModification, Effect, TargetFilter};
+use engine::types::actions::GameAction;
+use engine::types::card::CardFace;
+use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
+use engine::types::game_state::WaitingFor;
+use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
+use engine::types::phase::Phase;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 
@@ -114,10 +123,6 @@ fn uncivil_unrest_riot_and_double_damage_parse() {
 
 #[test]
 fn marchesa_dethrone_keyword_synthesizes_attack_trigger() {
-    use engine::database::synthesis::synthesize_all;
-    use engine::types::card::CardFace;
-    use engine::types::card_type::CoreType;
-
     let mut face = CardFace {
         name: "Marchesa, the Black Rose".to_string(),
         keywords: vec![Keyword::Dethrone],
@@ -134,13 +139,7 @@ fn marchesa_dethrone_keyword_synthesizes_attack_trigger() {
     );
 }
 
-#[test]
-fn uncivil_unrest_granted_riot_prompts_on_creature_etb() {
-    use engine::game::scenario::{GameScenario, P0};
-    use engine::types::actions::GameAction;
-    use engine::types::game_state::WaitingFor;
-    use engine::types::phase::Phase;
-
+fn cast_zero_cost_bear_with_uncivil_unrest() -> (GameRunner, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario
@@ -173,12 +172,61 @@ fn uncivil_unrest_granted_riot_prompts_on_creature_etb() {
         runner.pass_both_players();
     }
 
+    (runner, bear)
+}
+
+fn assert_riot_replacement_choice(runner: &GameRunner) {
+    let WaitingFor::ReplacementChoice {
+        candidate_count,
+        candidate_descriptions,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "granted Riot should prompt as an ETB replacement; waiting_for={:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*candidate_count, 2);
     assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::ChooseOneOfBranch { .. }
-        ),
-        "granted Riot should prompt on ETB; waiting_for={:?}",
-        runner.state().waiting_for
+        candidate_descriptions
+            .iter()
+            .any(|description| description.contains("Riot")),
+        "replacement choice should identify Riot, got {:?}",
+        candidate_descriptions
+    );
+}
+
+#[test]
+fn uncivil_unrest_granted_riot_accept_enters_with_counter() {
+    let (mut runner, bear) = cast_zero_cost_bear_with_uncivil_unrest();
+    assert_riot_replacement_choice(&runner);
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("choose Riot counter");
+    assert_eq!(
+        runner.state().objects[&bear]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied(),
+        Some(1),
+        "accepting Riot should make the creature enter with a +1/+1 counter"
+    );
+}
+
+#[test]
+fn uncivil_unrest_granted_riot_decline_grants_haste() {
+    let (mut runner, bear) = cast_zero_cost_bear_with_uncivil_unrest();
+    assert_riot_replacement_choice(&runner);
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .expect("choose Riot haste");
+    assert!(
+        runner.state().objects[&bear]
+            .keywords
+            .contains(&Keyword::Haste),
+        "declining Riot counter should make the creature gain haste"
     );
 }

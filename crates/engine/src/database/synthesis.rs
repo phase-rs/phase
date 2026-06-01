@@ -219,7 +219,6 @@ impl KeywordTriggerInstaller {
             // moment on.
             Keyword::Graft(_) => vec![build_graft_enters_trigger()],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
-            Keyword::Riot => vec![build_riot_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
             Keyword::Extort => vec![build_extort_trigger()],
@@ -256,7 +255,6 @@ impl KeywordTriggerInstaller {
             // removed.
             Keyword::Graft(_) => is_graft_enters_trigger(trigger),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
-            Keyword::Riot => is_riot_etb_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
             Keyword::Extort => is_extort_trigger(trigger),
@@ -1974,24 +1972,57 @@ pub fn synthesize_fabricate(face: &mut CardFace) {
     }
 }
 
-/// CR 702.128a: Riot — "When this creature enters, choose one — put a +1/+1
-/// counter on it or it gains haste until end of turn."
+/// CR 702.136a: Riot — "You may have this permanent enter with an additional
+/// +1/+1 counter on it. If you don't, it gains haste."
 ///
-/// Modeled as an ETB `Effect::ChooseOneOf` with a +1/+1 counter branch and a
-/// haste-until-end-of-turn branch (`GenericEffect` + transient continuous).
-/// Runtime-granted Riot (e.g. Uncivil Unrest) installs the same trigger via
-/// `KeywordTriggerInstaller` when layers apply `AddKeyword(Riot)`.
+/// Modeled as an optional `Moved` replacement, not an ETB trigger: accepting
+/// folds the counter into the battlefield-entry event, while declining runs the
+/// haste grant after the object enters. Static grants of Riot (Uncivil Unrest)
+/// synthesize the same replacement from the static's affected filter.
 pub fn synthesize_riot(face: &mut CardFace) {
-    if !face.keywords.iter().any(|kw| matches!(kw, Keyword::Riot)) {
-        return;
+    let printed_count = face
+        .keywords
+        .iter()
+        .filter(|kw| matches!(kw, Keyword::Riot))
+        .count();
+    add_riot_replacements(face, TargetFilter::SelfRef, printed_count);
+
+    let static_grants: Vec<TargetFilter> = face
+        .static_abilities
+        .iter()
+        .filter(|static_def| static_grants_riot(static_def))
+        .map(|static_def| static_def.affected.clone().unwrap_or(TargetFilter::Any))
+        .collect();
+    for filter in static_grants {
+        add_riot_replacements(face, filter, 1);
     }
-    if face.triggers.iter().any(is_riot_etb_trigger) {
-        return;
-    }
-    face.triggers.push(build_riot_trigger());
 }
 
-fn build_riot_trigger() -> TriggerDefinition {
+fn static_grants_riot(static_def: &StaticDefinition) -> bool {
+    static_def.mode == StaticMode::Continuous
+        && static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Riot
+                }
+            )
+        })
+}
+
+fn add_riot_replacements(face: &mut CardFace, valid_card: TargetFilter, needed: usize) {
+    let existing = face
+        .replacements
+        .iter()
+        .filter(|replacement| is_riot_replacement(replacement, &valid_card))
+        .count();
+    for _ in existing..needed {
+        face.replacements
+            .push(build_riot_replacement(valid_card.clone()));
+    }
+}
+
+fn build_riot_replacement(valid_card: TargetFilter) -> ReplacementDefinition {
     let counter_branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::PutCounter {
@@ -2000,7 +2031,7 @@ fn build_riot_trigger() -> TriggerDefinition {
             target: TargetFilter::SelfRef,
         },
     )
-    .description("Put a +1/+1 counter on it".to_string());
+    .description("This permanent enters with an additional +1/+1 counter on it".to_string());
 
     let haste_branch = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -2010,52 +2041,78 @@ fn build_riot_trigger() -> TriggerDefinition {
                 .modifications(vec![ContinuousModification::AddKeyword {
                     keyword: Keyword::Haste,
                 }])],
-            duration: Some(Duration::UntilEndOfTurn),
+            duration: Some(Duration::Permanent),
             target: None,
         },
     )
-    .duration(Duration::UntilEndOfTurn)
-    .description("It gains haste until end of turn".to_string());
+    .duration(Duration::Permanent)
+    .description("It gains haste".to_string());
 
-    let choose = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::ChooseOneOf {
-            chooser: PlayerFilter::Controller,
-            branches: vec![counter_branch, haste_branch],
+    ReplacementDefinition {
+        event: ReplacementEvent::Moved,
+        execute: Some(Box::new(counter_branch)),
+        mode: crate::types::ability::ReplacementMode::Optional {
+            decline: Some(Box::new(haste_branch)),
         },
-    );
-
-    TriggerDefinition::new(TriggerMode::ChangesZone)
-        .destination(Zone::Battlefield)
-        .valid_card(TargetFilter::SelfRef)
-        .execute(choose)
-        .description(
-            "CR 702.128a: Riot — when this creature enters, put a +1/+1 counter on it or it gains haste until end of turn."
+        valid_card: Some(valid_card),
+        destination_zone: Some(Zone::Battlefield),
+        description: Some(
+            "CR 702.136a: Riot — this permanent may enter with an additional +1/+1 counter; otherwise it gains haste."
                 .to_string(),
-        )
+        ),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
+    }
 }
 
-fn is_riot_etb_trigger(t: &TriggerDefinition) -> bool {
-    matches!(t.mode, TriggerMode::ChangesZone)
-        && t.destination == Some(Zone::Battlefield)
-        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
-        && matches!(
-            t.execute.as_deref().map(|a| &*a.effect),
-            Some(Effect::ChooseOneOf { branches, .. })
-                if branches.len() == 2
-                    && branches.iter().any(|b| matches!(
-                        &*b.effect,
-                        Effect::PutCounter {
-                            counter_type: CounterType::Plus1Plus1,
-                            target: TargetFilter::SelfRef,
-                            ..
-                        }
-                    ))
-                    && branches.iter().any(|b| matches!(
-                        &*b.effect,
-                        Effect::GenericEffect { .. }
-                    ))
-        )
+fn is_riot_replacement(replacement: &ReplacementDefinition, valid_card: &TargetFilter) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || replacement.valid_card.as_ref() != Some(valid_card)
+        || replacement.destination_zone != Some(Zone::Battlefield)
+    {
+        return false;
+    }
+
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    let Effect::PutCounter {
+        counter_type,
+        count: QuantityExpr::Fixed { value },
+        target: TargetFilter::SelfRef,
+    } = &*execute.effect
+    else {
+        return false;
+    };
+    if *counter_type != CounterType::Plus1Plus1 || *value != 1 {
+        return false;
+    }
+
+    let crate::types::ability::ReplacementMode::Optional {
+        decline: Some(decline),
+    } = &replacement.mode
+    else {
+        return false;
+    };
+    matches!(
+        &*decline.effect,
+        Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::Permanent),
+            ..
+        } if static_abilities.iter().any(static_grants_haste_to_self)
+    )
+}
+
+fn static_grants_haste_to_self(static_def: &StaticDefinition) -> bool {
+    static_def.affected == Some(TargetFilter::SelfRef)
+        && static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste
+                }
+            )
+        })
 }
 
 /// CR 702.93a: Undying — "When this permanent is put into a graveyard from the
@@ -4336,9 +4393,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // between N +1/+1 counters or N 1/1 colorless Servo artifact creature
     // tokens. Modeled via `Effect::ChooseOneOf`.
     synthesize_fabricate(face);
-    // CR 702.128a: Riot — ETB choose-one between +1/+1 counter and haste until
-    // end of turn. Granted Riot (static keyword grants) resolves via the same
-    // synthesized trigger shape through `KeywordTriggerInstaller`.
+    // CR 702.136a: Riot — optional ETB replacement choosing +1/+1 counter or
+    // haste. Static grants of Riot synthesize matching ETB replacements from
+    // their affected filters.
     synthesize_riot(face);
     // CR 702.93a: Undying — dies trigger that returns the permanent with a
     // +1/+1 counter, gated on having had no +1/+1 counter at death (LKI).
@@ -7036,15 +7093,17 @@ mod riot_synthesis_tests {
     use super::*;
 
     #[test]
-    fn synthesize_riot_adds_etb_choose_branches() {
+    fn synthesize_riot_adds_optional_etb_replacement() {
         let mut face = CardFace::default();
         face.keywords.push(Keyword::Riot);
         face.card_type.core_types.push(CoreType::Creature);
         synthesize_riot(&mut face);
         assert!(
-            face.triggers.iter().any(is_riot_etb_trigger),
-            "riot should add ETB ChooseOneOf trigger, got {:?}",
-            face.triggers
+            face.replacements
+                .iter()
+                .any(|replacement| is_riot_replacement(replacement, &TargetFilter::SelfRef)),
+            "riot should add ETB optional replacement, got {:?}",
+            face.replacements
         );
     }
 
@@ -7055,11 +7114,36 @@ mod riot_synthesis_tests {
         synthesize_riot(&mut face);
         synthesize_riot(&mut face);
         assert_eq!(
-            face.triggers
+            face.replacements
                 .iter()
-                .filter(|t| is_riot_etb_trigger(t))
+                .filter(|replacement| is_riot_replacement(replacement, &TargetFilter::SelfRef))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn synthesize_riot_static_grant_adds_replacement_for_affected_filter() {
+        let mut face = CardFace::default();
+        let affected = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::NonToken]),
+        );
+        face.static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Riot,
+                }]),
+        );
+        synthesize_riot(&mut face);
+        assert!(
+            face.replacements
+                .iter()
+                .any(|replacement| is_riot_replacement(replacement, &affected)),
+            "static Riot grant should add ETB replacement for affected filter, got {:?}",
+            face.replacements
         );
     }
 }
