@@ -3,9 +3,9 @@
 //! opponent choice; only "exile target creature or planeswalker" is a cast target.
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{TargetSelectionSlot, WaitingFor};
-use engine::types::ability::TargetRef;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
@@ -14,9 +14,10 @@ If the {1}{B} cost was paid, an opponent draws a card.\n\
 Exile target creature or planeswalker.";
 
 fn opponent_only_player_slot(slot: &TargetSelectionSlot) -> bool {
-    slot.legal_targets.iter().all(|t| {
-        matches!(t, TargetRef::Player(pid) if *pid != P0)
-    }) && !slot.legal_targets.is_empty()
+    slot.legal_targets
+        .iter()
+        .all(|t| matches!(t, TargetRef::Player(pid) if *pid != P0))
+        && !slot.legal_targets.is_empty()
 }
 
 fn assert_cast_target_slots(slots: &[TargetSelectionSlot]) {
@@ -47,12 +48,8 @@ fn baleful_mastery_cast_targeting_excludes_opponent_player_slot() {
     scenario.at_phase(Phase::PreCombatMain);
     let bear = scenario.add_creature(P1, "Grizzly Bear", 2, 2).id();
 
-    let mut spell_builder = scenario.add_spell_to_hand_from_oracle(
-        P0,
-        "Baleful Mastery",
-        true,
-        BALEFUL_MASTERY_ORACLE,
-    );
+    let mut spell_builder =
+        scenario.add_spell_to_hand_from_oracle(P0, "Baleful Mastery", true, BALEFUL_MASTERY_ORACLE);
     spell_builder.with_mana_cost(ManaCost::Cost {
         generic: 3,
         shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
