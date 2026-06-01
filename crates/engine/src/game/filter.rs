@@ -677,6 +677,26 @@ pub fn matches_target_filter_in_owner_zone(
         return false;
     }
 
+    // Fast path: when the object is already controlled by its owner — the
+    // common case for objects in hand/library/graveyard, where control-change
+    // effects almost never apply — the owner-override is a no-op. Skip the
+    // `GameObject` clone entirely (it allocates `name`, `counters`, and several
+    // Vecs per call, which is hot on library scans for tutors/search effects).
+    // Behavior is identical: the override only changes the result when
+    // `controller != owner`.
+    if obj.controller == obj.owner {
+        return filter_inner_for_object(
+            state,
+            obj,
+            object_id,
+            filter,
+            ctx.source_id,
+            ctx.source_controller,
+            ctx.ability,
+            ctx.recipient_id,
+        );
+    }
+
     let mut owner_scoped = obj.clone();
     owner_scoped.controller = owner_scoped.owner;
     filter_inner_for_object(
@@ -3824,6 +3844,53 @@ mod tests {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
         assert!(!matches_target_filter(&state, id, &TargetFilter::None, id));
+    }
+
+    /// Issue #1747 (perf): `matches_target_filter_in_owner_zone` skips the
+    /// `GameObject` clone when `controller == owner` (the fast path), and only
+    /// clones to override `controller := owner` when they differ (the slow
+    /// path). Both paths MUST yield the owner-scoped result — CR 109.5 / CR
+    /// 400.3: a card in an owner zone is evaluated with ownership standing in
+    /// for controller, so a control-changed card still counts as its owner's.
+    #[test]
+    fn owner_zone_filter_scopes_to_owner_on_fast_and_slow_paths() {
+        use crate::types::ability::TypedFilter;
+
+        let mut state = setup();
+        // A card in P0's library, owned AND controlled by P0 → fast path.
+        let card = create_object(
+            &mut state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        let your_card = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+        let ctx_p0 = FilterContext::from_source_with_controller(card, PlayerId(0));
+
+        // Fast path: controller == owner == P0, no clone needed.
+        assert_eq!(
+            state.objects[&card].controller,
+            state.objects[&card].owner,
+            "precondition: fast path requires controller == owner"
+        );
+        assert!(
+            super::matches_target_filter_in_owner_zone(&state, card, &your_card, &ctx_p0),
+            "owner-zone card owned+controlled by P0 is P0's card"
+        );
+
+        // Slow path: control-change the card to P1 (owner stays P0). Owner-
+        // scoping must still treat it as P0's card via the clone+override.
+        state.objects.get_mut(&card).unwrap().controller = PlayerId(1);
+        assert_ne!(
+            state.objects[&card].controller,
+            state.objects[&card].owner,
+            "precondition: slow path requires controller != owner"
+        );
+        assert!(
+            super::matches_target_filter_in_owner_zone(&state, card, &your_card, &ctx_p0),
+            "owner-scoping: a P1-controlled, P0-owned card in an owner zone is still P0's"
+        );
     }
 
     #[test]
