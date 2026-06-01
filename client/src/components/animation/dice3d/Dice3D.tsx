@@ -3,11 +3,11 @@
 // rAF + cleanup/dispose idiom of DeathShatter.tsx, swapping the 2D context for
 // a WebGLRenderer.
 //
-// The die tumbles with decaying angular velocity about a deterministic axis
+// The die tumbles with decaying angular velocity about deterministic axes
 // (derived from `result` + `sides`, never Math.random — so the same roll looks
-// identical across re-renders), then slerps to the orientation that shows
-// `result` facing CAMERA_UP. `onSettle` fires exactly once when it comes to
-// rest.
+// identical across re-renders), then slerps to the orientation that turns the
+// `result` face toward the camera (RESULT_FACING) so the number reads head-on.
+// `onSettle` fires exactly once when it comes to rest.
 
 import { useEffect, useRef } from "react";
 import {
@@ -27,7 +27,7 @@ import {
   WebGLRenderer,
 } from "three";
 
-import { dieDescriptor } from "./dieGeometry.ts";
+import { CAMERA_UP, dieDescriptor } from "./dieGeometry.ts";
 
 interface Dice3DProps {
   sides: number;
@@ -45,6 +45,10 @@ const DEFAULT_SIZE = 120;
 const TOTAL_MS = 1600; // base roll duration (before speedMultiplier)
 const TUMBLE_FRACTION = 0.6; // first 60% tumbles, last 40% settles
 const FACE_TEXTURE_PX = 128;
+// Camera offset from the die center — a slightly-raised 3/4 view. The result
+// face is settled to point straight at this position (see `viewFacingQuat`), so
+// the rolled number reads head-on while the die keeps its dramatic angle.
+const CAMERA_OFFSET = new Vector3(0, 1.4, 4.2);
 
 /** Quadratic ease-out, matching CardSlamAnimation's return easing. */
 function easeOutQuad(t: number): number {
@@ -130,7 +134,7 @@ export function Dice3D({
     // ─── Scene / camera / renderer ───
     const scene = new Scene();
     const camera = new PerspectiveCamera(40, 1, 0.1, 100);
-    camera.position.set(0, 1.4, 4.2);
+    camera.position.copy(CAMERA_OFFSET);
     camera.lookAt(0, 0, 0);
 
     const renderer = new WebGLRenderer({ alpha: true, antialias: true });
@@ -189,7 +193,7 @@ export function Dice3D({
       });
       mesh = new Mesh(geometry, boxMaterials);
     } else {
-      // Non-box polyhedron: single body material, number Sprites at centroids.
+      // Non-box polyhedron: single body material, number Sprites on each facet.
       const body = new MeshStandardMaterial({
         color: new Color(0xf5f1e6),
         roughness: 0.4,
@@ -198,21 +202,42 @@ export function Dice3D({
       materials.push(body);
       mesh = new Mesh(geometry, body);
 
+      // A face's plane distance from the center is the max projection of any
+      // vertex onto that face's outward normal. Computed from the geometry's
+      // own vertices, this is correct for every die type (the inscribed radius
+      // differs per solid — d4 ≈ 0.33, d20 ≈ 0.79 of the circumradius), so the
+      // label always sits ON the facet rather than buried inside the body.
+      const posAttr = geometry.getAttribute("position");
+      const vtx = new Vector3();
+      const faceDistance = (normal: Vector3): number => {
+        let max = -Infinity;
+        for (let k = 0; k < posAttr.count; k++) {
+          vtx.fromBufferAttribute(posAttr, k);
+          max = Math.max(max, vtx.dot(normal));
+        }
+        return max;
+      };
+
       for (let i = 0; i < descriptor.faceValue.length; i++) {
         const value = descriptor.faceValue[i];
         const texture = makeSpriteTexture(value);
         textures.push(texture);
+        // `depthTest: true` lets the opaque body occlude labels on faces turned
+        // away from the camera — so only the numbers on the visible facets show,
+        // like a real die. (`depthTest: false` painted all N faces at once.)
         const spriteMaterial = new SpriteMaterial({
           map: texture,
           transparent: true,
-          depthTest: false,
+          depthTest: true,
+          depthWrite: false,
         });
         spriteMaterials.push(spriteMaterial);
         const sprite = new Sprite(spriteMaterial);
-        // Park the label just outside the face along its normal so it sits on
-        // the facet. Parented to the mesh, it inherits all roll rotation.
+        // Float the label a hair outside the facet plane along its normal, so it
+        // reads cleanly when front-facing and is hidden by the body when behind.
+        // Parented to the mesh, it inherits all roll rotation.
         const normal = descriptor.faceNormal(i);
-        sprite.position.copy(normal.multiplyScalar(0.62));
+        sprite.position.copy(normal.clone().multiplyScalar(faceDistance(normal) + 0.06));
         sprite.scale.setScalar(0.5);
         mesh.add(sprite);
       }
@@ -221,10 +246,20 @@ export function Dice3D({
     scene.add(mesh);
 
     // ─── Orientation targets ───
-    const settleQuat = descriptor.orientationFor(result);
+    // `orientationFor` turns the result face to the geometry's canonical up
+    // (CAMERA_UP, +Y). Compose a view-facing rotation that carries +Y onto the
+    // camera direction, so the result face ends up pointing straight at the
+    // (oblique) camera and the number reads head-on instead of edge-on. The
+    // camera concern lives here, not in the camera-agnostic geometry module.
+    const cameraDir = CAMERA_OFFSET.clone().normalize();
+    const viewFacingQuat = new Quaternion().setFromUnitVectors(CAMERA_UP, cameraDir);
+    const settleQuat = viewFacingQuat.multiply(descriptor.orientationFor(result));
+    // Tumble around TWO distinct axes at different rates so the die actually
+    // tumbles (end over end + spin) rather than spinning flatly about one axis.
     const tumbleAxis = deterministicAxis(result, sides);
-    // Total tumble revolutions: a few full spins for a satisfying roll.
+    const tumbleAxis2 = deterministicAxis(result + 7, sides + 3);
     const tumbleTurns = 4 + (Math.abs(result) % 3);
+    const tumbleTurns2 = 3 + (Math.abs(result * 2 + 1) % 3);
     const totalMs = TOTAL_MS * speedMultiplier;
     const tumbleMs = totalMs * TUMBLE_FRACTION;
     const settleMs = totalMs - tumbleMs;
@@ -233,7 +268,8 @@ export function Dice3D({
     // from wherever the tumble left the die.
     let handoffQuat: Quaternion | null = null;
     const baseQuat = new Quaternion();
-    const tumbleQuat = new Quaternion();
+    const spinQuat = new Quaternion();
+    const flipQuat = new Quaternion();
 
     const start = performance.now();
 
@@ -244,13 +280,15 @@ export function Dice3D({
 
       if (elapsed < tumbleMs) {
         // Tumble: decaying angular velocity → angle eases out toward its max.
+        // Two superimposed rotations give a chaotic, end-over-end tumble.
         const t = elapsed / tumbleMs;
-        const angle = easeOutQuad(t) * tumbleTurns * Math.PI * 2;
-        tumbleQuat.setFromAxisAngle(tumbleAxis, angle);
-        mesh.quaternion.copy(baseQuat).multiply(tumbleQuat);
+        const eased = easeOutQuad(t);
+        spinQuat.setFromAxisAngle(tumbleAxis, eased * tumbleTurns * Math.PI * 2);
+        flipQuat.setFromAxisAngle(tumbleAxis2, eased * tumbleTurns2 * Math.PI * 2);
+        mesh.quaternion.copy(baseQuat).multiply(spinQuat).multiply(flipQuat);
 
-        // Vertical bounce arc (quad ease), purely visual.
-        const bounce = Math.sin(t * Math.PI) * 0.4;
+        // Vertical bounce arc (quad ease), purely visual — a pronounced toss.
+        const bounce = Math.sin(t * Math.PI) * 0.7;
         mesh.position.y = bounce;
       } else if (elapsed < totalMs) {
         // Settle: slerp from the handoff pose to the result-showing pose.

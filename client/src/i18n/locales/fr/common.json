@@ -200,6 +200,8 @@
     "turn": "Tour {{number}}"
   },
   "diceRoll": {
+    "rollingForFirst": "Tirage pour savoir qui commence",
+    "versus": "VS",
     "you": "Vous",
     "youPlayFirst": "Vous jouez en premier",
     "playerPlaysFirst": "{{name}} joue en premier",

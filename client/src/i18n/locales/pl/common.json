@@ -200,6 +200,8 @@
     "turn": "Tura {{number}}"
   },
   "diceRoll": {
+    "rollingForFirst": "Rzut o pierwszego gracza",
+    "versus": "VS",
     "you": "Ty",
     "youPlayFirst": "Zaczynasz",
     "playerPlaysFirst": "{{name}} zaczyna",

@@ -200,6 +200,8 @@
     "turn": "Zug {{number}}"
   },
   "diceRoll": {
+    "rollingForFirst": "Auswürfeln, wer beginnt",
+    "versus": "VS",
     "you": "Du",
     "youPlayFirst": "Du beginnst",
     "playerPlaysFirst": "{{name}} beginnt",

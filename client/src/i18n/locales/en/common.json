@@ -200,6 +200,8 @@
     "turn": "Turn {{number}}"
   },
   "diceRoll": {
+    "rollingForFirst": "Rolling for first player",
+    "versus": "VS",
     "you": "You",
     "youPlayFirst": "You play first",
     "playerPlaysFirst": "{{name}} plays first",

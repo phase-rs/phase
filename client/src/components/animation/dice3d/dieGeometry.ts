@@ -25,10 +25,12 @@ import {
 } from "three";
 
 /**
- * The direction a settled die's top (showing) face points after the roll
- * resolves. We use +Y: the scene camera looks slightly down the -Z/-Y diagonal,
- * so a face whose outward normal is +Y reads as the "top" of the die. All
- * `orientationFor` results rotate the labelled face's normal onto this vector.
+ * The canonical "up" a settled die's result face points to after the roll
+ * resolves, in the die's own (camera-agnostic) space. We use +Y. `Dice3D` then
+ * composes a further view-facing rotation so the result face turns toward its
+ * (oblique) camera and the number reads head-on — keeping this module free of
+ * any camera knowledge. All `orientationFor` results rotate the labelled face's
+ * normal onto this vector.
  */
 export const CAMERA_UP: Vector3 = new Vector3(0, 1, 0);
 

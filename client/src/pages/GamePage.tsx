@@ -717,6 +717,16 @@ function GamePageContent({
     flashStartingPlayerContest(startingContest.events, startingContest.startingPlayer);
     useGameStore.getState().clearStartingContest();
   }, [startingContest]);
+  // CR 103.1 before CR 103.5: the starting-player contest must finish before the
+  // mulligan UI appears (the roll determines who's on the play, which precedes
+  // drawing opening hands). True from `initGame` setting the carrier through the
+  // dice overlay's full life — the store hands `startingContest` off to
+  // `uiStore.diceRoll` atomically, so there's no gap. Degrades to `false`
+  // immediately for instant speed and explicit play/draw (no contest).
+  const startingContestDiceActive = useUiStore(
+    (s) => s.diceRoll?.context === "startingPlayer",
+  );
+  const startingContestActive = startingContest !== null || startingContestDiceActive;
   const [showAiHand, setShowAiHand] = useState(false);
   const [showDebugBounds, setShowDebugBounds] = useState(false);
   const [viewingZone, setViewingZone] = useState<{
@@ -1459,8 +1469,11 @@ function GamePageContent({
         )}
 
       {/* CR 103.5: Simultaneous mulligan — render this player's modal iff
-          they are in the pending set. Each player decides independently. */}
+          they are in the pending set. Each player decides independently.
+          Held back until the CR 103.1 starting-player contest finishes so the
+          dice aren't hidden behind this modal. */}
       {waitingFor?.type === "MulliganDecision" &&
+        !startingContestActive &&
         (() => {
           const entry = waitingFor.data.pending.find(
             (e) => e.player === playerId,
@@ -1477,6 +1490,7 @@ function GamePageContent({
         })()}
 
       {waitingFor?.type === "MulliganDecision" &&
+        !startingContestActive &&
         !waitingFor.data.pending.some((e) => e.player === playerId) && (
           <div className="fixed inset-0 z-50 flex items-center justify-center">
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
