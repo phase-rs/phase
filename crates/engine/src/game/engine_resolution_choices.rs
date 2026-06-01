@@ -1390,6 +1390,12 @@ pub(super) fn handle_resolution_choice(
                                     state.waiting_for.clone(),
                                 ));
                             }
+                            effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -1898,6 +1904,28 @@ pub(super) fn handle_resolution_choice(
                             state, &ctx, *card_id, events,
                         ) {
                             effects::change_zone::ZoneMoveResult::Done => {}
+                            effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                state.pending_change_zone_iteration =
+                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                        remaining: chosen_ids[i + 1..].to_vec(),
+                                        source_id: ctx.source_id,
+                                        controller: ctx.controller,
+                                        origin: ctx.origin,
+                                        destination: ctx.destination,
+                                        enter_transformed: ctx.enter_transformed,
+                                        enter_tapped: ctx.enter_tapped,
+                                        enters_under_player: ctx.enters_under_player,
+                                        enters_attacking: ctx.enters_attacking,
+                                        enter_with_counters: ctx.enter_with_counters.clone(),
+                                        duration: ctx.duration.clone(),
+                                        track_exiled_by_source: ctx.track_exiled_by_source,
+                                        effect_kind,
+                                    });
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
                             effects::change_zone::ZoneMoveResult::NeedsChoice(choice_player) => {
                                 // CR 614.12b + CR 614.1c + CR 614.13: stash the
                                 // unprocessed cards so the drain in

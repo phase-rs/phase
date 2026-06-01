@@ -2914,11 +2914,12 @@ fn apply_action(
                 &mut events,
             )?
         }
-        // CR 303.4 + CR 303.4g + CR 115.1: Player picked the permanent to
-        // enchant for a `Effect::ReturnAsAura` sub-effect. The picker is a
-        // CHOICE (not a target), so the action shape mirrors
-        // `WaitingFor::ExploreChoice` — `GameAction::ChooseTarget { target:
-        // Some(Object(id)) }` with `id` drawn from `legal_targets`.
+        // CR 303.4 + CR 303.4f + CR 303.4g + CR 115.1: Player picked the
+        // permanent to enchant for a return-as-Aura sub-effect or a non-spell
+        // Aura battlefield entry. The picker is a CHOICE (not a target), so
+        // the action shape mirrors
+        // `WaitingFor::ExploreChoice` — `GameAction::ChooseTarget` with the
+        // chosen `TargetRef` drawn from `legal_targets`.
         (
             WaitingFor::ReturnAsAuraTarget {
                 player,
@@ -2933,10 +2934,10 @@ fn apply_action(
                 return Err(EngineError::WrongPlayer);
             }
             let chosen = match target {
-                Some(TargetRef::Object(id)) if legal_targets.contains(&id) => id,
+                Some(target) if legal_targets.contains(&target) => target.clone(),
                 _ => {
                     return Err(EngineError::InvalidAction(
-                        "ReturnAsAuraTarget: invalid or missing legal Object target".to_string(),
+                        "ReturnAsAuraTarget: invalid or missing legal target".to_string(),
                     ));
                 }
             };
@@ -2949,8 +2950,45 @@ fn apply_action(
                     grants,
                 } => (enchant_filter.clone(), grants.clone()),
                 _ => {
+                    let old_target = match chosen {
+                        TargetRef::Object(chosen_id) => {
+                            super::effects::attach::attach_to(state, returned, chosen_id)
+                        }
+                        TargetRef::Player(chosen_player) => {
+                            super::effects::attach::attach_to_player(state, returned, chosen_player)
+                        }
+                    };
+                    if let Some(old_target) = old_target {
+                        events.push(crate::types::events::GameEvent::Unattached {
+                            attachment_id: returned,
+                            old_target,
+                        });
+                    }
+                    let resumes_change_zone_iteration =
+                        state.pending_change_zone_iteration.is_some();
+                    if !resumes_change_zone_iteration {
+                        events.push(crate::types::events::GameEvent::EffectResolved {
+                            kind: crate::types::ability::EffectKind::ChangeZone,
+                            source_id: pending.source_id,
+                        });
+                    }
+                    state.waiting_for = WaitingFor::Priority {
+                        player: active_player,
+                    };
+                    state.priority_player = active_player;
+                    effects::drain_pending_continuation(state, &mut events);
+                    return Ok(ActionResult {
+                        events,
+                        waiting_for: state.waiting_for.clone(),
+                        log_entries: vec![],
+                    });
+                }
+            };
+            let chosen = match chosen {
+                TargetRef::Object(id) => id,
+                TargetRef::Player(_) => {
                     return Err(EngineError::InvalidAction(
-                        "ReturnAsAuraTarget: pending_effect is not ReturnAsAura".to_string(),
+                        "ReturnAsAuraTarget: ReturnAsAura requires an object host".to_string(),
                     ));
                 }
             };

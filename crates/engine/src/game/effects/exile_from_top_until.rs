@@ -111,6 +111,7 @@ pub fn resolve(
                     crate::game::replacement::replacement_choice_waiting_for(player, state);
                 return Ok(());
             }
+            super::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
         }
 
         match until {

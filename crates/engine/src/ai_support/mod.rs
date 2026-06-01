@@ -140,7 +140,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (
             WaitingFor::ReturnAsAuraTarget { legal_targets, .. },
             GameAction::ChooseTarget { target },
-        ) => !matches_target_choice(target, legal_targets),
+        ) => !matches_waiting_target_choice(legal_targets, target),
         (WaitingFor::TargetSelection { selection, .. }, GameAction::ChooseTarget { target })
         | (
             WaitingFor::TriggerTargetSelection { selection, .. },
