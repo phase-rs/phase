@@ -3375,6 +3375,91 @@ mod tests {
     }
 
     #[test]
+    fn scoped_player_hand_change_zone_choice_uses_scoped_player() {
+        let mut state = GameState::new_two_player(42);
+        let controller_card = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Controller Hand Creature".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&controller_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let opponent_a = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Opponent Hand Creature A".to_string(),
+            Zone::Hand,
+        );
+        let opponent_b = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Opponent Hand Creature B".to_string(),
+            Zone::Hand,
+        );
+        for id in [opponent_a, opponent_b] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                ),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(200),
+            PlayerId(0),
+        );
+        ability.set_scoped_player_recursive(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                let mut actual = cards.clone();
+                actual.sort_by_key(|id| id.0);
+                let mut expected = vec![opponent_a, opponent_b];
+                expected.sort_by_key(|id| id.0);
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(
+                    actual, expected,
+                    "scoped-player hand choice must exclude controller hand cards"
+                );
+            }
+            other => panic!("expected EffectZoneChoice for scoped player, got {other:?}"),
+        }
+        assert_eq!(
+            state.objects.get(&controller_card).unwrap().zone,
+            Zone::Hand
+        );
+    }
+
+    #[test]
     fn optional_targeting_with_zero_targets_resolves_as_noop() {
         // CR 115.6: "up to one target" with 0 chosen should not fall through
         // to the untargeted zone-scan path.

@@ -110,6 +110,10 @@ export class WebSocketAdapter implements EngineAdapter {
   private pendingReject: ((error: Error) => void) | null = null;
   private initResolve: (() => void) | null = null;
   private initReject: ((error: Error) => void) | null = null;
+  /** Starting-player contest DieRolled batch captured from the initial
+   *  GameStarted message, handed back by `initializeGame()` so the dice overlay
+   *  animates it. Empty on reconnects (the server drains it after first send). */
+  private initStartEvents: GameEvent[] = [];
   private listeners: WsAdapterEventListener[] = [];
   private reconnectAttempt = 0;
   private readonly maxReconnectAttempts = 8;
@@ -175,8 +179,13 @@ export class WebSocketAdapter implements EngineAdapter {
     _matchConfig?: unknown,
     _firstPlayer?: number,
   ): Promise<SubmitResult> {
-    // Server handles deck data via WebSocket protocol during initialize()
-    return { events: [] };
+    // Server handles deck data via WebSocket protocol during initialize().
+    // The starting-player contest events (if any) were captured from the
+    // initial GameStarted message; hand them back so gameStore.initGame routes
+    // them to the dice overlay, then clear so they're consumed once.
+    const events = this.initStartEvents;
+    this.initStartEvents = [];
+    return { events };
   }
 
   async initialize(): Promise<void> {
@@ -565,7 +574,7 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
-        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; derived?: GameState["derived"]; player_token?: string };
+        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; derived?: GameState["derived"]; player_token?: string; events?: GameEvent[] };
         if (this.reconnectInFlight) {
           this.reconnectInFlight = false;
           this.reconnectAttempt = 0;
@@ -604,6 +613,12 @@ export class WebSocketAdapter implements EngineAdapter {
           ...(playerNames === undefined ? {} : { playerNames }),
         });
         if (this.initResolve) {
+          // CR 103.1: the server sends the starting-player contest DieRolled
+          // batch only on the initial GameStarted (drained server-side, so
+          // reconnects carry none). Stash it for initializeGame() to return,
+          // routing it through the same gameStore.initGame contest path as
+          // local games.
+          this.initStartEvents = data.events ?? [];
           this.initResolve();
           this.initResolve = null;
           this.initReject = null;

@@ -31,7 +31,11 @@ export const IMPORT_ERROR_KEYS = {
 // The WHATWG URL parser requires a scheme, so normalize once at the boundary
 // and let downstream validators see a uniform shape.
 function normalizeDeckUrl(input: string): string {
-  const trimmed = input.trim();
+  const trimmed = input
+    .trim()
+    .replace(/[)\].,!?:;]+$/u, "")
+    .replace(/^<(.+)>$/, "$1")
+    .replace(/[)\].,!?:;]+$/u, "");
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
