@@ -7,8 +7,6 @@
 //! client-supplied strings that must be bounded before clone-heavy work.
 
 use engine::starter_decks::DeckData;
-use engine::types::format::FormatConfig;
-use engine::types::match_config::MatchConfig;
 use lobby_broker::protocol::LobbyClientMessage;
 use lobby_broker::validation::validate_lobby_message;
 
@@ -75,49 +73,12 @@ fn guard_projected(msg: &LobbyClientMessage) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate Full-mode `CreateGameWithSettings` lobby fields before deck resolve
-/// and session creation.
-pub fn guard_full_create_game_with_settings(
-    deck: &DeckData,
-    display_name: &str,
-    public: bool,
-    password: &Option<String>,
-    timer_seconds: Option<u32>,
-    player_count: u8,
-    match_config: MatchConfig,
-    format_config: &Option<FormatConfig>,
-    room_name: &Option<String>,
-    start_when_full: bool,
-) -> Result<(), String> {
-    guard_projected(&LobbyClientMessage::CreateGameWithSettings {
-        deck: deck.clone(),
-        display_name: display_name.to_string(),
-        public,
-        password: password.clone(),
-        timer_seconds,
-        player_count,
-        match_config,
-        format_config: format_config.clone(),
-        room_name: room_name.clone(),
-        host_peer_id: None,
-        draft_metadata: None,
-        start_when_full,
-    })
-}
-
-/// Validate Full-mode `JoinGameWithPassword` lobby fields before deck resolve.
-pub fn guard_full_join_game_with_password(
-    game_code: &str,
-    deck: &DeckData,
-    display_name: &str,
-    password: &Option<String>,
-    reservation_token: &Option<String>,
-) -> Result<(), String> {
-    guard_projected(&LobbyClientMessage::JoinGameWithPassword {
-        game_code: game_code.to_string(),
-        deck: deck.clone(),
-        display_name: display_name.to_string(),
-        password: password.clone(),
-        reservation_token: reservation_token.clone(),
-    })
+/// Validate Full-mode create/join lobby frames before deck resolve and session
+/// creation.
+pub fn guard_full_lobby_client_message(msg: &LobbyClientMessage) -> Result<(), String> {
+    match msg {
+        LobbyClientMessage::CreateGameWithSettings { .. }
+        | LobbyClientMessage::JoinGameWithPassword { .. } => guard_projected(msg),
+        _ => Err("unexpected lobby message for Full-mode wire guard".to_string()),
+    }
 }

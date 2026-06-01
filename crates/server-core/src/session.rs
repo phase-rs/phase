@@ -2117,55 +2117,47 @@ mod tests {
     }
 
     mod session_lobby_guard_tests {
-        use super::*;
-        use crate::session_lobby_guard::{
-            guard_full_create_game_with_settings, guard_full_join_game_with_password,
-            MAX_MAIN_DECK_ENTRIES,
-        };
+        use crate::session_lobby_guard::{guard_full_lobby_client_message, MAX_MAIN_DECK_ENTRIES};
+        use engine::game::bracket_estimate::CommanderBracketTier;
         use engine::starter_decks::DeckData;
         use engine::types::match_config::MatchConfig;
+        use lobby_broker::protocol::LobbyClientMessage;
 
         fn sample_deck() -> DeckData {
             DeckData {
                 main_deck: vec!["Forest".to_string()],
                 sideboard: vec![],
                 commander: vec![],
-                ..Default::default()
+                bracket_tier: CommanderBracketTier::Core,
+            }
+        }
+
+        fn create_msg(display_name: &str, deck: DeckData) -> LobbyClientMessage {
+            LobbyClientMessage::CreateGameWithSettings {
+                deck,
+                display_name: display_name.to_string(),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                player_count: 2,
+                match_config: MatchConfig::default(),
+                format_config: None,
+                room_name: None,
+                host_peer_id: None,
+                draft_metadata: None,
+                start_when_full: true,
             }
         }
 
         #[test]
         fn full_create_accepts_valid_lobby_fields() {
-            assert!(guard_full_create_game_with_settings(
-                &sample_deck(),
-                "Alice",
-                true,
-                &None,
-                None,
-                2,
-                MatchConfig::default(),
-                &None,
-                &None,
-                true,
-            )
-            .is_ok());
+            assert!(guard_full_lobby_client_message(&create_msg("Alice", sample_deck())).is_ok());
         }
 
         #[test]
         fn full_create_rejects_oversized_display_name() {
-            let err = guard_full_create_game_with_settings(
-                &sample_deck(),
-                &"a".repeat(21),
-                true,
-                &None,
-                None,
-                2,
-                MatchConfig::default(),
-                &None,
-                &None,
-                true,
-            )
-            .unwrap_err();
+            let err = guard_full_lobby_client_message(&create_msg(&"a".repeat(21), sample_deck()))
+                .unwrap_err();
             assert!(err.contains("display_name"));
         }
 
@@ -2173,33 +2165,23 @@ mod tests {
         fn full_create_rejects_oversized_deck() {
             let deck = DeckData {
                 main_deck: vec!["Card".to_string(); MAX_MAIN_DECK_ENTRIES + 1],
-                ..Default::default()
+                sideboard: vec![],
+                commander: vec![],
+                bracket_tier: CommanderBracketTier::Core,
             };
-            let err = guard_full_create_game_with_settings(
-                &deck,
-                "Alice",
-                true,
-                &None,
-                None,
-                2,
-                MatchConfig::default(),
-                &None,
-                &None,
-                true,
-            )
-            .unwrap_err();
+            let err = guard_full_lobby_client_message(&create_msg("Alice", deck)).unwrap_err();
             assert!(err.contains("main_deck"));
         }
 
         #[test]
         fn full_join_rejects_oversized_game_code() {
-            let err = guard_full_join_game_with_password(
-                &"x".repeat(65),
-                &sample_deck(),
-                "Bob",
-                &None,
-                &None,
-            )
+            let err = guard_full_lobby_client_message(&LobbyClientMessage::JoinGameWithPassword {
+                game_code: "x".repeat(65),
+                deck: sample_deck(),
+                display_name: "Bob".to_string(),
+                password: None,
+                reservation_token: None,
+            })
             .unwrap_err();
             assert!(err.contains("game_code"));
         }

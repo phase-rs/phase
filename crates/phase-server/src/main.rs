@@ -38,9 +38,7 @@ use server_core::protocol::{
 };
 use server_core::resolve_deck;
 use server_core::session::{ActionResult, GameSession, SessionManager};
-use server_core::session_lobby_guard::{
-    guard_full_create_game_with_settings, guard_full_join_game_with_password,
-};
+use server_core::session_lobby_guard::guard_full_lobby_client_message;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
@@ -2584,17 +2582,21 @@ async fn handle_client_message(
                 return;
             }
 
-            if let Err(reason) = guard_full_create_game_with_settings(
-                &deck,
-                &display_name,
-                public,
-                &password,
-                timer_seconds,
-                requested_player_count,
-                match_config,
-                &format_config,
-                &room_name,
-                start_when_full,
+            if let Err(reason) = guard_full_lobby_client_message(
+                &lobby_broker::LobbyClientMessage::CreateGameWithSettings {
+                    deck: deck.clone(),
+                    display_name: display_name.clone(),
+                    public,
+                    password: password.clone(),
+                    timer_seconds,
+                    player_count: requested_player_count,
+                    match_config,
+                    format_config: format_config.clone(),
+                    room_name: room_name.clone(),
+                    host_peer_id: None,
+                    draft_metadata: None,
+                    start_when_full,
+                },
             ) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
@@ -3249,12 +3251,14 @@ async fn handle_client_message(
                 return;
             }
 
-            if let Err(reason) = guard_full_join_game_with_password(
-                &game_code,
-                &deck,
-                &display_name,
-                &password,
-                &reservation_token,
+            if let Err(reason) = guard_full_lobby_client_message(
+                &lobby_broker::LobbyClientMessage::JoinGameWithPassword {
+                    game_code: game_code.clone(),
+                    deck: deck.clone(),
+                    display_name: display_name.clone(),
+                    password: password.clone(),
+                    reservation_token: reservation_token.clone(),
+                },
             ) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {

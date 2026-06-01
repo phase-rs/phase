@@ -25,6 +25,4 @@ pub use session::{
     acting_player, acting_players, generate_game_code, generate_player_token, is_acting,
     SessionManager,
 };
-pub use session_lobby_guard::{
-    guard_full_create_game_with_settings, guard_full_join_game_with_password,
-};
+pub use session_lobby_guard::guard_full_lobby_client_message;
