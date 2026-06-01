@@ -215,6 +215,11 @@ impl LobbyManager {
         true
     }
 
+    /// Returns the host-reported seated player count (excluding reservations).
+    pub fn player_count(&self, game_code: &str) -> Option<u32> {
+        self.games.get(game_code).map(|meta| meta.current_players)
+    }
+
     /// Updates the `current_players` count for an existing lobby entry. No-op
     /// if the game isn't tracked.
     pub fn set_current_players(
