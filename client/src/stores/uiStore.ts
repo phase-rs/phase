@@ -11,6 +11,10 @@ import { usePreferencesStore } from "./preferencesStore";
 // Clears are deferred — if the cursor is still over a card/preview element
 // when the timer fires, the clear is suppressed.
 let pendingClearTimer: ReturnType<typeof setTimeout> | null = null;
+// Deferred-show timer for the configurable hover latency (cardPreviewHoverDelayMs).
+// Holds the pending "set inspectedObjectId" so a hover-out before the delay
+// elapses cancels it — the preview only appears once the cursor rests on a card.
+let pendingShowTimer: ReturnType<typeof setTimeout> | null = null;
 let lastPointer = { x: 0, y: 0 };
 if (typeof window !== "undefined") {
   window.addEventListener("pointermove", (e) => { lastPointer = { x: e.clientX, y: e.clientY }; }, { passive: true });
@@ -71,7 +75,9 @@ interface UiStoreState {
 interface UiStoreActions {
   selectObject: (id: ObjectId | null) => void;
   hoverObject: (id: ObjectId | null) => void;
-  inspectObject: (id: ObjectId | null, faceIndex?: number) => void;
+  /** `timing` defaults to "hover" (subject to the configurable preview latency);
+   *  "immediate" bypasses the delay for explicit-intent triggers (long-press). */
+  inspectObject: (id: ObjectId | null, faceIndex?: number, timing?: "hover" | "immediate") => void;
   dismissPreview: () => void;
   setAltHeld: (held: boolean) => void;
   setShiftHeld: (held: boolean) => void;
@@ -116,7 +122,7 @@ interface UiStoreActions {
 
 export type UiStore = UiStoreState & UiStoreActions;
 
-export const useUiStore = create<UiStore>()((set) => ({
+export const useUiStore = create<UiStore>()((set, get) => ({
   selectedObjectId: null,
   hoveredObjectId: null,
   inspectedObjectId: null,
@@ -154,16 +160,53 @@ export const useUiStore = create<UiStore>()((set) => ({
   setDebugHighlightedPlayerId: (id) => set({ debugHighlightedPlayerId: id }),
   setAltHeld: (held) => set({ altHeld: held }),
   setShiftHeld: (held) => set({ shiftHeld: held }),
-  inspectObject: (id, faceIndex) => {
+  inspectObject: (id, faceIndex, timing = "hover") => {
     if (id != null) {
-      // Setting a new inspection target: cancel any pending clear and apply immediately
+      // Setting a new inspection target: cancel any pending clear, and drop a
+      // pending delayed-show for a previous target before scheduling this one.
       if (pendingClearTimer != null) {
         clearTimeout(pendingClearTimer);
         pendingClearTimer = null;
       }
-      set({ inspectedObjectId: id, inspectedFaceIndex: faceIndex ?? 0 });
+      if (pendingShowTimer != null) {
+        clearTimeout(pendingShowTimer);
+        pendingShowTimer = null;
+      }
+      const applyInspect = () =>
+        set({ inspectedObjectId: id, inspectedFaceIndex: faceIndex ?? 0 });
+      // Configurable hover latency (cardPreviewHoverDelayMs). The delay gates only
+      // the FIRST appearance on a hover-capable device: while a preview is already
+      // open, sweeping to an adjacent card switches instantly, and the "shift"
+      // bind-key mode is keypress-triggered so it never waits (mutually exclusive
+      // with the latency). A 0ms delay (the default) keeps the prior instant feel.
+      const prefs = usePreferencesStore.getState();
+      const canHover =
+        typeof window !== "undefined" &&
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(hover: hover)").matches;
+      const delay =
+        canHover &&
+        timing !== "immediate" &&
+        prefs.cardPreviewMode !== "shift" &&
+        get().inspectedObjectId == null
+          ? prefs.cardPreviewHoverDelayMs
+          : 0;
+      if (delay > 0) {
+        pendingShowTimer = setTimeout(() => {
+          pendingShowTimer = null;
+          applyInspect();
+        }, delay);
+      } else {
+        applyInspect();
+      }
     } else {
-      // Clearing: defer so spurious mouseleave from re-render-induced layout shifts
+      // Clearing: drop any pending delayed-show so a hover-out before the latency
+      // elapses never pops the preview.
+      if (pendingShowTimer != null) {
+        clearTimeout(pendingShowTimer);
+        pendingShowTimer = null;
+      }
+      // Defer the clear so spurious mouseleave from re-render-induced layout shifts
       // is cancelled if a new inspectObject(id) arrives in the same frame.
       if (pendingClearTimer != null) return; // already scheduled
       pendingClearTimer = setTimeout(() => {
@@ -183,6 +226,10 @@ export const useUiStore = create<UiStore>()((set) => ({
     if (pendingClearTimer != null) {
       clearTimeout(pendingClearTimer);
       pendingClearTimer = null;
+    }
+    if (pendingShowTimer != null) {
+      clearTimeout(pendingShowTimer);
+      pendingShowTimer = null;
     }
     set({ inspectedObjectId: null, inspectedFaceIndex: 0, previewSticky: false, altHeld: false });
   },

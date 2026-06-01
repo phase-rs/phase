@@ -1,4 +1,4 @@
-name: Auto-label AI-CONTRIBUTOR PRs
+name: Auto-label AI-CONTRIBUTOR triage
 
 # Detect-only labeler for PRs opened via docs/AI-CONTRIBUTOR.md.
 #
@@ -7,16 +7,13 @@ name: Auto-label AI-CONTRIBUTOR PRs
 # write permissions, but does NOT check out the PR's code — we only read PR
 # metadata (head ref, body) supplied by the event payload, which is safe.
 #
-# Prerequisite: the two labels below must already exist in the repo.
+# Prerequisite: the label below must already exist in the repo.
 # `addLabels` 404s on missing labels, and continue-on-error swallows that
 # silently. One-time setup:
 #
-#   gh label create ai-contribution \
-#     --color 6e5494 \
-#     --description "PR opened via docs/AI-CONTRIBUTOR.md flow"
 #   gh label create needs-maintainer \
 #     --color d93f0b \
-#     --description "AI-contribution PR requires human triage"
+#     --description "AI-CONTRIBUTOR PR requires human triage"
 #
 # Failures degrade silently via continue-on-error so a labeler hiccup never
 # blocks a PR.
@@ -31,7 +28,7 @@ permissions:
 
 jobs:
   label:
-    name: Apply AI-CONTRIBUTOR labels
+    name: Apply AI-CONTRIBUTOR triage labels
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -50,11 +47,9 @@ jobs:
             const isAiContribution = isCardBranch || hasTemplateSignature;
 
             if (!isAiContribution) {
-              core.info('Not an AI-CONTRIBUTOR PR; nothing to label.');
+              core.info('Not an AI-CONTRIBUTOR PR; nothing to triage.');
               return;
             }
-
-            const labels = ['ai-contribution'];
 
             // Track line — accept "## Track\nDeveloper" (template canonical
             // form) and inline "Track: Developer" (legacy fallback).
@@ -106,13 +101,16 @@ jobs:
               hasPopulated('CI Failures') ||
               verificationMissing;
 
-            if (needsMaintainer) labels.push('needs-maintainer');
+            if (!needsMaintainer) {
+              core.info('AI-CONTRIBUTOR PR does not need maintainer triage.');
+              return;
+            }
 
-            core.info(`Applying labels: ${labels.join(', ')}`);
+            core.info('Applying label: needs-maintainer');
 
             await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: pr.number,
-              labels,
+              labels: ['needs-maintainer'],
             });

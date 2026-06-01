@@ -11,6 +11,7 @@ pub mod broker;
 pub mod env;
 pub mod lobby;
 pub mod protocol;
+pub mod validation;
 
 pub use broker::{
     check_build_commit, Broker, BuildCommitCheck, ClientHelloInfo, ConnState, Outbound,
@@ -24,3 +25,4 @@ pub use protocol::{
     parse_lobby_client_message, DraftLobbyMetadata, LobbyClientMessage, LobbyGame,
     LobbyServerMessage, ParsedFrame, ServerMode,
 };
+pub use validation::validate_lobby_message;

@@ -86,13 +86,13 @@ use crate::types::ability::{
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
     ContinuousModification, ControllerRef, DamageModification, DamageSource,
-    DelayedTriggerCondition, DoubleTarget, Duration, Effect, FilterProp, GainLifePlayer,
-    GameRestriction, IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec,
-    ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount,
-    PreventionScope, ProhibitedActivity, QuantityExpr, QuantityRef, ReplacementDefinition,
-    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
-    StepSkipTarget, SubAbilityLink, TargetFilter, TargetSelectionMode, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+    DelayedTriggerCondition, DoubleTarget, Duration, Effect, FilterProp, GameRestriction,
+    IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
+    ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
+    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget,
+    SubAbilityLink, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -120,7 +120,7 @@ use self::search::{
 use self::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, continuation_absorbs_current,
     parse_followup_continuation_ast, parse_intrinsic_continuation_ast, split_clause_sequence,
-    try_parse_same_is_true_continuation,
+    try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
 };
 use self::subject::{try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life};
 use crate::parser::oracle_ir::ast::*;
@@ -1880,6 +1880,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: mass_target,
+            enters_under: None,
             enter_tapped: false,
         }
     } else {
@@ -3478,7 +3479,9 @@ fn try_parse_choose_player_to_verb(
 /// `TargetFilter` are left untouched — the surrounding `relative_player_scope`
 /// already binds object-controller anaphora ("a creature they control").
 ///
-/// `GainLife` (recipient is the `GainLifePlayer` enum, not a `TargetFilter`)
+/// `GainLife` (recipient `player` is now a `TargetFilter`, but no current card
+/// pairs "choose a player to gain life" with this verb, so it is not yet wired
+/// into the `rebind` match below)
 /// and `Discard`/`DiscardCard` (no player-recipient `TargetFilter` — `Discard`
 /// is self-scoped, `DiscardCard.filter` selects *what* is discarded, not
 /// *who*) are a deliberate class-boundary deferral: no current card pairs
@@ -6588,10 +6591,10 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
         },
         Effect::GainLife {
             amount,
-            player: GainLifePlayer::Controller,
-        } if is_targeted && matches!(target, TargetFilter::Player) => Effect::GainLife {
+            player: TargetFilter::Controller,
+        } if is_targeted && target_filter_can_target_player(&target) => Effect::GainLife {
             amount,
-            player: GainLifePlayer::TargetPlayer,
+            player: target,
         },
         other => other,
     }
@@ -7354,6 +7357,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Battlefield,
+                            enters_under: d.enters_under,
                             enter_tapped: d.enter_tapped,
                         },
                         rem,
@@ -7380,6 +7384,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Hand,
+                            enters_under: None,
                             enter_tapped: false,
                         },
                         rem,
@@ -7395,6 +7400,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: d.zone,
+                            enters_under: None,
                             enter_tapped: false,
                         },
                         rem,
@@ -8796,7 +8802,7 @@ fn rewrite_recipient_on_link(def: &mut AbilityDefinition, filter: &TargetFilter)
         // Any other effect family is out of scope for compound-subject
         // distribution at this entry point. Returning false keeps the
         // detector tight and prevents silent misparse on bodies whose
-        // recipient binding is encoded differently (GainLifePlayer enum, etc.).
+        // recipient binding is encoded differently (e.g. nested filter props).
         _ => false,
     }
 }
@@ -9723,6 +9729,30 @@ fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: Ob
     }
 }
 
+fn bind_damage_clause_source(
+    effect: &mut Effect,
+    damage_source_ref: DamageSource,
+    power_scope: ObjectScope,
+) -> bool {
+    match effect {
+        Effect::DealDamage {
+            amount,
+            damage_source,
+            ..
+        }
+        | Effect::DamageAll {
+            amount,
+            damage_source,
+            ..
+        } => {
+            rewrite_event_source_power_to_object_power(amount, power_scope);
+            *damage_source = Some(damage_source_ref);
+            true
+        }
+        _ => false,
+    }
+}
+
 fn rewrite_filter_controller(filter: &mut TargetFilter, from: &ControllerRef, to: &ControllerRef) {
     match filter {
         TargetFilter::Typed(tf) if tf.controller.as_ref() == Some(from) => {
@@ -9783,6 +9813,20 @@ fn wrap_target_subject_damage(
     subject: &SubjectPhraseAst,
 ) -> Option<ParsedEffectClause> {
     let subject_target = subject.target.as_ref()?;
+    if matches!(subject_target, TargetFilter::TriggeringSource) {
+        // CR 603.6 + CR 120.1: "that creature deals damage equal to its
+        // power" in a zone-change trigger binds both the damage source and
+        // anaphoric power reference to the moved object.
+        if bind_damage_clause_source(
+            &mut clause.effect,
+            DamageSource::TriggeringSource,
+            ObjectScope::EventSource,
+        ) {
+            return Some(clause);
+        }
+        return None;
+    }
+
     // CR 608.2c + CR 120.1: "target creature deals damage equal to its
     // power..." makes the chosen source object, not the spell card, deal the
     // damage. "Its power" is therefore the first target's current power.
@@ -9792,24 +9836,12 @@ fn wrap_target_subject_damage(
     // (CR 702.16), wither/infect (CR 120.3b/d), and damage-source replacements
     // (CR 614). The 2015-06-22 Chandra's Ignition rulings codify this for
     // the multi-recipient case (DamageAll).
-    match &mut clause.effect {
-        Effect::DealDamage {
-            amount,
-            damage_source,
-            ..
-        } => {
-            rewrite_event_source_power_to_object_power(amount, ObjectScope::Target);
-            *damage_source = Some(DamageSource::Target);
-        }
-        Effect::DamageAll {
-            amount,
-            damage_source,
-            ..
-        } => {
-            rewrite_event_source_power_to_object_power(amount, ObjectScope::Target);
-            *damage_source = Some(DamageSource::Target);
-        }
-        _ => return None,
+    if !bind_damage_clause_source(
+        &mut clause.effect,
+        DamageSource::Target,
+        ObjectScope::Target,
+    ) {
+        return None;
     }
 
     let mut damage_ability = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
@@ -9869,6 +9901,21 @@ fn parse_subject_exile_top_count(pred_lower: &str) -> QuantityExpr {
 /// the subject's targeting information.
 fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
     let subject_filter = subject.target.as_ref().unwrap_or(&subject.affected).clone();
+    // CR 603.6 + CR 120.1: "that creature/permanent deals damage equal to
+    // its power..." in an ETB trigger makes the triggering object, not the
+    // trigger source permanent, the damage source. Keep the parsed damage
+    // recipient target intact ("to any target") while rebinding both the
+    // source metadata and anaphoric "its power" to the triggering source.
+    if matches!(subject_filter, TargetFilter::TriggeringSource)
+        && bind_damage_clause_source(
+            effect,
+            DamageSource::TriggeringSource,
+            ObjectScope::EventSource,
+        )
+    {
+        return;
+    }
+
     match effect {
         // CR 601.2c + CR 121.1: "Target player draws ..." — each Draw mode of a
         // modal spell is its own targeting instance. The imperative path emits
@@ -10027,6 +10074,15 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
                     rewrite_quantity_controller(count, ControllerRef::ScopedPlayer, effective_ctrl);
                 }
             }
+        }
+        // CR 115.1c / CR 602.2b + CR 601.2c / CR 119.3: "Target player gains
+        // N life" / "target opponent gains N life" announces a player target;
+        // the chosen player, not the source controller, gains the life.
+        Effect::GainLife {
+            player: player @ TargetFilter::Controller,
+            ..
+        } if subject.target.is_some() && target_filter_can_target_player(&subject_filter) => {
+            *player = subject_filter;
         }
         // CR 119.3 + CR 115.1d: "they lose N life" — inject subject's player reference.
         // LoseLife.target is Option<TargetFilter>, unlike other effects' non-optional targets.
@@ -10897,6 +10953,69 @@ fn attach_same_is_true_keywords(defs: &mut [AbilityDefinition], keywords: &[Keyw
             }
             return;
         }
+    }
+}
+
+/// CR 608.2c: Apply a "Repeat this process for <keyword list>" continuation
+/// (Kathril, Aspect Warper). Walks `defs` from the back for the most recent
+/// conditional keyword-counter placement (`PutCounter { counter_type:
+/// Keyword(..) }` gated by a graveyard-keyword `condition`) and appends one
+/// cloned sibling per listed keyword — swapping both the placed counter's
+/// keyword and the gating condition's keyword. Each clone is an independent
+/// sequential sibling, mirroring the antecedent's structure, so the engine
+/// resolves all keyword counters during the trigger's one resolution. This is
+/// the counters-class analogue of `attach_same_is_true_keywords` (static
+/// grants); it covers the whole "repeat this process for <list>" class.
+fn attach_repeat_process_keywords(defs: &mut Vec<AbilityDefinition>, keywords: &[Keyword]) {
+    let Some(template) = defs
+        .iter()
+        .rev()
+        .find(|d| {
+            matches!(
+                &*d.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Keyword(_),
+                    ..
+                }
+            )
+        })
+        .cloned()
+    else {
+        return;
+    };
+    for keyword in keywords {
+        let mut new_def = template.clone();
+        if let Effect::PutCounter { counter_type, .. } = &mut *new_def.effect {
+            *counter_type = CounterType::Keyword(keyword.kind());
+        }
+        if let Some(condition) = &mut new_def.condition {
+            rewrite_ability_condition_keyword(condition, keyword);
+        }
+        // Each replicated counter placement is its own sequential instruction.
+        new_def.sub_link = SubAbilityLink::SequentialSibling;
+        new_def.sub_ability = None;
+        defs.push(new_def);
+    }
+}
+
+/// Swap the gating keyword inside an `AbilityCondition` to `new_keyword`. Used
+/// by `attach_repeat_process_keywords` to rewrite the "if a creature card in
+/// your graveyard has <keyword>" gate of each replicated counter clause.
+fn rewrite_ability_condition_keyword(condition: &mut AbilityCondition, new_keyword: &Keyword) {
+    if let AbilityCondition::QuantityCheck { lhs, rhs, .. } = condition {
+        rewrite_quantity_expr_keyword(lhs, new_keyword);
+        rewrite_quantity_expr_keyword(rhs, new_keyword);
+    }
+}
+
+/// Rewrite the keyword inside any `ObjectCount` filter carried by a
+/// `QuantityExpr` (the count side of a graveyard-keyword condition).
+fn rewrite_quantity_expr_keyword(expr: &mut QuantityExpr, new_keyword: &Keyword) {
+    if let QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount { filter },
+    } = expr
+    {
+        rewrite_filter_keyword(filter, new_keyword);
     }
 }
 
@@ -12777,6 +12896,7 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
                 },
                 FilterProp::SameNameAsParentTarget,
             ])),
+            enters_under: None,
             enter_tapped,
         },
     )));
@@ -13167,6 +13287,42 @@ pub(crate) fn parse_effect_chain_ir(
                     is_otherwise: false,
                     unless_pay: None,
                     special: Some(SpecialClause::SameIsTrueFor(keywords)),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                });
+                continue;
+            }
+        }
+
+        // CR 608.2c: "Repeat this process for <keyword list>." — Kathril, Aspect
+        // Warper. Must precede the generic "repeat this process" directive below,
+        // whose `tag("repeat this process")` would otherwise swallow the prefix
+        // and discard the keyword list. Replicates the antecedent conditional
+        // keyword-counter clause once per listed keyword during lowering.
+        if !clauses.is_empty() {
+            if let Some(keywords) = try_parse_repeat_process_for_keywords(normalized_text) {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "repeat_process_for_keywords_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::RepeatProcessForKeywords(keywords)),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
                 });
@@ -15845,10 +16001,10 @@ mod tests {
         AbilityCondition, AggregateFunction, BounceSelection, CardTypeSetSource, CastVariantPaid,
         ChoiceType, CombatRelation, CombatRelationSubject, Comparator, ContinuousModification,
         ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode, Duration, FilterProp,
-        GainLifePlayer, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
-        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming,
-        TypeFilter, TypedFilter, ZoneRef,
+        LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction, ObjectProperty,
+        ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValue, PtValueScope, QuantityExpr,
+        QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -17207,6 +17363,87 @@ mod tests {
                     metric: crate::types::ability::CastManaSpentMetric::Total,
                 },
             }
+        );
+    }
+
+    /// CR 107.3i + CR 121.1 + CR 119.3: Pact of the Serpent class — a single
+    /// "where X is …" defining clause must bind X for BOTH sibling sub-effects
+    /// of "target player draws X cards and loses X life". The shared-X
+    /// resolver must reach the LoseLife sub-effect via the chained
+    /// `sub_ability` traversal so the chosen-type creature count substitutes
+    /// into both `count` and `amount` operands. Issue #1587.
+    #[test]
+    fn shared_where_x_binds_draws_and_loses_life_siblings() {
+        let chain = parse_effect_chain(
+            "target player draws X cards and loses X life, where X is the number of creatures they control of the chosen type",
+            AbilityKind::Spell,
+        );
+        // First sibling: Draw with shared QuantityExpr.
+        let draw_count = match &*chain.effect {
+            Effect::Draw { count, .. } => count.clone(),
+            other => panic!("expected Effect::Draw as first sibling, got {other:?}"),
+        };
+        assert!(
+            !matches!(
+                &draw_count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name },
+                } if name == "X"
+            ),
+            "draw count must be rewritten from bare X to the where-X binding, got {draw_count:?}"
+        );
+        // Second sibling: LoseLife with the SAME QuantityExpr.
+        let sub = chain
+            .sub_ability
+            .as_ref()
+            .expect("expected LoseLife sub_ability after Draw");
+        let lose_amount = match &*sub.effect {
+            Effect::LoseLife { amount, .. } => amount.clone(),
+            other => panic!("expected Effect::LoseLife as second sibling, got {other:?}"),
+        };
+        assert_eq!(
+            lose_amount, draw_count,
+            "draw count and lose-life amount must share the same where-X binding"
+        );
+    }
+
+    /// CR 121.1 + CR 119.3 + CR 608.2c: Rankle class — the elided second
+    /// player-action sibling may use an article count ("draws a card"), not
+    /// only digits or X. The split predicate must still carry the prior player
+    /// subject so each player both loses life and draws.
+    #[test]
+    fn article_count_draws_card_splits_after_loses_life_sibling() {
+        let chain = parse_effect_chain(
+            "each player loses 1 life and draws a card",
+            AbilityKind::Spell,
+        );
+        assert_eq!(chain.player_scope, Some(PlayerFilter::All));
+        assert!(
+            matches!(
+                &*chain.effect,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
+            "expected first sibling to be LoseLife(1), got {:?}",
+            chain.effect,
+        );
+
+        let sub = chain
+            .sub_ability
+            .as_ref()
+            .expect("expected Draw sub_ability after LoseLife");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
+            "expected second sibling to be Draw(1), got {:?}",
+            sub.effect,
         );
     }
 
@@ -19249,6 +19486,7 @@ mod tests {
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Exile,
                     target: TargetFilter::Player,
+                    enters_under: None,
                     enter_tapped: false,
                 }
             ),
@@ -19309,6 +19547,7 @@ mod tests {
                     origin: Some(Zone::Exile),
                     destination: Zone::Graveyard,
                     target: TargetFilter::ExiledBySource,
+                    enters_under: None,
                     enter_tapped: false,
                 }
             ),
@@ -19966,10 +20205,32 @@ mod tests {
                 e,
                 Effect::ChangeZoneAll {
                     destination: Zone::Battlefield,
+                    enters_under: None,
                     ..
                 }
             ),
             "return-all-to-battlefield must lower to ChangeZoneAll, got {e:?}"
+        );
+    }
+
+    /// CR 110.2a: Mass return-to-battlefield text can override the default
+    /// controller. Rise of the Dark Realms class must preserve "under your
+    /// control" on `ChangeZoneAll`, not only on single-object `ChangeZone`.
+    #[test]
+    fn effect_return_all_to_battlefield_under_your_control_preserves_controller_override() {
+        let e = parse_effect(
+            "Return all creature cards from all graveyards to the battlefield under your control",
+        );
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZoneAll {
+                    destination: Zone::Battlefield,
+                    enters_under: Some(ControllerRef::You),
+                    ..
+                }
+            ),
+            "mass return under your control must preserve enters_under, got {e:?}"
         );
     }
 
@@ -21065,7 +21326,7 @@ mod tests {
                             scope: crate::types::ability::ObjectScope::Target
                         }
                     },
-                    player: GainLifePlayer::TargetedController
+                    player: TargetFilter::ParentTargetController
                 }
             ),
             "Expected TargetPower + TargetedController, got {e:?}"
@@ -21096,7 +21357,7 @@ mod tests {
                         scope: crate::types::ability::ObjectScope::Target
                     }
                 },
-                player: GainLifePlayer::TargetedController
+                player: TargetFilter::ParentTargetController
             }
         ));
     }
@@ -21267,7 +21528,7 @@ mod tests {
         assert!(matches!(
             &*gain_life.effect,
             Effect::GainLife {
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
                 amount: QuantityExpr::Fixed { value: 3 },
             }
         ));
@@ -21457,6 +21718,7 @@ mod tests {
                 origin: Some(Zone::Hand),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
+                enters_under: None,
                 enter_tapped: false,
             }
         ));
@@ -21471,6 +21733,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
+                enters_under: None,
                 enter_tapped: false,
             }
         ));
@@ -26262,7 +26525,7 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilNextTurnOf {
+                        duration: Duration::UntilEndOfNextTurnOf {
                             player: PlayerScope::Controller,
                         },
                         ..
@@ -26270,7 +26533,7 @@ mod tests {
                     ..
                 }
             ),
-            "Expected GrantCastingPermission(PlayFromExile, UntilYourNextTurn), got {:?}",
+            "Expected GrantCastingPermission(PlayFromExile, UntilEndOfNextTurnOf), got {:?}",
             def.effect
         );
     }
@@ -26287,7 +26550,7 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilNextTurnOf {
+                        duration: Duration::UntilEndOfNextTurnOf {
                             player: PlayerScope::Controller,
                         },
                         ..
@@ -26295,7 +26558,7 @@ mod tests {
                     ..
                 }
             ),
-            "Expected PlayFromExile(UntilYourNextTurn), got {:?}",
+            "Expected PlayFromExile(UntilEndOfNextTurnOf), got {:?}",
             def.effect
         );
     }
@@ -26311,7 +26574,7 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilNextTurnOf {
+                        duration: Duration::UntilEndOfNextTurnOf {
                             player: PlayerScope::Controller,
                         },
                         ..
@@ -26319,7 +26582,7 @@ mod tests {
                     ..
                 }
             ),
-            "Expected PlayFromExile(UntilYourNextTurn), got {:?}",
+            "Expected PlayFromExile(UntilEndOfNextTurnOf), got {:?}",
             def.effect
         );
     }
@@ -26350,7 +26613,7 @@ mod tests {
                 *sub.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilNextTurnOf {
+                        duration: Duration::UntilEndOfNextTurnOf {
                             player: PlayerScope::Controller,
                         },
                         ..
@@ -26361,7 +26624,7 @@ mod tests {
                     ..
                 }
             ),
-            "Expected PlayFromExile(UntilYourNextTurn) on TrackedSet(0), got {:?}",
+            "Expected PlayFromExile(UntilEndOfNextTurnOf) on TrackedSet(0), got {:?}",
             sub.effect
         );
     }
@@ -32543,7 +32806,7 @@ mod tests {
                         },
                     }),
                 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
     }
@@ -32559,7 +32822,7 @@ mod tests {
                         filter: TargetFilter::Typed(TypedFilter::creature()),
                     },
                 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
     }
@@ -32766,7 +33029,59 @@ mod tests {
                         },
                     }),
                 },
-                player: GainLifePlayer::TargetPlayer,
+                player: TargetFilter::Player,
+            },
+        );
+    }
+
+    // CR 115.1c / CR 602.2b + CR 601.2c / CR 119.3: "Target player gains N life"
+    // announces a player target; the chosen player (not the controller) gains the life.
+    // Regression for issue #1508 — Kenrith's {2}{W} activated mode and any plain
+    // spell with the same shape (Healing Salve, Healing Leaves, Hope Charm modal)
+    // previously degraded to TargetFilter::Controller.
+    #[test]
+    fn effect_target_player_gains_fixed_life_uses_target_player() {
+        let e = parse_effect("target player gains 5 life");
+        assert_eq!(
+            e,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Player,
+            },
+        );
+    }
+
+    #[test]
+    fn effect_target_opponent_gains_fixed_life_uses_target_player() {
+        let e = parse_effect("target opponent gains 3 life");
+        assert_eq!(
+            e,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent)
+                ),
+            },
+        );
+    }
+
+    #[test]
+    fn effect_target_opponent_gains_life_for_each_creature_on_the_battlefield() {
+        let e = parse_effect("target opponent gains 2 life for each creature on the battlefield");
+        assert_eq!(
+            e,
+            Effect::GainLife {
+                amount: QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter::creature()),
+                        },
+                    }),
+                },
+                player: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent)
+                ),
             },
         );
     }
@@ -39061,6 +39376,7 @@ mod snapshot_tests {
             origin,
             destination,
             target,
+            enters_under,
             enter_tapped,
         } = &*same_name.effect
         else {
@@ -39068,6 +39384,7 @@ mod snapshot_tests {
         };
         assert_eq!(*origin, Some(Zone::Graveyard));
         assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(*enters_under, None);
         assert!(*enter_tapped);
         let TargetFilter::Typed(tail) = target else {
             panic!("expected typed same-name tail, got {target:?}");

@@ -287,6 +287,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 AbilityTag::Evolve => " activates evolve: ",
                 AbilityTag::Exhaust => " activates exhaust: ",
                 AbilityTag::Outlast => " activates outlast: ",
+                // CR 702.29c: Cycling emits a dedicated `GameEvent::Cycled`, not a
+                // `KeywordAbilityActivated` event, so this arm is unreachable.
+                AbilityTag::Cycling => " activates cycling: ",
             };
             vec![
                 player_seg(state, *player_id),

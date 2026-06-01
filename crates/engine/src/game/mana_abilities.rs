@@ -594,6 +594,20 @@ pub(crate) fn mana_choice_prompt(
                 None
             }
         }
+        // CR 106.7 (issue #1556): Exotic Orchard class — "add one mana of any
+        // color that a land an opponent controls could produce." Surface the
+        // union of producible colors as a choice; with 0 or 1 option the
+        // resolver handles it without a prompt (CR 106.5: empty union → no mana;
+        // single option auto-picks). Mirrors `AnyTypeProduceableBy`.
+        ManaProduction::OpponentLandColors { .. } => {
+            let owner = state.objects.get(&source_id).map(|obj| obj.controller)?;
+            let options = super::mana_sources::opponent_land_color_options(state, owner);
+            if options.len() > 1 {
+                Some(ManaChoicePrompt::SingleColor { options })
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }

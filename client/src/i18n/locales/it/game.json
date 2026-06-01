@@ -29,9 +29,32 @@
     "fromSource": "(da {{source}})",
     "basePT": "(base {{power}}/{{toughness}})",
     "damage": "Danno: {{amount}}",
+    "activateCost": "Attiva — {{cost}}",
     "ptDeltaFrom": "{{delta}} da {{source}}",
     "colors": "Colori: {{colors}}",
-    "colorless": "Incolore"
+    "colorless": "Incolore",
+    "chosen": {
+      "title": "Scelto",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Giocatore {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Sconosciuto",
+      "kind": {
+        "color": "Colore",
+        "creatureType": "Tipo di creatura",
+        "basicLandType": "Tipo di terra base",
+        "cardType": "Tipo di carta",
+        "oddOrEven": "Pari o dispari",
+        "cardName": "Nome carta",
+        "number": "Numero",
+        "player": "Giocatore",
+        "twoColors": "Due colori",
+        "tributeOutcome": "Tributo",
+        "keyword": "Parola chiave",
+        "label": "Etichetta",
+        "fallback": "Scelta"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Cancella attaccanti",

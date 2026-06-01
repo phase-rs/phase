@@ -124,6 +124,18 @@ fn unique_recipient_from_filter(
             .ok_or_else(|| EffectError::MissingParam("GiveControl recipient".to_string()));
     }
 
+    // CR 613.3 + CR 102.1: "the player to your left/right" resolves to a single
+    // living seating-neighbor (CR 101.4 / CR 103.1). `game::players::neighbor`
+    // already skips eliminated players, so this returns one player and bypasses
+    // the generic ambiguity loop below.
+    if let TargetFilter::Neighbor { direction } = filter {
+        return Ok(crate::game::players::neighbor(
+            state,
+            source_controller,
+            *direction,
+        ));
+    }
+
     let mut matching = state
         .players
         .iter()
@@ -386,6 +398,265 @@ mod tests {
             Err(EffectError::MissingParam(message)) if message == "ambiguous GiveControl recipient"
         ));
         assert!(events.is_empty());
+    }
+
+    /// CR 102.1 + CR 103.1 + CR 613.3: "The player to your right gains control
+    /// of this artifact" (Bucknard's Everfull Purse). Drives the real recipient
+    /// path: `resolve_give` → `unique_recipient_from_filter` →
+    /// `players::neighbor(Right)` = `previous_player`. In a 3-player game with
+    /// seat_order [P0,P1,P2] and controller P0, RIGHT = P2 (previous seat),
+    /// distinct from LEFT = P1 (next seat) — so this discriminates the seat
+    /// direction AND proves the single-recipient (no-ambiguity) resolution.
+    #[test]
+    fn give_control_to_player_to_the_right_targets_previous_seat() {
+        use crate::types::ability::SeatDirection;
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        assert_eq!(
+            state.seat_order,
+            vec![PlayerId(0), PlayerId(1), PlayerId(2)]
+        );
+
+        // The artifact (Bucknard's) controlled by the activator P0.
+        let artifact = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bucknard's Everfull Purse".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::Neighbor {
+                    direction: SeatDirection::Right,
+                },
+            },
+            vec![TargetRef::Object(artifact)],
+            artifact,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_give(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&artifact).unwrap().controller,
+            PlayerId(2),
+            "player to your right = previous seat (P2), not next seat (P1)"
+        );
+    }
+
+    /// CR 706.2 + CR 102.1 + CR 103.1 + CR 613.3: End-to-end resolution of
+    /// Bucknard's Everfull Purse's activated ability
+    /// (`{1}, {T}: Roll a d4 and create a number of Treasure tokens equal to
+    /// the result. The player to your right gains control of this artifact.`)
+    /// through the REAL chain pipeline. This is the combined-ability test the
+    /// two unit tests (token-count parse + 3/4-player Neighbor{Right} recipient)
+    /// don't cover individually: it drives `RollDie → Token{count:
+    /// EventContextAmount} → GiveControl{recipient: Neighbor{Right}}` through
+    /// `resolve_ability_chain` and asserts both effects on the post-resolution
+    /// state.
+    ///
+    /// (a) CR 706.2: exactly N Treasures are created where N is the d4 result
+    ///     READ FROM the emitted `GameEvent::DieRolled` (not hard-coded), so the
+    ///     `EventContextAmount` count snapshot is proven to flow from the roll.
+    /// (b) CR 102.1 + CR 103.1 + CR 613.3: control of the Purse transfers to the
+    ///     controller's RIGHT neighbor = previous seat. In [P0,P1,P2] with
+    ///     controller P0, RIGHT = P2 (previous seat), distinct from LEFT = P1.
+    #[test]
+    fn bucknards_everfull_purse_full_chain_rolls_treasures_and_passes_right() {
+        use crate::game::players::previous_player;
+        use crate::types::ability::{PtValue, QuantityExpr, QuantityRef, SeatDirection};
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        assert_eq!(
+            state.seat_order,
+            vec![PlayerId(0), PlayerId(1), PlayerId(2)]
+        );
+
+        // Bucknard's Everfull Purse, controlled by the activator P0.
+        let purse = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bucknard's Everfull Purse".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&purse).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+        }
+
+        // Build the resolved ability EXACTLY as the parser produces it:
+        //   RollDie{sides:4}
+        //     └─ Token{name:"Treasure", count: EventContextAmount, owner: Controller}
+        //          └─ GiveControl{target: SelfRef, recipient: Neighbor{Right}}
+        let give_control = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::Neighbor {
+                    direction: SeatDirection::Right,
+                },
+            },
+            vec![TargetRef::Object(purse)],
+            purse,
+            PlayerId(0),
+        );
+        let create_treasures = ResolvedAbility::new(
+            Effect::Token {
+                name: "Treasure".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Artifact".to_string(), "Treasure".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                // CR 706.2: "a number of Treasure tokens equal to the result"
+                // parses to an EventContextAmount count, snapshotted from the
+                // preceding RollDie's DieRolled event.
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            purse,
+            PlayerId(0),
+        )
+        .sub_ability(give_control);
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 4,
+                results: vec![],
+                modifier: None,
+            },
+            vec![],
+            purse,
+            PlayerId(0),
+        )
+        .sub_ability(create_treasures);
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        // (a) CR 706.2: read N from the emitted DieRolled event — never hard-coded.
+        let roll = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::DieRolled { result, .. } => Some(*result as usize),
+                _ => None,
+            })
+            .expect("RollDie must emit a DieRolled event");
+        assert!((1..=4).contains(&roll), "d4 result out of range: {roll}");
+
+        // Count Treasure tokens controlled by the activator (owner = Controller).
+        // After the GiveControl sub-effect the Purse moves to P2, so filtering on
+        // the Treasure subtype (not all P0-controlled artifacts) isolates the
+        // tokens from the artifact itself.
+        let treasure_count = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|o| {
+                o.card_types.subtypes.contains(&"Treasure".to_string())
+                    && o.controller == PlayerId(0)
+            })
+            .count();
+        assert_eq!(
+            treasure_count, roll,
+            "must create exactly N={roll} Treasures (the d4 result), not a hard-coded count",
+        );
+        // Treasure tokens are colorless artifacts — sanity-check the type line so
+        // a future Token-shape regression can't silently pass the count check.
+        assert!(
+            state
+                .battlefield
+                .iter()
+                .filter_map(|id| state.objects.get(id))
+                .filter(|o| o.card_types.subtypes.contains(&"Treasure".to_string()))
+                .all(
+                    |o| o.card_types.core_types.contains(&CoreType::Artifact) && o.color.is_empty()
+                ),
+            "Treasure tokens must be colorless artifacts",
+        );
+
+        // (b) CR 102.1 + CR 103.1 + CR 613.3: control passed to the RIGHT
+        // neighbor = previous seat = P2 (distinct from LEFT = P1).
+        assert_eq!(
+            previous_player(&state, PlayerId(0)),
+            PlayerId(2),
+            "right neighbor of P0 in [P0,P1,P2] is the previous seat P2",
+        );
+        assert_eq!(
+            state.objects.get(&purse).unwrap().controller,
+            PlayerId(2),
+            "the Purse must transfer to the player on the controller's right (P2), not the left (P1)",
+        );
+        assert_ne!(
+            state.objects.get(&purse).unwrap().controller,
+            PlayerId(1),
+            "control must NOT go to the LEFT neighbor (next seat P1)",
+        );
+    }
+
+    /// CR 102.1 + CR 800.4b: When the immediate right-neighbor has left the
+    /// game, "the player to your right" skips to the next living seat
+    /// counter-clockwise. In a 4-player game [P0,P1,P2,P3] with controller P0,
+    /// the immediate right is P3; eliminating P3 routes control to P2.
+    #[test]
+    fn give_control_to_the_right_skips_eliminated_neighbor() {
+        use crate::types::ability::SeatDirection;
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        assert_eq!(
+            state.seat_order,
+            vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)]
+        );
+        // Eliminate the immediate right neighbor (P3).
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(3))
+            .unwrap()
+            .is_eliminated = true;
+
+        let artifact = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bucknard's Everfull Purse".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::Neighbor {
+                    direction: SeatDirection::Right,
+                },
+            },
+            vec![TargetRef::Object(artifact)],
+            artifact,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_give(&mut state, &ability, &mut events).unwrap();
+        crate::game::layers::evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects.get(&artifact).unwrap().controller,
+            PlayerId(2),
+            "eliminated right neighbor (P3) is skipped; control passes to P2"
+        );
     }
 
     /// CR 611.2b + CR 110.5d + CR 613.1b: Callous Oppressor regression (issue

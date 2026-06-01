@@ -284,24 +284,55 @@ fn extract_set_pool_indexed(
 pub fn extract_all_set_pools(
     sets_dir: &Path,
 ) -> Result<BTreeMap<String, LimitedSetPool>, ExtractionError> {
-    let entries: Vec<_> = std::fs::read_dir(sets_dir)
-        .map_err(|e| ExtractionError::Other(format!("cannot read directory: {e}")))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .collect();
+    let read_dir = std::fs::read_dir(sets_dir)
+        .map_err(|e| ExtractionError::Other(format!("cannot read directory: {e}")))?;
+
+    // Collect the `.json` entries, surfacing directory-entry read errors instead
+    // of silently dropping them. Sort for a deterministic parse/progress/error
+    // order regardless of the OS-dependent `read_dir` order.
+    let mut entries: Vec<std::path::PathBuf> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for entry in read_dir {
+        match entry {
+            Ok(e) => {
+                let path = e.path();
+                if path.extension().is_some_and(|ext| ext == "json") {
+                    entries.push(path);
+                }
+            }
+            Err(e) => failures.push(format!("could not read a directory entry: {e}")),
+        }
+    }
+    entries.sort();
     let total = entries.len();
 
     // Pass 1: parse every set file once. A cross-set UUID index needs them all
     // resident simultaneously (`specialGuest` etc. point at other sets' cards).
+    // Collect every per-file failure (named by path) rather than aborting on the
+    // first, so a corpus with several bad files reports them all in one run.
     let mut datas: Vec<MtgjsonSetData> = Vec::with_capacity(total);
-    for (i, entry) in entries.iter().enumerate() {
-        let path = entry.path();
+    for (i, path) in entries.iter().enumerate() {
         let filename = path.file_stem().unwrap_or_default().to_string_lossy();
         eprintln!("[{}/{}] Parsing {filename}...", i + 1, total);
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| ExtractionError::Other(format!("cannot read {}: {e}", path.display())))?;
-        let file: MtgjsonSetFile = serde_json::from_str(&content)?;
-        datas.push(file.data);
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) => {
+                failures.push(format!("cannot read {}: {e}", path.display()));
+                continue;
+            }
+        };
+        match serde_json::from_str::<MtgjsonSetFile>(&content) {
+            Ok(file) => datas.push(file.data),
+            Err(e) => failures.push(format!("cannot parse {}: {e}", path.display())),
+        }
+    }
+
+    if !failures.is_empty() {
+        return Err(ExtractionError::Other(format!(
+            "{} set file(s) could not be loaded:\n  - {}",
+            failures.len(),
+            failures.join("\n  - ")
+        )));
     }
 
     let card_index = build_card_index(&datas);
@@ -560,5 +591,68 @@ mod tests {
 
         let result = extract_set_pool(json).unwrap().unwrap();
         assert_eq!(result.basic_lands, vec!["Island", "Plains"]);
+    }
+
+    // --- extract_all_set_pools (directory-level loading) ---
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("phase_draft_core_{pid}_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(dir: &std::path::Path, name: &str, contents: &str) {
+        std::fs::write(dir.join(name), contents).unwrap();
+    }
+
+    #[test]
+    fn all_pools_empty_dir_is_ok_and_empty() {
+        let dir = scratch_dir("empty");
+        let pools = extract_all_set_pools(&dir).unwrap();
+        assert!(pools.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_pools_loads_booster_set_and_skips_non_json_and_boosterless() {
+        let dir = scratch_dir("valid");
+        write_file(&dir, "tst.json", &minimal_set_with_booster());
+        write_file(&dir, "prm.json", &minimal_set_without_booster());
+        write_file(&dir, "README.txt", "not a set file");
+
+        let pools = extract_all_set_pools(&dir).unwrap();
+
+        // Only the set with a `booster.play` config yields a pool; the
+        // boosterless set and the non-`.json` file are skipped.
+        assert_eq!(pools.len(), 1);
+        assert!(pools.contains_key("tst"));
+        assert!(!pools.contains_key("prm"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_pools_reports_every_bad_file_in_one_error() {
+        let dir = scratch_dir("bad");
+        write_file(&dir, "good.json", &minimal_set_with_booster());
+        write_file(&dir, "bad1.json", "{ not valid json");
+        write_file(&dir, "bad2.json", r#"{"data": 123}"#);
+
+        let err = extract_all_set_pools(&dir).unwrap_err();
+        let msg = err.to_string();
+
+        // Both bad files are named in a single aggregated error rather than the
+        // load aborting on the first one.
+        assert!(msg.contains("bad1.json"), "expected bad1.json in: {msg}");
+        assert!(msg.contains("bad2.json"), "expected bad2.json in: {msg}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_pools_missing_directory_is_err() {
+        let missing = std::env::temp_dir().join("phase_draft_core_missing_dir_xyz");
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(extract_all_set_pools(&missing).is_err());
     }
 }

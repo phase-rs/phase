@@ -19,8 +19,8 @@
 use engine::game::effects;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    ControllerRef, Effect, GainLifePlayer, PreventionAmount, PreventionScope, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ControllerRef, Effect, PreventionAmount, PreventionScope, QuantityExpr, QuantityRef,
+    ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::game_state::GameState;
 use engine::types::identifiers::CardId;
@@ -84,7 +84,7 @@ fn riot_control_chain_gains_life_and_prevents_damage() {
                     }),
                 },
             },
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         },
         vec![],
         riot_control,

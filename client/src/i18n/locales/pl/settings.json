@@ -49,6 +49,10 @@
     "showKeywords": "Pokaż słowa kluczowe na kartach na polu bitwy",
     "opponentHoverPreview": "Podgląd po najechaniu na przeciwnika",
     "showOpponentBoard": "Pokaż pole bitwy przeciwnika po najechaniu na HUD",
+    "cardPreviewDelay": "Opóźnienie podglądu",
+    "cardPreviewDelayInstant": "Natychmiast",
+    "cardPreviewDelayValue": "{{ms}} ms",
+    "cardPreviewDelayHint": "Odczekaj tyle czasu po najechaniu na kartę, zanim pojawi się podgląd.",
     "cardPreview": "Podgląd karty po najechaniu",
     "cardPreviewOptions": {
       "follow": "Podążaj za kursorem",

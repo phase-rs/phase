@@ -1381,6 +1381,34 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             return true;
         }
     }
+    // CR 119.3 + CR 121.1 + CR 608.2c: Conjugated third-person-singular player
+    // action verb + count argument. When the prior conjunct established a
+    // targeted player subject ("Target player draws X cards and loses X life"
+    // — Pact of the Serpent; "Target player draws a card and loses 1 life" —
+    // Shadrix Silverquill mode), the second conjunct's verb appears in the
+    // singular conjugation with the player subject elided. The verb axis is
+    // restricted to player-only actions: "draws N cards" (CR 121.1), "loses
+    // N life" (CR 119.3), "gains N life" (CR 119.3). These verbs never apply
+    // to non-player subjects in Magic — life is a player-only attribute (CR
+    // 119) and drawing is a player-only action (CR 121) — so the split is
+    // safe regardless of prior subject. The count+noun discriminator keeps
+    // conjugated continuous-modifier forms ("gains flying", "loses all
+    // abilities") on the un-split path: those are never followed by a player
+    // action count such as "a card" or "1 life". Sibling-clause X-binding
+    // (`compute_sentence_where_x`) and player-subject inheritance
+    // (`carried_targeted_player_subject`) handle the rest once both chunks
+    // reach the chain loop.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("draws "),
+        tag("loses "),
+        tag("gains "),
+    ))
+    .parse(s)
+    {
+        if next_token_is_player_action_count(rest) {
+            return true;
+        }
+    }
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("get ").parse(s) {
         let rest = rest.trim_start();
         if alt((
@@ -1508,6 +1536,20 @@ fn next_token_is_count(s: &str) -> bool {
         return next.map(|c| !c.is_alphanumeric()).unwrap_or(true);
     }
     false
+}
+
+/// CR 121.1 / CR 119.3: Returns true when a conjugated player-action verb is
+/// followed by a count plus the matching player-action noun (`card(s)` or
+/// `life`). Unlike the imperative `gain`/`lose` heuristic above, this accepts
+/// article counts ("draws a card") without false-splitting continuous keyword
+/// grants such as "gains flying" or "loses all abilities".
+fn next_token_is_player_action_count(s: &str) -> bool {
+    let count = alt((
+        value((), nom_primitives::parse_number),
+        value((), tag::<_, _, OracleError<'_>>("x")),
+    ));
+    let noun = alt((tag("cards"), tag("card"), tag("life")));
+    (count, multispace1, noun).parse(s.trim_start()).is_ok()
 }
 
 /// Checks if text starts with a subject-prefixed damage verb.
@@ -3818,6 +3860,28 @@ pub(super) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyw
     // The sentence must be fully consumed by the keyword list (modulo a
     // trailing period) — a leftover tail means this is not a pure
     // same-is-true-for clause.
+    if rest.trim().trim_end_matches('.').is_empty() {
+        Some(keywords)
+    } else {
+        None
+    }
+}
+
+/// CR 608.2c: Parse "Repeat this process for <keyword list>." — Kathril, Aspect
+/// Warper. Returns the keyword list; the chunk loop wraps it in
+/// `SpecialClause::RepeatProcessForKeywords` and lowering replicates the
+/// antecedent conditional keyword-counter clause once per keyword. Mirrors
+/// `try_parse_same_is_true_continuation`; covers every "repeat this process for
+/// <list>" card, not Kathril alone.
+pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Keyword>> {
+    let lower = text.to_lowercase();
+    let (keywords, rest) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = tag("repeat this process for ").parse(i)?;
+        parse_keyword_list(i)
+    })?;
+    // The sentence must be fully consumed by the keyword list (modulo a trailing
+    // period) — a leftover tail means this is some other "repeat this process …"
+    // form (e.g. "repeat this process any number of times") and must not match.
     if rest.trim().trim_end_matches('.').is_empty() {
         Some(keywords)
     } else {

@@ -49,6 +49,10 @@
     "showKeywords": "Afficher les mots-clés sur les cartes du champ de bataille",
     "opponentHoverPreview": "Aperçu au survol de l'adversaire",
     "showOpponentBoard": "Afficher le plateau de l'adversaire au survol du HUD",
+    "cardPreviewDelay": "Délai de survol",
+    "cardPreviewDelayInstant": "Instantané",
+    "cardPreviewDelayValue": "{{ms}} ms",
+    "cardPreviewDelayHint": "Attendre ce délai après le survol d'une carte avant d'afficher l'aperçu.",
     "cardPreview": "Aperçu de la carte au survol",
     "cardPreviewOptions": {
       "follow": "Suivre le curseur",

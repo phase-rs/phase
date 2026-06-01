@@ -2834,8 +2834,8 @@ fn creature_type_name(ct: &crate::schema::types::CreatureType) -> String {
 mod tests {
     use super::*;
     use engine::types::ability::{
-        AbilityCondition, Comparator, ContinuousModification, GainLifePlayer, PlayerFilter,
-        QuantityExpr, StaticCondition,
+        AbilityCondition, Comparator, ContinuousModification, PlayerFilter, QuantityExpr,
+        StaticCondition,
     };
     use engine::types::triggers::TriggerMode;
 
@@ -2963,7 +2963,7 @@ mod tests {
                 }],
                 else_effects: vec![Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 }],
             }),
             player_scope: PlayerFilter::Opponent,
