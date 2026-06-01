@@ -3674,9 +3674,9 @@ mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, CommanderOwnership,
         Comparator, ContinuousModification, ControllerRef, CountScope, Duration, Effect,
-        FilterProp, GainLifePlayer, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr,
-        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter,
-        TypedFilter, ZoneRef,
+        FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
+        ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{StaticSourceIndex, TransientContinuousEffect};
@@ -5501,7 +5501,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ))
                 .with_trigger(TriggerMode::Attacks)
@@ -5547,7 +5547,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ))
                 .with_trigger(TriggerMode::Attacks);
@@ -5631,7 +5631,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ))
                 .with_trigger(TriggerMode::Attacks)
@@ -7296,7 +7296,7 @@ mod tests {
                 AbilityKind::Activated,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
             obj.abilities = Arc::new((*obj.base_abilities).clone());
@@ -8377,7 +8377,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         )
         .cost(AbilityCost::Composite {

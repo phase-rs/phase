@@ -130,6 +130,7 @@ fn transform_effect_in_place(effect: &mut Effect) {
             origin,
             destination,
             target,
+            enters_under: None,
             enter_tapped: false,
         },
         // Effects without an all-matching counterpart (e.g. `Counter` for

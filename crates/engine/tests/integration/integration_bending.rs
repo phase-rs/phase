@@ -2237,6 +2237,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::SpecificObject { id: land_id },
+            enters_under: None,
             enter_tapped: false,
         },
         vec![TargetRef::Object(land_id)],

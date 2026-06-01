@@ -691,6 +691,9 @@ pub(crate) enum TargetedImperativeAst {
         target: TargetFilter,
         origin: Option<Zone>,
         destination: Zone,
+        /// CR 110.2a: Controller override for mass returns to the battlefield.
+        /// `None` preserves default controller assignment.
+        enters_under: Option<ControllerRef>,
         enter_tapped: bool,
     },
     Fight {

@@ -86,13 +86,13 @@ use crate::types::ability::{
     BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
     ContinuousModification, ControllerRef, DamageModification, DamageSource,
-    DelayedTriggerCondition, DoubleTarget, Duration, Effect, FilterProp, GainLifePlayer,
-    GameRestriction, IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec,
-    ObjectProperty, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount,
-    PreventionScope, ProhibitedActivity, QuantityExpr, QuantityRef, ReplacementDefinition,
-    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
-    StepSkipTarget, SubAbilityLink, TargetFilter, TargetSelectionMode, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+    DelayedTriggerCondition, DoubleTarget, Duration, Effect, FilterProp, GameRestriction,
+    IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
+    ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
+    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget,
+    SubAbilityLink, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -1880,6 +1880,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: mass_target,
+            enters_under: None,
             enter_tapped: false,
         }
     } else {
@@ -3478,7 +3479,9 @@ fn try_parse_choose_player_to_verb(
 /// `TargetFilter` are left untouched — the surrounding `relative_player_scope`
 /// already binds object-controller anaphora ("a creature they control").
 ///
-/// `GainLife` (recipient is the `GainLifePlayer` enum, not a `TargetFilter`)
+/// `GainLife` (recipient `player` is now a `TargetFilter`, but no current card
+/// pairs "choose a player to gain life" with this verb, so it is not yet wired
+/// into the `rebind` match below)
 /// and `Discard`/`DiscardCard` (no player-recipient `TargetFilter` — `Discard`
 /// is self-scoped, `DiscardCard.filter` selects *what* is discarded, not
 /// *who*) are a deliberate class-boundary deferral: no current card pairs
@@ -6588,10 +6591,10 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
         },
         Effect::GainLife {
             amount,
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         } if is_targeted && matches!(target, TargetFilter::Player) => Effect::GainLife {
             amount,
-            player: GainLifePlayer::TargetPlayer,
+            player: TargetFilter::Player,
         },
         other => other,
     }
@@ -7354,6 +7357,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Battlefield,
+                            enters_under: d.enters_under,
                             enter_tapped: d.enter_tapped,
                         },
                         rem,
@@ -7380,6 +7384,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: Zone::Hand,
+                            enters_under: None,
                             enter_tapped: false,
                         },
                         rem,
@@ -7395,6 +7400,7 @@ fn try_parse_verb_and_target<'a>(
                             target,
                             origin,
                             destination: d.zone,
+                            enters_under: None,
                             enter_tapped: false,
                         },
                         rem,
@@ -8796,7 +8802,7 @@ fn rewrite_recipient_on_link(def: &mut AbilityDefinition, filter: &TargetFilter)
         // Any other effect family is out of scope for compound-subject
         // distribution at this entry point. Returning false keeps the
         // detector tight and prevents silent misparse on bodies whose
-        // recipient binding is encoded differently (GainLifePlayer enum, etc.).
+        // recipient binding is encoded differently (e.g. nested filter props).
         _ => false,
     }
 }
@@ -12840,6 +12846,7 @@ fn try_parse_return_target_and_same_name_from_your_graveyard(
                 },
                 FilterProp::SameNameAsParentTarget,
             ])),
+            enters_under: None,
             enter_tapped,
         },
     )));
@@ -15944,10 +15951,10 @@ mod tests {
         AbilityCondition, AggregateFunction, BounceSelection, CardTypeSetSource, CastVariantPaid,
         ChoiceType, CombatRelation, CombatRelationSubject, Comparator, ContinuousModification,
         ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode, Duration, FilterProp,
-        GainLifePlayer, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
-        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming,
-        TypeFilter, TypedFilter, ZoneRef,
+        LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction, ObjectProperty,
+        ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValue, PtValueScope, QuantityExpr,
+        QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -19348,6 +19355,7 @@ mod tests {
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Exile,
                     target: TargetFilter::Player,
+                    enters_under: None,
                     enter_tapped: false,
                 }
             ),
@@ -19408,6 +19416,7 @@ mod tests {
                     origin: Some(Zone::Exile),
                     destination: Zone::Graveyard,
                     target: TargetFilter::ExiledBySource,
+                    enters_under: None,
                     enter_tapped: false,
                 }
             ),
@@ -20065,10 +20074,32 @@ mod tests {
                 e,
                 Effect::ChangeZoneAll {
                     destination: Zone::Battlefield,
+                    enters_under: None,
                     ..
                 }
             ),
             "return-all-to-battlefield must lower to ChangeZoneAll, got {e:?}"
+        );
+    }
+
+    /// CR 110.2a: Mass return-to-battlefield text can override the default
+    /// controller. Rise of the Dark Realms class must preserve "under your
+    /// control" on `ChangeZoneAll`, not only on single-object `ChangeZone`.
+    #[test]
+    fn effect_return_all_to_battlefield_under_your_control_preserves_controller_override() {
+        let e = parse_effect(
+            "Return all creature cards from all graveyards to the battlefield under your control",
+        );
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZoneAll {
+                    destination: Zone::Battlefield,
+                    enters_under: Some(ControllerRef::You),
+                    ..
+                }
+            ),
+            "mass return under your control must preserve enters_under, got {e:?}"
         );
     }
 
@@ -21164,7 +21195,7 @@ mod tests {
                             scope: crate::types::ability::ObjectScope::Target
                         }
                     },
-                    player: GainLifePlayer::TargetedController
+                    player: TargetFilter::ParentTargetController
                 }
             ),
             "Expected TargetPower + TargetedController, got {e:?}"
@@ -21195,7 +21226,7 @@ mod tests {
                         scope: crate::types::ability::ObjectScope::Target
                     }
                 },
-                player: GainLifePlayer::TargetedController
+                player: TargetFilter::ParentTargetController
             }
         ));
     }
@@ -21366,7 +21397,7 @@ mod tests {
         assert!(matches!(
             &*gain_life.effect,
             Effect::GainLife {
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
                 amount: QuantityExpr::Fixed { value: 3 },
             }
         ));
@@ -21556,6 +21587,7 @@ mod tests {
                 origin: Some(Zone::Hand),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
+                enters_under: None,
                 enter_tapped: false,
             }
         ));
@@ -21570,6 +21602,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
+                enters_under: None,
                 enter_tapped: false,
             }
         ));
@@ -32615,7 +32648,7 @@ mod tests {
                         },
                     }),
                 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
     }
@@ -32631,7 +32664,7 @@ mod tests {
                         filter: TargetFilter::Typed(TypedFilter::creature()),
                     },
                 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
     }
@@ -32838,7 +32871,7 @@ mod tests {
                         },
                     }),
                 },
-                player: GainLifePlayer::TargetPlayer,
+                player: TargetFilter::Player,
             },
         );
     }
@@ -39133,6 +39166,7 @@ mod snapshot_tests {
             origin,
             destination,
             target,
+            enters_under,
             enter_tapped,
         } = &*same_name.effect
         else {
@@ -39140,6 +39174,7 @@ mod snapshot_tests {
         };
         assert_eq!(*origin, Some(Zone::Graveyard));
         assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(*enters_under, None);
         assert!(*enter_tapped);
         let TargetFilter::Typed(tail) = target else {
             panic!("expected typed same-name tail, got {target:?}");
