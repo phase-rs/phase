@@ -514,6 +514,7 @@ impl Broker {
         let mut out = Vec::new();
         let mut reservation_token = None;
         let mut reservation_expires_at_ms = None;
+        let mut reservation_counted_in_info = false;
 
         if conn
             .host_game
@@ -539,7 +540,7 @@ impl Broker {
             ))];
         }
 
-        let info = match self.lobby.verify_password(&game_code, password.as_deref()) {
+        let mut info = match self.lobby.verify_password(&game_code, password.as_deref()) {
             Ok(()) => match self.lobby.join_target_info(&game_code) {
                 Some(info) => info,
                 None => return vec![error(&format!("Game not found in lobby: {game_code}"))],
@@ -569,16 +570,20 @@ impl Broker {
             }
         }
 
-        // --- seat-full short-circuit ---
-        if info.max_players > 0 && info.current_players >= info.max_players {
-            out.push(error(&format!("Game {game_code} is full")));
-            return out;
-        }
-
         // --- optional reservation ---
         if reserve {
-            if conn.reservations.iter().any(|(code, _)| code == &game_code) {
-                return vec![error("You already hold a reservation for this game")];
+            let mut has_active_reservation = false;
+            conn.reservations.retain(|(code, token)| {
+                if code != &game_code {
+                    return true;
+                }
+                let active = self.lobby.has_active_reservation(code, token, env);
+                has_active_reservation |= active;
+                active
+            });
+            if has_active_reservation {
+                out.push(error("You already hold a reservation for this game"));
+                return out;
             }
             match self.lobby.reserve_seat(
                 &game_code,
@@ -601,10 +606,19 @@ impl Broker {
                     return out;
                 }
             }
+            if let Some(latest_info) = self.lobby.join_target_info(&game_code) {
+                info = latest_info;
+                reservation_counted_in_info = true;
+            }
+        } else if info.max_players > 0 && info.current_players >= info.max_players {
+            // --- seat-full short-circuit ---
+            out.push(error(&format!("Game {game_code} is full")));
+            return out;
         }
 
-        let filled_seats = (info.current_players + u32::from(reservation_token.is_some()))
-            .min(info.max_players) as u8;
+        let filled_seats = (info.current_players
+            + u32::from(reservation_token.is_some() && !reservation_counted_in_info))
+        .min(info.max_players) as u8;
         out.push(Outbound::ToSelf(LobbyServerMessage::JoinTargetInfo {
             game_code: game_code.clone(),
             is_p2p: info.is_p2p,
@@ -912,6 +926,57 @@ mod tests {
         assert!(matches!(
             second.as_slice(),
             [Outbound::ToSelf(LobbyServerMessage::Error { .. })]
+        ));
+        assert_eq!(guest.reservations.len(), 1);
+    }
+
+    #[test]
+    fn expired_reservation_on_conn_does_not_block_new_reserve() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+
+        let mut host = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        let created = create(&mut host, &mut broker, &env);
+        let code = game_code_of(&created);
+
+        let mut guest = ConnState::default();
+        hello(&mut guest, &mut broker, &env);
+
+        let first = broker.handle(
+            &mut guest,
+            LobbyClientMessage::LookupJoinTarget {
+                game_code: code.clone(),
+                password: None,
+                reserve: true,
+                display_name: Some("Guest".into()),
+                release_reservation_token: None,
+            },
+            &env,
+        );
+        assert!(matches!(
+            first.last(),
+            Some(Outbound::ToSelf(LobbyServerMessage::JoinTargetInfo { .. }))
+        ));
+        assert_eq!(guest.reservations.len(), 1);
+
+        env.now
+            .set(env.now.get() + crate::lobby::PUBLIC_SEAT_RESERVATION_MS + 1);
+
+        let second = broker.handle(
+            &mut guest,
+            LobbyClientMessage::LookupJoinTarget {
+                game_code: code.clone(),
+                password: None,
+                reserve: true,
+                display_name: Some("Guest".into()),
+                release_reservation_token: None,
+            },
+            &env,
+        );
+        assert!(matches!(
+            second.last(),
+            Some(Outbound::ToSelf(LobbyServerMessage::JoinTargetInfo { .. }))
         ));
         assert_eq!(guest.reservations.len(), 1);
     }
