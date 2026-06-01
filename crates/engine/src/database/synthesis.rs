@@ -219,6 +219,7 @@ impl KeywordTriggerInstaller {
             // moment on.
             Keyword::Graft(_) => vec![build_graft_enters_trigger()],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
+            Keyword::Riot => vec![build_riot_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
             Keyword::Extort => vec![build_extort_trigger()],
@@ -255,6 +256,7 @@ impl KeywordTriggerInstaller {
             // removed.
             Keyword::Graft(_) => is_graft_enters_trigger(trigger),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
+            Keyword::Riot => is_riot_etb_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
             Keyword::Extort => is_extort_trigger(trigger),
@@ -1970,6 +1972,90 @@ pub fn synthesize_fabricate(face: &mut CardFace) {
             ));
         face.triggers.push(trigger);
     }
+}
+
+/// CR 702.128a: Riot — "When this creature enters, choose one — put a +1/+1
+/// counter on it or it gains haste until end of turn."
+///
+/// Modeled as an ETB `Effect::ChooseOneOf` with a +1/+1 counter branch and a
+/// haste-until-end-of-turn branch (`GenericEffect` + transient continuous).
+/// Runtime-granted Riot (e.g. Uncivil Unrest) installs the same trigger via
+/// `KeywordTriggerInstaller` when layers apply `AddKeyword(Riot)`.
+pub fn synthesize_riot(face: &mut CardFace) {
+    if !face.keywords.iter().any(|kw| matches!(kw, Keyword::Riot)) {
+        return;
+    }
+    if face.triggers.iter().any(is_riot_etb_trigger) {
+        return;
+    }
+    face.triggers.push(build_riot_trigger());
+}
+
+fn build_riot_trigger() -> TriggerDefinition {
+    let counter_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("Put a +1/+1 counter on it".to_string());
+
+    let haste_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }])],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+        },
+    )
+    .duration(Duration::UntilEndOfTurn)
+    .description("It gains haste until end of turn".to_string());
+
+    let choose = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![counter_branch, haste_branch],
+        },
+    );
+
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(choose)
+        .description(
+            "CR 702.128a: Riot — when this creature enters, put a +1/+1 counter on it or it gains haste until end of turn."
+                .to_string(),
+        )
+}
+
+fn is_riot_etb_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::ChangesZone)
+        && t.destination == Some(Zone::Battlefield)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::ChooseOneOf { branches, .. })
+                if branches.len() == 2
+                    && branches.iter().any(|b| matches!(
+                        &*b.effect,
+                        Effect::PutCounter {
+                            counter_type: CounterType::Plus1Plus1,
+                            target: TargetFilter::SelfRef,
+                            ..
+                        }
+                    ))
+                    && branches.iter().any(|b| matches!(
+                        &*b.effect,
+                        Effect::GenericEffect { .. }
+                    ))
+        )
 }
 
 /// CR 702.93a: Undying — "When this permanent is put into a graveyard from the
@@ -4250,6 +4336,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // between N +1/+1 counters or N 1/1 colorless Servo artifact creature
     // tokens. Modeled via `Effect::ChooseOneOf`.
     synthesize_fabricate(face);
+    // CR 702.128a: Riot — ETB choose-one between +1/+1 counter and haste until
+    // end of turn. Granted Riot (static keyword grants) resolves via the same
+    // synthesized trigger shape through `KeywordTriggerInstaller`.
+    synthesize_riot(face);
     // CR 702.93a: Undying — dies trigger that returns the permanent with a
     // +1/+1 counter, gated on having had no +1/+1 counter at death (LKI).
     synthesize_undying(face);
@@ -6938,6 +7028,39 @@ mod extort_synthesis_tests {
         assert_eq!(state.players[0].life, 22);
         assert_eq!(state.players[1].life, 19);
         assert_eq!(state.players[2].life, 19);
+    }
+}
+
+#[cfg(test)]
+mod riot_synthesis_tests {
+    use super::*;
+
+    #[test]
+    fn synthesize_riot_adds_etb_choose_branches() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Riot);
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_riot(&mut face);
+        assert!(
+            face.triggers.iter().any(is_riot_etb_trigger),
+            "riot should add ETB ChooseOneOf trigger, got {:?}",
+            face.triggers
+        );
+    }
+
+    #[test]
+    fn synthesize_riot_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Riot);
+        synthesize_riot(&mut face);
+        synthesize_riot(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_riot_etb_trigger(t))
+                .count(),
+            1
+        );
     }
 }
 
