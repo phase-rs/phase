@@ -49,6 +49,10 @@
     "showKeywords": "Mostra le parole chiave sulle carte sul campo di battaglia",
     "opponentHoverPreview": "Anteprima al passaggio sull'avversario",
     "showOpponentBoard": "Mostra il campo dell'avversario passando sull'HUD",
+    "cardPreviewDelay": "Ritardo al passaggio",
+    "cardPreviewDelayInstant": "Istantaneo",
+    "cardPreviewDelayValue": "{{ms}} ms",
+    "cardPreviewDelayHint": "Attendi questo tempo dopo aver passato il cursore su una carta prima di mostrare l'anteprima.",
     "cardPreview": "Anteprima della carta al passaggio del mouse",
     "cardPreviewOptions": {
       "follow": "Segui il cursore",
