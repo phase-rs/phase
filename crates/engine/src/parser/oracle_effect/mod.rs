@@ -31387,6 +31387,67 @@ mod tests {
             }
             other => panic!("expected controller-only typed filter, got {other:?}"),
         }
+
+        let present = try_nom_condition_as_ability_condition(
+            "you control that creature",
+            &mut ParseContext::default(),
+        )
+        .expect("present-tense condition should parse");
+        let AbilityCondition::TargetMatchesFilter {
+            filter: present_filter,
+            use_lki,
+        } = present
+        else {
+            panic!("expected TargetMatchesFilter condition");
+        };
+        assert!(!use_lki);
+        match present_filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected typed creature filter, got {other:?}"),
+        }
+
+        let negative_present = try_nom_condition_as_ability_condition(
+            "you don't control it",
+            &mut ParseContext::default(),
+        )
+        .expect("negative present-tense condition should parse");
+        let AbilityCondition::Not { condition } = negative_present else {
+            panic!("expected negated condition");
+        };
+        let AbilityCondition::TargetMatchesFilter { filter, use_lki } = *condition else {
+            panic!("expected inner TargetMatchesFilter condition");
+        };
+        assert!(!use_lki);
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.is_empty());
+            }
+            other => panic!("expected controller-only typed filter, got {other:?}"),
+        }
+
+        let negative_past = try_nom_condition_as_ability_condition(
+            "you didn't control it",
+            &mut ParseContext::default(),
+        )
+        .expect("negative past-tense condition should parse");
+        let AbilityCondition::Not { condition } = negative_past else {
+            panic!("expected negated condition");
+        };
+        let AbilityCondition::TargetMatchesFilter { filter, use_lki } = *condition else {
+            panic!("expected inner TargetMatchesFilter condition");
+        };
+        assert!(use_lki);
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.is_empty());
+            }
+            other => panic!("expected controller-only typed filter, got {other:?}"),
+        }
     }
 
     #[test]

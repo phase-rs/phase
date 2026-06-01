@@ -2602,7 +2602,8 @@ pub(super) fn try_nom_condition_as_ability_condition(
 ///
 /// Composes three orthogonal axes — none enumerated as full-string `tag()`s:
 ///   - polarity: positive ("you control[led]") vs. negative ("you don't /
-///     do not / didn't / did not control[led]"). Negative → `negated = true`.
+///     do not / didn't / did not control[led]"). Negative → `negated = true`;
+///     "didn't" / "did not" also imply past-tense LKI.
 ///   - tense: present ("control") → current state (`use_lki = false`,
 ///     CR 109.4 evaluated now); past ("controlled") → LKI snapshot
 ///     (`use_lki = true`, CR 400.7) — matters when an earlier chain link has
@@ -2639,20 +2640,21 @@ fn parse_anaphoric_control_predicate(input: &str) -> OracleResult<'_, (TargetFil
 
     // Axis 1 — polarity. "you " then optional negator, then the control verb.
     let (rest, _) = tag::<_, _, E>("you ").parse(input)?;
-    let (rest, negated) = opt(alt((
-        tag::<_, _, E>("don't "),
-        tag("do not "),
-        tag("didn't "),
-        tag("did not "),
+    let (rest, negator_lki) = opt(alt((
+        value(false, tag::<_, _, E>("don't ")),
+        value(false, tag("do not ")),
+        value(true, tag("didn't ")),
+        value(true, tag("did not ")),
     )))
-    .parse(rest)
-    .map(|(rest, m)| (rest, m.is_some()))?;
+    .parse(rest)?;
+    let negated = negator_lki.is_some();
     // Axis 2 — tense. "controlled" → past (LKI); "control" → present.
-    let (rest, use_lki) = alt((
+    let (rest, verb_lki) = alt((
         value(true, tag::<_, _, E>("controlled ")),
         value(false, tag("control ")),
     ))
     .parse(rest)?;
+    let use_lki = negator_lki.unwrap_or(verb_lki) || verb_lki;
     // Axis 3 — subject.
     let (rest, filter) = alt((
         value(controller_only, tag::<_, _, E>("it")),
