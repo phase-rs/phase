@@ -49,6 +49,10 @@
     "showKeywords": "Show keywords on battlefield cards",
     "opponentHoverPreview": "Opponent Hover Preview",
     "showOpponentBoard": "Show opponent's board on HUD hover",
+    "cardPreviewDelay": "Hover Delay",
+    "cardPreviewDelayInstant": "Instant",
+    "cardPreviewDelayValue": "{{ms}} ms",
+    "cardPreviewDelayHint": "Wait this long after hovering a card before the preview appears.",
     "cardPreview": "Card Hover Preview",
     "cardPreviewOptions": {
       "follow": "Follow cursor",

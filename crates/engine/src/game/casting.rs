@@ -1727,6 +1727,30 @@ pub fn top_of_library_land_playable_by_permission(
     Some((top_id, src_id))
 }
 
+/// CR 118.9 + CR 401.5: When `object_id` is the current top of `player`'s library
+/// and a `TopOfLibraryCastPermission` static grants an alt-cost rider (Bolas's
+/// Citadel: pay life equal to mana value), return that cost for castability
+/// pre-checks and the `check_additional_cost_or_pay` payment path.
+pub(crate) fn top_of_library_alt_ability_cost_for_object(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<crate::types::ability::AbilityCost> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone != Zone::Library || obj.owner != player {
+        return None;
+    }
+    top_of_library_permission_source(state, player, Some(CardPlayMode::Cast)).and_then(
+        |(top_id, _src, alt)| {
+            if top_id == object_id {
+                alt
+            } else {
+                None
+            }
+        },
+    )
+}
+
 /// CR 604.2 + CR 305.1: Find lands in the player's graveyard that can be played
 /// via a GraveyardCastPermission static with `play_mode: Play`.
 pub fn graveyard_lands_playable_by_permission(
@@ -6205,6 +6229,20 @@ fn can_cast_prepared_now(
                 if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
                     return false;
                 }
+            }
+        }
+    }
+
+    // CR 401.5 + CR 118.9 + CR 119.8: Top-of-library alt-cost casts (Bolas's
+    // Citadel) replace the mana cost with a PayLife cost equal to the spell's
+    // mana value. Gate legal actions on life affordability so the UI never offers
+    // a cast the payment pipeline would reject after the player taps mana.
+    if let Some(alt_cost) =
+        top_of_library_alt_ability_cost_for_object(state, player, prepared.object_id)
+    {
+        if let Some(amount) = find_pay_life_cost(&alt_cost, state, player, prepared.object_id) {
+            if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
+                return false;
             }
         }
     }

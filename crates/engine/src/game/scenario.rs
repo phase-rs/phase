@@ -220,8 +220,8 @@ impl GameScenario {
 
     /// Add generic named cards to the top of a player's library.
     ///
-    /// The last supplied name becomes the current top card, matching the engine's
-    /// library-top convention (`Vec::last()` / pop-from-end flows).
+    /// The first supplied name becomes the current top card, matching the
+    /// engine's library-top convention (`library[0]`).
     pub fn with_library_top(&mut self, player: PlayerId, names_top_first: &[&str]) -> &mut Self {
         for &name in names_top_first.iter().rev() {
             self.add_card_to_library_top(player, name);
@@ -232,13 +232,25 @@ impl GameScenario {
     /// Add one generic named card to the top of a player's library.
     pub fn add_card_to_library_top(&mut self, player: PlayerId, name: &str) -> ObjectId {
         let card_id = CardId(self.state.next_object_id);
-        create_object(
+        let id = create_object(
             &mut self.state,
             card_id,
             player,
             name.to_string(),
             Zone::Library,
-        )
+        );
+        // Engine convention: `library[0]` is the top. `create_object` appends
+        // to the bottom, so re-seat this card at index 0 for deterministic top
+        // tests.
+        let player_state = self
+            .state
+            .players
+            .iter_mut()
+            .find(|p| p.id == player)
+            .expect("player exists");
+        player_state.library.retain(|&oid| oid != id);
+        player_state.library.insert(0, id);
+        id
     }
 
     /// Add generic named cards to a player's graveyard without rules text.
@@ -613,6 +625,17 @@ impl GameScenario {
         };
         obj.card_types.core_types.push(core_type);
         obj.base_card_types = obj.card_types.clone();
+
+        if zone == Zone::Library {
+            let player_state = self
+                .state
+                .players
+                .iter_mut()
+                .find(|p| p.id == player)
+                .expect("player exists");
+            player_state.library.retain(|&oid| oid != id);
+            player_state.library.insert(0, id);
+        }
 
         CardBuilder {
             state: &mut self.state,

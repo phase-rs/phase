@@ -2018,15 +2018,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         } else if obj.zone == Zone::Library && obj.owner == player {
             // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast with an
             // alt-cost rider (Bolas's Citadel: "pay life equal to its mana
-            // value rather than paying its mana cost"). The static lives on
-            // the granting permanent on the battlefield, not on the spell;
-            // resolve through `top_of_library_permission_source` to fetch it.
-            super::casting::top_of_library_permission_source(
-                state,
-                player,
-                Some(crate::types::ability::CardPlayMode::Cast),
-            )
-            .and_then(|(top_id, _src, alt)| if top_id == object_id { alt } else { None })
+            // value rather than paying its mana cost").
+            super::casting::top_of_library_alt_ability_cost_for_object(state, player, object_id)
         } else {
             None
         }
