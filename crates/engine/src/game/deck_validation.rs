@@ -1989,15 +1989,11 @@ fn is_time_lord_doctor_commander(face: &CardFace) -> bool {
         return subtypes.len() == 1;
     }
     subtypes.len() == 2
+        && subtypes.iter().any(|s| s.eq_ignore_ascii_case("Doctor"))
+        && subtypes.iter().any(|s| s.eq_ignore_ascii_case("Time Lord"))
         && subtypes
             .iter()
-            .any(|s| s.eq_ignore_ascii_case("Doctor"))
-        && subtypes
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case("Time Lord"))
-        && subtypes.iter().all(|s| {
-            s.eq_ignore_ascii_case("Doctor") || s.eq_ignore_ascii_case("Time Lord")
-        })
+            .all(|s| s.eq_ignore_ascii_case("Doctor") || s.eq_ignore_ascii_case("Time Lord"))
 }
 
 /// CR 702.124: Check if a partner type matches the other face by subtype.
@@ -3565,11 +3561,7 @@ mod tests {
             vec![],
         );
         // Can pair with a Doctor
-        let doctor = partner_face(
-            "The Thirteenth Doctor",
-            vec![],
-            vec!["Time Lord", "Doctor"],
-        );
+        let doctor = partner_face("The Thirteenth Doctor", vec![], vec!["Time Lord", "Doctor"]);
         assert!(are_valid_partners(&amy, &doctor));
 
         // Can pair with Rory Williams
