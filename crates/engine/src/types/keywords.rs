@@ -692,8 +692,6 @@ pub enum Keyword {
     /// CR 702.46: Soulshift N — when this creature dies, return target Spirit card
     /// with mana value N or less from your graveyard to your hand.
     Soulshift(u32),
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (ETB +1/+1 counters + ability-grant trigger not wired).
     /// CR 702.165: Backup N — when this creature enters, put N +1/+1 counters
     /// on target creature, which gains this creature's other abilities until EOT.
     Backup(u32),
