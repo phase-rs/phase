@@ -2964,10 +2964,14 @@ fn apply_action(
                             old_target,
                         });
                     }
-                    events.push(crate::types::events::GameEvent::EffectResolved {
-                        kind: crate::types::ability::EffectKind::ChangeZone,
-                        source_id: pending.source_id,
-                    });
+                    let resumes_change_zone_iteration =
+                        state.pending_change_zone_iteration.is_some();
+                    if !resumes_change_zone_iteration {
+                        events.push(crate::types::events::GameEvent::EffectResolved {
+                            kind: crate::types::ability::EffectKind::ChangeZone,
+                            source_id: pending.source_id,
+                        });
+                    }
                     state.waiting_for = WaitingFor::Priority {
                         player: active_player,
                     };

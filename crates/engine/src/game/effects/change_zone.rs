@@ -132,6 +132,7 @@ fn legal_aura_attachment_targets(
         .copied()
         .filter(|id| *id != aura_id)
         .filter(|id| crate::game::filter::matches_target_filter(state, *id, enchant_filter, &ctx))
+        .filter(|id| crate::game::effects::attach::can_attach_to_object(state, aura_id, *id))
         .map(TargetRef::Object)
         .collect();
 
@@ -1282,7 +1283,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         ControllerRef, FilterProp, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr,
-        QuantityRef, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        QuantityRef, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -1290,6 +1291,7 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
+    use crate::types::statics::StaticMode;
 
     fn make_hand_choice_ability(up_to: bool) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -1413,6 +1415,68 @@ mod tests {
     }
 
     #[test]
+    fn aura_put_onto_battlefield_by_effect_stays_put_without_legal_host() {
+        let mut state = GameState::new_two_player(42);
+        let aura_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Returned Aura".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords
+                .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Creature,
+                ))));
+        }
+
+        let host_id = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Illegal Host".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let host = state.objects.get_mut(&host_id).unwrap();
+            host.card_types.core_types.push(CoreType::Creature);
+            host.static_definitions.push(
+                StaticDefinition::new(StaticMode::Other("CantBeEnchanted".to_string()))
+                    .affected(TargetFilter::SelfRef),
+            );
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SpecificObject { id: aura_id },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&aura_id].zone, Zone::Graveyard);
+        assert!(state.objects[&aura_id].attached_to.is_none());
+        assert!(!state.objects[&host_id].attachments.contains(&aura_id));
+    }
+
+    #[test]
     fn aura_put_onto_battlefield_by_effect_prompts_for_multiple_legal_hosts() {
         let mut state = GameState::new_two_player(42);
         let aura_id = create_object(
@@ -1515,6 +1579,132 @@ mod tests {
         );
         assert!(state.objects[&second_host].attachments.contains(&aura_id));
         assert!(!state.objects[&first_host].attachments.contains(&aura_id));
+    }
+
+    #[test]
+    fn aura_put_onto_battlefield_by_effect_resumes_multi_target_move_after_choice() {
+        let mut state = GameState::new_two_player(42);
+        let aura_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Returned Aura".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords
+                .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Creature,
+                ))));
+        }
+
+        let other_card = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Other Permanent".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&other_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let first_host = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "First Host".to_string(),
+            Zone::Battlefield,
+        );
+        let second_host = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Second Host".to_string(),
+            Zone::Battlefield,
+        );
+        for host_id in [first_host, second_host] {
+            state
+                .objects
+                .get_mut(&host_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(aura_id), TargetRef::Object(other_card)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReturnAsAuraTarget { .. }
+        ));
+        assert!(state.pending_change_zone_iteration.is_some());
+        assert_eq!(state.objects[&other_card].zone, Zone::Graveyard);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(second_host)),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects[&aura_id]
+                .attached_to
+                .and_then(|target| target.as_object()),
+            Some(second_host)
+        );
+        assert!(state.objects[&second_host].attachments.contains(&aura_id));
+        assert_eq!(state.objects[&other_card].zone, Zone::Battlefield);
+        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        let change_zone_resolutions = result
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::ChangeZone,
+                        source_id: ObjectId(100),
+                    }
+                )
+            })
+            .count();
+        assert_eq!(change_zone_resolutions, 1);
     }
 
     #[test]
