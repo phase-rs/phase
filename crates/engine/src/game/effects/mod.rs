@@ -51,6 +51,7 @@ pub mod conjure;
 pub mod connive;
 pub mod control_next_turn;
 pub mod copy_spell;
+pub mod copy_token_blocking;
 pub mod counter;
 pub mod counters;
 pub mod create_damage_replacement;
@@ -1679,6 +1680,9 @@ pub fn resolve_effect(
         Effect::CastCopyOfCard { .. } => cast_copy_of_card::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
         Effect::Myriad => myriad::resolve(state, ability, events),
+        Effect::CopyTokenBlockingAttacker { .. } => {
+            copy_token_blocking::resolve(state, ability, events)
+        }
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
         Effect::PutCounter { .. } => counters::resolve_add(state, ability, events),
