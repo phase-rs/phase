@@ -290,6 +290,10 @@ interface MultiplayerActions {
   ) => Promise<boolean>;
   getActiveP2PHost: () => { adapter: P2PHostAdapter; gameId: string } | null;
   seatMutate: (mutation: SeatMutation) => void;
+  /** Like `seatMutate` but awaits P2P work; server sends are still fire-and-forget. */
+  seatMutateAsync: (mutation: SeatMutation) => Promise<void>;
+  /** Remove open seats, then start — mutations run in order (fixes Start-now races). */
+  startLobbyWithCurrentPlayers: () => Promise<void>;
   /**
    * Lazily open the long-lived subscription socket and return the
    * `PhaseSocket`. Idempotent: a second call while an open is in flight
@@ -350,6 +354,59 @@ interface MultiplayerActions {
     serverUrl: string,
     settings: CreateDraftSettings,
   ) => Promise<void>;
+}
+
+function disposeActiveP2PHost(): void {
+  if (activeP2PHostAdapter) {
+    activeP2PHostAdapter.dispose();
+    activeP2PHostAdapter = null;
+    activeP2PHostGameId = null;
+  }
+}
+
+function closeHostWebSocket(): void {
+  if (hostReconnectTimer) {
+    clearTimeout(hostReconnectTimer);
+    hostReconnectTimer = null;
+  }
+  if (hostWs) {
+    hostWs.close();
+    hostWs = null;
+  }
+}
+
+function activeServerHostingSocket(get: () => MultiplayerState): WebSocket | null {
+  if (hostWs) {
+    if (hostWs.readyState !== WebSocket.OPEN) {
+      throw new Error("Host connection is not active.");
+    }
+    return hostWs;
+  }
+  if (
+    get().hostingStatus === "waiting" &&
+    get().hostGameCode != null &&
+    !activeP2PHostAdapter
+  ) {
+    throw new Error("Host connection is not active.");
+  }
+  return null;
+}
+
+async function runP2PSeatMutation(
+  mutation: SeatMutation,
+  set: (partial: Partial<MultiplayerState>) => void,
+): Promise<void> {
+  const adapter = activeP2PHostAdapter;
+  if (!adapter) {
+    throw new Error("P2P host is not active.");
+  }
+  if (mutation.type === "Start") {
+    adapter.startNow();
+    await startActiveP2PHostGame(set);
+  } else {
+    await adapter.applySeatMutation(mutation);
+    set({ playerSlots: adapter.getPlayerSlots() });
+  }
 }
 
 async function startActiveP2PHostGame(
@@ -544,14 +601,16 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       setLatency: (ms) => set({ latencyMs: ms }),
 
       startHosting: (settings, deck) => {
-        // Clean up any existing hosting session
-        if (hostWs) {
-          hostWs.close();
-          hostWs = null;
-        }
-        if (hostReconnectTimer) {
-          clearTimeout(hostReconnectTimer);
-          hostReconnectTimer = null;
+        // Clean up any existing hosting session (server or P2P).
+        closeHostWebSocket();
+        disposeActiveP2PHost();
+        if (activeBroker) {
+          if (activeBrokerGameCode) {
+            void activeBroker.unregister(activeBrokerGameCode).catch(() => {});
+          }
+          activeBroker.close();
+          activeBroker = null;
+          activeBrokerGameCode = null;
         }
         clearWsSession();
         gameStartedFired = false;
@@ -627,7 +686,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             const data = msg.data as { message: string };
             console.error("Host error:", data.message);
             get().showToast(data.message || "Failed to create game.");
-            get().cancelHosting();
+            // Keep the pregame lobby open for recoverable errors (failed
+            // Start, seat edits, bracket checks). Only tear down when we
+            // never reached a lobby or the connection itself failed.
+            if (get().hostingStatus !== "waiting") {
+              get().cancelHosting();
+            }
           }
         };
 
@@ -755,19 +819,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       cancelHosting: () => {
-        if (hostReconnectTimer) {
-          clearTimeout(hostReconnectTimer);
-          hostReconnectTimer = null;
-        }
-        if (hostWs) {
-          hostWs.close();
-          hostWs = null;
-        }
-        if (activeP2PHostAdapter) {
-          activeP2PHostAdapter.dispose();
-          activeP2PHostAdapter = null;
-          activeP2PHostGameId = null;
-        }
+        closeHostWebSocket();
+        disposeActiveP2PHost();
         if (activeBroker) {
           if (activeBrokerGameCode) {
             void activeBroker.unregister(activeBrokerGameCode).catch(() => {});
@@ -823,6 +876,11 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       startP2PHostingSession: async (settings, deck, opts) => {
+        closeHostWebSocket();
+        clearWsSession();
+        gameStartedFired = false;
+        hostReconnectAttempt = 0;
+
         const resetFailedHosting = () => {
           set({
             hostIsPublic: false,
@@ -996,34 +1054,38 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         return null;
       },
 
+      seatMutateAsync: async (mutation) => {
+        const serverSocket = activeServerHostingSocket(get);
+        if (serverSocket) {
+          serverSocket.send(JSON.stringify({
+            type: "SeatMutate",
+            data: { mutation },
+          }));
+          return;
+        }
+        await runP2PSeatMutation(mutation, set);
+      },
+
       seatMutate: (mutation) => {
-        if (activeP2PHostAdapter) {
-          void (async () => {
-            if (mutation.type === "Start") {
-              await startActiveP2PHostGame(set);
-            } else {
-              await activeP2PHostAdapter.applySeatMutation(mutation);
-              set({ playerSlots: activeP2PHostAdapter.getPlayerSlots() });
-            }
-          })().catch((err) => {
-            // Surface the failure to BOTH the dev console and the in-app
-            // toaster. The toaster can be off-screen or hidden behind the
-            // lobby modal; without the console.error a silent rejection in
-            // startPregameGame / applySeatMutation looks like the button
-            // did nothing at all.
+        void get()
+          .seatMutateAsync(mutation)
+          .catch((err) => {
             console.error("[seatMutate]", mutation.type, err);
             get().showToast(err instanceof Error ? err.message : String(err));
           });
-          return;
+      },
+
+      startLobbyWithCurrentPlayers: async () => {
+        const waiting = get()
+          .playerSlots.filter((slot) => slot.kind.type === "WaitingHuman")
+          .sort((a, b) => b.playerId - a.playerId);
+        for (const slot of waiting) {
+          await get().seatMutateAsync({
+            type: "Remove",
+            data: { seatIndex: slot.playerId },
+          });
         }
-        if (!hostWs || hostWs.readyState !== WebSocket.OPEN) {
-          get().showToast("Host connection is not active.");
-          return;
-        }
-        hostWs.send(JSON.stringify({
-          type: "SeatMutate",
-          data: { mutation },
-        }));
+        await get().seatMutateAsync({ type: "Start" });
       },
 
       ensureSubscriptionSocket: async () => {

@@ -56,6 +56,24 @@ fn tracked_set_member_zone(state: &GameState, filter: &TargetFilter) -> Option<Z
         .find_map(|obj_id| state.objects.get(obj_id).map(|obj| obj.zone))
 }
 
+fn resolve_enters_under_player(
+    effect_name: &str,
+    enters_under: Option<&ControllerRef>,
+    controller: PlayerId,
+) -> Result<Option<PlayerId>, EffectError> {
+    // CR 110.2a: Resolve controller-override references exactly once at the
+    // resolver boundary, then carry a concrete PlayerId through zone movement.
+    match enters_under {
+        None => Ok(None),
+        Some(ControllerRef::You) => Ok(Some(controller)),
+        Some(other) => Err(EffectError::InvalidParam(format!(
+            "CR 110.2a: {effect_name}.enters_under = {other:?} is not yet \
+             supported by the resolver; only ControllerRef::You maps to a \
+             concrete PlayerId today"
+        ))),
+    }
+}
+
 fn resolution_choice_cardinality(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -555,17 +573,11 @@ pub fn resolve(
             // and concentrates the `ControllerRef` semantics in one place.
             // Only `ControllerRef::You` is supported today — any other
             // variant is a parser bug or an unimplemented engine extension.
-            let enters_under_player: Option<PlayerId> = match enters_under {
-                None => None,
-                Some(ControllerRef::You) => Some(ability.controller),
-                Some(other) => {
-                    return Err(EffectError::InvalidParam(format!(
-                        "CR 110.2a: ChangeZone.enters_under = {other:?} is not \
-                         yet supported by the resolver; only ControllerRef::You \
-                         maps to a concrete PlayerId today"
-                    )));
-                }
-            };
+            let enters_under_player = resolve_enters_under_player(
+                "ChangeZone",
+                enters_under.as_ref(),
+                ability.controller,
+            )?;
             (
                 *origin,
                 *destination,
@@ -1026,6 +1038,7 @@ pub fn resolve_all(
             origin,
             destination,
             target,
+            enters_under: _,
             enter_tapped,
         } => {
             let extracted = target.extract_zones();
@@ -1086,6 +1099,13 @@ pub fn resolve_all(
 
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
+
+    let enters_under_player: Option<PlayerId> = match &ability.effect {
+        Effect::ChangeZoneAll { enters_under, .. } => {
+            resolve_enters_under_player("ChangeZoneAll", enters_under.as_ref(), ability.controller)?
+        }
+        _ => None,
+    };
 
     // Collect matching object IDs from the origin zone.
     // Explicit filter-controller override (e.g., "creature that player controls")
@@ -1159,8 +1179,9 @@ pub fn resolve_all(
             .get(&obj_id)
             .map(|o| o.zone)
             .unwrap_or(origin_zone);
-        // Mass zone moves don't use enter_transformed or controller_override;
-        // enter_tapped is carried for "return ... tapped" effects.
+        // Mass zone moves don't use enter_transformed; enter_tapped and
+        // controller override are carried for "return ... tapped/under your
+        // control" effects.
         match execute_zone_move(
             state,
             obj_id,
@@ -1170,7 +1191,7 @@ pub fn resolve_all(
             ability.duration.as_ref(),
             false,
             enter_tapped,
-            None,
+            enters_under_player,
             &[],
             track_exiled_by_source,
             events,
@@ -2394,6 +2415,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Hand,
                 target: TargetFilter::None,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -2441,6 +2463,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -2505,6 +2528,7 @@ mod tests {
                     properties: vec![FilterProp::IsCommander],
                     ..Default::default()
                 }),
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -2565,6 +2589,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -2635,6 +2660,7 @@ mod tests {
                             zone: Zone::Graveyard,
                         }]),
                 ),
+                enters_under: None,
                 enter_tapped: true,
             },
             vec![],
@@ -2664,6 +2690,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -2734,6 +2761,7 @@ mod tests {
                     controller: Some(crate::types::ability::ControllerRef::Opponent),
                     properties: vec![],
                 }),
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -2834,6 +2862,7 @@ mod tests {
                 origin: Some(Zone::Exile),
                 destination: Zone::Graveyard,
                 target: TargetFilter::ExiledBySource,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -3188,6 +3217,7 @@ mod tests {
                         }],
                         ..Default::default()
                     }),
+                    enters_under: None,
                     enter_tapped: false,
                 },
                 vec![],
@@ -4202,6 +4232,7 @@ mod tests {
                 origin: Some(Zone::Hand),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -4221,6 +4252,129 @@ mod tests {
             Some(3),
             "ChangeZoneAll must record moved-object count for EventContextAmount consumers"
         );
+    }
+
+    /// CR 110.2a + CR 400.7: Mass graveyard-to-battlefield effects that state
+    /// "under your control" must override the default controller for every
+    /// entering permanent, including cards owned by opponents. Rise of the Dark
+    /// Realms class: "Return all creature cards from all graveyards to the
+    /// battlefield under your control."
+    #[test]
+    fn change_zone_all_graveyard_to_battlefield_enters_under_controller() {
+        let mut state = GameState::new_two_player(42);
+        let caster_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Caster Corpse".into(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&caster_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Corpse".into(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&opponent_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let opponent_noncreature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Spell".into(),
+            Zone::Graveyard,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        for id in [caster_creature, opponent_creature] {
+            let obj = &state.objects[&id];
+            assert_eq!(obj.zone, Zone::Battlefield);
+            assert_eq!(
+                obj.controller,
+                PlayerId(0),
+                "returned creature {id:?} should enter under the spell controller"
+            );
+        }
+        assert_eq!(state.objects[&opponent_noncreature].zone, Zone::Graveyard);
+    }
+
+    /// CR 110.2a: `ChangeZoneAll.enters_under` currently supports only
+    /// `ControllerRef::You`; unsupported variants must strict-fail before any
+    /// member moves, matching the single-object `ChangeZone` resolver.
+    #[test]
+    fn change_zone_all_strict_fails_on_unsupported_enters_under_controller_ref() {
+        let mut state = GameState::new_two_player(42);
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Corpse".into(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&opponent_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                enters_under: Some(ControllerRef::Opponent),
+                enter_tapped: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        let err = resolve_all(&mut state, &ability, &mut events)
+            .expect_err("unsupported ControllerRef must strict-fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("CR 110.2a"),
+            "error must cite CR 110.2a, got {msg}"
+        );
+        assert!(
+            msg.contains("ChangeZoneAll") && msg.contains("Opponent"),
+            "error must name the effect and offending variant, got {msg}"
+        );
+        assert_eq!(state.objects[&opponent_creature].zone, Zone::Graveyard);
     }
 
     /// CR 400.7 + CR 701.23 + CR 701.24: Multi-zone same-name exile.
@@ -4296,6 +4450,7 @@ mod tests {
                         FilterProp::SameNameAsParentTarget,
                     ]),
                 ),
+                enters_under: None,
                 enter_tapped: false,
             },
             // Parent target supplies the "that name" referent.
@@ -4439,6 +4594,7 @@ mod tests {
                         },
                         FilterProp::SameNameAsParentTarget,
                     ])),
+                    enters_under: None,
                     enter_tapped: false,
                 },
                 vec![TargetRef::Object(seed)],
@@ -4636,6 +4792,7 @@ mod tests {
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
                 },
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],

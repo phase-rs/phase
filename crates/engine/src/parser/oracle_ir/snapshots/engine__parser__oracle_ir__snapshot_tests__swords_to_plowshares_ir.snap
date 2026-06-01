@@ -38,7 +38,9 @@ expression: "&ir"
                 }
               }
             },
-            "player": "targeted_controller"
+            "player": {
+              "type": "ParentTargetController"
+            }
           },
           "cost": null,
           "sub_ability": null,

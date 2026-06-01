@@ -10,8 +10,7 @@ expression: def
     "amount": {
       "type": "Fixed",
       "value": 3
-    },
-    "player": "controller"
+    }
   },
   "cost": null,
   "sub_ability": {

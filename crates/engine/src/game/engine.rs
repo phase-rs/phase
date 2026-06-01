@@ -5725,9 +5725,8 @@ mod tests {
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ControllerRef, Effect,
-        GainLifePlayer, ManaContribution, ManaProduction, ManaSpendRestriction, QuantityExpr,
-        ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
-        TypedFilter,
+        ManaContribution, ManaProduction, ManaSpendRestriction, QuantityExpr, ResolvedAbility,
+        StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CardType;
     use crate::types::card_type::CoreType;
@@ -10984,7 +10983,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 10 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 )
                 .cost(AbilityCost::Composite {
@@ -11091,7 +11090,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 )
                 .cost(AbilityCost::Composite {
@@ -11930,7 +11929,7 @@ mod tests {
             Box::new(ResolvedAbility::new(
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
                 vec![],
                 source,
@@ -12060,7 +12059,7 @@ mod trigger_target_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer, ModalChoice,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, ModalChoice,
         ModalSelectionConstraint, QuantityExpr, ResolvedAbility, StaticCondition, TargetFilter,
         TargetRef, TypedFilter,
     };
@@ -12455,7 +12454,7 @@ mod trigger_target_tests {
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 2 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ),
                 AbilityDefinition::new(
@@ -12495,7 +12494,7 @@ mod trigger_target_tests {
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 2 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ),
                 AbilityDefinition::new(
@@ -12582,7 +12581,7 @@ mod trigger_target_tests {
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ),
                 AbilityDefinition::new(
@@ -13007,14 +13006,14 @@ mod trigger_target_tests {
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 4 },
-                        player: crate::types::ability::GainLifePlayer::Controller,
+                        player: crate::types::ability::TargetFilter::Controller,
                     },
                 ),
                 AbilityDefinition::new(
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 2 },
-                        player: crate::types::ability::GainLifePlayer::Controller,
+                        player: crate::types::ability::TargetFilter::Controller,
                     },
                 ),
             ],
@@ -14022,9 +14021,9 @@ mod phase_trigger_regression_tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect,
-        FilterProp, GainLifePlayer, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
-        ResolvedAbility, TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter,
-        TypedFilter, UnlessPayModifier,
+        FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
+        TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
@@ -14179,7 +14178,7 @@ mod phase_trigger_regression_tests {
                         AbilityKind::Activated,
                         Effect::GainLife {
                             amount: QuantityExpr::Fixed { value: 1 },
-                            player: GainLifePlayer::Controller,
+                            player: TargetFilter::Controller,
                         },
                     ))
                     .trigger_zones(vec![Zone::Battlefield]),
@@ -14230,7 +14229,7 @@ mod phase_trigger_regression_tests {
                         AbilityKind::Activated,
                         Effect::GainLife {
                             amount: QuantityExpr::Fixed { value: 1 },
-                            player: GainLifePlayer::Controller,
+                            player: TargetFilter::Controller,
                         },
                     ))
                     .trigger_zones(vec![Zone::Battlefield]),
@@ -14287,7 +14286,7 @@ mod phase_trigger_regression_tests {
                         AbilityKind::Activated,
                         Effect::GainLife {
                             amount: QuantityExpr::Fixed { value: 1 },
-                            player: GainLifePlayer::Controller,
+                            player: TargetFilter::Controller,
                         },
                     ))
                     .trigger_zones(vec![Zone::Battlefield]),
@@ -14347,7 +14346,7 @@ mod phase_trigger_regression_tests {
                         AbilityKind::Activated,
                         Effect::GainLife {
                             amount: QuantityExpr::Fixed { value: 1 },
-                            player: GainLifePlayer::Controller,
+                            player: TargetFilter::Controller,
                         },
                     ))
                     .trigger_zones(vec![Zone::Battlefield]),
@@ -14885,7 +14884,7 @@ mod phase_trigger_regression_tests {
                         AbilityKind::Database,
                         Effect::GainLife {
                             amount: QuantityExpr::Fixed { value: 1 },
-                            player: GainLifePlayer::Controller,
+                            player: TargetFilter::Controller,
                         },
                     )),
             );
@@ -15074,7 +15073,7 @@ mod phase_trigger_regression_tests {
                                 }),
                                 offset: 1,
                             },
-                            player: GainLifePlayer::Controller,
+                            player: TargetFilter::Controller,
                         },
                     ),
                 ),
@@ -15458,7 +15457,7 @@ mod phase_trigger_regression_tests {
         let mut primary = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 4 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,
@@ -15467,7 +15466,7 @@ mod phase_trigger_regression_tests {
         let mut alternative = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 2 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,
@@ -15516,7 +15515,7 @@ mod phase_trigger_regression_tests {
         let mut primary = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 4 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,
@@ -15525,7 +15524,7 @@ mod phase_trigger_regression_tests {
         let mut alternative = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 2 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,
@@ -15571,7 +15570,7 @@ mod phase_trigger_regression_tests {
         let primary = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 4 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,
@@ -15620,7 +15619,7 @@ mod phase_trigger_regression_tests {
         let mut primary = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 4 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,
@@ -15629,7 +15628,7 @@ mod phase_trigger_regression_tests {
         let mut alternative = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 2 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,
@@ -15680,7 +15679,7 @@ mod phase_trigger_regression_tests {
             pending_effect: Box::new(ResolvedAbility::new(
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
                 vec![],
                 source_id,
@@ -15883,7 +15882,7 @@ mod phase_trigger_regression_tests {
             Box::new(ResolvedAbility::new(
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 2 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
                 vec![],
                 source_id,
@@ -16034,7 +16033,7 @@ mod phase_trigger_regression_tests {
             AbilityKind::Spell,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
         let branch_lose = AbilityDefinition::new(
