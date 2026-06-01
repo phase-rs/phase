@@ -2120,7 +2120,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
             ),
             AbilityDefinition::new(

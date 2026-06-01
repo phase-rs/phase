@@ -7139,7 +7139,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: target_expr.clone(),
-                player: crate::types::ability::GainLifePlayer::Controller,
+                player: crate::types::ability::TargetFilter::Controller,
             },
             vec![TargetRef::Object(target)],
             source,
