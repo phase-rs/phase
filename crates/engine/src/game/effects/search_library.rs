@@ -1,4 +1,6 @@
-use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::filter::{
+    matches_target_filter, matches_target_filter_in_owner_zone, FilterContext,
+};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{
@@ -10,6 +12,7 @@ use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
+use crate::types::zones::Zone;
 
 /// CR 701.23a: Resolve `SearchLibrary.target_player` to the library owner's
 /// `PlayerId`. Handles both the pre-resolved path (caster picked a Player at
@@ -56,7 +59,14 @@ fn resolve_library_owner(
 fn searcher_is_library_owner(target_player: &TargetFilter) -> bool {
     matches!(
         target_player,
-        TargetFilter::ParentTargetController
+        // CR 702.124j: "Partner with" — target player searches their own library,
+        // so when the target is selected via TargetFilter::Player (any player),
+        // the targeted player is both the library owner and the searcher.
+        // Asymmetric searches (Bribery, Praetor's Grasp) use Opponent/specific
+        // player targets where the controller is the searcher — those use
+        // target_player: Some(Opponent) which falls through to the else branch.
+        TargetFilter::Player
+            | TargetFilter::ParentTargetController
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSpellController
             | TargetFilter::TriggeringSpellOwner
@@ -253,26 +263,13 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 701.23 + CR 609.3: If a CantSearchLibrary static muzzles the cause of this
-    // search, the search does nothing. Per CR 609.3, an effect that attempts to do
-    // something impossible does only as much as possible — so we skip the search
-    // entirely, do NOT mark the turn-tracking flag, and emit only the resolution
-    // event so downstream bookkeeping sees a completed (no-op) effect.
-    if is_search_muzzled(state, ability.controller) {
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::SearchLibrary,
-            source_id: ability.source_id,
-        });
-        return Ok(());
-    }
-
     // CR 107.3a + CR 601.2b: Resolve the count expression against the ability so
     // `Variable("X")` picks up the caster's announced X. Fixed counts are unaffected.
     // CR 107.1c + CR 701.23d: Peel `UpTo` from the count expression to derive
     // the upper-bound expression and propagate the may-pick-fewer flag to
     // SearchChoice. Plain `QuantityExpr` means a mandatory count; wrapped
     // in `UpTo` means "any number of" / "up to N" — searcher picks 0..=count.
-    let (filter, count, reveal, target_player, up_to, selection_constraint, split) =
+    let (filter, count, reveal, target_player, up_to, selection_constraint, split, source_zones) =
         match &ability.effect {
             Effect::SearchLibrary {
                 filter,
@@ -281,6 +278,7 @@ pub fn resolve(
                 target_player,
                 selection_constraint,
                 split,
+                source_zones,
             } => {
                 let (inner, up_to) = count.peel_up_to();
                 (
@@ -291,6 +289,7 @@ pub fn resolve(
                     up_to,
                     selection_constraint.clone(),
                     split.clone(),
+                    source_zones.clone(),
                 )
             }
             _ => (
@@ -301,8 +300,30 @@ pub fn resolve(
                 false,
                 SearchSelectionConstraint::None,
                 None,
+                vec![Zone::Library],
             ),
         };
+
+    // CR 701.23 + CR 609.3: If a CantSearchLibrary static muzzles the cause of
+    // this search, the library can't be searched. Per CR 609.3 ("do as much as
+    // possible"), a multi-zone search (graveyard/hand/library) still searches
+    // the non-library zones — only the library component is suppressed. A
+    // library-only search becomes a no-op: emit the resolution event, skip the
+    // turn-tracking flag, and return.
+    let library_muzzled = is_search_muzzled(state, ability.controller);
+    let effective_zones: Vec<Zone> = source_zones
+        .iter()
+        .copied()
+        .filter(|zone| !(library_muzzled && *zone == Zone::Library))
+        .collect();
+    if effective_zones.is_empty() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::SearchLibrary,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+    let searched_library = effective_zones.contains(&Zone::Library);
 
     // CR 701.23a: Determine the library owner and the searcher.
     //   - Library owner: the player whose library is searched (driven by
@@ -320,28 +341,53 @@ pub fn resolve(
         _ => ability.controller,
     };
 
-    let player = state
-        .players
-        .iter()
-        .find(|p| p.id == library_owner_id)
-        .ok_or(EffectError::PlayerNotFound)?;
-    events.push(GameEvent::PlayerPerformedAction {
-        player_id: searcher_id,
-        action: PlayerActionKind::SearchedLibrary,
-    });
-    state
-        .players_who_searched_library_this_turn
-        .insert(searcher_id);
+    // CR 701.23a: Library search drives the `CantSearchLibrary` muzzle and the
+    // per-turn "searched a library" tracking (Aven Mindcensor, Opposition
+    // Agent, Archive Trap). Only emit the event / set the flag when the library
+    // is among the zones actually searched — a graveyard/hand-only search (or a
+    // muzzled library component) does not count as searching a library.
+    if searched_library {
+        events.push(GameEvent::PlayerPerformedAction {
+            player_id: searcher_id,
+            action: PlayerActionKind::SearchedLibrary,
+        });
+        state
+            .players_who_searched_library_this_turn
+            .insert(searcher_id);
+    }
 
-    // CR 107.3a + CR 601.2b: Evaluate the filter with the resolving ability
-    // in scope so dynamic thresholds (e.g. `CmcLE { value: Variable("X") }`
-    // for Nature's Rhythm) resolve against the caster's announced X.
+    // CR 701.23a: The candidate set is the union of all searched zones. Every
+    // zone in a multi-zone tutor shares one possessive ("search [player]'s
+    // graveyard, hand, and/or library"), so all searched zones belong to the
+    // library owner — the targeted player for opponent searches, the caster
+    // otherwise. `searcher_id` governs WHO chooses and the shuffle/tracking, not
+    // whose zones are searched. Resolve the owner once.
+    let Some(owner) = state.players.iter().find(|p| p.id == library_owner_id) else {
+        return Err(EffectError::PlayerNotFound);
+    };
+    let mut candidate_ids: Vec<crate::types::identifiers::ObjectId> = Vec::new();
+    for zone in &effective_zones {
+        let zone_objects = match zone {
+            Zone::Library => &owner.library,
+            Zone::Graveyard => &owner.graveyard,
+            Zone::Hand => &owner.hand,
+            // CR 701.23a: The parser only ever produces Graveyard/Hand/Library
+            // for `source_zones`; other zones are not searchable tutoring zones.
+            _ => continue,
+        };
+        candidate_ids.extend(zone_objects.iter().copied());
+    }
+
+    // CR 107.3a + CR 601.2b: Evaluate the filter with the resolving ability in
+    // scope so dynamic thresholds (e.g. `CmcLE { value: Variable("X") }` for
+    // Nature's Rhythm) resolve against the caster's announced X.
+    // CR 109.5 + CR 400.3: library/graveyard/hand are owner-scoped zones — a
+    // card's control-change LKI must not exclude its owner from a "your X"
+    // filter, so match with ownership standing in for control.
     let filter_ctx = FilterContext::from_ability(ability);
-    let matching: Vec<_> = player
-        .library
-        .iter()
-        .filter(|&&obj_id| matches_target_filter(state, obj_id, &filter, &filter_ctx))
-        .copied()
+    let matching: Vec<crate::types::identifiers::ObjectId> = candidate_ids
+        .into_iter()
+        .filter(|&obj_id| matches_target_filter_in_owner_zone(state, obj_id, &filter, &filter_ctx))
         .collect();
 
     if matching.is_empty() {
@@ -399,6 +445,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),
@@ -416,6 +463,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),
@@ -486,6 +534,124 @@ mod tests {
             .subtypes
             .push(subtype.to_string());
         id
+    }
+
+    fn make_multi_zone_named_search(name: &str, zones: Vec<Zone>) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::Named {
+                        name: name.to_string(),
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: zones,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+    }
+
+    #[test]
+    fn multi_zone_search_offers_cards_from_every_searched_zone() {
+        // CR 701.23a: A God-Pharaoh's-Gift-class tutor searches graveyard + hand
+        // + library; a matching card in any of those zones is a legal choice.
+        let mut state = GameState::new_two_player(42);
+        let gy = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Graveyard,
+        );
+        let hand = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Hand,
+        );
+        let lib = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Library,
+        );
+        let _other = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Other".to_string(),
+            Zone::Graveyard,
+        );
+
+        let ability = make_multi_zone_named_search(
+            "Target",
+            vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 701.23a: Library is among the searched zones, so SearchedLibrary fires.
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::SearchedLibrary,
+                ..
+            }
+        )));
+        assert!(state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(0)));
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => {
+                assert!(cards.contains(&gy), "graveyard match should be offered");
+                assert!(cards.contains(&hand), "hand match should be offered");
+                assert!(cards.contains(&lib), "library match should be offered");
+                assert_eq!(cards.len(), 3, "only the three 'Target' cards");
+            }
+            other => panic!("Expected SearchChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn search_without_library_zone_does_not_mark_searched_library() {
+        // CR 701.23a: A search restricted to non-library zones (or whose library
+        // component is muzzled) must not set the "searched a library" flag.
+        let mut state = GameState::new_two_player(42);
+        let gy = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Graveyard,
+        );
+
+        let ability = make_multi_zone_named_search("Target", vec![Zone::Graveyard, Zone::Hand]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::SearchedLibrary,
+                ..
+            }
+        )));
+        assert!(!state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(0)));
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => assert!(cards.contains(&gy)),
+            other => panic!("Expected SearchChoice, got {:?}", other),
+        }
     }
 
     #[test]
@@ -690,6 +856,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),
@@ -728,6 +895,91 @@ mod tests {
             )),
             "Trailing Shuffle MUST fire even when the search found nothing \
              (CR 701.20a: the 'then shuffle' tail is unconditional)"
+        );
+    }
+
+    #[test]
+    fn multizone_tutor_moves_graveyard_pick_to_battlefield() {
+        // CR 701.23a: A God-Pharaoh's-Gift-class tutor finds the card in the
+        // graveyard/hand/library; the put-step must move it from wherever it
+        // was chosen. Regression guard for the origin=Library put-step bug.
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine::apply;
+        use crate::types::ability::{Effect, FilterProp};
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let gy = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Graveyard,
+        );
+
+        let shuffle_step = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        // Multi-zone put-step carries origin: None (move the card from its
+        // actual zone), as the parser now emits for multi-zone tutors.
+        let put_step = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(shuffle_step);
+        let search_step = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::Named {
+                        name: "Target".to_string(),
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: true,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(put_step);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &search_step, &mut events, 0).unwrap();
+        assert!(matches!(state.waiting_for, WaitingFor::SearchChoice { .. }));
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards { cards: vec![gy] },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects[&gy].zone,
+            Zone::Battlefield,
+            "graveyard-chosen card must reach the battlefield"
         );
     }
 
@@ -779,6 +1031,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),
@@ -967,6 +1220,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),
@@ -1001,6 +1255,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),
@@ -1097,6 +1352,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),
@@ -1341,6 +1597,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),
@@ -1386,6 +1643,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),
@@ -1427,6 +1685,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),
@@ -1493,6 +1752,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(9999),
@@ -1552,6 +1812,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(9998),
@@ -1606,6 +1867,7 @@ mod tests {
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![TargetRef::Object(destroyed)],
             ObjectId(9997),
@@ -1659,6 +1921,7 @@ mod tests {
                 )),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(9996),

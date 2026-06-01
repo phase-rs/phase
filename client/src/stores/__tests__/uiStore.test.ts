@@ -40,6 +40,40 @@ describe("uiStore", () => {
     expect(useUiStore.getState().selectedCardIds).toEqual([5, 10]);
   });
 
+  it("cycleSelectedCard deselects an already-selected card", () => {
+    act(() => {
+      useUiStore.getState().cycleSelectedCard(5, 2);
+      useUiStore.getState().cycleSelectedCard(10, 2);
+      useUiStore.getState().cycleSelectedCard(5, 2);
+    });
+    expect(useUiStore.getState().selectedCardIds).toEqual([10]);
+  });
+
+  it("cycleSelectedCard adds while under the cap", () => {
+    act(() => {
+      useUiStore.getState().cycleSelectedCard(5, 2);
+      useUiStore.getState().cycleSelectedCard(10, 2);
+    });
+    expect(useUiStore.getState().selectedCardIds).toEqual([5, 10]);
+  });
+
+  it("cycleSelectedCard swaps the single selection at max === 1", () => {
+    act(() => {
+      useUiStore.getState().cycleSelectedCard(5, 1);
+      useUiStore.getState().cycleSelectedCard(10, 1);
+    });
+    expect(useUiStore.getState().selectedCardIds).toEqual([10]);
+  });
+
+  it("cycleSelectedCard evicts the oldest selection at the cap", () => {
+    act(() => {
+      useUiStore.getState().cycleSelectedCard(5, 2);
+      useUiStore.getState().cycleSelectedCard(10, 2);
+      useUiStore.getState().cycleSelectedCard(15, 2);
+    });
+    expect(useUiStore.getState().selectedCardIds).toEqual([10, 15]);
+  });
+
   it("clearSelectedCards resets selectedCardIds", () => {
     act(() => {
       useUiStore.getState().addSelectedCard(1);

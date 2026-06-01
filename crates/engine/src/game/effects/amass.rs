@@ -1,15 +1,16 @@
 use crate::game::effects::counters::add_counter_with_replacement;
-use crate::game::game_object::DisplaySource;
+use crate::game::effects::token::apply_create_token_after_replacement;
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::zones;
+use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
-use crate::types::card_type::{CardType, CoreType};
+use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
-use crate::types::zones::Zone;
+use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenCharacteristics, TokenSpec};
+use std::collections::HashSet;
 
 /// CR 701.47a: Amass [subtype] N.
 ///
@@ -36,8 +37,10 @@ pub fn resolve(
     let target_id = if let Some(id) = army_id {
         id
     } else {
-        // CR 701.47a: Create a 0/0 black [subtype] Army creature token.
-        create_army_token(state, controller, &subtype)
+        let Some(id) = create_army_token(state, controller, &subtype, ability, events) else {
+            return Ok(());
+        };
+        id
     };
 
     // CR 701.47a: Put N +1/+1 counters on the chosen Army.
@@ -94,40 +97,65 @@ fn create_army_token(
     state: &mut GameState,
     controller: crate::types::player::PlayerId,
     subtype: &str,
-) -> ObjectId {
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Option<ObjectId> {
     let name = format!("{subtype} Army");
-    let obj_id = zones::create_object(state, CardId(0), controller, name, Zone::Battlefield);
-
-    if let Some(obj) = state.objects.get_mut(&obj_id) {
-        obj.is_token = true;
-        obj.display_source = DisplaySource::Token;
-        obj.power = Some(0);
-        obj.toughness = Some(0);
-        obj.base_power = Some(0);
-        obj.base_toughness = Some(0);
-        obj.card_types = CardType {
-            supertypes: vec![],
+    let spec = TokenSpec {
+        characteristics: TokenCharacteristics {
+            display_name: name.clone(),
+            power: Some(0),
+            toughness: Some(0),
             core_types: vec![CoreType::Creature],
             subtypes: vec!["Army".to_string(), subtype.to_string()],
-        };
-        obj.base_card_types = obj.card_types.clone();
-        obj.color = vec![ManaColor::Black];
-        obj.base_color = vec![ManaColor::Black];
-        // CR 400.7 + CR 302.6: Single authority for ETB state — sets
-        // `entered_battlefield_turn`, `summoning_sick`, and clears transient
-        // fields (tapped, damage_marked, etc.) in one place.
-        obj.reset_for_battlefield_entry(state.turn_number);
-    }
+            supertypes: vec![],
+            colors: vec![ManaColor::Black],
+            keywords: vec![],
+        },
+        script_name: name,
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+        tapped: false,
+        enters_attacking: false,
+        attach_to: None,
+        sacrifice_at: None,
+        source_id: ability.source_id,
+        controller: ability.controller,
+    };
 
-    obj_id
+    let proposed = ProposedEvent::CreateToken {
+        owner: controller,
+        spec: Box::new(spec),
+        enter_tapped: EtbTapState::Unspecified,
+        count: 1,
+        applied: HashSet::new(),
+    };
+
+    // CR 614.16 + CR 701.47a: Token-creation replacement effects apply to the
+    // Army token an amass instruction creates.
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(event) => {
+            apply_create_token_after_replacement(state, event, events);
+            find_army(state, controller)
+        }
+        ReplacementResult::Prevented => None,
+        ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::scenario::{GameScenario, P0};
     use crate::types::ability::QuantityExpr;
+    use crate::types::ability::{ControllerRef, ReplacementDefinition};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
+    use crate::types::proposed_event::{TokenCharacteristics, TokenSpec};
+    use crate::types::replacements::ReplacementEvent;
 
     fn make_amass_ability(subtype: &str, count: QuantityExpr) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -233,5 +261,70 @@ mod tests {
             .unwrap();
         assert!(army.card_types.subtypes.contains(&"Zombie".to_string()));
         assert!(army.card_types.subtypes.contains(&"Orc".to_string()));
+    }
+
+    #[test]
+    fn amass_creation_triggers_chatterfang_additional_squirrel() {
+        let mut scenario = GameScenario::new();
+        let chatterfang_replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .token_owner_scope(ControllerRef::You)
+            .additional_token_spec(TokenSpec {
+                characteristics: TokenCharacteristics {
+                    display_name: "Squirrel".to_string(),
+                    power: Some(1),
+                    toughness: Some(1),
+                    core_types: vec![CoreType::Creature],
+                    subtypes: vec!["Squirrel".to_string()],
+                    supertypes: Vec::new(),
+                    colors: vec![ManaColor::Green],
+                    keywords: Vec::new(),
+                },
+                script_name: "Squirrel".to_string(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                attach_to: None,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: P0,
+            });
+        scenario
+            .add_creature(P0, "Chatterfang, Squirrel General", 3, 3)
+            .with_subtypes(vec!["Squirrel", "Warrior"])
+            .with_replacement_definition(chatterfang_replacement);
+        let mut state = scenario.state;
+        let mut events = Vec::new();
+        let ability = make_amass_ability("Orc", QuantityExpr::Fixed { value: 1 });
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let army_tokens: Vec<_> = state
+            .objects
+            .values()
+            .filter(|obj| obj.is_token && obj.card_types.subtypes.iter().any(|s| s == "Army"))
+            .collect();
+        assert_eq!(army_tokens.len(), 1, "amass should create one Army token");
+        let army = army_tokens[0];
+        assert!(
+            army.card_types.subtypes.iter().any(|s| s == "Orc"),
+            "new Army should be an Orc"
+        );
+        assert_eq!(
+            army.counters.get(&CounterType::Plus1Plus1).copied(),
+            Some(1),
+            "amass should still place its +1/+1 counter on the new Army"
+        );
+
+        let squirrel_tokens: Vec<_> = state
+            .objects
+            .values()
+            .filter(|obj| obj.is_token && obj.card_types.subtypes.iter().any(|s| s == "Squirrel"))
+            .collect();
+        assert_eq!(
+            squirrel_tokens.len(),
+            1,
+            "Chatterfang should append one Squirrel when amass creates the Army token"
+        );
     }
 }

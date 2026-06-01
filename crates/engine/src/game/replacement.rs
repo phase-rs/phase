@@ -11,7 +11,8 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 
 use super::filter::{
-    matches_target_filter, matches_target_filter_on_battlefield_entry, FilterContext,
+    matches_target_filter, matches_target_filter_on_battlefield_entry,
+    matches_target_filter_on_damage_record_source, FilterContext,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
@@ -2186,32 +2187,45 @@ fn matches_damage_target_filter(
     filter: &DamageTargetFilter,
     target: &TargetRef,
     repl_controller: PlayerId,
+    repl_source: ObjectId,
     state: &GameState,
 ) -> bool {
     fn player_scope_matches(
         scope: &DamageTargetPlayerScope,
         player: PlayerId,
         repl_controller: PlayerId,
+        repl_source: ObjectId,
+        state: &GameState,
     ) -> bool {
         match scope {
             DamageTargetPlayerScope::Any => true,
             DamageTargetPlayerScope::Opponent => player != repl_controller,
             DamageTargetPlayerScope::Controller => player == repl_controller,
+            DamageTargetPlayerScope::SourceChosenPlayer => {
+                // CR 607.2d + CR 614.1a: A damage replacement can scope
+                // "the chosen player" through the replacement source's linked
+                // persisted choice.
+                crate::game::effects::source_chosen_player(state, repl_source)
+                    .is_some_and(|chosen| player == chosen)
+            }
             DamageTargetPlayerScope::Specific(specific) => player == *specific,
         }
     }
 
     match filter {
         DamageTargetFilter::Player { player } => match target {
-            TargetRef::Player(pid) => player_scope_matches(player, *pid, repl_controller),
+            TargetRef::Player(pid) => {
+                player_scope_matches(player, *pid, repl_controller, repl_source, state)
+            }
             TargetRef::Object(_) => false,
         },
         DamageTargetFilter::PlayerOrPermanentsControlledBy { player } => match target {
-            TargetRef::Player(pid) => player_scope_matches(player, *pid, repl_controller),
-            TargetRef::Object(oid) => state
-                .objects
-                .get(oid)
-                .is_some_and(|obj| player_scope_matches(player, obj.controller, repl_controller)),
+            TargetRef::Player(pid) => {
+                player_scope_matches(player, *pid, repl_controller, repl_source, state)
+            }
+            TargetRef::Object(oid) => state.objects.get(oid).is_some_and(|obj| {
+                player_scope_matches(player, obj.controller, repl_controller, repl_source, state)
+            }),
         },
         DamageTargetFilter::CreatureOnly => match target {
             TargetRef::Player(_) => false,
@@ -2468,8 +2482,11 @@ fn evaluate_replacement_condition(
             };
             let ctx = FilterContext::from_source(state, source_id);
             state.damage_dealt_this_turn.iter().any(|record| {
+                // CR 608.2i + CR 608.2h: match the damage source against its
+                // damage-time snapshot (look-back), consistent with
+                // DamageDealtThisTurn / OpponentDealtCombatDamage.
                 record.target == TargetRef::Object(affected_id)
-                    && matches_target_filter(state, record.source_id, source, &ctx)
+                    && matches_target_filter_on_damage_record_source(state, record, source, &ctx)
             })
         }
         ReplacementCondition::EventSourceControlledBy {
@@ -2720,7 +2737,13 @@ pub fn find_applicable_replacements(
                     // CR 614.1a: Damage target filter — restricts which damage recipients trigger this replacement.
                     if let Some(ref tf) = repl_def.damage_target_filter {
                         if let ProposedEvent::Damage { target, .. } = event {
-                            if !matches_damage_target_filter(tf, target, obj.controller, state) {
+                            if !matches_damage_target_filter(
+                                tf,
+                                target,
+                                obj.controller,
+                                obj.id,
+                                state,
+                            ) {
                                 continue;
                             }
                         }
@@ -2917,7 +2940,13 @@ pub fn find_applicable_replacements(
                 }
                 if let Some(ref tf) = repl_def.damage_target_filter {
                     if let ProposedEvent::Damage { target, .. } = event {
-                        if !matches_damage_target_filter(tf, target, PlayerId(0), state) {
+                        if !matches_damage_target_filter(
+                            tf,
+                            target,
+                            PlayerId(0),
+                            ObjectId(0),
+                            state,
+                        ) {
                             continue;
                         }
                     }
@@ -4094,8 +4123,8 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, GainLifePlayer, QuantityExpr,
-        ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
+        AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, Effect, GainLifePlayer,
+        QuantityExpr, ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
     };
     use crate::types::game_state::DamageRecord;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -5999,13 +6028,14 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.insert(ObjectId(20), victim);
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(10),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(20)),
             target_controller: PlayerId(0),
             amount: 1,
             is_combat: false,
+            ..Default::default()
         });
 
         let cond = ReplacementCondition::DealtDamageThisTurnBySource {
@@ -6042,13 +6072,14 @@ mod tests {
         );
         victim.controller = PlayerId(0);
         state.objects.insert(ObjectId(20), victim);
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(10),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(20)),
             target_controller: PlayerId(1),
             amount: 1,
             is_combat: false,
+            ..Default::default()
         });
 
         assert!(evaluate_replacement_condition(
@@ -6090,13 +6121,14 @@ mod tests {
         state.objects.insert(ObjectId(30), victim);
         state.objects.get_mut(&ObjectId(10)).unwrap().attached_to =
             Some(AttachTarget::Object(ObjectId(20)));
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(20),
             source_controller: PlayerId(0),
             target: TargetRef::Object(ObjectId(30)),
             target_controller: PlayerId(0),
             amount: 1,
             is_combat: false,
+            ..Default::default()
         });
 
         assert!(evaluate_replacement_condition(
@@ -6109,6 +6141,105 @@ mod tests {
             Some(ObjectId(30)),
             &dummy_begin_turn_event(),
         ));
+    }
+
+    /// CR 608.2i + CR 608.2h: `DealtDamageThisTurnBySource` matches the damage
+    /// source against its damage-time *snapshot*, not the live object. A Dragon
+    /// deals damage this turn and is then transformed into a non-Dragon (or
+    /// leaves the battlefield). A live-object source match would now read the
+    /// current characteristics and fail; the snapshot match still recognizes
+    /// the source was a Dragon when the damage was dealt. This is the
+    /// discriminating regression guard for the lookback unification — it would
+    /// FAIL under the previous `matches_target_filter(state, record.source_id,
+    /// ..)` live read.
+    #[test]
+    fn dealt_damage_by_source_uses_damage_time_snapshot() {
+        use crate::types::ability::{TargetFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let dragon_id = ObjectId(20);
+        let victim_id = ObjectId(30);
+
+        // The damage source: a Dragon creature controlled by PlayerId(0) at damage time.
+        let mut dragon = GameObject::new(
+            dragon_id,
+            CardId(2),
+            PlayerId(0),
+            "Shivan Dragon".to_string(),
+            Zone::Battlefield,
+        );
+        dragon.card_types.core_types.push(CoreType::Creature);
+        dragon.card_types.subtypes.push("Dragon".to_string());
+        state.objects.insert(dragon_id, dragon);
+        state.battlefield.push_back(dragon_id);
+
+        let victim = GameObject::new(
+            victim_id,
+            CardId(3),
+            PlayerId(0),
+            "Victim".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(victim_id, victim);
+
+        // Record damage with the Dragon characteristics captured at damage time.
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: dragon_id,
+            source_controller: PlayerId(0),
+            target: TargetRef::Object(victim_id),
+            target_controller: PlayerId(0),
+            amount: 3,
+            is_combat: false,
+            source_subtypes: vec!["Dragon".to_string()],
+            source_core_types: vec![CoreType::Creature],
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            ..Default::default()
+        });
+
+        // Now mutate the LIVE source: strip its Dragon subtype (transformed into
+        // a non-Dragon permanent). A live-object match would no longer see a Dragon.
+        let live = state.objects.get_mut(&dragon_id).unwrap();
+        live.card_types.subtypes.clear();
+        live.card_types.core_types.clear();
+
+        let dragon_filter =
+            TargetFilter::Typed(TypedFilter::default().subtype("Dragon".to_string()));
+        let cond = ReplacementCondition::DealtDamageThisTurnBySource {
+            source: dragon_filter,
+        };
+
+        // The snapshot says the source was a Dragon at damage time → matches.
+        assert!(
+            evaluate_replacement_condition(
+                &cond,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                Some(victim_id),
+                &dummy_begin_turn_event(),
+            ),
+            "source matched its damage-time Dragon snapshot even after the live \
+             object lost the Dragon subtype (CR 608.2i lookback)"
+        );
+
+        // A non-matching filter (Goblin) must NOT match the Dragon snapshot —
+        // confirms the swap discriminates on snapshot characteristics, not Any.
+        let goblin_cond = ReplacementCondition::DealtDamageThisTurnBySource {
+            source: TargetFilter::Typed(TypedFilter::default().subtype("Goblin".to_string())),
+        };
+        assert!(
+            !evaluate_replacement_condition(
+                &goblin_cond,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                Some(victim_id),
+                &dummy_begin_turn_event(),
+            ),
+            "Dragon snapshot must not satisfy a Goblin source filter"
+        );
     }
 
     #[test]
@@ -6667,6 +6798,108 @@ mod tests {
         assert!(
             !candidates.is_empty(),
             "Should match damage to opponent's permanent"
+        );
+    }
+
+    #[test]
+    fn damage_target_filter_source_chosen_player_scopes_replacement() {
+        let repl = damage_repl(DamageModification::Double).damage_target_filter(
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::SourceChosenPlayer,
+            },
+        );
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+        let registry = build_replacement_registry();
+
+        let chosen_player_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            !find_applicable_replacements(&state, &chosen_player_damage, &registry).is_empty(),
+            "damage to the source's chosen player should match"
+        );
+
+        let unchosen_player_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &unchosen_player_damage, &registry).is_empty(),
+            "damage to another player should not match"
+        );
+    }
+
+    #[test]
+    fn damage_target_filter_source_chosen_player_matches_their_permanent() {
+        let repl = damage_repl(DamageModification::Double).damage_target_filter(
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::SourceChosenPlayer,
+            },
+        );
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        state
+            .objects
+            .get_mut(&ObjectId(10))
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+
+        let chosen_permanent = GameObject::new(
+            ObjectId(60),
+            CardId(3),
+            PlayerId(1),
+            "Chosen Player Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(60), chosen_permanent);
+        state.battlefield.push_back(ObjectId(60));
+
+        let other_permanent = GameObject::new(
+            ObjectId(61),
+            CardId(4),
+            PlayerId(0),
+            "Other Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(61), other_permanent);
+        state.battlefield.push_back(ObjectId(61));
+
+        let registry = build_replacement_registry();
+        let chosen_permanent_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(60)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            !find_applicable_replacements(&state, &chosen_permanent_damage, &registry).is_empty(),
+            "damage to a permanent the source's chosen player controls should match"
+        );
+
+        let other_permanent_damage = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(61)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert!(
+            find_applicable_replacements(&state, &other_permanent_damage, &registry).is_empty(),
+            "damage to another player's permanent should not match"
         );
     }
 

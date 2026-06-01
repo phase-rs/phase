@@ -93,6 +93,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                 supertypes: obj.card_types.supertypes.clone(),
                 keywords: obj.keywords.clone(),
                 colors: obj.color.clone(),
+                chosen_attributes: obj.chosen_attributes.clone(),
                 // CR 400.7: Capture counters for "if it had counters on it" patterns.
                 counters: obj.counters.clone(),
             };
@@ -175,7 +176,30 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
         };
         if !preserve_bestow_form && obj_mut.bestow_form.is_some() {
             super::casting::revert_bestow_aura_form(obj_mut);
-            state.layers_dirty = true;
+            state.layers_dirty.mark_full();
+        }
+
+        // CR 702.148a + CR 612: A cleave spell's text-changing effect functions
+        // only "while a spell with cleave is on the stack." The bracket-removed
+        // ability set is installed on the hand object at cast time and must be
+        // reverted to the printed form when the spell leaves the stack —
+        // whether it resolved (Stack → Graveyard/Exile), was countered, or
+        // fizzled. Without this revert the same object id carries the cleave
+        // (bracket-removed) abilities into the graveyard, and a graveyard→hand
+        // recursion (Regrowth, Eternal Witness) — which reuses the object id
+        // without re-projecting the printed face — would let a later
+        // normal-cost recast resolve with the wrong (cleave) text.
+        //
+        // Gated the same way as bestow (preserve only on → Stack and on
+        // Stack → Battlefield) so the logic is uniform and future-proof, even
+        // though cleave instants/sorceries never resolve onto the battlefield.
+        let preserve_cleave_form = match from {
+            _ if to == Zone::Stack => true,
+            Zone::Stack if to == Zone::Battlefield => true,
+            _ => false,
+        };
+        if !preserve_cleave_form && obj_mut.cleave_form.is_some() {
+            super::casting::revert_cleave_text_change(obj_mut);
         }
 
         // CR 122.2: Counters cease to exist when an object changes zones.
@@ -192,7 +216,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
     // when a permanent leaves the battlefield.
     if from == Zone::Battlefield {
         super::pairing::break_pair(state, object_id);
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
         super::layers::prune_host_left_effects(state, object_id);
         super::layers::prune_affected_object_left_effects(state, object_id);
         for tapped in state.lands_tapped_for_mana.values_mut() {
@@ -356,7 +380,7 @@ pub fn move_to_zone(
     // CR 702.94a + CR 400.3: hand-zone continuous effects require re-evaluation
     // when a hand object appears or departs.
     if to == Zone::Battlefield || to == Zone::Hand || from == Zone::Hand {
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
     }
 
     // CR 702.145c + CR 702.145f: Daybound/Nightbound permanents entering under
@@ -420,6 +444,86 @@ pub fn move_to_zone(
         to,
         record: Box::new(zone_change_record),
     });
+}
+
+/// CR 603.10a: Record that every member of `group` left the battlefield in the
+/// SAME simultaneous event, so leaves-the-battlefield / dies observers that are
+/// themselves in the group observe each other via last-known information (the
+/// CR 603.10a worked example: a Blood Artist destroyed by the same Wrath of God
+/// as the creatures it counts triggers once per co-dying creature).
+///
+/// Producers of a simultaneous departure batch — one board wipe (`DestroyAll`),
+/// one state-based-action destruction pass (CR 704.7), one mass bounce/exile —
+/// call this on the events they just produced, AFTER moving every member. This
+/// is the authority for simultaneity: it is established here at the
+/// event-production layer rather than inferred downstream from the shape of the
+/// accumulated event vector, so sequential departures within a single
+/// resolution are never grouped (a member only appears in another member's
+/// `co_departed` when they truly left together).
+pub fn mark_simultaneous_departures(events: &mut [GameEvent], group: &[ObjectId]) {
+    if group.len() < 2 {
+        return;
+    }
+    for event in events.iter_mut() {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            record,
+            ..
+        } = event
+        {
+            if group.contains(object_id) {
+                record.co_departed = group
+                    .iter()
+                    .copied()
+                    .filter(|&member| member != *object_id)
+                    .collect();
+            }
+        }
+    }
+}
+
+/// CR 603.10a: Filter `ids` to those whose object has actually left the
+/// battlefield (now resides in some other zone). Producers that accumulate a
+/// candidate ID list — bounce, change-zone, sacrifice, destroy — pass that list
+/// through this filter before `mark_simultaneous_departures` so that a member
+/// which never actually departed (regenerated, sacrifice-prevented, bounce
+/// guarded out) is excluded from every survivor's `co_departed` group.
+pub fn departed_subset(state: &GameState, ids: &[ObjectId]) -> Vec<ObjectId> {
+    ids.iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.zone != Zone::Battlefield)
+        })
+        .collect()
+}
+
+/// CR 603.10a: Stamp simultaneous departure on a slice of events produced by a
+/// sweep that does not expose an explicit ID list (e.g. `sacrifice_unchosen`
+/// internal loops). Collects every battlefield-origin `ZoneChanged` in `slice`
+/// whose object is now off-battlefield, then groups them as co-departed.
+pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent]) {
+    let departed: Vec<ObjectId> = slice
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                ..
+            } if state
+                .objects
+                .get(object_id)
+                .is_some_and(|o| o.zone != Zone::Battlefield) =>
+            {
+                Some(*object_id)
+            }
+            _ => None,
+        })
+        .collect();
+    mark_simultaneous_departures(slice, &departed);
 }
 
 fn capture_linked_exile_snapshot(

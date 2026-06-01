@@ -81,6 +81,8 @@
     "waitTimeHours": "{{count}} godz. temu",
     "buildMismatchTitle": "Gospodarz ma wersję {{version}} ({{commit}}) — twoja kompilacja jest inna. Odśwież, aby zaktualizować.",
     "gameFull": "Ta gra jest pełna.",
+    "youAreHosting": "Hostujesz tę grę.",
+    "hosting": "Hostowanie",
     "sandboxConfirm": "To jest gra w trybie piaskownicy. Gracze z uprawnieniami debugowania mogą bezpośrednio manipulować stanem gry. Kontynuować?",
     "draftBadgeTitle": "Draft {{kind}} — {{setCode}}",
     "draftBadge": "Draft {{setCode}}",
@@ -88,7 +90,8 @@
     "sandboxBadgeTitle": "Ta gra pozwala na akcje debugowania. Używaj do testów — to nie jest mecz wyczynowy.",
     "anonymous": "Anonimowy",
     "by": "autor: {{name}}",
-    "passwordProtected": "Chronione hasłem"
+    "passwordProtected": "Chronione hasłem",
+    "join": "Dołącz"
   },
   "serverPicker": {
     "title": "Serwer",

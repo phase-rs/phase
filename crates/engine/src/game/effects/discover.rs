@@ -2,7 +2,7 @@ use crate::game::{quantity, zones};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{CastOfferKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
@@ -61,10 +61,12 @@ pub fn resolve(
     match hit_card {
         Some(hit) => {
             // Player chooses: cast without paying or put to hand
-            state.waiting_for = WaitingFor::DiscoverChoice {
+            state.waiting_for = WaitingFor::CastOffer {
                 player: ability.controller,
-                hit_card: hit,
-                exiled_misses,
+                kind: CastOfferKind::Discover {
+                    hit_card: hit,
+                    exiled_misses,
+                },
             };
         }
         None => {
@@ -167,9 +169,12 @@ mod tests {
 
         // Should find the creature and set DiscoverChoice
         match &state.waiting_for {
-            WaitingFor::DiscoverChoice {
-                hit_card,
-                exiled_misses,
+            WaitingFor::CastOffer {
+                kind:
+                    CastOfferKind::Discover {
+                        hit_card,
+                        exiled_misses,
+                    },
                 ..
             } => {
                 assert_eq!(*hit_card, creature);
@@ -228,8 +233,8 @@ mod tests {
 
         assert!(matches!(
             state.waiting_for,
-            WaitingFor::DiscoverChoice {
-                hit_card,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { hit_card, .. },
                 ..
             } if hit_card == hit
         ));

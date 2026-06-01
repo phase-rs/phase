@@ -19,7 +19,7 @@
 //! - Controller scoping: `TypedFilter.controller: Option<ControllerRef>` at
 //!   `ability.rs:815-818`.
 //!
-//! `StaticMode::ReduceCost` is deliberately out of scope — cost reducers are a
+//! `StaticMode::ModifyCost` is deliberately out of scope — cost reducers are a
 //! follow-up feature.
 
 use engine::game::DeckEntry;
@@ -349,6 +349,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -533,6 +534,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -574,6 +576,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         fetch_ability.cost = Some(AbilityCost::Composite {
