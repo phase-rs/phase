@@ -6181,6 +6181,52 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
             .is_empty()
 }
 
+/// CR 702.180a (issue #1550): A Harmonize spell may tap up to one untapped
+/// creature its controller controls to reduce the generic portion of its
+/// harmonize cost by that creature's power. For castability gating, return the
+/// harmonize cost reduced by the largest such reduction available, so the spell
+/// is offered as castable whenever the player could pay it after tapping their
+/// best creature (Winternight Stories was wrongly hidden when the player had
+/// enough mana only after the reduction). Eligibility mirrors the
+/// `HarmonizeTapChoice` flow (untapped controlled creature with power > 0).
+///
+/// This is an upper-bound approximation: it assumes the best creature is free
+/// to tap. The previously-broken case was the false negative (a castable
+/// harmonize spell hidden); a rare over-offer where the best creature is also
+/// the only mana source is still caught by the payment pipeline.
+fn harmonize_castability_mana_cost(
+    state: &GameState,
+    player: PlayerId,
+    variant: CastingVariant,
+    cost: &ManaCost,
+) -> ManaCost {
+    let ManaCost::Cost { shards, generic } = cost else {
+        return cost.clone();
+    };
+    if variant != CastingVariant::Harmonize || *generic == 0 {
+        return cost.clone();
+    }
+    let max_power = state
+        .objects
+        .values()
+        .filter(|o| {
+            o.controller == player
+                && o.zone == Zone::Battlefield
+                && !o.tapped
+                && o.card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Creature)
+        })
+        .filter_map(|o| o.power)
+        .filter(|p| *p > 0)
+        .max()
+        .unwrap_or(0) as u32;
+    ManaCost::Cost {
+        shards: shards.clone(),
+        generic: generic.saturating_sub(max_power),
+    }
+}
+
 fn can_cast_prepared_now(
     state: &GameState,
     player: PlayerId,
@@ -6302,9 +6348,18 @@ fn can_cast_prepared_now(
     // CR 117.1d + CR 601.2g: Feasibility, not just auto-tap, gates castability —
     // a player may activate sacrifice-/discard-/life-cost mana abilities during
     // payment (issue #562: KCI must expose Ichor Wellspring as castable).
+    // CR 702.180a (issue #1550): gate Harmonize castability on the cost the
+    // player could actually pay after the optional creature-tap generic
+    // reduction, not the full printed harmonize cost.
+    let effective_cost = harmonize_castability_mana_cost(
+        state,
+        player,
+        prepared.casting_variant,
+        &prepared.mana_cost,
+    );
     let creature_face_ok = (prepared.modal.is_some()
         || spell_has_legal_targets(state, obj, player))
-        && can_feasibly_pay_mana_cost(state, player, Some(prepared.object_id), &prepared.mana_cost);
+        && can_feasibly_pay_mana_cost(state, player, Some(prepared.object_id), &effective_cost);
 
     if creature_face_ok {
         return true;
@@ -22450,6 +22505,71 @@ mod tests {
         assert!(
             available.contains(&obj_id),
             "Flashback card in graveyard should be castable"
+        );
+    }
+
+    /// CR 702.180a (issue #1550): Winternight Stories — Harmonize {4}{U}. With
+    /// only 4 mana but a 4-power creature to tap (reducing the {4} generic to
+    /// {0}), the spell must appear castable from the graveyard. Before the fix
+    /// the castability check used the full {4}{U} cost and hid it.
+    #[test]
+    fn harmonize_card_castable_when_creature_tap_covers_generic() {
+        let mut state = setup_game_at_main_phase();
+
+        // Harmonize {4}{U} sorcery in the graveyard.
+        let card_id = CardId(state.next_object_id);
+        let spell = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Winternight Stories".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            };
+            obj.base_keywords.push(Keyword::Harmonize(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 4,
+            }));
+            obj.keywords = obj.base_keywords.clone();
+            let ability = crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                crate::types::ability::Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            Arc::make_mut(&mut obj.abilities).push(ability.clone());
+            Arc::make_mut(&mut obj.base_abilities).push(ability);
+        }
+
+        // A 4-power untapped creature the player controls (the tap target).
+        let creature = create_object(
+            &mut state,
+            CardId(77_001),
+            PlayerId(0),
+            "Power Four".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let c = state.objects.get_mut(&creature).unwrap();
+            c.card_types.core_types.push(CoreType::Creature);
+            c.power = Some(4);
+            c.toughness = Some(4);
+        }
+
+        // Only 4 mana available — short of the full {4}{U} = 5.
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 4);
+
+        assert!(
+            spell_objects_available_to_cast(&state, PlayerId(0)).contains(&spell),
+            "Harmonize {{4}}{{U}} must be castable with 4 mana + a 4-power creature to tap"
         );
     }
 
