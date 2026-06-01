@@ -3736,6 +3736,17 @@ fn candidate_materiality(
         // Unknown definition — be conservative.
         return CandidateMateriality::Unconditional;
     };
+    // CR 615 + CR 616.1: A damage prevention shield modifies the damage amount,
+    // so it writes the `Damage` field and is order-material against any other
+    // `Damage` writer — a doubler (Furnace of Rath `Double`), Torbran (`Plus`),
+    // or another prevention shield — because prevent-then-double and
+    // double-then-prevent do not commute ((3-2)*2 = 2 vs (3*2)-2 = 4). A bare
+    // prevention shield leaves `execute`/`damage_modification` unset, so without
+    // this it fell through to `Disjoint` and the CR 616.1 order choice was
+    // silently skipped.
+    if matches!(repl_def.shield_kind, ShieldKind::Prevention { .. }) {
+        return CandidateMateriality::Writes(EventField::Damage);
+    }
     let Some(execute) = repl_def.execute.as_deref() else {
         // CR 616.1: a `null` `execute` is not a guaranteed no-op. A count-event
         // replacement (Doubling Season, Hardened Scales) modifies the count via
@@ -4647,6 +4658,51 @@ mod tests {
             panic!("expected NeedsChoice for non-commuting damage modification, got {result:?}");
         };
         assert_eq!(player, PlayerId(1));
+    }
+
+    #[test]
+    fn prevention_shield_and_damage_doubler_prompt_for_order() {
+        // CR 615 + CR 616.1e: A prevention shield ("prevent the next 2") and a
+        // damage doubler (Furnace of Rath `Double`) both modify the amount of a
+        // single `ProposedEvent::Damage`, and they do NOT commute:
+        // (3-2)*2 = 2 vs (3*2)-2 = 4. The affected player must choose the order.
+        // Before the fix the prevention shield classified `Disjoint` (its
+        // `execute`/`damage_modification` are unset), so the set was deemed
+        // immaterial and the CR 616.1 order prompt was skipped.
+        let mut state = GameState::new_two_player(42);
+        let mut furnace = GameObject::new(
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Furnace of Rath".to_string(),
+            Zone::Battlefield,
+        );
+        furnace.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .damage_modification(DamageModification::Double)]
+            .into();
+        state.objects.insert(ObjectId(10), furnace);
+        state.battlefield.push_back(ObjectId(10));
+
+        // Global prevention shield ("prevent the next 2 damage").
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .prevention_shield(PreventionAmount::Next(2)),
+        );
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::NeedsChoice(_)),
+            "prevention shield + doubler must prompt for order per CR 616.1e, got {result:?}"
+        );
     }
 
     #[test]
