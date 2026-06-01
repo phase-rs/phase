@@ -8,6 +8,7 @@ pub mod persist;
 pub mod protocol;
 pub mod reconnect;
 pub mod session;
+pub mod session_lobby_guard;
 pub mod starter_decks;
 
 pub use deck_resolve::resolve_deck;
@@ -23,4 +24,7 @@ pub use reconnect::ReconnectManager;
 pub use session::{
     acting_player, acting_players, generate_game_code, generate_player_token, is_acting,
     SessionManager,
+};
+pub use session_lobby_guard::{
+    guard_full_create_game_with_settings, guard_full_join_game_with_password,
 };

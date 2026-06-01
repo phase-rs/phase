@@ -38,6 +38,9 @@ use server_core::protocol::{
 };
 use server_core::resolve_deck;
 use server_core::session::{ActionResult, GameSession, SessionManager};
+use server_core::session_lobby_guard::{
+    guard_full_create_game_with_settings, guard_full_join_game_with_password,
+};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
@@ -2581,6 +2584,25 @@ async fn handle_client_message(
                 return;
             }
 
+            if let Err(reason) = guard_full_create_game_with_settings(
+                &deck,
+                &display_name,
+                public,
+                &password,
+                timer_seconds,
+                requested_player_count,
+                match_config,
+                &format_config,
+                &room_name,
+                start_when_full,
+            ) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             {
                 let mgr = state.lock().await;
                 if mgr.sessions.len() >= MAX_GAMES {
@@ -3224,6 +3246,20 @@ async fn handle_client_message(
                     identity,
                 )
                 .await;
+                return;
+            }
+
+            if let Err(reason) = guard_full_join_game_with_password(
+                &game_code,
+                &deck,
+                &display_name,
+                &password,
+                &reservation_token,
+            ) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
                 return;
             }
 

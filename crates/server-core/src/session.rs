@@ -2115,4 +2115,93 @@ mod tests {
         let session = mgr.sessions.get(&code).unwrap();
         assert_eq!(session.state.players[defending_player.0 as usize].life, 20);
     }
+
+    mod session_lobby_guard_tests {
+        use super::*;
+        use crate::session_lobby_guard::{
+            guard_full_create_game_with_settings, guard_full_join_game_with_password,
+            MAX_MAIN_DECK_ENTRIES,
+        };
+        use engine::starter_decks::DeckData;
+        use engine::types::match_config::MatchConfig;
+
+        fn sample_deck() -> DeckData {
+            DeckData {
+                main_deck: vec!["Forest".to_string()],
+                sideboard: vec![],
+                commander: vec![],
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn full_create_accepts_valid_lobby_fields() {
+            assert!(guard_full_create_game_with_settings(
+                &sample_deck(),
+                "Alice",
+                true,
+                &None,
+                None,
+                2,
+                MatchConfig::default(),
+                &None,
+                &None,
+                true,
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn full_create_rejects_oversized_display_name() {
+            let err = guard_full_create_game_with_settings(
+                &sample_deck(),
+                &"a".repeat(21),
+                true,
+                &None,
+                None,
+                2,
+                MatchConfig::default(),
+                &None,
+                &None,
+                true,
+            )
+            .unwrap_err();
+            assert!(err.contains("display_name"));
+        }
+
+        #[test]
+        fn full_create_rejects_oversized_deck() {
+            let deck = DeckData {
+                main_deck: vec!["Card".to_string(); MAX_MAIN_DECK_ENTRIES + 1],
+                ..Default::default()
+            };
+            let err = guard_full_create_game_with_settings(
+                &deck,
+                "Alice",
+                true,
+                &None,
+                None,
+                2,
+                MatchConfig::default(),
+                &None,
+                &None,
+                true,
+            )
+            .unwrap_err();
+            assert!(err.contains("main_deck"));
+        }
+
+        #[test]
+        fn full_join_rejects_oversized_game_code() {
+            let err = guard_full_join_game_with_password(
+                &"x".repeat(65),
+                &sample_deck(),
+                "Bob",
+                &None,
+                &None,
+            )
+            .unwrap_err();
+            assert!(err.contains("game_code"));
+        }
+    }
 }
