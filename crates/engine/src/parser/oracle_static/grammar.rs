@@ -1546,7 +1546,7 @@ pub(crate) fn merge_cost_modifier_target_filter(
 /// ruling, this is a "directly affect the total cost" effect applied after
 /// every additive/subtractive modifier, just before the cost is "locked in".
 ///
-/// Returns a `StaticMode::MinimumCost` with `spell_filter = None` (the printed
+/// Returns a `StaticMode::ModifyCost` (Minimum) with `spell_filter = None` (the printed
 /// pattern affects all spells; future filtered variants would attach a filter
 /// here) and any trailing "as long as" / "if" condition lifted into the
 /// `StaticDefinition.condition` field (handles Trinisphere's "as long as this
@@ -1593,9 +1593,11 @@ pub(crate) fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefi
     }
     let amount = ManaCost::generic(n1);
 
-    let mut definition = StaticDefinition::new(StaticMode::MinimumCost {
+    let mut definition = StaticDefinition::new(StaticMode::ModifyCost {
+        mode: CostModifyMode::Minimum,
         amount,
         spell_filter: None,
+        dynamic_count: None,
     })
     .description(text.to_string());
 

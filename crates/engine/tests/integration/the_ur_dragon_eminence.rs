@@ -36,7 +36,7 @@ use engine::types::actions::GameAction;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
-use engine::types::statics::StaticMode;
+use engine::types::statics::{CostModifyMode, StaticMode};
 use engine::types::zones::Zone;
 
 /// Build The Ur-Dragon's Eminence static — typed `ReduceCost {1}` over
@@ -55,7 +55,8 @@ fn build_eminence_static() -> StaticDefinition {
             .subtype("Dragon".to_string())
             .properties(vec![FilterProp::Another]),
     );
-    StaticDefinition::new(StaticMode::ReduceCost {
+    StaticDefinition::new(StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
         amount: ManaCost::generic(1),
         spell_filter: Some(dragon_filter),
         dynamic_count: None,

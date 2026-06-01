@@ -1,7 +1,7 @@
 use crate::types::ability::{ContinuousModification, StaticDefinition};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CostModifyMode, StaticMode};
 
 use super::filter::translate_filter;
 use super::types::{ForgeAbilityLine, ForgeTranslateError};
@@ -142,7 +142,8 @@ fn translate_raise_cost(line: &ForgeAbilityLine) -> Result<StaticDefinition, For
         .get("ValidCard")
         .and_then(|s| translate_filter(s).ok());
 
-    let mut def = StaticDefinition::new(StaticMode::RaiseCost {
+    let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+        mode: CostModifyMode::Raise,
         amount,
         spell_filter,
         dynamic_count: None,
@@ -166,7 +167,8 @@ fn translate_reduce_cost(line: &ForgeAbilityLine) -> Result<StaticDefinition, Fo
         .get("ValidCard")
         .and_then(|s| translate_filter(s).ok());
 
-    let mut def = StaticDefinition::new(StaticMode::ReduceCost {
+    let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
         amount,
         spell_filter,
         dynamic_count: None,
@@ -194,7 +196,11 @@ mod tests {
         };
         let def = translate_static(&line).unwrap();
         match def.mode {
-            StaticMode::RaiseCost { amount, .. } => {
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Raise,
+                amount,
+                ..
+            } => {
                 assert_eq!(amount.mana_value(), 1);
             }
             other => panic!("expected RaiseCost, got {other:?}"),

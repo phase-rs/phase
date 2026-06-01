@@ -416,6 +416,19 @@ pub enum BlockExceptionKind {
     MinBlockers { min: u32 },
 }
 
+/// CR 601.2f: Direction/semantic axis for mana-cost modification statics.
+/// All three modes are applied in the CR 601.2f cost-locking step.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CostModifyMode {
+    /// Subtractive — reduce generic mana (floor: 0).
+    Reduce,
+    /// Additive — increase generic mana. Thalia, Guardian of Thraben class.
+    Raise,
+    /// Floor — cost cannot fall below `amount` after all Reduce/Raise settle.
+    /// CR 601.2f last-step floor. Trinisphere class.
+    Minimum,
+}
+
 /// All static ability modes from Forge's static ability registry.
 /// Matched case-sensitively against Forge mode strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,19 +514,26 @@ pub enum StaticMode {
     /// CR 118.9 + CR 601.2f: A permanent grants its controller a wholesale
     /// alternative MANA cost for spells matching `StaticDefinition::affected`
     /// that the controller casts — they may pay `cost` rather than the spell's
-    /// mana cost. Parallel to `CastWithKeyword`. Distinct from `ReduceCost`
-    /// (subtractive, CR 601.2f) — this REPLACES the mana cost wholesale
+    /// mana cost. Parallel to `CastWithKeyword`. Distinct from
+    /// `ModifyCost { mode: Reduce, .. }` (subtractive, CR 601.2f) — this REPLACES
+    /// the mana cost wholesale
     /// (CR 118.9) and is mutually exclusive with other alternative costs
     /// (CR 118.9a). Rooftop Storm ({0}, Zombie creature spells), Fist of Suns
     /// ({WUBRG}, any spell), Jodah (MV 5+).
     CastWithAlternativeCost {
         cost: ManaCost,
     },
-    /// CR 601.2f: Reduces the cost of spells matching the filter.
-    /// Permanent-based cost reduction applied during casting (not self-cost reduction).
-    ReduceCost {
+    /// CR 601.2f: Modifies the mana cost of spells matching `spell_filter`
+    /// (or all spells when `None`) by `amount`, in the direction described by `mode`.
+    /// `Reduce` subtracts generic mana (floor: 0), `Raise` adds generic mana,
+    /// `Minimum` floors the total cost after all Reduce/Raise settle.
+    ModifyCost {
+        mode: CostModifyMode,
         amount: ManaCost,
         spell_filter: Option<TargetFilter>,
+        /// Dynamic multiplier (e.g. "for each [thing] you control").
+        /// Only meaningful for `Reduce` and `Raise` — always `None` for `Minimum`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
     },
     /// CR 601.2f: Reduces the generic mana cost of activated abilities matching a keyword type.
@@ -547,40 +567,6 @@ pub enum StaticMode {
     /// Canonical class: The Wandering Emperor's same-turn loyalty permission.
     ActivateAsInstant {
         cost_category: CostCategory,
-    },
-    /// CR 601.2f: Increases the cost of spells matching the filter.
-    /// Permanent-based cost increase applied during casting (Thalia, etc.).
-    RaiseCost {
-        amount: ManaCost,
-        spell_filter: Option<TargetFilter>,
-        dynamic_count: Option<QuantityRef>,
-    },
-    /// CR 601.2f: Floors the total mana cost of matching spells. Per CR 601.2f,
-    /// this belongs to the "any effects that directly affect the total cost"
-    /// step that runs after all additive/subtractive cost modifiers and just
-    /// before the cost is "locked in." Trinisphere class: "each spell that
-    /// would cost less than three mana to cast costs three mana to cast."
-    ///
-    /// Per the Trinisphere ruling: "apply Trinisphere's effect if the mana
-    /// component of the spell's cost is less than three mana" — applied last,
-    /// after RaiseCost / ReduceCost / pending reductions / Affinity have all
-    /// settled. The floor never reduces a cost.
-    ///
-    /// `amount` is the floor expressed as a `ManaCost` (always pure-generic in
-    /// printed cards; shape-shared with `RaiseCost`/`ReduceCost` for uniform
-    /// serialization). The runtime compares `mana_cost.mana_value()` against
-    /// `amount.mana_value()` and tops up generic mana to reach the floor —
-    /// colored requirements are never modified, per the Trinisphere reminder
-    /// text "Additional mana ... may be paid with any color of mana or
-    /// colorless mana."
-    ///
-    /// `spell_filter` narrows which spells are floored. `None` = all spells
-    /// (Trinisphere). No `dynamic_count` field — printed cost-floor effects
-    /// are always a fixed amount, distinguishing this variant's shape from
-    /// its `RaiseCost`/`ReduceCost` siblings.
-    MinimumCost {
-        amount: ManaCost,
-        spell_filter: Option<TargetFilter>,
     },
     /// CR 118.3 + CR 601.2h + CR 602.2b: The scoped player can't pay a
     /// matching non-mana cost to cast spells or activate abilities.
@@ -998,7 +984,7 @@ pub enum StaticMode {
     Other(String),
 }
 
-/// Manual Hash impl because `ReduceCost`/`RaiseCost` contain `TargetFilter` and `QuantityRef`
+/// Manual Hash impl because `ModifyCost` contains `TargetFilter` and `QuantityRef`
 /// which don't implement `Hash`. For data-carrying variants, we hash only the discriminant +
 /// simple fields. This is safe because data-carrying variants are never used as HashMap keys
 /// (they're handled by `is_data_carrying_static` in coverage.rs instead).
@@ -1072,9 +1058,7 @@ impl Hash for StaticMode {
             StaticMode::PayLifeAsColoredMana { color } => color.hash(state),
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
-            StaticMode::ReduceCost { .. }
-            | StaticMode::RaiseCost { .. }
-            | StaticMode::MinimumCost { .. }
+            StaticMode::ModifyCost { .. }
             | StaticMode::CantPayCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantDraw { .. }
@@ -1122,7 +1106,11 @@ impl fmt::Display for StaticMode {
             StaticMode::CastWithAlternativeCost { cost } => {
                 write!(f, "CastWithAlternativeCost({cost:?})")
             }
-            StaticMode::ReduceCost { .. } => write!(f, "ReduceCost"),
+            StaticMode::ModifyCost { mode, .. } => match mode {
+                CostModifyMode::Reduce => write!(f, "ReduceCost"),
+                CostModifyMode::Raise => write!(f, "RaiseCost"),
+                CostModifyMode::Minimum => write!(f, "MinimumCost"),
+            },
             StaticMode::ReduceAbilityCost {
                 keyword,
                 amount,
@@ -1141,8 +1129,6 @@ impl fmt::Display for StaticMode {
             StaticMode::ActivateAsInstant { cost_category } => {
                 write!(f, "ActivateAsInstant({cost_category:?})")
             }
-            StaticMode::RaiseCost { .. } => write!(f, "RaiseCost"),
-            StaticMode::MinimumCost { .. } => write!(f, "MinimumCost"),
             StaticMode::CantPayCost { who, cost } => write!(f, "CantPayCost({who},{cost})"),
             StaticMode::CantGainLife => write!(f, "CantGainLife"),
             StaticMode::CantLoseLife => write!(f, "CantLoseLife"),
@@ -1345,7 +1331,8 @@ impl FromStr for StaticMode {
                 exemption: ActivationExemption::None,
             },
             "CastWithFlash" => StaticMode::CastWithFlash,
-            "ReduceCost" => StaticMode::ReduceCost {
+            "ReduceCost" => StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount: ManaCost::zero(),
                 spell_filter: None,
                 dynamic_count: None,
@@ -1401,7 +1388,8 @@ impl FromStr for StaticMode {
                     _ => StaticMode::Other(s.to_string()),
                 }
             }
-            "RaiseCost" => StaticMode::RaiseCost {
+            "RaiseCost" => StaticMode::ModifyCost {
+                mode: CostModifyMode::Raise,
                 amount: ManaCost::zero(),
                 spell_filter: None,
                 dynamic_count: None,
@@ -1409,9 +1397,11 @@ impl FromStr for StaticMode {
             // CR 601.2f: Cost-floor static (Trinisphere class). Legacy unit-string
             // defaults to a zero floor — meaningful instances are constructed via
             // the parser with the printed amount.
-            "MinimumCost" => StaticMode::MinimumCost {
+            "MinimumCost" => StaticMode::ModifyCost {
+                mode: CostModifyMode::Minimum,
                 amount: ManaCost::zero(),
                 spell_filter: None,
+                dynamic_count: None,
             },
             "CantPayCost" => StaticMode::CantPayCost {
                 who: ProhibitionScope::AllPlayers,
@@ -1794,11 +1784,52 @@ where
             }
         }
         other => {
+            if let Some(mode) = deserialize_legacy_modify_cost_object(&other) {
+                return mode.map_err(serde::de::Error::custom);
+            }
             // Data-carrying variant path. Delegate to the derived Deserialize
             // which handles all struct/newtype variants correctly.
             serde_json::from_value::<StaticMode>(other).map_err(serde::de::Error::custom)
         }
     }
+}
+
+#[derive(Deserialize)]
+struct LegacyModifyCostPayload {
+    #[serde(default)]
+    amount: ManaCost,
+    #[serde(default)]
+    spell_filter: Option<TargetFilter>,
+    #[serde(default)]
+    dynamic_count: Option<QuantityRef>,
+}
+
+fn deserialize_legacy_modify_cost_object(
+    raw: &serde_json::Value,
+) -> Option<serde_json::Result<StaticMode>> {
+    let map = raw.as_object()?;
+    if map.len() != 1 {
+        return None;
+    }
+
+    let (name, payload) = map.iter().next()?;
+    let mode = match name.as_str() {
+        "ReduceCost" => CostModifyMode::Reduce,
+        "RaiseCost" => CostModifyMode::Raise,
+        "MinimumCost" => CostModifyMode::Minimum,
+        _ => return None,
+    };
+
+    Some(
+        serde_json::from_value::<LegacyModifyCostPayload>(payload.clone()).map(|payload| {
+            StaticMode::ModifyCost {
+                mode,
+                amount: payload.amount,
+                spell_filter: payload.spell_filter,
+                dynamic_count: payload.dynamic_count,
+            }
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -2033,6 +2064,37 @@ mod tests {
         let json2 = r#"{"mode":"GrantsExtraVote"}"#;
         let w2: Wrapper = serde_json::from_str(json2).unwrap();
         assert_eq!(w2.mode, StaticMode::GrantsExtraVote);
+    }
+
+    #[test]
+    fn fwd_compat_legacy_cost_modify_objects_map_to_modify_cost() {
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_static_mode_fwd")]
+            mode: StaticMode,
+        }
+
+        let cases = [
+            ("ReduceCost", CostModifyMode::Reduce),
+            ("RaiseCost", CostModifyMode::Raise),
+            ("MinimumCost", CostModifyMode::Minimum),
+        ];
+
+        for (legacy_name, expected_mode) in cases {
+            let json = format!(
+                r#"{{"mode":{{"{legacy_name}":{{"amount":{{"type":"Cost","shards":[],"generic":2}},"spell_filter":null,"dynamic_count":null}}}}}}"#
+            );
+            let wrapper: Wrapper = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                wrapper.mode,
+                StaticMode::ModifyCost {
+                    mode: expected_mode,
+                    amount: ManaCost::generic(2),
+                    spell_filter: None,
+                    dynamic_count: None,
+                }
+            );
+        }
     }
 
     #[test]

@@ -877,7 +877,8 @@ fn static_this_spell_cost_less_self_scoped_in_castable_zones() {
     .unwrap();
     assert!(matches!(
         def.mode,
-        StaticMode::ReduceCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 1, .. },
             dynamic_count: Some(_),
             ..
@@ -897,7 +898,8 @@ fn ghalta_self_cost_reduction_is_active_from_command_zone() {
     )
     .unwrap();
 
-    let StaticMode::ReduceCost {
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
         dynamic_count:
             Some(QuantityRef::Aggregate {
                 function: AggregateFunction::Sum,
@@ -923,7 +925,8 @@ fn static_this_spell_cost_less_for_each_creature_that_attacked_this_turn() {
     )
     .unwrap();
 
-    let StaticMode::ReduceCost {
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
         amount: ManaCost::Cost { generic: 1, .. },
         dynamic_count:
             Some(QuantityRef::ObjectCount {
@@ -958,7 +961,8 @@ fn static_this_spell_cost_less_for_each_creature_you_attacked_with_this_turn() {
 
     assert!(matches!(
         def.mode,
-        StaticMode::ReduceCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 1, .. },
             dynamic_count: Some(QuantityRef::AttackedThisTurn),
             ..
@@ -1015,7 +1019,8 @@ fn self_cost_reduction_if_night_uses_day_night_condition() {
 
     assert!(matches!(
         def.mode,
-        StaticMode::ReduceCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 2, .. },
             ..
         }
@@ -1048,7 +1053,8 @@ fn self_cost_reduction_if_bargained_uses_additional_cost_paid_condition() {
         assert!(
             matches!(
                 def.mode,
-                StaticMode::ReduceCost {
+                StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
                     amount: ManaCost::Cost { generic: 2, .. },
                     ..
                 }
@@ -1070,7 +1076,13 @@ fn self_cost_reduction_if_control_wizard_still_uses_presence_condition() {
     // Regression: the bargained early-return must not divert other conditions.
     let def =
         parse_static_line("This spell costs {2} less to cast if you control a Wizard.").unwrap();
-    assert!(matches!(def.mode, StaticMode::ReduceCost { .. }));
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            ..
+        }
+    ));
     assert!(
         !matches!(def.condition, Some(StaticCondition::AdditionalCostPaid)),
         "control-a-Wizard must not parse as AdditionalCostPaid, got {:?}",
@@ -1086,13 +1098,16 @@ fn static_this_spell_cost_less_if_it_targets_creature_filter() {
 
     assert!(matches!(
         def.mode,
-        StaticMode::ReduceCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 2, .. },
             ..
         }
     ));
-    let StaticMode::ReduceCost {
-        ref spell_filter, ..
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
     } = def.mode
     else {
         panic!("expected ReduceCost");
@@ -1133,7 +1148,8 @@ fn static_spells_cost_less() {
     let def = parse_static_line("Spells you cast cost {1} less to cast.").unwrap();
     assert!(matches!(
         def.mode,
-        StaticMode::ReduceCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             spell_filter: None,
             dynamic_count: None,
             ..
@@ -1142,7 +1158,8 @@ fn static_spells_cost_less() {
     // Verify amount is generic 1 (avoid assert_eq! on complex types — SIGABRT risk)
     assert!(matches!(
         def.mode,
-        StaticMode::ReduceCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 1, .. },
             ..
         }
@@ -1154,7 +1171,8 @@ fn static_opponent_spells_cost_more() {
     let def = parse_static_line("Spells your opponents cast cost {1} more to cast.").unwrap();
     assert!(matches!(
         def.mode,
-        StaticMode::RaiseCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Raise,
             spell_filter: None,
             dynamic_count: None,
             ..
@@ -1162,7 +1180,8 @@ fn static_opponent_spells_cost_more() {
     ));
     assert!(matches!(
         def.mode,
-        StaticMode::RaiseCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Raise,
             amount: ManaCost::Cost { generic: 1, .. },
             ..
         }
@@ -1178,7 +1197,8 @@ fn static_opponent_spells_targeting_commanders_cost_more() {
 
     assert!(matches!(
         def.mode,
-        StaticMode::RaiseCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Raise,
             amount: ManaCost::Cost { generic: 3, .. },
             ..
         }
@@ -1190,8 +1210,10 @@ fn static_opponent_spells_targeting_commanders_cost_more() {
             ..
         }))
     ));
-    let StaticMode::RaiseCost {
-        ref spell_filter, ..
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Raise,
+        ref spell_filter,
+        ..
     } = def.mode
     else {
         panic!("expected RaiseCost");
@@ -1225,13 +1247,16 @@ fn static_spells_targeting_creature_cost_less() {
 
     assert!(matches!(
         def.mode,
-        StaticMode::ReduceCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 2, .. },
             ..
         }
     ));
-    let StaticMode::ReduceCost {
-        ref spell_filter, ..
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
     } = def.mode
     else {
         panic!("expected ReduceCost");
@@ -1265,13 +1290,16 @@ fn static_opponent_spells_from_zones_cost_more() {
     .unwrap();
     assert!(matches!(
         def.mode,
-        StaticMode::RaiseCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Raise,
             amount: ManaCost::Cost { generic: 2, .. },
             ..
         }
     ));
-    if let StaticMode::RaiseCost {
-        ref spell_filter, ..
+    if let StaticMode::ModifyCost {
+        mode: CostModifyMode::Raise,
+        ref spell_filter,
+        ..
     } = def.mode
     {
         let filter = spell_filter
@@ -1307,13 +1335,16 @@ fn static_spells_from_exile_cost_less() {
     let def = parse_static_line("Spells you cast from exile cost {1} less to cast.").unwrap();
     assert!(matches!(
         def.mode,
-        StaticMode::ReduceCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 1, .. },
             ..
         }
     ));
-    if let StaticMode::ReduceCost {
-        ref spell_filter, ..
+    if let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
     } = def.mode
     {
         let filter = spell_filter
@@ -1340,13 +1371,16 @@ fn static_creature_spells_cost_less() {
     let def = parse_static_line("Creature spells you cast cost {1} less to cast.").unwrap();
     assert!(matches!(
         def.mode,
-        StaticMode::ReduceCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::Cost { generic: 1, .. },
             ..
         }
     ));
-    if let StaticMode::ReduceCost {
-        ref spell_filter, ..
+    if let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
     } = def.mode
     {
         let filter = spell_filter.as_ref().expect("Expected spell_filter");
@@ -1373,7 +1407,8 @@ fn static_spells_of_chosen_type_cost_less_carries_chosen_card_type() {
     // infix previously prevented the discriminator from being extracted.
     let def =
         parse_static_line("Spells you cast of the chosen type cost {1} less to cast.").unwrap();
-    let StaticMode::ReduceCost {
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
         spell_filter: Some(TargetFilter::Typed(ref tf)),
         ..
     } = def.mode
@@ -1400,7 +1435,8 @@ fn static_creature_spells_of_chosen_type_cost_less_carries_chosen_creature_type(
     let def =
         parse_static_line("Creature spells you cast of the chosen type cost {1} less to cast.")
             .unwrap();
-    let StaticMode::ReduceCost {
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
         spell_filter: Some(TargetFilter::Typed(ref tf)),
         ..
     } = def.mode
@@ -1436,11 +1472,19 @@ fn static_instant_sorcery_spells_cost_less() {
     );
     let def = def.unwrap();
     assert!(
-        matches!(def.mode, StaticMode::ReduceCost { .. }),
+        matches!(
+            def.mode,
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                ..
+            }
+        ),
         "Expected ReduceCost mode"
     );
-    if let StaticMode::ReduceCost {
-        ref spell_filter, ..
+    if let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
     } = def.mode
     {
         assert!(
@@ -1473,9 +1517,17 @@ fn static_instant_sorcery_spells_cost_less() {
 fn static_white_spells_cost_more() {
     // "White spells your opponents cast cost {1} more to cast."
     let def = parse_static_line("White spells your opponents cast cost {1} more to cast.").unwrap();
-    assert!(matches!(def.mode, StaticMode::RaiseCost { .. }));
-    if let StaticMode::RaiseCost {
-        ref spell_filter, ..
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Raise,
+            ..
+        }
+    ));
+    if let StaticMode::ModifyCost {
+        mode: CostModifyMode::Raise,
+        ref spell_filter,
+        ..
     } = def.mode
     {
         let filter = spell_filter.as_ref().expect("Expected spell_filter");
@@ -1500,13 +1552,16 @@ fn static_noncreature_spells_cost_more_thalia() {
     let def = parse_static_line("Noncreature spells cost {1} more to cast.").unwrap();
     assert!(matches!(
         def.mode,
-        StaticMode::RaiseCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Raise,
             amount: ManaCost::Cost { generic: 1, .. },
             ..
         }
     ));
-    if let StaticMode::RaiseCost {
-        ref spell_filter, ..
+    if let StaticMode::ModifyCost {
+        mode: CostModifyMode::Raise,
+        ref spell_filter,
+        ..
     } = def.mode
     {
         let filter = spell_filter.as_ref().expect("Expected spell_filter");
@@ -1536,7 +1591,8 @@ fn static_noncreature_spells_cost_more_thalia() {
 #[test]
 fn static_spells_with_chosen_name_cost_more_disruptor_flute() {
     let def = parse_static_line("Spells with the chosen name cost {3} more to cast.").unwrap();
-    let StaticMode::RaiseCost {
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Raise,
         amount,
         spell_filter,
         dynamic_count,
@@ -1566,9 +1622,11 @@ fn static_trinisphere_cost_floor_with_untapped_condition() {
         )
         .expect("Trinisphere line must parse");
     match &def.mode {
-        StaticMode::MinimumCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Minimum,
             amount,
             spell_filter,
+            ..
         } => {
             assert_eq!(amount, &ManaCost::generic(3), "floor must be {{3}}");
             assert!(spell_filter.is_none(), "Trinisphere has no spell filter");
@@ -1597,9 +1655,11 @@ fn static_cost_floor_canonical_form_no_condition() {
     assert!(
         matches!(
             def.mode,
-            StaticMode::MinimumCost {
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Minimum,
                 amount: ManaCost::Cost { generic: 3, .. },
                 spell_filter: None,
+                ..
             }
         ),
         "expected MinimumCost(3); got {:?}",
@@ -1618,9 +1678,17 @@ fn static_first_qualified_spell_costs_less_has_filter_and_condition() {
         )
         .unwrap();
 
-    assert!(matches!(def.mode, StaticMode::ReduceCost { .. }));
-    let StaticMode::ReduceCost {
-        ref spell_filter, ..
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            ..
+        }
+    ));
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        ref spell_filter,
+        ..
     } = def.mode
     else {
         unreachable!();
@@ -1662,7 +1730,8 @@ fn static_spells_cost_x_less_where_x_is_your_speed() {
         "Noncreature spells you cast cost {X} less to cast, where X is your speed.",
     )
     .unwrap();
-    let StaticMode::ReduceCost {
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
         amount,
         dynamic_count,
         ..
@@ -1686,7 +1755,13 @@ fn static_noncreature_spells_cost_less_as_long_as_lesson_threshold() {
         )
         .unwrap();
 
-    assert!(matches!(def.mode, StaticMode::ReduceCost { .. }));
+    assert!(matches!(
+        def.mode,
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            ..
+        }
+    ));
     assert!(matches!(
         def.condition,
         Some(StaticCondition::QuantityComparison {
@@ -1724,7 +1799,8 @@ fn static_eminence_cost_reduction_command_zone_or_battlefield() {
     assert!(
         matches!(
             def.mode,
-            StaticMode::ReduceCost {
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount: ManaCost::Cost { generic: 1, .. },
                 ..
             }
@@ -1779,7 +1855,8 @@ fn static_eminence_cost_reduction_inverted_form() {
     assert!(
         matches!(
             def.mode,
-            StaticMode::ReduceCost {
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount: ManaCost::Cost { generic: 1, .. },
                 ..
             }
@@ -8308,7 +8385,8 @@ fn spell_cost_reduction_uses_card_types_in_graveyard_quantity() {
     )
     .unwrap();
     match def.mode {
-        StaticMode::ReduceCost {
+        StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             dynamic_count:
                 Some(QuantityRef::DistinctCardTypes {
                     source:
