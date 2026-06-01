@@ -505,9 +505,9 @@ pub fn convert(t: &Trigger) -> ConvResult<TriggerDefinition> {
         Trigger::WhenAPlayerDrawsACard(_players) => TriggerDefinition::new(TriggerMode::Drawn),
 
         // CR 601.2i: Spell cast.
-        Trigger::WhenASpellIsCast(_spells) => TriggerDefinition::new(TriggerMode::SpellCast),
-        Trigger::WhenAPlayerCastsASpell(_players, _spells) => {
-            TriggerDefinition::new(TriggerMode::SpellCast)
+        Trigger::WhenASpellIsCast(spells) => spell_cast_trigger(None, spells)?,
+        Trigger::WhenAPlayerCastsASpell(players, spells) => {
+            spell_cast_trigger(Some(players.as_ref()), spells)?
         }
 
         // CR 119.4 / CR 119.3: Life triggers.
@@ -823,6 +823,29 @@ fn nth_count_from_comparison(comparison: &Comparison, idiom: &'static str) -> Co
 ///   Rift family) and lowers to `valid_card: TargetFilter::SelfRef`.
 /// - Other card predicates (specific card-type filters) have no engine
 ///   slot today and strict-fail.
+/// CR 601.2i + CR 603.6a: "Whenever [a player] casts [a spell]" — lower the
+/// player axis to `valid_target` and the spell predicate to `valid_card`, mirroring
+/// the native oracle_trigger parser (e.g. Ovika's noncreature-spell trigger).
+fn spell_cast_trigger(
+    players: Option<&Players>,
+    spells: &crate::schema::types::Spells,
+) -> ConvResult<TriggerDefinition> {
+    use crate::schema::types::Spells as S;
+
+    let mut def = TriggerDefinition::new(TriggerMode::SpellCast);
+    if let Some(players) = players {
+        if !matches!(players, Players::AnyPlayer) {
+            def.valid_target = Some(TargetFilter::Typed(
+                TypedFilter::default().controller(players_to_controller(players)?),
+            ));
+        }
+    }
+    if !matches!(spells, S::AnySpell) {
+        def.valid_card = Some(spells_to_filter(spells)?);
+    }
+    Ok(def)
+}
+
 fn cycled_trigger(
     players: &Players,
     cards: &CardsInHand,
@@ -849,4 +872,36 @@ fn cycled_trigger(
         }
     }
     Ok(def)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::types::{CardType, Player, Players, Spells};
+    use engine::types::ability::{ControllerRef, TypeFilter};
+
+    #[test]
+    fn when_you_cast_noncreature_spell_sets_caster_and_spell_filters() {
+        let def = convert(&Trigger::WhenAPlayerCastsASpell(
+            Box::new(Players::SinglePlayer(Box::new(Player::You))),
+            Box::new(Spells::IsNonCardtype(CardType::Creature)),
+        ))
+        .expect("convert player spell cast trigger");
+
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        let Some(TargetFilter::Typed(tf)) = &def.valid_target else {
+            panic!("expected caster filter, got {:?}", def.valid_target);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+
+        let Some(TargetFilter::Typed(tf)) = &def.valid_card else {
+            panic!("expected spell filter, got {:?}", def.valid_card);
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))),
+            "expected Non(Creature), got {:?}",
+            tf.type_filters
+        );
+    }
 }

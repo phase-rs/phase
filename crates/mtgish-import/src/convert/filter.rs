@@ -453,7 +453,9 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         // `TargetFilter::LastCreated`, which the engine snapshots at the moment a
         // composed delayed trigger is built (the exile-at-end-of-combat half of
         // Mirror Match) so it survives later token creation.
-        Permanents::TheCreatedTokens => TargetFilter::LastCreated,
+        Permanents::TheCreatedTokens | Permanents::TheTokensCreatedThisWay => {
+            TargetFilter::LastCreated
+        }
 
         // "Except for ~" set-difference subject — semantically the
         // complement of the inner filter. mtgish surfaces this distinct from
@@ -2029,6 +2031,14 @@ mod tests {
             ChoiceType::Color {
                 excluded: vec![ManaColor::White],
             }
+        );
+    }
+
+    #[test]
+    fn the_tokens_created_this_way_maps_to_last_created() {
+        assert_eq!(
+            convert(&Permanents::TheTokensCreatedThisWay).expect("convert tokens created this way"),
+            TargetFilter::LastCreated
         );
     }
 }

@@ -6505,6 +6505,74 @@ pub mod tests {
         );
     }
 
+    /// Issue #1718: SpellCast triggers with `valid_target` (caster) and
+    /// `valid_card` (noncreature) must fire — Ovika's mtgish import was missing
+    /// these filters before `spell_cast_trigger` lowered them.
+    #[test]
+    fn spell_cast_trigger_with_caster_and_noncreature_filter_fires() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ControllerRef, TypeFilter};
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let ovika = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ovika, Enigma Goliath".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let trigger = TriggerDefinition::new(TriggerMode::SpellCast)
+                .valid_target(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ))
+                .valid_card(TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(
+                    Box::new(TypeFilter::Creature),
+                ))))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ));
+            let obj = state.objects.get_mut(&ovika).unwrap();
+            obj.trigger_definitions.push(trigger.clone());
+            std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                card_id: CardId(10),
+                controller: PlayerId(0),
+                object_id: spell,
+            }],
+        );
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "noncreature spell cast by controller should trigger Ovika-style ability"
+        );
+    }
+
     #[test]
     fn prowess_does_not_trigger_on_creature_spell() {
         use crate::types::keywords::Keyword;
