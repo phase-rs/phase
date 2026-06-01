@@ -9,8 +9,8 @@ use nom::Parser;
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, CombatRelation, CombatRelationSubject, Comparator,
     ControllerRef, FilterProp, ObjectProperty, ObjectScope, PtStat, PtValueScope, QuantityExpr,
-    QuantityRef, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
-    TypeFilter, TypedFilter,
+    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -796,6 +796,22 @@ pub fn parse_target_with_syntax<'a>(
             value(
                 TargetFilter::ParentTargetSlot { index: 0 },
                 tag("the second player"),
+            ),
+            // CR 102.1 + CR 103.1: "the player to your right/left" —
+            // seating-relative neighbor. Right = previous seat (clockwise turn
+            // order proceeds to the left). Placed before the bare "the player"
+            // arm so the longer phrase wins under longest-match-first dispatch.
+            value(
+                TargetFilter::Neighbor {
+                    direction: SeatDirection::Right,
+                },
+                tag("the player to your right"),
+            ),
+            value(
+                TargetFilter::Neighbor {
+                    direction: SeatDirection::Left,
+                },
+                tag("the player to your left"),
             ),
             value(TargetFilter::ParentTarget, tag("the player")),
             value(TargetFilter::ParentTarget, tag("the creature")),
@@ -9512,6 +9528,33 @@ mod tests {
         assert!(tf.type_filters.contains(&TypeFilter::Artifact));
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
         assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 102.1 + CR 103.1: "the player to your right/left" parses to a
+    /// seating-relative `Neighbor` filter. Right = previous seat (clockwise
+    /// turn order proceeds to the left).
+    #[test]
+    fn parse_target_player_to_your_right_is_neighbor_right() {
+        let (f, rest) = parse_target("the player to your right");
+        assert_eq!(
+            f,
+            TargetFilter::Neighbor {
+                direction: SeatDirection::Right
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_player_to_your_left_is_neighbor_left() {
+        let (f, rest) = parse_target("the player to your left");
+        assert_eq!(
+            f,
+            TargetFilter::Neighbor {
+                direction: SeatDirection::Left
+            }
+        );
+        assert_eq!(rest, "");
     }
 
     #[test]
