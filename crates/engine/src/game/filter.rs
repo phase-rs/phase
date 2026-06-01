@@ -3858,9 +3858,10 @@ mod tests {
 
         let mut state = setup();
         // A card in P0's library, owned AND controlled by P0 → fast path.
+        let cid = CardId(state.next_object_id);
         let card = create_object(
             &mut state,
-            CardId(state.next_object_id),
+            cid,
             PlayerId(0),
             "Forest".to_string(),
             Zone::Library,
@@ -3870,8 +3871,7 @@ mod tests {
 
         // Fast path: controller == owner == P0, no clone needed.
         assert_eq!(
-            state.objects[&card].controller,
-            state.objects[&card].owner,
+            state.objects[&card].controller, state.objects[&card].owner,
             "precondition: fast path requires controller == owner"
         );
         assert!(
@@ -3883,8 +3883,7 @@ mod tests {
         // scoping must still treat it as P0's card via the clone+override.
         state.objects.get_mut(&card).unwrap().controller = PlayerId(1);
         assert_ne!(
-            state.objects[&card].controller,
-            state.objects[&card].owner,
+            state.objects[&card].controller, state.objects[&card].owner,
             "precondition: slow path requires controller != owner"
         );
         assert!(
