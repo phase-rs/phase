@@ -10370,7 +10370,7 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, BounceSelection,
         CastingPermission, Comparator, ContinuousModification, ControllerRef, CountScope,
-        DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp,
+        DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
         ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
         QuantityExpr, QuantityRef, SharedQuality, TargetFilter, TypeFilter, TypedFilter,
     };
@@ -18326,6 +18326,61 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(def.origin, Some(Zone::Graveyard));
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        match &*execute.effect {
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source,
+            } => {
+                assert_eq!(*target, TargetFilter::Any);
+                assert_eq!(*damage_source, Some(DamageSource::TriggeringSource));
+                assert!(matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource,
+                        },
+                    }
+                ));
+            }
+            other => panic!("expected DealDamage, got {other:?}"),
+        }
+    }
+
+    /// CR 120.1 + CR 603.6: Pyrogoyf's "that creature deals damage equal to
+    /// its power" trigger must use the entering Lhurgoyf as both the damage
+    /// source and power source, while keeping "any target" as the chosen damage
+    /// recipient.
+    #[test]
+    fn pyrogoyf_etb_damage_uses_entering_lhurgoyf_as_damage_source() {
+        let def = parse_trigger_line(
+            "Whenever this creature or another Lhurgoyf creature you control enters, that creature deals damage equal to its power to any target.",
+            "Pyrogoyf",
+        );
+
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        match &*execute.effect {
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source,
+            } => {
+                assert_eq!(*target, TargetFilter::Any);
+                assert_eq!(*damage_source, Some(DamageSource::TriggeringSource));
+                assert!(matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource,
+                        },
+                    }
+                ));
+            }
+            other => panic!("expected DealDamage, got {other:?}"),
+        }
     }
 
     /// CR 603.6 + CR 603.6a — origin extraction for "enters from exile"

@@ -170,6 +170,31 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
 /// `prune_until_next_turn_effects`.
 pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_player: PlayerId) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        // CR 514.2: arm "until the end of your next turn" play-permissions when
+        // the grantee's next turn begins — convert to `UntilEndOfTurn` so the
+        // cleanup-step prune (`prune_end_of_turn_casting_permissions`) ends them
+        // at this turn's cleanup, letting the cards be played throughout the
+        // grantee's next turn (Light Up the Stage class).
+        for p in obj.casting_permissions.iter_mut() {
+            if let CastingPermission::PlayFromExile {
+                duration,
+                granted_to,
+                ..
+            } = p
+            {
+                if *granted_to == active_player
+                    && matches!(
+                        duration,
+                        Duration::UntilEndOfNextTurnOf {
+                            player: PlayerScope::Controller
+                        }
+                    )
+                {
+                    *duration = Duration::UntilEndOfTurn;
+                }
+            }
+        }
+
         obj.casting_permissions.retain(|p| match p {
             CastingPermission::PlayFromExile {
                 duration:
@@ -249,6 +274,24 @@ pub fn prune_end_step_casting_permissions(state: &mut GameState, active_player: 
 /// Also clears `goaded_by` entries for the active player on all battlefield objects,
 /// per CR 701.15a: goad expires at the beginning of the goading player's next turn.
 pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: PlayerId) {
+    // CR 514.2: "until the end of your next turn" effects are *armed* when the
+    // controller's next turn begins — convert them to `UntilEndOfTurn` so the
+    // cleanup-step prune (`prune_end_of_turn_effects`) ends them at THIS turn's
+    // cleanup, persisting through the whole turn. They survive the creation
+    // turn's own cleanup because that turn's untap step already passed before
+    // the effect was created, so this is the controller's *next* turn.
+    for e in state.transient_continuous_effects.iter_mut() {
+        if matches!(
+            e.duration,
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller
+            }
+        ) && e.controller == active_player
+        {
+            e.duration = Duration::UntilEndOfTurn;
+        }
+    }
+
     let before = state.transient_continuous_effects.len();
     state.transient_continuous_effects.retain(|e| {
         !(matches!(
@@ -7883,6 +7926,96 @@ mod tests {
             state.objects[&exiled].casting_permissions.len(),
             3,
             "non-UntilEndOfTurn permissions must survive cleanup"
+        );
+    }
+
+    #[test]
+    fn until_end_of_next_turn_permission_armed_at_untap_expires_at_cleanup() {
+        // CR 514.2: a "until the end of your next turn" play-permission (Light Up
+        // the Stage class) must SURVIVE the grantee's untap step — armed to
+        // UntilEndOfTurn — and expire only at that turn's cleanup, so the exiled
+        // cards are playable throughout the next turn. Contrast
+        // `until_your_next_turn_prune_expires_for_grantee_only`, where
+        // UntilNextTurnOf is removed outright at untap.
+        let mut state = setup();
+        let exiled = make_exiled_card(&mut state, PlayerId(0));
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                granted_to: PlayerId(0),
+                frequency: crate::types::statics::CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+            });
+
+        // Untap step of the grantee's next turn: armed to UntilEndOfTurn, kept.
+        prune_until_next_turn_casting_permissions(&mut state, PlayerId(0));
+        let perms = &state.objects[&exiled].casting_permissions;
+        assert_eq!(
+            perms.len(),
+            1,
+            "permission must survive the untap step (CR 514.2), not be pruned"
+        );
+        assert!(
+            matches!(
+                perms[0],
+                CastingPermission::PlayFromExile {
+                    duration: Duration::UntilEndOfTurn,
+                    ..
+                }
+            ),
+            "permission must be armed to UntilEndOfTurn at untap, got {:?}",
+            perms[0]
+        );
+
+        // Cleanup of that turn: the armed permission now expires.
+        prune_end_of_turn_casting_permissions(&mut state);
+        assert!(
+            state.objects[&exiled].casting_permissions.is_empty(),
+            "armed permission expires at the cleanup of the grantee's next turn"
+        );
+    }
+
+    #[test]
+    fn until_end_of_next_turn_effect_armed_at_untap_expires_at_cleanup() {
+        // CR 514.2: a continuous effect granted "until the end of your next turn"
+        // (Slip Out the Back class) must persist through the controller's next
+        // turn — armed at untap, pruned at that turn's cleanup.
+        let mut state = setup();
+        state.add_transient_continuous_effect(
+            ObjectId(0),
+            PlayerId(0),
+            Duration::UntilEndOfNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            TargetFilter::SelfRef,
+            vec![],
+            None,
+        );
+
+        prune_until_next_turn_effects(&mut state, PlayerId(0));
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "effect must survive the untap step (armed), not be pruned"
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].duration,
+            Duration::UntilEndOfTurn,
+            "effect must be armed to UntilEndOfTurn at untap"
+        );
+
+        prune_end_of_turn_effects(&mut state);
+        assert!(
+            state.transient_continuous_effects.is_empty(),
+            "armed effect expires at the cleanup of the controller's next turn"
         );
     }
 

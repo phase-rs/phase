@@ -773,6 +773,9 @@ fn fmt_duration(d: &Duration) -> String {
         Duration::UntilNextTurnOf { player } => {
             format!("until next turn ({})", fmt_player_scope(player))
         }
+        Duration::UntilEndOfNextTurnOf { player } => {
+            format!("until end of next turn ({})", fmt_player_scope(player))
+        }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
         Duration::UntilNextStepOf { step, player } => {
             format!(

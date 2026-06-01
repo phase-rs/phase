@@ -7184,6 +7184,49 @@ mod tests {
         );
     }
 
+    /// CR 614.1c + CR 614.1d: Thriving land text ("This land enters tapped. As
+    /// it enters, choose a color other than green.") must ENTER TAPPED in
+    /// addition to prompting for the colour. Drives the real PlayLand → ETB
+    /// replacement pipeline (synthesis via `from_oracle_text`) and asserts the
+    /// land is tapped on the battlefield.
+    #[test]
+    fn thriving_grove_enters_tapped_with_color_choice() {
+        use crate::game::scenario::{GameScenario, P0};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let grove = scenario
+            .add_land_to_hand(P0, "Thriving Grove")
+            .from_oracle_text(
+                "This land enters tapped. As it enters, choose a color other than green.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+        }
+        let card_id = runner.state().objects[&grove].card_id;
+
+        runner
+            .act(GameAction::PlayLand {
+                object_id: grove,
+                card_id,
+            })
+            .unwrap();
+
+        assert!(
+            runner.state().battlefield.contains(&grove),
+            "Thriving Grove must be on the battlefield after PlayLand"
+        );
+        assert!(
+            runner.state().objects[&grove].tapped,
+            "issue #1581: Thriving Grove must ENTER TAPPED (enter_tapped replacement \
+             applied), not just resolve the colour choice"
+        );
+    }
+
     #[test]
     fn apply_play_land_rejects_non_main_phase() {
         let mut state = setup_game_at_main_phase();

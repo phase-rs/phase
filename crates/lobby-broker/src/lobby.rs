@@ -179,11 +179,7 @@ impl LobbyManager {
         let reservation = LobbyReservation {
             token: token.clone(),
             display_name,
-            expires_at_ms: if meta.has_password {
-                None
-            } else {
-                Some(now + PUBLIC_SEAT_RESERVATION_MS)
-            },
+            expires_at_ms: Some(now + PUBLIC_SEAT_RESERVATION_MS),
         };
         meta.reservations.insert(token, reservation.clone());
         Ok(reservation)
@@ -879,8 +875,9 @@ mod tests {
     }
 
     #[test]
-    fn password_protected_reservation_never_expires() {
+    fn password_protected_reservation_expires() {
         let env = FakeEnv::new();
+        env.set_now_ms(5_000);
         let mut lobby = LobbyManager::new();
         lobby.register_game(
             "GAME01",
@@ -897,7 +894,7 @@ mod tests {
         let res = lobby
             .reserve_seat("GAME01", "Bob".to_string(), &env)
             .expect("seat reserved");
-        assert_eq!(res.expires_at_ms, None);
+        assert_eq!(res.expires_at_ms, Some(5_000 + PUBLIC_SEAT_RESERVATION_MS));
     }
 
     #[test]
