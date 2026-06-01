@@ -9,10 +9,9 @@ use crate::game::zones;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Comparator,
     ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectError,
-    EffectKind, FilterProp, GainLifePlayer, ManaContribution, ManaProduction, PlayerFilter,
-    PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter,
+    EffectKind, FilterProp, ManaContribution, ManaProduction, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, ResolvedAbility, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -1564,7 +1563,7 @@ fn food_ability() -> AbilityDefinition {
         AbilityKind::Activated,
         Effect::GainLife {
             amount: QuantityExpr::Fixed { value: 3 },
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         },
     )
     .cost(AbilityCost::Composite {

@@ -11599,6 +11599,53 @@ mod tests {
         }
     }
 
+    /// Issue #1585 — Pantlaza, Sun-Favored: "Whenever Pantlaza or another
+    /// Dinosaur you control enters, you may discover X, where X is that
+    /// creature's toughness. Do this only once each turn." The trigger must be
+    /// an ETB (`ChangesZone` → Battlefield), constrained to once per turn, and
+    /// its execute must be a `Discover` whose limit binds to the *entering*
+    /// creature's toughness — NOT a `Variable("X")` placeholder, which resolves
+    /// to 0 at runtime and makes discover a silent no-op ("did not discover").
+    #[test]
+    fn trigger_pantlaza_etb_discover_x_is_entering_creature_toughness() {
+        let def = parse_trigger_line(
+            "Whenever Pantlaza or another Dinosaur you control enters, you may \
+             discover X, where X is that creature's toughness. Do this only \
+             once each turn. (Exile cards from the top of your library until \
+             you exile a nonland card with that mana value or less. Cast it \
+             without paying its mana cost or put it into your hand. Put the \
+             rest on the bottom in a random order.)",
+            "Pantlaza, Sun-Favored",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.constraint,
+            Some(crate::types::ability::TriggerConstraint::OncePerTurn),
+            "\"Do this only once each turn\" must map to OncePerTurn",
+        );
+
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("trigger should have execute step");
+        match execute.effect.as_ref() {
+            Effect::Discover { mana_value_limit } => {
+                assert!(
+                    matches!(
+                        mana_value_limit,
+                        QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::Toughness { .. }
+                        }
+                    ),
+                    "discover X must bind to the entering creature's toughness, \
+                     not a Variable placeholder (got {mana_value_limit:?})",
+                );
+            }
+            other => panic!("Expected Discover, got {other:?}"),
+        }
+    }
+
     #[test]
     fn trigger_battalion() {
         let def = parse_trigger_line(
@@ -14935,7 +14982,7 @@ mod tests {
                 // subject by a post-hoc `player_scope` override.
                 assert_eq!(
                     player,
-                    &crate::types::ability::GainLifePlayer::Controller,
+                    &crate::types::ability::TargetFilter::Controller,
                     "Exquisite Blood: 'you gain' recipient must be the ability controller"
                 );
             }
@@ -23020,6 +23067,95 @@ mod tests {
                 )),
                 "gate for {keyword:?} must check WithKeyword({keyword:?}), props: {:?}",
                 tf.properties
+            );
+        }
+    }
+
+    /// Issue #1592 — Odric, Lunarch Marshal's CURRENT (post-errata) Oracle text:
+    /// the trigger is now "At the beginning of each combat" and the
+    /// "same is true for" list gained `skulk` (13 keywords total). Each grant
+    /// must still be an `IsPresent`-gated `StaticDefinition` (gated on a creature
+    /// you control having that keyword) — NOT an unconditional grant of every
+    /// keyword. This guards the runtime symptom reported in #1592 ("it's getting
+    /// all of the abilities") against the current card text.
+    #[test]
+    fn parse_odric_current_errata_text_gates_all_thirteen_keywords() {
+        use crate::types::keywords::Keyword;
+
+        let def = parse_trigger_line(
+            "At the beginning of each combat, creatures you control gain first \
+             strike until end of turn if a creature you control has first strike. \
+             The same is true for flying, deathtouch, double strike, haste, \
+             hexproof, indestructible, lifelink, menace, reach, skulk, trample, \
+             and vigilance.",
+            "Odric, Lunarch Marshal",
+        );
+        let execute = def.execute.expect("Odric trigger must have an execute");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*execute.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", execute.effect);
+        };
+        // First strike + 12 "same is true for" keywords = 13 definitions.
+        assert_eq!(
+            static_abilities.len(),
+            13,
+            "expected 13 conditioned StaticDefinitions, got {}",
+            static_abilities.len()
+        );
+        assert!(
+            execute.sub_ability.is_none(),
+            "the 'same is true for' sentence must fold into static_abilities"
+        );
+
+        let expected = [
+            Keyword::FirstStrike,
+            Keyword::Flying,
+            Keyword::Deathtouch,
+            Keyword::DoubleStrike,
+            Keyword::Haste,
+            Keyword::Hexproof,
+            Keyword::Indestructible,
+            Keyword::Lifelink,
+            Keyword::Menace,
+            Keyword::Reach,
+            Keyword::Skulk,
+            Keyword::Trample,
+            Keyword::Vigilance,
+        ];
+        for (sdef, keyword) in static_abilities.iter().zip(expected.iter()) {
+            // Grant: one AddKeyword for this keyword.
+            assert!(
+                sdef.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword { keyword: k } if k == keyword
+                )),
+                "static def must grant {keyword:?}, mods: {:?}",
+                sdef.modifications
+            );
+            // Gate: IsPresent of a creature YOU CONTROL with the SAME keyword.
+            let Some(crate::types::ability::StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            }) = &sdef.condition
+            else {
+                panic!(
+                    "static def for {keyword:?} must be IsPresent-gated, got {:?}",
+                    sdef.condition
+                );
+            };
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::WithKeyword { value } if value == keyword
+                )),
+                "gate for {keyword:?} must check WithKeyword({keyword:?}), props: {:?}",
+                tf.properties
+            );
+            assert_eq!(
+                tf.controller,
+                Some(crate::types::ability::ControllerRef::You),
+                "gate for {keyword:?} must be scoped to creatures you control"
             );
         }
     }

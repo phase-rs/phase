@@ -14,7 +14,12 @@ class ResizeObserverMock {
   unobserve(): void {}
 }
 
-function makeCard(name: string, typeLine: string, cmc = 0): ScryfallCard {
+function makeCard(
+  name: string,
+  typeLine: string,
+  cmc = 0,
+  oracleText?: string,
+): ScryfallCard {
   return {
     id: name.toLowerCase(),
     name,
@@ -23,6 +28,7 @@ function makeCard(name: string, typeLine: string, cmc = 0): ScryfallCard {
     type_line: typeLine,
     color_identity: [],
     legalities: {},
+    oracle_text: oracleText,
   };
 }
 
@@ -159,6 +165,62 @@ describe("DeckStack", () => {
     expectDocumentOrder(angelTile, banishingTile);
     expectDocumentOrder(banishingTile, leylineTile);
     expectDocumentOrder(banishingTile, plainsTile);
+  });
+
+  it("keeps the add button enabled past 4 copies for 'any number' cards (CR 100.2a)", () => {
+    // Regression for #1494: Relentless Rats / Rat Colony override the 4-copy
+    // deck construction limit per CR 100.2a. The stack tile's + button must
+    // stay enabled even when the count is at or above the normal limit.
+    render(
+      <DeckStack
+        deck={{
+          main: [{ name: "Relentless Rats", count: 5 }],
+          sideboard: [],
+        }}
+        commanders={[]}
+        cardDataCache={
+          new Map([
+            [
+              "Relentless Rats",
+              makeCard(
+                "Relentless Rats",
+                "Creature — Rat",
+                3,
+                "Relentless Rats's power and toughness are each equal to the number of creatures named Relentless Rats you control.\nA deck can have any number of cards named Relentless Rats.",
+              ),
+            ],
+          ])
+        }
+        onAddCard={vi.fn()}
+        onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
+        onRemoveCommander={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTitle("Add one Relentless Rats")).toBeEnabled();
+  });
+
+  it("disables the add button at 1 copy for singleton formats", () => {
+    render(
+      <DeckStack
+        deck={{
+          main: [{ name: "Sol Ring", count: 1 }],
+          sideboard: [],
+        }}
+        commanders={[]}
+        cardDataCache={
+          new Map([["Sol Ring", makeCard("Sol Ring", "Artifact", 1)]])
+        }
+        format="Commander"
+        onAddCard={vi.fn()}
+        onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
+        onRemoveCommander={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTitle("Sol Ring is at the copy limit")).toBeDisabled();
   });
 
   it("moves a second-section card back to the main deck via its move button", () => {

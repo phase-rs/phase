@@ -164,8 +164,17 @@ impl AbilityCost {
                 filter,
             } => {
                 if matches!(filter, Some(TargetFilter::SelfRef)) {
-                    let zone = zone.unwrap_or(Zone::Hand);
-                    return state.objects.get(&source).is_some_and(|o| o.zone == zone);
+                    // CR 118.3 + CR 602.1a: "Exile this <self>" as an
+                    // activation cost needs the source available to pay that
+                    // cost. An explicit zone ("from your graveyard/hand")
+                    // gates payability on that zone; a missing zone means the
+                    // source's current zone — the ability is only active where
+                    // the source functions (e.g. a land's "Exile this land"
+                    // is paid from the battlefield), NOT the hand.
+                    return match zone {
+                        Some(z) => state.objects.get(&source).is_some_and(|o| o.zone == *z),
+                        None => state.objects.contains_key(&source),
+                    };
                 }
                 let zone = exile_cost_effective_zone(*zone, filter.as_ref());
                 eligible_exile_cost_objects(state, player, source, zone, filter.as_ref(), *count)
@@ -581,6 +590,40 @@ mod tests {
             amount: QuantityExpr::Fixed { value: 4 }
         }
         .is_payable(&state, P0, ObjectId(0)));
+    }
+
+    /// CR 118.3 + CR 602.1a: a self-exile cost with no explicit zone ("Exile
+    /// this land") is paid from the source's current zone — the battlefield —
+    /// not the hand. This previously defaulted to `Zone::Hand`, so a
+    /// permanent's "Exile this <self>" activated-ability cost was wrongly
+    /// reported unpayable from play.
+    #[test]
+    fn self_exile_cost_without_zone_payable_from_battlefield() {
+        let mut scenario = GameScenario::new();
+        let src = scenario.add_creature(P0, "Ominous Cemetery", 0, 0).id();
+        let self_exile = AbilityCost::Exile {
+            count: 1,
+            zone: None,
+            filter: Some(TargetFilter::SelfRef),
+        };
+        assert!(
+            self_exile.is_payable(&scenario.state, P0, src),
+            "self-exile cost with no zone must be payable from the battlefield"
+        );
+        // Within the Ominous Cemetery composite ({5}, {T}, Exile this land) the
+        // exile component stays payable.
+        assert!(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, self_exile],
+        }
+        .is_payable(&scenario.state, P0, src));
+        // An EXPLICIT zone still gates: a battlefield source cannot pay a
+        // "from your graveyard" self-exile cost (Scavenge class).
+        assert!(!AbilityCost::Exile {
+            count: 1,
+            zone: Some(Zone::Graveyard),
+            filter: Some(TargetFilter::SelfRef),
+        }
+        .is_payable(&scenario.state, P0, src));
     }
 
     /// CR 601.2b: Standalone TapCreatures (no {T}) includes the source itself

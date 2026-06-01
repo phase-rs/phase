@@ -7529,16 +7529,22 @@ fn pay_ability_cost_inner(
         // any zone) are still handled by the catch-all below.
         AbilityCost::Exile {
             filter: Some(TargetFilter::SelfRef),
-            zone: Some(z),
+            zone,
             count: 1,
         } => {
             let obj = state.objects.get(&source_id).ok_or_else(|| {
                 EngineError::InvalidAction("Source object not found for exile cost".to_string())
             })?;
-            if obj.zone != *z {
-                return Err(EngineError::ActionNotAllowed(format!(
-                    "Cannot exile self for cost: source is not in {z:?}"
-                )));
+            // CR 118.3 + CR 602.2b: an explicit zone validates the source's
+            // location during cost payment; a missing zone exiles the source
+            // from whatever zone it is currently in (e.g. a land's "Exile this
+            // land" paid from the battlefield).
+            if let Some(z) = zone {
+                if obj.zone != *z {
+                    return Err(EngineError::ActionNotAllowed(format!(
+                        "Cannot exile self for cost: source is not in {z:?}"
+                    )));
+                }
             }
             super::zones::move_to_zone(state, source_id, Zone::Exile, events);
         }
@@ -9647,8 +9653,8 @@ mod tests {
         AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
         BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
         ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
-        CostCategory, FilterProp, GainLifePlayer, GameRestriction, KickerVariant, ManaContribution,
-        ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
+        CostCategory, FilterProp, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
+        ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
         ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtValue,
         QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
         SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
@@ -10982,6 +10988,44 @@ mod tests {
     }
 
     #[test]
+    fn composite_tap_self_exile_activation_moves_battlefield_source_to_exile() {
+        let mut state = setup_game_at_main_phase();
+        let source_cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: None,
+                    filter: Some(TargetFilter::SelfRef),
+                },
+            ],
+        };
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            source_cost,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+
+        assert!(can_activate_ability_now(&state, PlayerId(0), source, 1));
+
+        let mut events = Vec::new();
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 1, &mut events).unwrap();
+
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects[&source].zone, Zone::Exile);
+        assert_eq!(state.stack.len(), 1);
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == source),
+            "activation should reach the stack after the source exiles itself"
+        );
+    }
+
+    #[test]
     fn activated_sacrifice_cost_resumes_to_effect_target_selection() {
         let mut state = setup_game_at_main_phase();
         let source = create_object(
@@ -12053,7 +12097,7 @@ mod tests {
                         amount: QuantityExpr::Ref {
                             qty: QuantityRef::PreviousEffectAmount,
                         },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 )),
             );
@@ -14379,7 +14423,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 3 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 )
                 .cost(AbilityCost::Composite {
@@ -14529,7 +14573,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 )
                 .cost(AbilityCost::Mana {
@@ -16624,6 +16668,82 @@ mod tests {
         assert!(!spell_objects_available_to_cast(&state, PlayerId(0)).contains(&obj_id));
     }
 
+    /// CR 601.2a + issue #1583 — Evelyn's permission is "Once each turn." After
+    /// the player has already played a collection-counter card this turn
+    /// (Evelyn's once-per-turn slot recorded in `exile_play_permissions_used`),
+    /// a second such card — even one owned by an opponent — is no longer
+    /// castable this turn, because `live_collection_counter_play_permission_source`
+    /// skips a used source. The card becomes castable again once the slot frees.
+    #[test]
+    fn collection_counter_play_permission_is_once_per_turn() {
+        let mut state = setup_game_at_main_phase();
+        let source = create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(0),
+            "Evelyn, the Covetous".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::Other(
+                "LinkedCollectionCounterPlayPermission".to_string(),
+            )));
+
+        // An opponent-owned (PlayerId(1)) exiled spell with a collection counter,
+        // exiled by an ability PlayerId(0) controlled — the reported scenario.
+        let exiled = create_object(
+            &mut state,
+            CardId(41),
+            PlayerId(1),
+            "Opponent Exiled Sorcery".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&exiled).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.counters.insert(
+                crate::types::counter::CounterType::Generic("collection".to_string()),
+                1,
+            );
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.casting_permissions
+                .push(CastingPermission::PlayFromExile {
+                    duration: Duration::Permanent,
+                    granted_to: PlayerId(0),
+                    frequency: CastFrequency::OncePerTurn,
+                    source_id: Some(source),
+                    exiled_by_ability_controller: Some(PlayerId(0)),
+                    mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
+                });
+        }
+
+        // Castable before Evelyn's once-per-turn slot is consumed.
+        assert!(spell_objects_available_to_cast(&state, PlayerId(0)).contains(&exiled));
+
+        // CR 601.2a: simulate having already played a collection-counter card
+        // this turn — Evelyn's source slot is recorded as used.
+        state.exile_play_permissions_used.insert(source);
+        assert!(
+            !spell_objects_available_to_cast(&state, PlayerId(0)).contains(&exiled),
+            "second collection-counter card must not be castable once the \
+             once-per-turn permission source is used"
+        );
+
+        // Freeing the slot (e.g. at the next turn's cleanup) re-enables it.
+        state.exile_play_permissions_used.remove(&source);
+        assert!(spell_objects_available_to_cast(&state, PlayerId(0)).contains(&exiled));
+    }
+
     #[test]
     fn activated_ability_with_target_defers_cost_until_target_selection() {
         let mut state = setup_game_at_main_phase();
@@ -17747,6 +17867,84 @@ mod tests {
         assert_eq!(obj.colors_spent_to_cast.distinct_colors(), 0);
     }
 
+    /// Issue #1589 — "cannot activate the convoke ability." The frontend
+    /// dispatches convoke taps from the engine's per-object legal-action surface
+    /// (`legal_actions_full`'s `legal_actions_by_object`, NOT the flat list,
+    /// which omits mana actions). After casting a Convoke spell the engine is in
+    /// `ManaPayment { convoke_mode: Some(Convoke) }`, and every convoke-eligible
+    /// creature you control MUST appear there with a `TapForConvoke` action —
+    /// otherwise the player has no UI affordance to activate convoke.
+    #[test]
+    fn convoke_creature_exposed_in_legal_actions_during_payment() {
+        let mut state = setup_game_at_main_phase();
+
+        let helper = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(0),
+            "Helper".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&helper).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(62),
+            PlayerId(0),
+            "Convoke Creature".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Convoke);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Creature".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(62),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(ConvokeMode::Convoke),
+                ..
+            }
+        ));
+
+        // The per-object legal-action surface the frontend renders against must
+        // offer the convoke creature a TapForConvoke action.
+        let (_flat, _costs, grouped) = crate::ai_support::legal_actions_full(&state);
+        let helper_actions = grouped.get(&helper).cloned().unwrap_or_default();
+        assert!(
+            helper_actions.iter().any(|action| matches!(
+                action,
+                GameAction::TapForConvoke { object_id, .. } if *object_id == helper
+            )),
+            "legal_actions_full must expose TapForConvoke for the convoke-eligible \
+             creature during ManaPayment, got {helper_actions:?}"
+        );
+    }
+
     #[test]
     fn cancel_cast_after_convoke_removes_payment_marker_and_untaps_creature() {
         use crate::game::engine::apply_as_current;
@@ -18649,7 +18847,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -20530,7 +20728,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
             )],
             trigger_definitions: Default::default(),
