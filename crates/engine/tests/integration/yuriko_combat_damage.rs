@@ -182,6 +182,17 @@ fn yuriko_attacks_loses_opponent_life_equal_to_revealed_card_mana_value() {
 ///
 /// The 16-vs-14 gap proves the chained life-loss reads the revealed card's
 /// CMC and not the attacker's, even when the attacker is not Yuriko herself.
+///
+/// CR 603.3b: Ingenious Infiltrator carries its *own* combat-damage trigger
+/// ("...draw a card"). Both same-controller triggers fire and P0 orders them;
+/// whichever resolves first consumes the top of the library. The library is
+/// therefore seeded with TWO mana-value-2 cards (Counterspell + Negate) so
+/// that Infiltrator's draw and Yuriko's reveal each take a distinct CMC-2 card
+/// regardless of resolution order — Yuriko's reveal always yields mana value 2.
+/// A single library card would let the draw steal it, leaving Yuriko's reveal
+/// empty (no anaphoric referent) and falling through to the trigger-event
+/// source (the attacker, CMC 4) — the 14 bug-value masquerading as a fix
+/// failure.
 #[test]
 fn another_ninja_attacks_yuriko_still_reads_revealed_card_mana_value() {
     let Some(db) = load_db() else {
@@ -191,8 +202,11 @@ fn another_ninja_attacks_yuriko_still_reads_revealed_card_mana_value() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let _yuriko = scenario.add_real_card(P0, "Yuriko, the Tiger's Shadow", Zone::Battlefield, db);
-    // Counterspell is {U}{U} — mana value 2, distinct from Yuriko's 3.
+    // Counterspell {U}{U} and Negate {1}{U} are both mana value 2, distinct
+    // from Yuriko's 3 and Infiltrator's 4. Two cards so Infiltrator's own
+    // "draw a card" trigger and Yuriko's reveal each take a CMC-2 card.
     let revealed = scenario.add_real_card(P0, "Counterspell", Zone::Library, db);
+    let _drawn = scenario.add_real_card(P0, "Negate", Zone::Library, db);
     // Attacker — also a real Ninja so it matches the trigger condition
     // ("Whenever a Ninja you control deals combat damage to a player").
     // Ingenious Infiltrator is a Vedalken Ninja with mana cost {2}{U}{B}

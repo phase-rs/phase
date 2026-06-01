@@ -1018,7 +1018,7 @@ export type CastOfferKind =
   | { type: "Madness"; object_id: ObjectId; cost: ManaCost }
   | { type: "Paradigm"; offers: ObjectId[] }
   | { type: "Cascade"; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number }
-  | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[] };
+  | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[]; discover_value: number };
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }

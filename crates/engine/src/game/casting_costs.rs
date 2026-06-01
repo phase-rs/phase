@@ -174,14 +174,19 @@ pub(crate) fn handle_decide_additional_cost(
         }
         AdditionalCost::Choice(preferred, fallback) => {
             if pay {
-                if state
+                let is_card_additional_cost_choice = state
                     .objects
                     .get(&pending.object_id)
                     .and_then(|obj| obj.additional_cost.as_ref())
-                    .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
-                {
+                    .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)));
+                if is_card_additional_cost_choice {
+                    // CR 601.2b: Optional/additional `Choice` costs (e.g. casualty).
                     ability.context.additional_cost_paid = true;
                     ability.context.additional_cost_payment_count = 1;
+                } else if matches!(preferred, AbilityCost::Mana { .. }) {
+                    // CR 118.9: Spellcasting-option alternative mana costs are not
+                    // additional costs; gate riders via `alternative_mana_cost_paid`.
+                    ability.context.alternative_mana_cost_paid = true;
                 }
                 Some(preferred.clone())
             } else {
@@ -3104,8 +3109,18 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         ) {
             CascadeCheck::NotApplicable => false,
             CascadeCheck::Accepted => true,
-            CascadeCheck::Rejected { exiled_misses } => {
-                return handle_cascade_rejection(state, player, object_id, exiled_misses, events);
+            CascadeCheck::Rejected {
+                exiled_misses,
+                reject_action,
+            } => {
+                return handle_resolution_cast_rejection(
+                    state,
+                    player,
+                    object_id,
+                    exiled_misses,
+                    reject_action,
+                    events,
+                );
             }
         };
         if !cascade_accepted
@@ -3454,32 +3469,41 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     Ok(WaitingFor::Priority { player })
 }
 
-/// CR 702.85a: Outcome of evaluating a cascade cast-time constraint.
+/// CR 608.2g: Outcome of evaluating a cast-during-resolution constraint
+/// (Cascade CR 702.85a / Discover CR 701.57a).
 enum CascadeCheck {
-    /// No cascade constraint on this object — the cast proceeds normally.
+    /// No cast-during-resolution permission on this object — the cast proceeds
+    /// normally (or via a plain standing `ManaValue` permission).
     NotApplicable,
-    /// The constraint passed (resulting MV < source MV). The cast proceeds;
-    /// the misses have already been bottom-shuffled as a side effect.
+    /// The constraint passed (Cascade: resulting MV < source MV; Discover:
+    /// resulting MV <= N). The cast proceeds; the misses have already been
+    /// bottom-shuffled as a side effect.
     Accepted,
-    /// The constraint failed (resulting MV >= source MV). The cast must be
-    /// aborted; the caller should unwind the announcement stack entry and
-    /// route through `handle_cascade_rejection`.
-    Rejected { exiled_misses: Vec<ObjectId> },
+    /// The constraint failed. The cast must be aborted; the caller should
+    /// unwind the announcement stack entry and route through
+    /// `handle_resolution_cast_rejection`, which sends the hit to its
+    /// `reject_action` destination.
+    Rejected {
+        exiled_misses: Vec<ObjectId>,
+        reject_action: crate::types::ability::ResolutionMvRejectAction,
+    },
 }
 
-/// CR 702.85a: Inspect the casting object's `ExileWithAltCost` permissions for
-/// a cascade constraint and evaluate it against the resulting spell's mana
-/// value. Consumes the matched cascade permission (only); other permissions
-/// with `constraint: None` (Suspend, Airbending, Discover, ...) are untouched.
+/// CR 608.2g: Inspect the casting object's `ExileWithAltCost` permissions for a
+/// cast-during-resolution permission (Cascade / Discover) and evaluate its
+/// resulting-MV constraint. Identified by `resolution_cleanup.is_some()`, which
+/// distinguishes it from plain standing `ManaValue`-constrained permissions
+/// (Maralen, Beseech) that carry `constraint: Some(ManaValue)` but
+/// `resolution_cleanup: None` and stay on the existing fallback path. Consumes
+/// the matched permission only; all other permissions are untouched.
 ///
 /// On acceptance, bottom-shuffles the exiled misses here so both accept paths
 /// (plain free cast + X-cost cast) share a single cleanup point.
 ///
-/// `resulting_mv` is the resulting spell's mana value as seen by CR 702.85a's
-/// "resulting spell's mana value" comparison — i.e. printed `mana_cost.mana_value()`
-/// plus the chosen X. Caller is responsible for synthesizing this because X is
-/// known at announcement time but `obj.cost_x_paid` is not stamped until after
-/// mana payment.
+/// `resulting_mv` is the resulting spell's mana value — printed
+/// `mana_cost.mana_value()` plus the chosen X. Caller synthesizes this because
+/// X is known at announcement time but `obj.cost_x_paid` is not stamped until
+/// after mana payment.
 fn evaluate_cascade_constraint_with_resulting_mv(
     state: &mut GameState,
     object_id: ObjectId,
@@ -3487,7 +3511,7 @@ fn evaluate_cascade_constraint_with_resulting_mv(
     resulting_mv: u32,
     events: &mut Vec<GameEvent>,
 ) -> CascadeCheck {
-    use crate::types::ability::{CastPermissionConstraint, CastingPermission};
+    use crate::types::ability::CastingPermission;
 
     let index = match state.objects.get(&object_id) {
         Some(obj) => {
@@ -3496,9 +3520,11 @@ fn evaluate_cascade_constraint_with_resulting_mv(
             }) else {
                 return CascadeCheck::NotApplicable;
             };
+            // CR 608.2g: only cast-during-resolution permissions carry
+            // `resolution_cleanup`; standing ManaValue permissions do not.
             match obj.casting_permissions.get(index) {
                 Some(CastingPermission::ExileWithAltCost {
-                    constraint: Some(CastPermissionConstraint::CascadeResultingMvBelow { .. }),
+                    resolution_cleanup: Some(_),
                     ..
                 }) => Some(index),
                 _ => None,
@@ -3517,38 +3543,51 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         .expect("object present above")
         .casting_permissions
         .remove(index);
-    let (source_mv, exiled_misses) = match permission {
+    let (constraint, exiled_misses, reject_action) = match permission {
         CastingPermission::ExileWithAltCost {
-            constraint:
-                Some(CastPermissionConstraint::CascadeResultingMvBelow {
-                    source_mv,
-                    exiled_misses,
-                }),
+            constraint,
+            resolution_cleanup: Some(cleanup),
             ..
-        } => (source_mv, exiled_misses),
+        } => (constraint, cleanup.exiled_misses, cleanup.reject_action),
         _ => unreachable!("position() already filtered to this variant"),
     };
 
-    if resulting_mv < source_mv {
+    // CR 702.85a / CR 701.57a: evaluate the resulting-MV gate carried on the
+    // permission (`< source_mv` for Cascade, `<= N` for Discover).
+    let obj = state.objects.get(&object_id).expect("object present above");
+    let accepted = super::casting::cast_permission_constraint_allows_cast(
+        state,
+        obj,
+        &constraint,
+        Some(resulting_mv),
+    );
+
+    if accepted {
         // CR 702.85a: "cards exiled this way that weren't cast" — the hit is
         // being cast, so only the misses bottom-shuffle.
         crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
         CascadeCheck::Accepted
     } else {
-        CascadeCheck::Rejected { exiled_misses }
+        CascadeCheck::Rejected {
+            exiled_misses,
+            reject_action,
+        }
     }
 }
 
-/// CR 702.85a: Unwind a cascade-rejected cast — remove the announcement-time
-/// stack entry, bottom-shuffle the misses + hit card together in a random
-/// order, and return priority to the caster.
-fn handle_cascade_rejection(
+/// CR 608.2g: Unwind a cast-during-resolution-rejected cast — remove the
+/// announcement-time stack entry, dispose of the hit + misses per
+/// `reject_action`, and return priority to the caster.
+fn handle_resolution_cast_rejection(
     state: &mut GameState,
     player: PlayerId,
     object_id: ObjectId,
     exiled_misses: Vec<ObjectId>,
+    reject_action: crate::types::ability::ResolutionMvRejectAction,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    use crate::types::ability::ResolutionMvRejectAction;
+
     // CR 601.2a: Remove the announcement-time stack entry. The spell never
     // finishes entering the stack because we abort before the Hand→Stack
     // zone move in `finalize_cast_with_phyrexian_choices`.
@@ -3556,11 +3595,21 @@ fn handle_cascade_rejection(
         state.stack.remove(pos);
     }
 
-    // CR 702.85a: Misses + the hit (declined at cast time) all bottom-shuffle
-    // together in a random order.
-    let mut all_to_bottom = exiled_misses;
-    all_to_bottom.push(object_id);
-    crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
+    match reject_action {
+        // CR 702.85a: Cascade — misses + the hit (declined at cast time) all
+        // bottom-shuffle together in a random order.
+        ResolutionMvRejectAction::BottomWithMisses => {
+            let mut all_to_bottom = exiled_misses;
+            all_to_bottom.push(object_id);
+            crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
+        }
+        // CR 701.57a: Discover — the misses go to the library bottom in a
+        // random order; the hit goes to its owner's hand.
+        ResolutionMvRejectAction::ToHand => {
+            crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
+            super::zones::move_to_zone(state, object_id, Zone::Hand, events);
+        }
+    }
 
     // CR 601.2a: Priority returns to the would-be caster.
     state.priority_passes.clear();
@@ -7825,7 +7874,10 @@ mod tests {
 
     mod cascade_constraint {
         use super::*;
-        use crate::types::ability::{CastPermissionConstraint, CastingPermission, Comparator};
+        use crate::types::ability::{
+            CastPermissionConstraint, CastingPermission, Comparator, QuantityExpr,
+            ResolutionCastCleanup, ResolutionMvRejectAction,
+        };
         use crate::types::mana::{ManaCostShard, ManaType, ManaUnit};
 
         fn exile_card(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
@@ -7849,11 +7901,17 @@ mod tests {
                 .push(CastingPermission::ExileWithAltCost {
                     cost: ManaCost::zero(),
                     cast_transformed: false,
-                    constraint: Some(CastPermissionConstraint::CascadeResultingMvBelow {
-                        source_mv,
-                        exiled_misses: vec![miss_a, miss_b],
+                    constraint: Some(CastPermissionConstraint::ManaValue {
+                        comparator: Comparator::LT,
+                        value: QuantityExpr::Fixed {
+                            value: source_mv as i32,
+                        },
                     }),
                     granted_to: None,
+                    resolution_cleanup: Some(ResolutionCastCleanup {
+                        exiled_misses: vec![miss_a, miss_b],
+                        reject_action: ResolutionMvRejectAction::BottomWithMisses,
+                    }),
                 });
 
             (state, hit, vec![miss_a, miss_b])
@@ -7939,6 +7997,7 @@ mod tests {
                         value: QuantityExpr::Fixed { value: 2 },
                     }),
                     granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -7989,6 +8048,7 @@ mod tests {
                         value: QuantityExpr::Fixed { value: 4 },
                     }),
                     granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: None,
                 });
             hit_obj
                 .casting_permissions
@@ -7997,6 +8057,7 @@ mod tests {
                     cast_transformed: false,
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -8039,6 +8100,7 @@ mod tests {
                     cast_transformed: false,
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: None,
                 });
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
@@ -8100,17 +8162,22 @@ mod tests {
                         value: QuantityExpr::Fixed { value: 4 },
                     }),
                     granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: None,
                 });
             hit_obj
                 .casting_permissions
                 .push(CastingPermission::ExileWithAltCost {
                     cost: ManaCost::zero(),
                     cast_transformed: false,
-                    constraint: Some(CastPermissionConstraint::CascadeResultingMvBelow {
-                        source_mv: 10,
-                        exiled_misses: vec![miss],
+                    constraint: Some(CastPermissionConstraint::ManaValue {
+                        comparator: Comparator::LT,
+                        value: QuantityExpr::Fixed { value: 10 },
                     }),
                     granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: Some(ResolutionCastCleanup {
+                        exiled_misses: vec![miss],
+                        reject_action: ResolutionMvRejectAction::BottomWithMisses,
+                    }),
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -8152,11 +8219,15 @@ mod tests {
                 .push(CastingPermission::ExileWithAltCost {
                     cost: ManaCost::zero(),
                     cast_transformed: false,
-                    constraint: Some(CastPermissionConstraint::CascadeResultingMvBelow {
-                        source_mv: 1,
-                        exiled_misses: vec![miss],
+                    constraint: Some(CastPermissionConstraint::ManaValue {
+                        comparator: Comparator::LT,
+                        value: QuantityExpr::Fixed { value: 1 },
                     }),
                     granted_to: Some(PlayerId(1)),
+                    resolution_cleanup: Some(ResolutionCastCleanup {
+                        exiled_misses: vec![miss],
+                        reject_action: ResolutionMvRejectAction::BottomWithMisses,
+                    }),
                 });
             hit_obj
                 .casting_permissions
@@ -8165,6 +8236,7 @@ mod tests {
                     cast_transformed: false,
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -8192,16 +8264,19 @@ mod tests {
             assert!(state.stack.iter().any(|entry| entry.id == hit));
         }
 
-        /// CR 702.85a: A fixed-MV 4 hit with source MV 4 is NOT strictly less
-        /// than 4, so the cast is rejected. The permission is still consumed,
-        /// and the returned misses match the original set for the caller to
-        /// bottom-shuffle together with the hit.
+        /// CR 702.85a: A cascade hit whose PRINTED MV (2) is below source MV (4)
+        /// — a legal offer — but whose RESULTING MV reaches 4 (e.g. X chosen so
+        /// printed 2 + X 2 = 4) is NOT strictly less than 4, so the cast is
+        /// rejected. The permission is still consumed, and the returned misses
+        /// match the original set for the caller to bottom-shuffle with the hit.
         #[test]
         fn rejects_when_resulting_mv_equals_source() {
-            let (mut state, hit, misses) = setup_fixed_mv_cascade_hit(4, 4);
+            // Printed MV 2 (< source 4) so the permission is a valid offer at
+            // offer time; the resulting MV of 4 is the post-X value the gate
+            // rejects (4 is not < 4).
+            let (mut state, hit, misses) = setup_fixed_mv_cascade_hit(4, 2);
             let mut events = Vec::new();
-            let resulting_mv = state.objects.get(&hit).unwrap().mana_cost.mana_value()
-                + state.objects.get(&hit).unwrap().cost_x_paid.unwrap_or(0);
+            let resulting_mv = 4;
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
                 &mut state,
                 hit,
@@ -8210,7 +8285,7 @@ mod tests {
                 &mut events,
             );
             match outcome {
-                CascadeCheck::Rejected { exiled_misses } => {
+                CascadeCheck::Rejected { exiled_misses, .. } => {
                     assert_eq!(exiled_misses, misses);
                 }
                 other => panic!("Expected Rejected, got {:?}", matches_name(&other)),
@@ -8231,15 +8306,15 @@ mod tests {
             }
         }
 
-        /// CR 702.85a: A fixed-MV 5 hit with source MV 4 exceeds source, so the
-        /// cast is rejected. Confirms strict inequality is enforced above as
-        /// well as at the equality boundary.
+        /// CR 702.85a: A cascade hit whose PRINTED MV (3) is below source MV (4)
+        /// — a legal offer — but whose RESULTING MV (5, after X) exceeds source,
+        /// is rejected. Confirms strict inequality is enforced above the
+        /// equality boundary as well.
         #[test]
         fn rejects_when_resulting_mv_above_source() {
-            let (mut state, hit, _misses) = setup_fixed_mv_cascade_hit(4, 5);
+            let (mut state, hit, _misses) = setup_fixed_mv_cascade_hit(4, 3);
             let mut events = Vec::new();
-            let resulting_mv = state.objects.get(&hit).unwrap().mana_cost.mana_value()
-                + state.objects.get(&hit).unwrap().cost_x_paid.unwrap_or(0);
+            let resulting_mv = 5;
             let outcome = evaluate_cascade_constraint_with_resulting_mv(
                 &mut state,
                 hit,
@@ -8271,9 +8346,15 @@ mod tests {
             let stack_depth_before = state.stack.len();
 
             let mut events = Vec::new();
-            let waiting_for =
-                handle_cascade_rejection(&mut state, PlayerId(0), hit, misses.clone(), &mut events)
-                    .expect("rejection handler must succeed");
+            let waiting_for = handle_resolution_cast_rejection(
+                &mut state,
+                PlayerId(0),
+                hit,
+                misses.clone(),
+                ResolutionMvRejectAction::BottomWithMisses,
+                &mut events,
+            )
+            .expect("rejection handler must succeed");
 
             assert_eq!(
                 state.stack.len(),

@@ -2058,12 +2058,12 @@ fn parse_counter_added_target(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
         value(
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            alt((
-                tag("creature under your control"),
-                tag("creature you control"),
-                tag("creatures under your control"),
-                tag("creatures you control"),
-            )),
+            // number axis × controller-phrase axis (PATTERNS.md §8b) — "creatures"
+            // before "creature" since alt() is short-circuit.
+            (
+                alt((tag("creatures"), tag("creature"))),
+                alt((tag(" under your control"), tag(" you control"))),
+            ),
         ),
         value(
             TargetFilter::Typed(TypedFilter::creature()),
@@ -2071,12 +2071,10 @@ fn parse_counter_added_target(input: &str) -> OracleResult<'_, TargetFilter> {
         ),
         value(
             TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
-            alt((
-                tag("permanent under your control"),
-                tag("permanent you control"),
-                tag("permanents under your control"),
-                tag("permanents you control"),
-            )),
+            (
+                alt((tag("permanents"), tag("permanent"))),
+                alt((tag(" under your control"), tag(" you control"))),
+            ),
         ),
         value(
             TargetFilter::Typed(TypedFilter::permanent()),

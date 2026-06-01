@@ -1706,6 +1706,12 @@ pub enum CastOfferKind {
     Discover {
         hit_card: ObjectId,
         exiled_misses: Vec<ObjectId>,
+        /// CR 701.57a: "Discover N" — the resulting spell's mana value must be
+        /// less than or equal to N for the cast to proceed. Carried on the
+        /// offer so the cast-during-resolution path can build the `ManaValue`
+        /// gate. `serde(default)` because this is live serialized pause-state.
+        #[serde(default)]
+        discover_value: u32,
     },
 }
 
