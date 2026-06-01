@@ -27552,6 +27552,82 @@ mod tests {
 
     /// CR 702.29e + CR 601.2b: Generous Ent ({5}{G}) with only 2 Forests in play.
     ///
+    /// Issue #1579 — Complicate: "When you cycle this card, …" triggers fire on
+    /// cycling. CR 702.29c: activating a cycling ability now emits a dedicated
+    /// `GameEvent::Cycled` (alongside the `Discarded` cost event), so the
+    /// `TriggerMode::Cycled` trigger matches and goes on the stack.
+    #[test]
+    fn issue_1579_cycling_fires_when_you_cycle_trigger() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::game_state::StackEntryKind;
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let card = scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Test Cycler",
+                2,
+                2,
+                "Cycling {2}\nWhen you cycle this card, draw a card.",
+            )
+            .id();
+        scenario.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 2],
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let cyc_idx = state
+            .objects
+            .get(&card)
+            .unwrap()
+            .abilities
+            .iter()
+            .position(|a| matches!(a.kind, AbilityKind::Activated))
+            .expect("synthesized cycling activated ability");
+
+        let mut events = Vec::new();
+        handle_activate_ability(state, PlayerId(0), card, cyc_idx, &mut events).unwrap();
+
+        // Fix: cycling now emits a Cycled event for the cycled card …
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Cycled { object_id, .. } if *object_id == card)),
+            "cycling must emit a Cycled event"
+        );
+        // … and STILL emits Discarded (so discard / cycle-or-discard triggers
+        // continue to fire exactly once via the Discarded event).
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Discarded { object_id, .. } if *object_id == card)),
+            "cycling must still emit a Discarded event"
+        );
+
+        // The "When you cycle this card" trigger fires and is put on the stack.
+        let stack_before = state.stack.len();
+        crate::game::triggers::process_triggers(state, &events);
+        let trigger_on_stack = state.stack.iter().any(|entry| {
+            matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if source_id == card
+            )
+        });
+        assert!(
+            trigger_on_stack,
+            "issue #1579: the cycling trigger must fire and go on the stack; stack={:?}",
+            state.stack
+        );
+        assert!(state.stack.len() > stack_before);
+    }
+
     /// The creature is uncastable (insufficient mana), but its Forestcycling {1}
     /// activated ability is payable (costs {1} + discard self). Verifies that:
     /// 1. `can_cast_object_now` returns false — the AI must not offer CastSpell.

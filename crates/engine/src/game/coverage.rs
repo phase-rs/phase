@@ -13,9 +13,9 @@ use crate::types::ability::{
     DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal, FilterProp,
     GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
     PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, SharedQuality, SharedQualityRelation, SpeedDelta,
-    SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition, TargetFilter,
-    TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
+    ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation,
+    SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -363,6 +363,10 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
+        TargetFilter::Neighbor { direction } => match direction {
+            SeatDirection::Left => "player to your left".into(),
+            SeatDirection::Right => "player to your right".into(),
+        },
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
         TargetFilter::TrackedSetFiltered { id, filter } => {
             format!("tracked set #{} matching {}", id.0, fmt_target(filter))

@@ -487,6 +487,26 @@ export type CounterMatch =
   | { type: "Any" }
   | { type: "OfType"; data: CounterType };
 
+// ── Chosen Attributes ─────────────────────────────────────────────────────
+
+/**
+ * Persistent choices attached to a permanent by the engine
+ * (`serde(tag = "type", content = "value")`), e.g. "chosen card name".
+ */
+export type ChosenAttribute =
+  | { type: "Color"; value: ManaColor }
+  | { type: "CreatureType"; value: string }
+  | { type: "BasicLandType"; value: string }
+  | { type: "CardType"; value: CoreType }
+  | { type: "OddOrEven"; value: "Odd" | "Even" }
+  | { type: "CardName"; value: string }
+  | { type: "Number"; value: number }
+  | { type: "Player"; value: PlayerId }
+  | { type: "TwoColors"; value: [ManaColor, ManaColor] }
+  | { type: "TributeOutcome"; value: "Paid" | "Declined" }
+  | { type: "Keyword"; value: Keyword }
+  | { type: "Label"; value: string };
+
 export type CounterMoveChoice = {
   destination_id: ObjectId;
   counter_type: CounterType;
@@ -680,6 +700,7 @@ export interface GameObject {
   mana_ability_index?: number;
   is_suspected?: boolean;
   case_state?: { is_solved: boolean; solve_condition: unknown } | null;
+  chosen_attributes?: ChosenAttribute[];
   class_level?: number;
   devotion?: number;
   available_mana_pips?: ManaPip[];
