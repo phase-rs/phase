@@ -28670,6 +28670,33 @@ mod tests {
         assert_eq!(result, "lose 2 life");
     }
 
+    /// CR 508.6 + CR 104.3e: An "[source] attacked this turn" relative clause
+    /// narrows the player set to `OpponentAttackedThisTurn` (Angel of Destiny,
+    /// issue #1599). General over the predicate verb and over the self-ref
+    /// spelling ("this creature" / "~" / "it"). The controller is excluded by
+    /// the scope, so an attack trigger never eliminates its own controller.
+    #[test]
+    fn strip_each_player_subject_attacked_this_turn_clause() {
+        for subject in ["each player", "each opponent"] {
+            for selfref in ["this creature", "~", "it"] {
+                let text = format!("{subject} {selfref} attacked this turn loses the game");
+                let (scope, result) = strip_each_player_subject(&text);
+                assert_eq!(
+                    scope,
+                    Some(PlayerFilter::OpponentAttackedThisTurn),
+                    "scope must narrow to OpponentAttackedThisTurn for {text:?}",
+                );
+                assert_eq!(result, "lose the game", "predicate for {text:?}");
+            }
+        }
+
+        // General over the predicate verb (not just "loses the game").
+        let (scope, result) =
+            strip_each_player_subject("each player this creature attacked this turn loses 2 life");
+        assert_eq!(scope, Some(PlayerFilter::OpponentAttackedThisTurn));
+        assert_eq!(result, "lose 2 life");
+    }
+
     #[test]
     fn strip_each_player_subject_strips_leading_also() {
         // CR 608.2c: Leading "also" continuation adverb after a player scope is

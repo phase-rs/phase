@@ -1568,6 +1568,31 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (Some(controls_scope), deconjugated);
     }
 
+    // CR 508.6 + CR 104.3e: A "[source] attacked this turn" relative clause after
+    // "each player" / "each opponent" restricts the affected set to the players
+    // the source's controller attacked this turn — Angel of Destiny: "each player
+    // this creature attacked this turn loses the game". Resolved as
+    // `OpponentAttackedThisTurn` (backed by `attacked_defenders_this_turn`), which
+    // excludes the controller, so an attack trigger never eliminates its own
+    // controller. Like the "who controls" clause above, the relative clause MUST
+    // be consumed and reflected in the scope; dropping it would over-apply the
+    // loss to every player (the bug behind issue #1599). General over the
+    // predicate verb — "loses the game", "loses N life", etc. all compose.
+    //
+    // Fidelity note: the printed subject is per-creature ("this creature"), but
+    // the engine tracks attacked defenders per attacking player, not per
+    // attacker. Identical in two-player games; in multiplayer this may include an
+    // opponent that a *different* creature the controller controls attacked. No
+    // per-attacker defender ledger exists to tighten this further.
+    let rest_attacked_lower = rest.to_lowercase();
+    if let Some(((), after_clause)) = nom_on_lower(rest, &rest_attacked_lower, |i| {
+        let (i, _) = alt((tag("this creature "), tag("~ "), tag("it "))).parse(i)?;
+        value((), tag("attacked this turn ")).parse(i)
+    }) {
+        let deconjugated = subject::deconjugate_verb(after_clause);
+        return (Some(PlayerFilter::OpponentAttackedThisTurn), deconjugated);
+    }
+
     // Guard: static restriction predicates ("can't", "cannot", "don't", "may only",
     // "may not") belong to the static parser, not the imperative effect pipeline.
     // Intercepting them here would produce Unimplemented instead of typed static modes.
