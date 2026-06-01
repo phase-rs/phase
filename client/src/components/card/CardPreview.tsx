@@ -13,6 +13,7 @@ import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { computePTDisplay, formatCounterType, formatTypeLine, toRoman } from "../../viewmodel/cardProps.ts";
 import {
   getKeywordDisplayText,
@@ -874,10 +875,13 @@ function CardInfoPanel({
             const granted = isGrantedKeyword(kw, obj.base_keywords);
             const source = keywordSources.get(getKeywordName(kw));
             const reminder = getKeywordReminderText(kw);
+            const tooltipId = reminder ? `card-preview-keyword-${obj.id}-${i}` : undefined;
             return (
               <span
                 key={i}
-                className={`group relative cursor-default ${granted ? "text-indigo-300" : "text-white"}`}
+                tabIndex={reminder ? 0 : undefined}
+                aria-describedby={tooltipId}
+                className={`group relative cursor-default rounded-sm focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/60 ${granted ? "text-indigo-300" : "text-white"}`}
               >
                 {getKeywordDisplayText(kw)}
                 {source && (
@@ -886,9 +890,9 @@ function CardInfoPanel({
                   </span>
                 )}
                 {reminder && (
-                  <span className="pointer-events-none absolute left-0 bottom-full z-50 mb-1.5 hidden w-52 rounded border border-white/10 bg-slate-950/95 px-2.5 py-1.5 text-[10px] leading-snug font-normal text-slate-200 shadow-xl backdrop-blur-md group-hover:block">
+                  <GameplayTooltip id={tooltipId} className="right-auto left-0 mb-1.5 w-52 px-2.5 py-1.5 text-[10px] font-normal text-slate-200 shadow-xl">
                     {reminder}
-                  </span>
+                  </GameplayTooltip>
                 )}
               </span>
             );
