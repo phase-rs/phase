@@ -76,6 +76,7 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
 
     fn deck(main: &[&str], sideboard: &[&str], commander: &[&str]) -> DeckData {
         fn v(s: &[&str]) -> Vec<String> {
@@ -87,6 +88,37 @@ mod tests {
             commander: v(commander),
             bracket_tier: Default::default(),
         }
+    }
+
+    fn card(name: &str) -> Value {
+        json!({
+            "name": name,
+            "mana_cost": { "type": "Cost", "shards": [], "generic": 0 },
+            "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+            "power": null,
+            "toughness": null,
+            "loyalty": null,
+            "defense": null,
+            "oracle_text": null,
+            "non_ability_text": null,
+            "flavor_name": null,
+            "keywords": [],
+            "abilities": [],
+            "triggers": [],
+            "static_abilities": [],
+            "replacements": [],
+            "color_override": null,
+            "color_identity": [],
+            "scryfall_oracle_id": format!("oracle-{name}"),
+        })
+    }
+
+    fn db_from(names: &[&str]) -> CardDatabase {
+        let entries: serde_json::Map<String, Value> = names
+            .iter()
+            .map(|name| (name.to_lowercase(), card(name)))
+            .collect();
+        CardDatabase::from_json_str(&Value::Object(entries).to_string()).unwrap()
     }
 
     #[test]
@@ -108,6 +140,26 @@ mod tests {
         // not the randomized HashMap iteration order.
         let missing: Vec<&str> = missing.iter().map(String::as_str).collect();
         assert_eq!(missing, ["main:Bolt", "main:Forest", "main:Island"]);
+    }
+
+    #[test]
+    fn resolve_deck_dedups_resolved_entries_in_first_appearance_order() {
+        let db = db_from(&["Forest", "Lightning Bolt", "Shock"]);
+        let payload = resolve_deck(
+            &db,
+            &deck(&["Forest", "Lightning Bolt", "Forest", "Shock"], &[], &[]),
+        )
+        .unwrap();
+
+        let entries: Vec<_> = payload
+            .main_deck
+            .iter()
+            .map(|entry| (entry.card.name.as_str(), entry.count))
+            .collect();
+        assert_eq!(
+            entries,
+            [("Forest", 2), ("Lightning Bolt", 1), ("Shock", 1)]
+        );
     }
 
     #[test]
