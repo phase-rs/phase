@@ -613,6 +613,9 @@ pub(super) fn target_filter_matches_object(
         TargetFilter::ScopedPlayer => false,
         // SpecificPlayer scopes to a player, not an object — never matches an object.
         TargetFilter::SpecificPlayer { .. } => false,
+        // CR 102.1 + CR 103.1: Neighbor scopes to a seating-relative player,
+        // not an object — never matches an object.
+        TargetFilter::Neighbor { .. } => false,
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -2178,29 +2181,30 @@ pub(super) fn match_cycled(
     }
 }
 
-/// CR 702.29d: CycledOrDiscarded — fires on either Cycled or Discarded events.
-/// Per CR 702.29d, triggers only once when a card is cycled (cycling is a form of discarding).
+/// CR 702.29d: CycledOrDiscarded — "Whenever a player cycles or discards a card."
+/// Matches ONLY the `Discarded` event, not `Cycled`: cycling always emits a
+/// `Discarded` event in addition to its `Cycled` event (CR 702.29a — cycling is
+/// "Discard this card …"), so matching `Discarded` alone fires the trigger
+/// exactly once for both plain discards and cycling. Also matching `Cycled`
+/// would double-fire on a cycle, violating CR 702.29d ("These abilities trigger
+/// only once when a card is cycled").
 pub(super) fn match_cycled_or_discarded(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    match event {
-        GameEvent::Cycled {
-            player_id,
-            object_id,
+    if let GameEvent::Discarded {
+        player_id,
+        object_id,
+    } = event
+    {
+        if !valid_player_matches(trigger, state, *player_id, source_id) {
+            return false;
         }
-        | GameEvent::Discarded {
-            player_id,
-            object_id,
-        } => {
-            if !valid_player_matches(trigger, state, *player_id, source_id) {
-                return false;
-            }
-            valid_card_matches(trigger, state, *object_id, source_id)
-        }
-        _ => false,
+        valid_card_matches(trigger, state, *object_id, source_id)
+    } else {
+        false
     }
 }
 
@@ -3589,15 +3593,6 @@ mod tests {
             source,
             &state,
         ));
-        assert!(!match_cycled_or_discarded(
-            &GameEvent::Cycled {
-                player_id: PlayerId(1),
-                object_id: card,
-            },
-            &trigger,
-            source,
-            &state,
-        ));
         assert!(match_cycled(
             &GameEvent::Cycled {
                 player_id: PlayerId(0),
@@ -3607,8 +3602,31 @@ mod tests {
             source,
             &state,
         ));
-        assert!(match_cycled_or_discarded(
+
+        // CR 702.29d: `CycledOrDiscarded` matches the `Discarded` event (which
+        // cycling also emits), NOT the `Cycled` event — so it fires exactly once
+        // per cycle. Opponent-scoped `Discarded` is rejected; controller is
+        // matched; and the `Cycled` event is intentionally NOT matched.
+        assert!(!match_cycled_or_discarded(
             &GameEvent::Cycled {
+                player_id: PlayerId(0),
+                object_id: card,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(!match_cycled_or_discarded(
+            &GameEvent::Discarded {
+                player_id: PlayerId(1),
+                object_id: card,
+            },
+            &trigger,
+            source,
+            &state,
+        ));
+        assert!(match_cycled_or_discarded(
+            &GameEvent::Discarded {
                 player_id: PlayerId(0),
                 object_id: card,
             },

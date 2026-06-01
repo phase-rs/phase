@@ -753,6 +753,14 @@ impl SessionManager {
             .is_some()
     }
 
+    pub fn has_active_reservation(&mut self, game_code: &str, reservation_token: &str) -> bool {
+        let Some(session) = self.sessions.get_mut(game_code) else {
+            return false;
+        };
+        session.cleanup_expired_reservations();
+        session.reservations.contains_key(reservation_token)
+    }
+
     pub fn release_reservations(&mut self, reservations: &[(String, String)]) -> bool {
         let mut changed = false;
         for (game_code, token) in reservations {

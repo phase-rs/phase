@@ -20629,6 +20629,76 @@ mod mdfc_land_tests {
         );
     }
 
+    // CR 712.11b + CR 903.8: A spell//spell Modal DFC commander (Esika, God of
+    // the Tree // The Prismatic Bridge) cast from the command zone must offer the
+    // face choice so the player can put either face on the stack (#1548). The
+    // choice was previously gated to the hand, so only the front face was
+    // castable from the command zone.
+    #[test]
+    fn mdfc_commander_cast_from_command_zone_offers_face_choice() {
+        let mut state = setup_game_at_main_phase();
+        state.format_config.command_zone = true;
+        let obj_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Esika, God of the Tree".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_commander = true;
+            obj.card_types = make_creature_type();
+            obj.back_face = Some(make_back_face(
+                "The Prismatic Bridge",
+                CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Enchantment],
+                    subtypes: vec![],
+                },
+                Some(LayoutKind::Modal),
+            ));
+        }
+
+        let cast_actions = crate::ai_support::legal_actions(&state)
+            .iter()
+            .filter(|action| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == obj_id)
+            })
+            .count();
+        assert_eq!(
+            cast_actions, 1,
+            "the MDFC commander must be offered as castable from the command zone"
+        );
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(100),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(result.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+            "spell//spell MDFC commander cast from the command zone must offer \
+             ModalFaceChoice, got {:?}",
+            result.waiting_for
+        );
+
+        // Both faces must be offered (front: Esika; back: The Prismatic Bridge).
+        let candidates = crate::ai_support::legal_actions(&state);
+        let modal_actions = candidates
+            .iter()
+            .filter(|c| matches!(c, GameAction::ChooseModalFace { .. }))
+            .count();
+        assert_eq!(
+            modal_actions, 2,
+            "both MDFC commander faces must be offered from the command zone"
+        );
+    }
+
     // CR 712.8a: MDFC Creature/Land in graveyard — front face only, NOT a land
     #[test]
     fn mdfc_creature_land_in_graveyard_not_offered_as_land() {
