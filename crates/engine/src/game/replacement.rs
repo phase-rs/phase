@@ -350,6 +350,7 @@ fn discard_applier(
             from: Zone::Hand,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -4046,6 +4047,8 @@ pub fn continue_replacement(
             });
             let post = if real_work.is_some() {
                 real_work
+            } else if EventModifiers::has_only_event_modifier(accept_effect.as_deref()) {
+                None
             } else {
                 accept_effect
             };
@@ -4404,6 +4407,7 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -5297,6 +5301,7 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
@@ -6254,6 +6259,7 @@ mod tests {
             from: Zone::Hand,
             to: Zone::Battlefield,
             cause: None,
+            attach_to: None,
             enter_tapped: EtbTapState::Tapped,
             enter_with_counters: Vec::new(),
             controller_override: None,

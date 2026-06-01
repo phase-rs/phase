@@ -120,7 +120,7 @@ use self::search::{
 use self::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, continuation_absorbs_current,
     parse_followup_continuation_ast, parse_intrinsic_continuation_ast, split_clause_sequence,
-    try_parse_same_is_true_continuation,
+    try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
 };
 use self::subject::{try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life};
 use crate::parser::oracle_ir::ast::*;
@@ -10900,6 +10900,69 @@ fn attach_same_is_true_keywords(defs: &mut [AbilityDefinition], keywords: &[Keyw
     }
 }
 
+/// CR 608.2c: Apply a "Repeat this process for <keyword list>" continuation
+/// (Kathril, Aspect Warper). Walks `defs` from the back for the most recent
+/// conditional keyword-counter placement (`PutCounter { counter_type:
+/// Keyword(..) }` gated by a graveyard-keyword `condition`) and appends one
+/// cloned sibling per listed keyword — swapping both the placed counter's
+/// keyword and the gating condition's keyword. Each clone is an independent
+/// sequential sibling, mirroring the antecedent's structure, so the engine
+/// resolves all keyword counters during the trigger's one resolution. This is
+/// the counters-class analogue of `attach_same_is_true_keywords` (static
+/// grants); it covers the whole "repeat this process for <list>" class.
+fn attach_repeat_process_keywords(defs: &mut Vec<AbilityDefinition>, keywords: &[Keyword]) {
+    let Some(template) = defs
+        .iter()
+        .rev()
+        .find(|d| {
+            matches!(
+                &*d.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Keyword(_),
+                    ..
+                }
+            )
+        })
+        .cloned()
+    else {
+        return;
+    };
+    for keyword in keywords {
+        let mut new_def = template.clone();
+        if let Effect::PutCounter { counter_type, .. } = &mut *new_def.effect {
+            *counter_type = CounterType::Keyword(keyword.kind());
+        }
+        if let Some(condition) = &mut new_def.condition {
+            rewrite_ability_condition_keyword(condition, keyword);
+        }
+        // Each replicated counter placement is its own sequential instruction.
+        new_def.sub_link = SubAbilityLink::SequentialSibling;
+        new_def.sub_ability = None;
+        defs.push(new_def);
+    }
+}
+
+/// Swap the gating keyword inside an `AbilityCondition` to `new_keyword`. Used
+/// by `attach_repeat_process_keywords` to rewrite the "if a creature card in
+/// your graveyard has <keyword>" gate of each replicated counter clause.
+fn rewrite_ability_condition_keyword(condition: &mut AbilityCondition, new_keyword: &Keyword) {
+    if let AbilityCondition::QuantityCheck { lhs, rhs, .. } = condition {
+        rewrite_quantity_expr_keyword(lhs, new_keyword);
+        rewrite_quantity_expr_keyword(rhs, new_keyword);
+    }
+}
+
+/// Rewrite the keyword inside any `ObjectCount` filter carried by a
+/// `QuantityExpr` (the count side of a graveyard-keyword condition).
+fn rewrite_quantity_expr_keyword(expr: &mut QuantityExpr, new_keyword: &Keyword) {
+    if let QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount { filter },
+    } = expr
+    {
+        rewrite_filter_keyword(filter, new_keyword);
+    }
+}
+
 #[tracing::instrument(level = "debug")]
 fn parse_imperative_effect(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     let lower = text.to_lowercase();
@@ -13167,6 +13230,42 @@ pub(crate) fn parse_effect_chain_ir(
                     is_otherwise: false,
                     unless_pay: None,
                     special: Some(SpecialClause::SameIsTrueFor(keywords)),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                });
+                continue;
+            }
+        }
+
+        // CR 608.2c: "Repeat this process for <keyword list>." — Kathril, Aspect
+        // Warper. Must precede the generic "repeat this process" directive below,
+        // whose `tag("repeat this process")` would otherwise swallow the prefix
+        // and discard the keyword list. Replicates the antecedent conditional
+        // keyword-counter clause once per listed keyword during lowering.
+        if !clauses.is_empty() {
+            if let Some(keywords) = try_parse_repeat_process_for_keywords(normalized_text) {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "repeat_process_for_keywords_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::RepeatProcessForKeywords(keywords)),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
                 });

@@ -42,9 +42,7 @@ tilt up             # continuous build/test — leave running
 
 ## Pull requests
 
-- Target `origin/main` (`phase-rs/phase`). The repo uses a **merge queue** —
-  enqueue with `gh pr merge --auto`.
-- Keep PRs focused — a bug fix doesn't need surrounding cleanup.
+- Target `origin/main` (`phase-rs/phase`).
 - Don't modify `mtgish/`, `crates/mtgish-import/`, or `data/mtgish-*` (dormant);
   PRs that only touch them are rejected.
 - If you used an LLM, report the model on a `Model:` line in the PR body per

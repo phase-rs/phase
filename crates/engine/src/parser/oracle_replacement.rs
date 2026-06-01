@@ -3472,12 +3472,25 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
         ));
     }
 
+    // "a spell" — any spell is the source; no typed filter (Benevolent Unicorn).
+    // Must precede `parse_type_phrase`, which maps bare "spell" to Card.
+    if subject == "spell" {
+        return None;
+    }
+
     // "a source" with no qualifier — no filter needed (matches any source)
     if subject == "source" {
         return None;
     }
 
-    // "a spell" — no source filter (handled as general case for now)
+    // CR 614.1a: Typed damage sources ("creature you control with a +1/+1
+    // counter on it", "Giant source you control", …) — delegate to the shared
+    // type-phrase parser (Uncivil Unrest, Torbran-adjacent prints).
+    let (filter, rest) = parse_type_phrase(subject);
+    if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+        return Some(filter);
+    }
+
     None
 }
 
@@ -8626,6 +8639,35 @@ mod tests {
         assert_eq!(def.damage_source_filter, None); // any source
         assert_eq!(def.damage_target_filter, None); // any target
         assert_eq!(def.combat_scope, None); // all damage
+    }
+
+    #[test]
+    fn uncivil_unrest_double_damage_parses_creature_source_filter() {
+        let def = parse_replacement_line(
+            "If a creature you control with a +1/+1 counter on it would deal damage to a permanent or player, it deals double that damage instead.",
+            "Uncivil Unrest",
+        )
+        .expect("Uncivil Unrest replacement should parse");
+        assert_eq!(def.damage_modification, Some(DamageModification::Double));
+        let Some(TargetFilter::Typed(tf)) = def.damage_source_filter else {
+            panic!(
+                "expected typed damage source filter, got {:?}",
+                def.damage_source_filter
+            );
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Counters {
+                    counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                    ..
+                }
+            )),
+            "expected +1/+1 counter qualifier, got {:?}",
+            tf.properties
+        );
     }
 
     #[test]

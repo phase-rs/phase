@@ -31,7 +31,29 @@
     "damage": "Dano: {{amount}}",
     "ptDeltaFrom": "{{delta}} de {{source}}",
     "colors": "Cores: {{colors}}",
-    "colorless": "Incolor"
+    "colorless": "Incolor",
+    "chosen": {
+      "title": "Escolhido",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Jogador {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Desconhecido",
+      "kind": {
+        "color": "Cor",
+        "creatureType": "Tipo de criatura",
+        "basicLandType": "Tipo de terreno básico",
+        "cardType": "Tipo de carta",
+        "oddOrEven": "Ímpar ou par",
+        "cardName": "Nome da carta",
+        "number": "Número",
+        "player": "Jogador",
+        "twoColors": "Duas cores",
+        "tributeOutcome": "Tributo",
+        "keyword": "Palavra-chave",
+        "label": "Rótulo",
+        "fallback": "Escolha"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Limpar Atacantes",
