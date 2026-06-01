@@ -201,6 +201,28 @@ describe("DeckStack", () => {
     expect(screen.getByTitle("Add one Relentless Rats")).toBeEnabled();
   });
 
+  it("disables the add button at 1 copy for singleton formats", () => {
+    render(
+      <DeckStack
+        deck={{
+          main: [{ name: "Sol Ring", count: 1 }],
+          sideboard: [],
+        }}
+        commanders={[]}
+        cardDataCache={
+          new Map([["Sol Ring", makeCard("Sol Ring", "Artifact", 1)]])
+        }
+        format="Commander"
+        onAddCard={vi.fn()}
+        onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
+        onRemoveCommander={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTitle("Sol Ring is at the copy limit")).toBeDisabled();
+  });
+
   it("moves a second-section card back to the main deck via its move button", () => {
     // The recovery path for the Commander 'maybeboard trap': a card parked in
     // the second section must be returnable to the main deck from the stack.
