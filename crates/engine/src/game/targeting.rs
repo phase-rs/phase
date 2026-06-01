@@ -671,7 +671,18 @@ pub fn resolve_effect_player_ref(
     filter: &TargetFilter,
 ) -> Option<PlayerId> {
     match filter {
-        TargetFilter::Controller => Some(ability.scoped_player.unwrap_or(ability.controller)),
+        // CR 109.5: "you" in an ability is its controller, independent of any
+        // resolution-scoped player. Player-scope iteration rebinds
+        // `ability.controller` to the scoped player (effects/mod.rs), so reading
+        // `controller` already yields the per-iteration player there. Reading
+        // `scoped_player` here instead conflated the two whenever a path set
+        // `scoped_player` WITHOUT rebinding `controller` — most visibly a
+        // villainous choice (CR 701.55a), where the chooser is bound as
+        // `scoped_player` but a "you …" branch's controller must stay the
+        // source's controller. Mirror the sibling resolver
+        // `effects::resolve_player_for_context_ref`, which resolves `Controller`
+        // straight to `ability.controller`.
+        TargetFilter::Controller => Some(ability.controller),
         // CR 109.5: The ability's original controller — fixed even when
         // `player_scope` iteration has rebound `ability.controller`.
         TargetFilter::OriginalController => {
@@ -2993,6 +3004,31 @@ mod tests {
             source,
             PlayerId(0),
         )
+    }
+
+    /// CR 109.5 + CR 701.55a: A villainous-choice "you …" branch is resolved
+    /// with `controller = source controller` and `scoped_player = the chooser`
+    /// (an opponent). "you"/`Controller` must resolve to the controller, not to
+    /// the chooser bound as `scoped_player`; "that player"/`ScopedPlayer` still
+    /// resolves to the chooser. Pre-fix, `Controller` read
+    /// `scoped_player.unwrap_or(controller)`, so a "you" branch acted on the
+    /// opponent who made the choice.
+    #[test]
+    fn controller_player_ref_ignores_scoped_player() {
+        let state = GameState::new_two_player(7);
+        let mut ability = make_resolved_with_targets(vec![], ObjectId(1));
+        // controller is PlayerId(0) (the source's controller).
+        ability.scoped_player = Some(PlayerId(1)); // the opponent who chose the branch
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::Controller),
+            Some(PlayerId(0)),
+            "\"you\" must resolve to the controller, not the chooser bound as scoped_player"
+        );
+        assert_eq!(
+            resolve_effect_player_ref(&state, &ability, &TargetFilter::ScopedPlayer),
+            Some(PlayerId(1)),
+            "\"that player\" must still resolve to the scoped chooser"
+        );
     }
 
     /// CR 608.2c + 603.10a: Tier 1 — `SelfRef` with empty `ability.targets`

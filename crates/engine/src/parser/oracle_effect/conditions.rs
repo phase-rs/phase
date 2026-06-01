@@ -235,6 +235,19 @@ fn parse_kicker_condition_mana_cost(cost_text: &str) -> Option<ManaCost> {
         .map(|(_, cost)| cost)
 }
 
+fn strip_alternative_mana_cost_conditional<'a>(text: &'a str, lower: &str) -> Option<&'a str> {
+    // CR 118.9 + CR 608.2c: "If the {COST} cost was paid, [body]" — alternative
+    // cost rider on spells like Baleful Mastery.
+    let ((), after_prefix) =
+        nom_on_lower(text, lower, |input| value((), tag("if the ")).parse(input))?;
+    let (after_cost, _) = nom_primitives::parse_mana_cost(after_prefix).ok()?;
+    let after_cost_lower = after_cost.to_lowercase();
+    nom_on_lower(after_cost, &after_cost_lower, |input| {
+        value((), tag(" cost was paid, ")).parse(input)
+    })
+    .map(|((), rest)| rest)
+}
+
 pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
 
@@ -267,6 +280,8 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         }
     }
 
+    let mut alternative_mana_cost_conditional = false;
+
     let body = if let Some(((), rest)) = nom_on_lower(text, &lower, |input| {
         value(
             (),
@@ -278,6 +293,9 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         )
         .parse(input)
     }) {
+        Some(rest.to_string())
+    } else if let Some(rest) = strip_alternative_mana_cost_conditional(text, &lower) {
+        alternative_mana_cost_conditional = true;
         Some(rest.to_string())
     } else if tag::<_, _, OracleError<'_>>("if ")
         .parse(lower.as_str())
@@ -359,6 +377,8 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
                 let stripped = strip_leading_instead(&body);
                 if stripped.len() < body.len() {
                     (stripped, AbilityCondition::AdditionalCostPaidInstead)
+                } else if alternative_mana_cost_conditional {
+                    (body, AbilityCondition::AlternativeManaCostPaid)
                 } else {
                     (body, AbilityCondition::additional_cost_paid_any())
                 }

@@ -61,6 +61,14 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
       const newLife = prevLife.current + lifeEvent.data.amount;
       const doAnimate = () => {
         animate(motionLife, newLife, { duration: 0.3 });
+        // Issue #1560: advance `prevLife` only when the animation actually
+        // commits, not when it is merely scheduled. The damage-dealt branch
+        // below DEFERS `doAnimate` via a timer that the cleanup cancels when
+        // `activeStep` advances; if `prevLife` were pre-advanced, the authoritative
+        // `life` arriving in the store would equal `prevLife.current`, so the
+        // fallback effect's guard (`prevLife.current !== life`) would suppress the
+        // corrective animation and the displayed total would freeze at the old value.
+        prevLife.current = newLife;
         // Record the value actually animated toward only when the animation
         // runs, so a cancelled deferred animation leaves `animatedTo` stale and
         // Effect 2 reconciles it.
@@ -69,8 +77,6 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
         if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
         flashTimerRef.current = setTimeout(() => setFlashColor(null), 400);
       };
-
-      prevLife.current = newLife;
 
       if (hasDamageDealt) {
         impactTimerRef.current = setTimeout(doAnimate, CARD_SLAM_FLIGHT_MS * speedMultiplier);

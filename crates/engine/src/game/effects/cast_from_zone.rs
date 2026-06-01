@@ -124,6 +124,7 @@ pub fn resolve(
                     cast_transformed,
                     constraint: constraint.clone(),
                     granted_to,
+                    resolution_cleanup: None,
                 }
             };
             if !obj.casting_permissions.contains(&permission) {

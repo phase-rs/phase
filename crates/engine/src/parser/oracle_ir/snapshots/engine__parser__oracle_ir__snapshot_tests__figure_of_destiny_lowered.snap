@@ -29,6 +29,10 @@ expression: "&lowered"
                 "core_type": "Creature"
               },
               {
+                "type": "RemoveAllSubtypes",
+                "set": "Creature"
+              },
+              {
                 "type": "AddSubtype",
                 "subtype": "Kithkin"
               },
@@ -90,6 +94,10 @@ expression: "&lowered"
               {
                 "type": "AddType",
                 "core_type": "Creature"
+              },
+              {
+                "type": "RemoveAllSubtypes",
+                "set": "Creature"
               },
               {
                 "type": "AddSubtype",
@@ -167,6 +175,10 @@ expression: "&lowered"
               {
                 "type": "AddKeyword",
                 "keyword": "FirstStrike"
+              },
+              {
+                "type": "RemoveAllSubtypes",
+                "set": "Creature"
               },
               {
                 "type": "AddSubtype",

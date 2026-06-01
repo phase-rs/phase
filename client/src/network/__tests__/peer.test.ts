@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 
 import { createPeerSession } from "../peer";
 import { validateMessage } from "../protocol";
+import type { P2PMessage } from "../protocol";
 import { FakeDataConnection } from "./fakeDataConnection";
 
 function createTestSession(opts?: { onSessionEnd?: () => void }) {
@@ -10,6 +11,10 @@ function createTestSession(opts?: { onSessionEnd?: () => void }) {
   const session = createPeerSession(conn as never, opts);
   return { conn, session };
 }
+
+// Drain all pending microtasks/timers so the recvQueue-chained pending-message
+// flush (scheduled by onMessage) has run.
+const flushAsync = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe("P2P Protocol - validateMessage", () => {
   it("accepts valid P2P message types", () => {
@@ -100,9 +105,56 @@ describe("PeerSession", () => {
 
     const handler = vi.fn();
     session.onMessage(handler);
+    await flushAsync();
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith(actionMessage);
+    session.close();
+  });
+
+  it("awaits async pending handlers and dispatches buffered messages before later inbound ones", async () => {
+    const { conn, session } = createTestSession();
+    const order: string[] = [];
+
+    const buffered = {
+      type: "action" as const,
+      senderPlayerId: 0,
+      action: { type: "PassPriority" as const },
+    };
+    // Buffered before any handler is attached.
+    await conn.simulateData(buffered);
+
+    const handler = vi.fn(async (m: P2PMessage) => {
+      await Promise.resolve();
+      order.push(m.type);
+    });
+    session.onMessage(handler);
+    await flushAsync();
+    // A later inbound message must be dispatched only after the buffered one.
+    await conn.simulateData({ type: "concede" });
+
+    expect(order).toEqual(["action", "concede"]);
+    session.close();
+  });
+
+  it("keeps the session alive when a pending-message handler throws", async () => {
+    const { conn, session } = createTestSession();
+    await conn.simulateData({ type: "concede" });
+
+    const received: string[] = [];
+    const handler = vi.fn((m: P2PMessage) => {
+      received.push(m.type);
+      if (received.length === 1) {
+        throw new Error("boom on first pending message");
+      }
+    });
+    session.onMessage(handler);
+    await flushAsync();
+    // The thrown pending handler must not poison recvQueue: later inbound
+    // messages still reach the handler.
+    await conn.simulateData({ type: "concede" });
+
+    expect(received).toEqual(["concede", "concede"]);
     session.close();
   });
 
