@@ -17316,6 +17316,87 @@ mod tests {
         );
     }
 
+    /// CR 107.3i + CR 121.1 + CR 119.3: Pact of the Serpent class — a single
+    /// "where X is …" defining clause must bind X for BOTH sibling sub-effects
+    /// of "target player draws X cards and loses X life". The shared-X
+    /// resolver must reach the LoseLife sub-effect via the chained
+    /// `sub_ability` traversal so the chosen-type creature count substitutes
+    /// into both `count` and `amount` operands. Issue #1587.
+    #[test]
+    fn shared_where_x_binds_draws_and_loses_life_siblings() {
+        let chain = parse_effect_chain(
+            "target player draws X cards and loses X life, where X is the number of creatures they control of the chosen type",
+            AbilityKind::Spell,
+        );
+        // First sibling: Draw with shared QuantityExpr.
+        let draw_count = match &*chain.effect {
+            Effect::Draw { count, .. } => count.clone(),
+            other => panic!("expected Effect::Draw as first sibling, got {other:?}"),
+        };
+        assert!(
+            !matches!(
+                &draw_count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name },
+                } if name == "X"
+            ),
+            "draw count must be rewritten from bare X to the where-X binding, got {draw_count:?}"
+        );
+        // Second sibling: LoseLife with the SAME QuantityExpr.
+        let sub = chain
+            .sub_ability
+            .as_ref()
+            .expect("expected LoseLife sub_ability after Draw");
+        let lose_amount = match &*sub.effect {
+            Effect::LoseLife { amount, .. } => amount.clone(),
+            other => panic!("expected Effect::LoseLife as second sibling, got {other:?}"),
+        };
+        assert_eq!(
+            lose_amount, draw_count,
+            "draw count and lose-life amount must share the same where-X binding"
+        );
+    }
+
+    /// CR 121.1 + CR 119.3 + CR 608.2c: Rankle class — the elided second
+    /// player-action sibling may use an article count ("draws a card"), not
+    /// only digits or X. The split predicate must still carry the prior player
+    /// subject so each player both loses life and draws.
+    #[test]
+    fn article_count_draws_card_splits_after_loses_life_sibling() {
+        let chain = parse_effect_chain(
+            "each player loses 1 life and draws a card",
+            AbilityKind::Spell,
+        );
+        assert_eq!(chain.player_scope, Some(PlayerFilter::All));
+        assert!(
+            matches!(
+                &*chain.effect,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
+            "expected first sibling to be LoseLife(1), got {:?}",
+            chain.effect,
+        );
+
+        let sub = chain
+            .sub_ability
+            .as_ref()
+            .expect("expected Draw sub_ability after LoseLife");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
+            "expected second sibling to be Draw(1), got {:?}",
+            sub.effect,
+        );
+    }
+
     #[test]
     fn effect_lightning_bolt() {
         let e = parse_effect("Lightning Bolt deals 3 damage to any target");
