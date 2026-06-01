@@ -4054,6 +4054,12 @@ pub enum ParsedCondition {
     /// CR 702.142a: This creature attacked this turn (Boast activation restriction).
     SourceAttackedThisTurn,
     SourceIsCreature,
+    /// CR 301.5 + CR 602.5b: The source is attached to an object with the
+    /// required core type. Used for activation restrictions such as
+    /// Reconfigure's "only if this permanent is attached to a creature."
+    SourceAttachedTo {
+        required_type: CoreType,
+    },
     SourceUntappedAttachedTo {
         required_type: CoreType,
     },

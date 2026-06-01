@@ -6,15 +6,16 @@ use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::parser::oracle_keyword::{keyword_display_name, parse_keyword_from_oracle};
 use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, BracketMode};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
-    AdditionalCostPaymentSource, AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType,
-    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
-    CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp, GainLifePlayer,
-    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    RuntimeHandler, SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
+    ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
+    CardPlayMode, CastVariantPaid, ChoiceType, Comparator, ContinuousModification, ControllerRef,
+    CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp,
+    GainLifePlayer, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -397,6 +398,11 @@ pub fn synthesize_reconfigure(face: &mut CardFace) {
                 },
             )
             .cost(AbilityCost::Mana { cost: cost.clone() })
+            .activation_restrictions(vec![ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::SourceAttachedTo {
+                    required_type: CoreType::Creature,
+                }),
+            }])
             .sorcery_speed(),
         );
     }
@@ -9819,6 +9825,20 @@ mod sorcery_speed_invariant_tests {
         assert!(
             matches!(*face.abilities[1].effect, Effect::UnattachAll { .. }),
             "second reconfigure ability unattaches the Equipment"
+        );
+        assert!(
+            face.abilities[1]
+                .activation_restrictions
+                .iter()
+                .any(|restriction| matches!(
+                    restriction,
+                    ActivationRestriction::RequiresCondition {
+                        condition: Some(ParsedCondition::SourceAttachedTo {
+                            required_type: CoreType::Creature
+                        })
+                    }
+                )),
+            "unattach mode is legal only while attached to a creature (CR 702.151a)"
         );
     }
 
