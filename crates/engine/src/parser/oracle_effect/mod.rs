@@ -3468,6 +3468,100 @@ fn try_parse_choose_player_to_verb(
     Some(clause)
 }
 
+/// CR 608.2c + CR 800.4a (issue #1504): "an opponent draws a card" — the
+/// opponent is chosen during resolution, not targeted at cast (contrast with
+/// "target opponent draws"). Decomposed into `Choose { Opponent }` with the
+/// verb phrase as a `sub_ability`, mirroring `try_parse_choose_player_to_verb`
+/// for Skullwinder's "choose an opponent" form.
+fn try_parse_an_opponent_to_verb(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let after_then = opt(tag::<_, _, OracleError<'_>>("then "))
+        .parse(tp.lower)
+        .ok()?
+        .0;
+    let (after_opponent, _) = tag::<_, _, OracleError<'_>>("an opponent ")
+        .parse(after_then)
+        .ok()?;
+    if tag::<_, _, OracleError<'_>>("chooses ")
+        .parse(after_opponent)
+        .is_ok()
+    {
+        return None;
+    }
+
+    let index = ctx.chosen_player_count;
+    ctx.relative_player_scope = Some(ControllerRef::ChosenPlayer { index });
+
+    let verb_lower = after_opponent.trim_start();
+    if verb_lower.is_empty() {
+        return None;
+    }
+    let verb_orig = &tp.original[tp.original.len() - verb_lower.len()..];
+    let mut verb_clause = parse_effect_clause(verb_orig, ctx);
+    if matches!(verb_clause.effect, Effect::Unimplemented { .. }) {
+        return None;
+    }
+    rebind_opponent_player_recipient_to_chosen(&mut verb_clause.effect, index);
+    if let Some(sub) = verb_clause.sub_ability.as_mut() {
+        rebind_opponent_player_recipient_in_chain(sub, index);
+    }
+
+    let mut clause = parsed_clause(Effect::Choose {
+        choice_type: ChoiceType::Opponent,
+        persist: false,
+    });
+    let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
+    sub.sub_ability = verb_clause.sub_ability;
+    sub.duration = verb_clause.duration;
+    clause.sub_ability = Some(Box::new(sub));
+    Some(clause)
+}
+
+fn filter_is_bare_opponent_player(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(crate::types::ability::TypedFilter {
+            type_filters,
+            controller: Some(ControllerRef::Opponent),
+            properties,
+        }) if type_filters.is_empty() && properties.is_empty()
+    )
+}
+
+fn rebind_opponent_player_recipient_to_chosen(effect: &mut Effect, index: u8) {
+    let chosen = TargetFilter::Typed(crate::types::ability::TypedFilter {
+        controller: Some(ControllerRef::ChosenPlayer { index }),
+        ..Default::default()
+    });
+    match effect {
+        Effect::Draw { target, .. }
+        | Effect::Mill { target, .. }
+        | Effect::Discard { target, .. } => {
+            if filter_is_bare_opponent_player(target) {
+                *target = chosen;
+            } else {
+                retarget_effect_to_chosen_player(effect, index);
+            }
+        }
+        Effect::GainLife { player, .. } if filter_is_bare_opponent_player(player) => {
+            *player = chosen;
+        }
+        _ => retarget_effect_to_chosen_player(effect, index),
+    }
+}
+
+fn rebind_opponent_player_recipient_in_chain(def: &mut AbilityDefinition, index: u8) {
+    rebind_opponent_player_recipient_to_chosen(&mut def.effect, index);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rebind_opponent_player_recipient_in_chain(sub, index);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rebind_opponent_player_recipient_in_chain(else_branch, index);
+    }
+}
+
 /// CR 109.4: Rebind a verb effect's player-recipient field to the Nth chosen
 /// player. Covers the player-recipient effect families that follow a "choose a
 /// player to <verb>" clause and carry a `Controller`-defaulted recipient
@@ -3669,6 +3763,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // generic imperative `choose` dispatch (which would consume the prefix
     // and drop the trailing verb).
     if let Some(clause) = try_parse_choose_player_to_verb(tp, ctx) {
+        return clause;
+    }
+
+    // CR 608.2c + CR 800.4a (issue #1504): "an opponent <verb>" before generic
+    // subject dispatch, which would bind `ControllerRef::Opponent` as a cast-time
+    // player target on Draw/Mill/etc.
+    if let Some(clause) = try_parse_an_opponent_to_verb(tp, ctx) {
         return clause;
     }
 
@@ -14334,7 +14435,7 @@ pub(crate) fn parse_effect_chain_ir(
         if matches!(
             clause.effect,
             Effect::Choose {
-                choice_type: ChoiceType::Player,
+                choice_type: ChoiceType::Player | ChoiceType::Opponent,
                 ..
             }
         ) {
@@ -40050,6 +40151,55 @@ mod snapshot_tests {
             )
             .is_none(),
             "interceptor must reject inputs whose inner quantity is not the equalization shape"
+        );
+    }
+
+    /// GitHub issue #1504 — Baleful Mastery: "an opponent draws a card" must not
+    /// require targeting an opponent at cast; opponent is chosen on resolution.
+    #[test]
+    fn baleful_mastery_opponent_draw_uses_choose_not_cast_target() {
+        let text = "If the {1}{B} cost was paid, an opponent draws a card. Exile target creature or planeswalker.";
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+
+        // Chain order: conditional opponent draw is the head; exile is sub_ability.
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent,
+                    ..
+                }
+            ),
+            "opponent draw must be Choose(Opponent), got {:?}",
+            def.effect
+        );
+        assert!(
+            matches!(
+                def.condition,
+                Some(AbilityCondition::AdditionalCostPaid { .. })
+            ),
+            "draw must be gated on alternative cost payment, got {:?}",
+            def.condition
+        );
+        let draw_effect = def
+            .sub_ability
+            .as_ref()
+            .expect("Choose should chain to Draw");
+        let Effect::Draw { target, .. } = draw_effect.effect.as_ref() else {
+            panic!("expected Draw sub-ability, got {:?}", draw_effect.effect);
+        };
+        assert!(
+            target.chosen_player_index() == Some(0),
+            "Draw must target ChosenPlayer {{0}}, got {target:?}"
+        );
+        let exile = draw_effect
+            .sub_ability
+            .as_ref()
+            .expect("Draw should chain to exile");
+        assert!(
+            matches!(exile.effect.as_ref(), Effect::ChangeZone { .. }),
+            "exile must be chained after draw, got {:?}",
+            exile.effect
         );
     }
 

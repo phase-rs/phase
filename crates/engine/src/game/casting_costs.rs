@@ -174,15 +174,15 @@ pub(crate) fn handle_decide_additional_cost(
         }
         AdditionalCost::Choice(preferred, fallback) => {
             if pay {
-                if state
-                    .objects
-                    .get(&pending.object_id)
-                    .and_then(|obj| obj.additional_cost.as_ref())
-                    .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
-                {
-                    ability.context.additional_cost_paid = true;
-                    ability.context.additional_cost_payment_count = 1;
-                }
+                // CR 118.9 + CR 608.2c: Paying the preferred branch of a
+                // `Choice` cost marks `additional_cost_paid` for resolution
+                // clauses such as "if the {cost} was paid" (Baleful Mastery).
+                // Applies both to card-level `additional_cost::Choice` and to
+                // the casting-options alternative-cost prompt, which reuses
+                // this shape with `preferred` = alt cost and `fallback` =
+                // printed mana cost.
+                ability.context.additional_cost_paid = true;
+                ability.context.additional_cost_payment_count = 1;
                 Some(preferred.clone())
             } else {
                 Some(fallback.clone())

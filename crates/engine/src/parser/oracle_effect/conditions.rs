@@ -279,6 +279,14 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         .parse(input)
     }) {
         Some(rest.to_string())
+    } else if let Some(((), rest)) = nom_on_lower(text, &lower, |input| {
+        // CR 118.9 + CR 608.2c: "If the {COST} cost was paid, [body]" — alternative
+        // cost rider on spells like Baleful Mastery.
+        let (input, _) = tag::<_, _, OracleError<'_>>("if the ").parse(input)?;
+        let (input, _) = take_until::<_, _, OracleError<'_>>(" cost was paid, ").parse(input)?;
+        value((), tag(" cost was paid, ")).parse(input)
+    }) {
+        Some(rest.to_string())
     } else if tag::<_, _, OracleError<'_>>("if ")
         .parse(lower.as_str())
         .is_ok()
