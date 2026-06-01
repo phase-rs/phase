@@ -12789,14 +12789,15 @@ mod tests {
         );
 
         // Clause 2 — effect + player scope: LoseTheGame fanned out over each
-        // player the controller attacked this turn (CR 508.6). The controller is
-        // excluded by `OpponentAttackedThisTurn`, so the Angel never eliminates
-        // itself — directly fixing the "my own Angel killed me" report.
+        // player the source creature attacked this turn (CR 508.6). The
+        // controller is excluded by `OpponentAttackedBySourceThisTurn`, so the
+        // Angel never eliminates itself — directly fixing the "my own Angel
+        // killed me" report.
         let execute = def.execute.as_ref().expect("execute must be Some");
         assert_eq!(*execute.effect, Effect::LoseTheGame);
         assert_eq!(
             execute.player_scope,
-            Some(PlayerFilter::OpponentAttackedThisTurn),
+            Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
             "LoseTheGame must scope to players the source attacked this turn (issue #1599), got {:?}",
             execute.player_scope,
         );

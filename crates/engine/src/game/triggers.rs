@@ -3737,6 +3737,7 @@ pub(crate) fn check_trigger_condition(
             // CR 508.6: a set-valued attacked-this-turn predicate has no
             // single-player "whose turn" semantic.
             | PlayerFilter::OpponentAttackedThisTurn
+            | PlayerFilter::OpponentAttackedBySourceThisTurn
             | PlayerFilter::All
             | PlayerFilter::HighestSpeed
             | PlayerFilter::ZoneChangedThisWay

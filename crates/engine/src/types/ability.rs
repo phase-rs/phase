@@ -3397,6 +3397,11 @@ pub enum PlayerFilter {
     /// Used by "the number of opponents you attacked this turn" (Militant Angel).
     /// (CR 508.1b: declare-attackers announcement; CR 506.2: active = attacking player.)
     OpponentAttackedThisTurn,
+    /// CR 508.6: Each opponent the ability's source creature attacked this turn.
+    /// Uses `state.creature_attacked_defenders_this_turn[source_id]` for
+    /// source-specific text like "each player this creature attacked this turn"
+    /// (Angel of Destiny).
+    OpponentAttackedBySourceThisTurn,
     /// All players.
     All,
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.

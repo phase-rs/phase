@@ -230,6 +230,11 @@ pub(crate) fn matches_player_scope(
                     PlayerFilter::OpponentAttackedThisTurn => {
                         p.id != controller && state.has_attacked(controller, p.id)
                     }
+                    // CR 508.6: opponent this source creature attacked this turn.
+                    PlayerFilter::OpponentAttackedBySourceThisTurn => {
+                        p.id != controller
+                            && state.creature_attacked_player_this_turn(source_id, p.id)
+                    }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
                             .players
@@ -4778,6 +4783,7 @@ fn scoped_player_matches_filter(
         PlayerFilter::DefendingPlayer
         | PlayerFilter::OpponentDealtCombatDamage { .. }
         | PlayerFilter::OpponentAttackedThisTurn
+        | PlayerFilter::OpponentAttackedBySourceThisTurn
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
@@ -5097,6 +5103,75 @@ mod tests {
             handler: crate::types::ability::RuntimeHandler::NinjutsuFamily,
         };
         assert!(is_known_effect(&runtime));
+    }
+
+    /// CR 508.6: "each player this creature attacked this turn" must bind to
+    /// the source creature's own attacked-defender ledger, not the controller's
+    /// aggregate "you attacked" set.
+    #[test]
+    fn source_attacked_this_turn_player_filter_is_per_creature() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let angel = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Angel of Destiny".to_string(),
+            Zone::Battlefield,
+        );
+        let other_attacker = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Other Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        state
+            .attacked_defenders_this_turn
+            .entry(PlayerId(0))
+            .or_default()
+            .extend([PlayerId(1), PlayerId(2)]);
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(angel)
+            .or_default()
+            .insert(PlayerId(1));
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(other_attacker)
+            .or_default()
+            .insert(PlayerId(2));
+
+        assert!(
+            matches_player_scope(
+                &state,
+                PlayerId(2),
+                &PlayerFilter::OpponentAttackedThisTurn,
+                PlayerId(0),
+                angel,
+            ),
+            "the controller aggregate should include every player any creature attacked",
+        );
+        assert!(
+            !matches_player_scope(
+                &state,
+                PlayerId(2),
+                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                PlayerId(0),
+                angel,
+            ),
+            "Angel must not affect a player attacked only by a different creature",
+        );
+        assert!(
+            matches_player_scope(
+                &state,
+                PlayerId(1),
+                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                PlayerId(0),
+                angel,
+            ),
+            "Angel must still affect the player it attacked",
+        );
     }
 
     #[test]

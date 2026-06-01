@@ -1542,6 +1542,11 @@ pub fn declare_attackers(
     // the grant is live for the whole combat, not just after damage.
     state.layers_dirty.mark_full();
     let attacker_count = combat.attackers.len();
+    let creature_attacked_defenders: Vec<(ObjectId, PlayerId)> = combat
+        .attackers
+        .iter()
+        .map(|attacker| (attacker.object_id, attacker.defending_player))
+        .collect();
 
     // Use the first attacker's defending player for the event
     let defending_player = combat
@@ -1560,6 +1565,13 @@ pub fn declare_attackers(
     state
         .creatures_attacked_this_turn
         .extend(attacker_ids.iter().copied());
+    for (attacker_id, defending_player) in creature_attacked_defenders {
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(attacker_id)
+            .or_default()
+            .insert(defending_player);
+    }
 
     super::restrictions::record_attackers_declared(state, attacker_count);
 
@@ -3153,6 +3165,31 @@ mod tests {
             e,
             GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids == &[id]
         )));
+    }
+
+    #[test]
+    fn declare_attackers_records_defenders_per_attacking_creature() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.combat = Some(CombatState::default());
+        let angel = create_creature(&mut state, PlayerId(0), "Angel of Destiny", 2, 6);
+        let bear = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        let mut events = Vec::new();
+        declare_attackers(
+            &mut state,
+            &[
+                (angel, AttackTarget::Player(PlayerId(1))),
+                (bear, AttackTarget::Player(PlayerId(2))),
+            ],
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(state.creature_attacked_player_this_turn(angel, PlayerId(1)));
+        assert!(!state.creature_attacked_player_this_turn(angel, PlayerId(2)));
+        assert!(state.creature_attacked_player_this_turn(bear, PlayerId(2)));
     }
 
     #[test]

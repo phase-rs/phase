@@ -3258,6 +3258,11 @@ pub(crate) fn resolve_player_count(
                         PlayerFilter::OpponentAttackedThisTurn => {
                             p.id != controller && state.has_attacked(controller, p.id)
                         }
+                        // CR 508.6: opponent this source creature attacked this turn.
+                        PlayerFilter::OpponentAttackedBySourceThisTurn => {
+                            p.id != controller
+                                && state.creature_attacked_player_this_turn(source_id, p.id)
+                        }
                         PlayerFilter::All => true,
                         PlayerFilter::HighestSpeed => {
                             let highest_speed = state
