@@ -51,6 +51,7 @@ pub mod conjure;
 pub mod connive;
 pub mod control_next_turn;
 pub mod copy_spell;
+pub mod copy_token_blocking;
 pub mod counter;
 pub mod counters;
 pub mod create_damage_replacement;
@@ -229,6 +230,11 @@ pub(crate) fn matches_player_scope(
                     // CR 508.6: opponent this player attacked this turn.
                     PlayerFilter::OpponentAttackedThisTurn => {
                         p.id != controller && state.has_attacked(controller, p.id)
+                    }
+                    // CR 508.6: opponent this source creature attacked this turn.
+                    PlayerFilter::OpponentAttackedBySourceThisTurn => {
+                        p.id != controller
+                            && state.creature_attacked_player_this_turn(source_id, p.id)
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -1086,6 +1092,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
         | Some(
             AbilityCondition::AdditionalCostPaid { .. }
             | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
             | AbilityCondition::EventOutcomeWon
             | AbilityCondition::WhenYouDo
             | AbilityCondition::CastFromZone { .. }
@@ -1679,6 +1686,9 @@ pub fn resolve_effect(
         Effect::CastCopyOfCard { .. } => cast_copy_of_card::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
         Effect::Myriad => myriad::resolve(state, ability, events),
+        Effect::CopyTokenBlockingAttacker { .. } => {
+            copy_token_blocking::resolve(state, ability, events)
+        }
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
         Effect::PutCounter { .. } => counters::resolve_add(state, ability, events),
@@ -2305,10 +2315,35 @@ fn filter_uses_relative_controller_you(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 503.1a + CR 608.2d (issue #1535): True when the filter is scoped to the
+/// resolution's scoped player — e.g. "that player ... a card they control"
+/// bound by an "at the beginning of each player's upkeep, that player may ..."
+/// trigger (Braids, Conjurer Adept). Such a filter must resolve its acting
+/// player and candidate pool against the per-iteration scoped player, not the
+/// ability's controller.
+fn filter_uses_relative_controller_scoped(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller == Some(ControllerRef::ScopedPlayer),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_uses_relative_controller_scoped)
+        }
+        TargetFilter::Not { filter } => filter_uses_relative_controller_scoped(filter),
+        _ => false,
+    }
+}
+
 pub(crate) fn controller_for_relative_filter(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> PlayerId {
+    // CR 503.1a + CR 608.2d (issue #1535): a filter scoped to the per-iteration
+    // scoped player ("that player ... from their hand" under "each player's
+    // upkeep") resolves to that scoped player, not the ability's controller.
+    if let Some(scoped) = ability.scoped_player {
+        if filter_uses_relative_controller_scoped(target_filter) {
+            return scoped;
+        }
+    }
     if filter_uses_relative_controller_you(target_filter)
         && ability.scoped_player.is_none()
         && ability
@@ -4365,6 +4400,7 @@ pub(crate) fn evaluate_condition(
             kicker_cost.as_ref(),
             *min_count,
         ),
+        AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
         AbilityCondition::EffectOutcome {
             signal: EffectOutcomeSignal::OptionalEffectPerformed,
         } => ability.context.optional_effect_performed && !state.cost_payment_failed_flag,
@@ -4778,6 +4814,7 @@ fn scoped_player_matches_filter(
         PlayerFilter::DefendingPlayer
         | PlayerFilter::OpponentDealtCombatDamage { .. }
         | PlayerFilter::OpponentAttackedThisTurn
+        | PlayerFilter::OpponentAttackedBySourceThisTurn
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
@@ -5097,6 +5134,75 @@ mod tests {
             handler: crate::types::ability::RuntimeHandler::NinjutsuFamily,
         };
         assert!(is_known_effect(&runtime));
+    }
+
+    /// CR 508.6: "each player this creature attacked this turn" must bind to
+    /// the source creature's own attacked-defender ledger, not the controller's
+    /// aggregate "you attacked" set.
+    #[test]
+    fn source_attacked_this_turn_player_filter_is_per_creature() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let angel = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Angel of Destiny".to_string(),
+            Zone::Battlefield,
+        );
+        let other_attacker = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Other Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        state
+            .attacked_defenders_this_turn
+            .entry(PlayerId(0))
+            .or_default()
+            .extend([PlayerId(1), PlayerId(2)]);
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(angel)
+            .or_default()
+            .insert(PlayerId(1));
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(other_attacker)
+            .or_default()
+            .insert(PlayerId(2));
+
+        assert!(
+            matches_player_scope(
+                &state,
+                PlayerId(2),
+                &PlayerFilter::OpponentAttackedThisTurn,
+                PlayerId(0),
+                angel,
+            ),
+            "the controller aggregate should include every player any creature attacked",
+        );
+        assert!(
+            !matches_player_scope(
+                &state,
+                PlayerId(2),
+                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                PlayerId(0),
+                angel,
+            ),
+            "Angel must not affect a player attacked only by a different creature",
+        );
+        assert!(
+            matches_player_scope(
+                &state,
+                PlayerId(1),
+                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                PlayerId(0),
+                angel,
+            ),
+            "Angel must still affect the player it attacked",
+        );
     }
 
     #[test]
@@ -11161,6 +11267,84 @@ mod tests {
         state.current_trigger_event = None;
         ability.context.optional_effect_performed = true;
         assert!(evaluate_condition(&cond, &state, &ability));
+    }
+
+    /// CR 701.30b: "Clash with an opponent" lets the clashing player CHOOSE the
+    /// opponent. With two or more opponents the engine must pause on
+    /// `ClashChooseOpponent` (offering every opponent) instead of silently
+    /// clashing with the first opponent in seat order.
+    #[test]
+    fn clash_with_multiple_opponents_prompts_for_opponent_choice() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let ability = ResolvedAbility::new(Effect::Clash, vec![], ObjectId(1), PlayerId(0));
+
+        let mut events = Vec::new();
+        clash::resolve(&mut state, &ability, &mut events).expect("clash resolves");
+
+        match &state.waiting_for {
+            WaitingFor::ClashChooseOpponent {
+                player, candidates, ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert!(
+                    candidates.contains(&PlayerId(1)) && candidates.contains(&PlayerId(2)),
+                    "both opponents must be offered, got {candidates:?}"
+                );
+            }
+            other => panic!("expected ClashChooseOpponent, got {other:?}"),
+        }
+
+        // CR 701.30b: the controller's chosen opponent — not the first in seat
+        // order — is the one that clashes.
+        let mut clash_events = Vec::new();
+        clash::perform_clash(&mut state, &ability, PlayerId(2), &mut clash_events)
+            .expect("clash performs against the chosen opponent");
+        assert!(
+            clash_events.iter().any(|e| matches!(
+                e,
+                GameEvent::Clash {
+                    opponent: PlayerId(2),
+                    ..
+                }
+            )),
+            "clash must be against the chosen opponent PlayerId(2)"
+        );
+    }
+
+    /// CR 701.30b: With a single opponent there is no decision to make, so a
+    /// two-player clash proceeds without a `ClashChooseOpponent` prompt.
+    #[test]
+    fn clash_with_single_opponent_needs_no_choice() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(Effect::Clash, vec![], ObjectId(1), PlayerId(0));
+
+        let mut events = Vec::new();
+        clash::resolve(&mut state, &ability, &mut events).expect("clash resolves");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ClashChooseOpponent { .. }),
+            "two-player clash must not prompt for an opponent choice"
+        );
+    }
+
+    /// CR 701.30b: If no opponent exists, there is no legal player to choose
+    /// for "clash with an opponent"; the effect is a no-op rather than
+    /// manufacturing `PlayerId(1)`.
+    #[test]
+    fn clash_with_no_opponents_does_not_default_to_invalid_player() {
+        let mut state = GameState::new(FormatConfig::standard(), 1, 42);
+        let ability = ResolvedAbility::new(Effect::Clash, vec![], ObjectId(1), PlayerId(0));
+
+        let mut events = Vec::new();
+        clash::resolve(&mut state, &ability, &mut events).expect("clash no-op succeeds");
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ClashChooseOpponent { .. }),
+            "no-op clash must not prompt when there are no candidates"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, GameEvent::Clash { .. })),
+            "no-op clash must not emit a Clash event with a fabricated opponent"
+        );
     }
 
     /// CR 702.33f: variant gating reads `kickers_paid` membership. Mirrors

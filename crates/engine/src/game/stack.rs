@@ -26,7 +26,7 @@ pub fn push_to_stack(state: &mut GameState, entry: StackEntry, events: &mut Vec<
     state.stack.push_back(entry);
 }
 
-fn restore_alternative_spell_normal_face(state: &mut GameState, object_id: ObjectId) {
+pub(crate) fn restore_alternative_spell_normal_face(state: &mut GameState, object_id: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&object_id) {
         if let Some(normal_face) = obj.back_face.take() {
             let alternative_snapshot = super::printed_cards::snapshot_object_face(obj);
@@ -281,10 +281,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         Zone::Graveyard
                     };
                     zones::move_to_zone(state, entry.id, dest, events);
-                    if matches!(
-                        casting_variant,
-                        CastingVariant::Adventure | CastingVariant::Omen
-                    ) {
+                    if casting_variant.restores_front_face_after_stack_exit() {
                         restore_alternative_spell_normal_face(state, entry.id);
                     }
                 }
@@ -555,6 +552,27 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     }
                                 }
                             }
+                            // CR 702.162a + CR 712.11a + CR 712.13: MTMTE
+                            // puts the converted spell on the stack with its
+                            // back face up. A resolving DFC spell becomes a
+                            // permanent with the same face up; mark the
+                            // battlefield object transformed without swapping
+                            // faces again.
+                            if casting_variant == CastingVariant::MoreThanMeetsTheEye
+                                && to == Zone::Battlefield
+                            {
+                                let mut marked = false;
+                                if let Some(obj) = state.objects.get_mut(&object_id) {
+                                    if obj.back_face.is_some() && !obj.transformed {
+                                        obj.transformed = true;
+                                        marked = true;
+                                    }
+                                }
+                                if marked {
+                                    crate::game::layers::mark_layers_full(state);
+                                    events.push(GameEvent::Transformed { object_id });
+                                }
+                            }
                             // CR 614.1c: Apply pending ETB counters from delayed triggers
                             // (e.g., "that creature enters with an additional +1/+1 counter").
                             let pending: Vec<_> = state
@@ -734,12 +752,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         }
 
-        // CR 715.4 / CR 720.4: Outside the stack, Adventure-family cards have
-        // their normal characteristics.
-        if matches!(
-            casting_variant,
-            CastingVariant::Adventure | CastingVariant::Omen
-        ) {
+        // CR 400.7 + CR 712.11a: face-swapped stack spells revert to front
+        // face when leaving the stack unless they resolved as that face onto
+        // the battlefield.
+        if casting_variant.restores_front_face_after_stack_exit()
+            && !spell_in_zone(state, entry.id, Zone::Battlefield)
+        {
             restore_alternative_spell_normal_face(state, entry.id);
         }
 

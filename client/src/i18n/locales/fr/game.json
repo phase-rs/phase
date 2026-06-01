@@ -1144,6 +1144,10 @@
     "cleaveNormalLabel": "Lancer normalement",
     "cleaveAltLabel": "Lancer avec Tranchage",
     "cleaveSubtitle": "Lancez {{name}} normalement, ou payez son coût de Tranchage pour retirer les mots entre crochets.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Exiler une carte",
     "additionalSacrifice": "+ Sacrifier un permanent",
     "additionalPayLife": "+ Payer des points de vie",
@@ -1155,6 +1159,10 @@
     "title": "Choisir un protecteur",
     "battleFallback": "Bataille",
     "subtitle": "{{name}} a besoin d'un nouveau protecteur. Choisissez quel adversaire la défendra."
+  },
+  "clashOpponent": {
+    "title": "Choisir l'adversaire pour la confrontation",
+    "subtitle": "Choisissez quel adversaire fera la confrontation avec vous."
   },
   "cardDataMissing": {
     "title": "Données de cartes manquantes",

@@ -3397,6 +3397,11 @@ pub enum PlayerFilter {
     /// Used by "the number of opponents you attacked this turn" (Militant Angel).
     /// (CR 508.1b: declare-attackers announcement; CR 506.2: active = attacking player.)
     OpponentAttackedThisTurn,
+    /// CR 508.6: Each opponent the ability's source creature attacked this turn.
+    /// Uses `state.creature_attacked_defenders_this_turn[source_id]` for
+    /// source-specific text like "each player this creature attacked this turn"
+    /// (Angel of Destiny).
+    OpponentAttackedBySourceThisTurn,
     /// All players.
     All,
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
@@ -5774,6 +5779,24 @@ pub enum Effect {
     /// opponent other than the defending player for the source creature, then
     /// exiles those tokens at end of combat.
     Myriad,
+    /// CR 509.1g + CR 506.3e + CR 707.2: For each attacking creature matched by
+    /// `source_filter`, create a token that's a copy of it and put that token
+    /// onto the battlefield blocking the attacker it copies. Mirror Match is the
+    /// canonical card ("For each attacking creature, create a token that's a
+    /// copy of that creature. Those tokens block those creatures …"). The
+    /// end-of-combat exile of the created tokens is composed separately as a
+    /// delayed trigger over `TargetFilter::LastCreated` ("those tokens"), so
+    /// this effect only handles the copy-and-block half of the idiom.
+    CopyTokenBlockingAttacker {
+        /// CR 508.1: The attacking creatures to copy and block. Non-targeting —
+        /// resolved against the battlefield at resolution time ("for each").
+        source_filter: TargetFilter,
+        /// CR 109.4: The player who creates (and therefore controls) the copy
+        /// tokens. Defaults to the resolving ability's controller. Mirrors
+        /// `Effect::CopyTokenOf.owner`.
+        #[serde(default = "default_target_filter_controller")]
+        owner: TargetFilter,
+    },
     /// CR 707.2 / CR 613.1a: Become a copy of target permanent.
     /// Sets copiable characteristics at Layer 1.
     BecomeCopy {
@@ -7658,6 +7681,8 @@ impl Effect {
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
             | Effect::Myriad
+            // CR 508.1: copies are chosen by the effect, not declared as targets.
+            | Effect::CopyTokenBlockingAttacker { .. }
             | Effect::ChangeSpeed { .. }
             | Effect::PumpAll { .. }
             | Effect::DamageAll { .. }
@@ -7828,6 +7853,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::CastCopyOfCard { .. } => "CastCopyOfCard",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
         Effect::Myriad => "Myriad",
+        Effect::CopyTokenBlockingAttacker { .. } => "CopyTokenBlockingAttacker",
         Effect::BecomeCopy { .. } => "BecomeCopy",
         Effect::ChooseCard { .. } => "ChooseCard",
         Effect::PutCounter { .. } => "PutCounter",
@@ -8189,6 +8215,9 @@ impl From<&Effect> for EffectKind {
             Effect::CastCopyOfCard { .. } => EffectKind::CastCopyOfCard,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
             Effect::Myriad => EffectKind::Myriad,
+            // CR 707.2: classified as a copy-token effect — the block placement
+            // is bookkeeping layered on top of the same token-copy creation.
+            Effect::CopyTokenBlockingAttacker { .. } => EffectKind::CopyTokenOf,
             Effect::BecomeCopy { .. } => EffectKind::BecomeCopy,
             Effect::ChooseCard { .. } => EffectKind::ChooseCard,
             Effect::PutCounter { .. } => EffectKind::PutCounter,
@@ -9211,6 +9240,10 @@ pub enum AbilityCondition {
     /// the parent effect when the additional cost was paid.
     /// The resolver swaps the override sub's effect in place of the parent before resolution.
     AdditionalCostPaidInstead,
+    /// CR 118.9 + CR 608.2c: "If the {COST} cost was paid" on spells with an
+    /// alternative *mana* cost (e.g. Baleful Mastery). Evaluates against
+    /// `SpellContext.alternative_mana_cost_paid`, not `additional_cost_paid`.
+    AlternativeManaCostPaid,
     /// CR 608.2c / CR 608.2d / CR 101.3: Gates a sub-ability on the outcome of
     /// a previous instruction in the same resolution. Parameterized so
     /// optional-decline and mandatory-impossible branches share one condition
@@ -9547,6 +9580,11 @@ pub struct SpellContext {
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,
+    /// CR 118.9: Whether the controller paid an alternative mana cost from
+    /// `casting_options` (not an optional/additional cost such as kicker or
+    /// pay-life alternatives).
+    #[serde(default)]
+    pub alternative_mana_cost_paid: bool,
     /// CR 601.2b/f/h: Number of non-kicker additional-cost payments declared
     /// while casting this spell. Used by keyword abilities such as Squad
     /// (CR 702.157a), whose repeatable payment count is not a kicker count.

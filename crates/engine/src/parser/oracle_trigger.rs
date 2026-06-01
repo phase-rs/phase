@@ -11599,12 +11599,44 @@ mod tests {
         }
     }
 
+    /// Issue #1499 — Arabella, Abandoned Doll: "Whenever Arabella attacks, it
+    /// deals X damage to each opponent and you gain X life, where X is the
+    /// number of creatures you control with power 2 or less." The attack trigger
+    /// must bind X to a dynamic creature count (a `QuantityRef::ObjectCount`),
+    /// not a `Variable("X")` placeholder that resolves to 0 at runtime.
+    #[test]
+    fn arabella_attack_trigger_binds_x_to_creature_count() {
+        let def = parse_trigger_line(
+            "Whenever Arabella, Abandoned Doll attacks, it deals X damage to each \
+             opponent and you gain X life, where X is the number of creatures you \
+             control with power 2 or less.",
+            "Arabella, Abandoned Doll",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("Arabella attack trigger must have an execute");
+        match &*execute.effect {
+            Effect::DamageEachPlayer { amount, .. } => assert!(
+                matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::ObjectCount { .. }
+                    }
+                ),
+                "X must bind to a dynamic creature count, got {amount:?}"
+            ),
+            other => panic!("expected DamageEachPlayer top effect, got {other:?}"),
+        }
+    }
+
     /// Issue #1585 — Pantlaza, Sun-Favored: "Whenever Pantlaza or another
     /// Dinosaur you control enters, you may discover X, where X is that
     /// creature's toughness. Do this only once each turn." The trigger must be
-    /// an ETB (`ChangesZone` → Battlefield), constrained to once per turn, and
+    /// an ETB (`ChangesZone` -> Battlefield), constrained to once per turn, and
     /// its execute must be a `Discover` whose limit binds to the *entering*
-    /// creature's toughness — NOT a `Variable("X")` placeholder, which resolves
+    /// creature's toughness - NOT a `Variable("X")` placeholder, which resolves
     /// to 0 at runtime and makes discover a silent no-op ("did not discover").
     #[test]
     fn trigger_pantlaza_etb_discover_x_is_entering_creature_toughness() {
@@ -12747,6 +12779,59 @@ mod tests {
             transform_sub.sub_link,
             SubAbilityLink::ContinuationStep,
             "Transform sub_link must be ContinuationStep (chain extension of the Untap clause)",
+        );
+    }
+
+    /// CR 104.3e + CR 603.4 + CR 508.6 + CR 119: Angel of Destiny (issue #1599).
+    /// "At the beginning of your end step, if you have at least 15 life more than
+    /// your starting life total, each player this creature attacked this turn
+    /// loses the game."
+    ///
+    /// Two clauses were silently dropped before this fix:
+    ///   1. The intervening-if (life ≥ starting life + 15) parsed as `None`, so
+    ///      the loss fired every end step regardless of life total.
+    ///   2. The subject "each player this creature attacked this turn" was
+    ///      stripped, leaving `LoseTheGame` with no targets and no `player_scope`
+    ///      — which `win_lose::resolve_lose` routes to the controller (CR 104.3a),
+    ///      making the Angel eliminate its own controller.
+    #[test]
+    fn parse_angel_of_destiny_end_step_loss_issue_1599() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you have at least 15 life more than your starting life total, each player this creature attacked this turn loses the game.",
+            "Angel of Destiny",
+        );
+
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+
+        // Clause 1 — intervening-if (CR 603.4): LifeAboveStarting ≥ 15, i.e.
+        // current life is at least 15 above the starting life total (CR 119).
+        // Reuses the `LifeAboveStarting` building block (life − starting life).
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeAboveStarting,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 15 },
+            }),
+            "condition must be QuantityComparison LifeAboveStarting GE Fixed(15), got {:?}",
+            def.condition,
+        );
+
+        // Clause 2 — effect + player scope: LoseTheGame fanned out over each
+        // player the source creature attacked this turn (CR 508.6). The
+        // controller is excluded by `OpponentAttackedBySourceThisTurn`, so the
+        // Angel never eliminates itself — directly fixing the "my own Angel
+        // killed me" report.
+        let execute = def.execute.as_ref().expect("execute must be Some");
+        assert_eq!(*execute.effect, Effect::LoseTheGame);
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
+            "LoseTheGame must scope to players the source attacked this turn (issue #1599), got {:?}",
+            execute.player_scope,
         );
     }
 

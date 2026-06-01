@@ -174,14 +174,19 @@ pub(crate) fn handle_decide_additional_cost(
         }
         AdditionalCost::Choice(preferred, fallback) => {
             if pay {
-                if state
+                let is_card_additional_cost_choice = state
                     .objects
                     .get(&pending.object_id)
                     .and_then(|obj| obj.additional_cost.as_ref())
-                    .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
-                {
+                    .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)));
+                if is_card_additional_cost_choice {
+                    // CR 601.2b: Optional/additional `Choice` costs (e.g. casualty).
                     ability.context.additional_cost_paid = true;
                     ability.context.additional_cost_payment_count = 1;
+                } else if matches!(preferred, AbilityCost::Mana { .. }) {
+                    // CR 118.9: Spellcasting-option alternative mana costs are not
+                    // additional costs; gate riders via `alternative_mana_cost_paid`.
+                    ability.context.alternative_mana_cost_paid = true;
                 }
                 Some(preferred.clone())
             } else {

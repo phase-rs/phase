@@ -1144,6 +1144,10 @@
     "cleaveNormalLabel": "Conjurar Normalmente",
     "cleaveAltLabel": "Conjurar com Remover",
     "cleaveSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Remover para remover as palavras entre colchetes.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Exile uma carta",
     "additionalSacrifice": "+ Sacrifique um permanente",
     "additionalPayLife": "+ Pague vida",
@@ -1155,6 +1159,10 @@
     "title": "Escolher um Protetor",
     "battleFallback": "Batalha",
     "subtitle": "{{name}} precisa de um novo protetor. Escolha qual oponente a defenderá."
+  },
+  "clashOpponent": {
+    "title": "Escolher oponente para confronto",
+    "subtitle": "Escolha qual oponente fará confronto com você."
   },
   "cardDataMissing": {
     "title": "Dados das Cartas Ausentes",

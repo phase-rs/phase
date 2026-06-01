@@ -1144,6 +1144,10 @@
     "cleaveNormalLabel": "Lanzar normalmente",
     "cleaveAltLabel": "Lanzar con Recortar",
     "cleaveSubtitle": "Lanza {{name}} normalmente, o paga su coste de Recortar para eliminar las palabras entre corchetes.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Exiliar una carta",
     "additionalSacrifice": "+ Sacrificar un permanente",
     "additionalPayLife": "+ Pagar vidas",
@@ -1155,6 +1159,10 @@
     "title": "Elegir un protector",
     "battleFallback": "Batalla",
     "subtitle": "{{name}} necesita un nuevo protector. Elige qué oponente la defenderá."
+  },
+  "clashOpponent": {
+    "title": "Elegir oponente para chocar",
+    "subtitle": "Elige qué oponente chocará contigo."
   },
   "cardDataMissing": {
     "title": "Faltan los datos de cartas",

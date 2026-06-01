@@ -3468,6 +3468,100 @@ fn try_parse_choose_player_to_verb(
     Some(clause)
 }
 
+/// CR 608.2c + CR 800.4a (issue #1504): "an opponent draws a card" — the
+/// opponent is chosen during resolution, not targeted at cast (contrast with
+/// "target opponent draws"). Decomposed into `Choose { Opponent }` with the
+/// verb phrase as a `sub_ability`, mirroring `try_parse_choose_player_to_verb`
+/// for Skullwinder's "choose an opponent" form.
+fn try_parse_an_opponent_to_verb(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let after_then = opt(tag::<_, _, OracleError<'_>>("then "))
+        .parse(tp.lower)
+        .ok()?
+        .0;
+    let (after_opponent, _) = tag::<_, _, OracleError<'_>>("an opponent ")
+        .parse(after_then)
+        .ok()?;
+    if tag::<_, _, OracleError<'_>>("chooses ")
+        .parse(after_opponent)
+        .is_ok()
+    {
+        return None;
+    }
+
+    let index = ctx.chosen_player_count;
+    ctx.relative_player_scope = Some(ControllerRef::ChosenPlayer { index });
+
+    let verb_lower = after_opponent.trim_start();
+    if verb_lower.is_empty() {
+        return None;
+    }
+    let verb_orig = &tp.original[tp.original.len() - verb_lower.len()..];
+    let mut verb_clause = parse_effect_clause(verb_orig, ctx);
+    if matches!(verb_clause.effect, Effect::Unimplemented { .. }) {
+        return None;
+    }
+    rebind_opponent_player_recipient_to_chosen(&mut verb_clause.effect, index);
+    if let Some(sub) = verb_clause.sub_ability.as_mut() {
+        rebind_opponent_player_recipient_in_chain(sub, index);
+    }
+
+    let mut clause = parsed_clause(Effect::Choose {
+        choice_type: ChoiceType::Opponent,
+        persist: false,
+    });
+    let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
+    sub.sub_ability = verb_clause.sub_ability;
+    sub.duration = verb_clause.duration;
+    clause.sub_ability = Some(Box::new(sub));
+    Some(clause)
+}
+
+fn filter_is_bare_opponent_player(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(crate::types::ability::TypedFilter {
+            type_filters,
+            controller: Some(ControllerRef::Opponent),
+            properties,
+        }) if type_filters.is_empty() && properties.is_empty()
+    )
+}
+
+fn rebind_opponent_player_recipient_to_chosen(effect: &mut Effect, index: u8) {
+    let chosen = TargetFilter::Typed(crate::types::ability::TypedFilter {
+        controller: Some(ControllerRef::ChosenPlayer { index }),
+        ..Default::default()
+    });
+    match effect {
+        Effect::Draw { target, .. }
+        | Effect::Mill { target, .. }
+        | Effect::Discard { target, .. } => {
+            if filter_is_bare_opponent_player(target) {
+                *target = chosen;
+            } else {
+                retarget_effect_to_chosen_player(effect, index);
+            }
+        }
+        Effect::GainLife { player, .. } if filter_is_bare_opponent_player(player) => {
+            *player = chosen;
+        }
+        _ => retarget_effect_to_chosen_player(effect, index),
+    }
+}
+
+fn rebind_opponent_player_recipient_in_chain(def: &mut AbilityDefinition, index: u8) {
+    rebind_opponent_player_recipient_to_chosen(&mut def.effect, index);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rebind_opponent_player_recipient_in_chain(sub, index);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rebind_opponent_player_recipient_in_chain(else_branch, index);
+    }
+}
+
 /// CR 109.4: Rebind a verb effect's player-recipient field to the Nth chosen
 /// player. Covers the player-recipient effect families that follow a "choose a
 /// player to <verb>" clause and carry a `Controller`-defaulted recipient
@@ -3669,6 +3763,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // generic imperative `choose` dispatch (which would consume the prefix
     // and drop the trailing verb).
     if let Some(clause) = try_parse_choose_player_to_verb(tp, ctx) {
+        return clause;
+    }
+
+    // CR 608.2c + CR 800.4a (issue #1504): "an opponent <verb>" before generic
+    // subject dispatch, which would bind `ControllerRef::Opponent` as a cast-time
+    // player target on Draw/Mill/etc.
+    if let Some(clause) = try_parse_an_opponent_to_verb(tp, ctx) {
         return clause;
     }
 
@@ -10075,6 +10176,28 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
                 }
             }
         }
+        // CR 608.2c + CR 608.2d (issue #1535): "that player may put a [typed]
+        // card from their hand onto the battlefield" (Braids, Conjurer Adept) /
+        // "each player puts a [typed] card from their graveyard ...". When the
+        // subject is a player reference and the `ChangeZone` target is a *typed*
+        // filter, the `Any`-guarded injection in the object-targeting group above
+        // was skipped, leaving the moved-object filter with no owner constraint —
+        // so at resolution it draws from every player's zone and the choice is
+        // mis-routed to the controller. Stamp the subject's controller onto the
+        // filter (mirroring the `Sacrifice` arm) so the card is taken from, and
+        // the choice presented to, the acting (per-iteration) player.
+        Effect::ChangeZone { target, .. }
+            if player_filter_as_controller_ref(&subject_filter).is_some() =>
+        {
+            if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
+                let effective_ctrl = if subject.target.is_some() {
+                    ControllerRef::TargetPlayer
+                } else {
+                    ctrl
+                };
+                force_controller(target, effective_ctrl);
+            }
+        }
         // CR 115.1c / CR 602.2b + CR 601.2c / CR 119.3: "Target player gains
         // N life" / "target opponent gains N life" announces a player target;
         // the chosen player, not the source controller, gains the life.
@@ -12812,6 +12935,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
+        return def;
+    }
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
@@ -12835,10 +12961,131 @@ pub(crate) fn parse_effect_chain_with_context(
     if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
+        return def;
+    }
     let ir = parse_effect_chain_ir(text, kind, ctx);
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
     def
+}
+
+/// CR 509.1g + CR 506.3e + CR 707.2 + CR 603.7: Mirror Match's whole-card idiom
+/// — "For each creature attacking you[ or a planeswalker you control], create a
+/// token that's a copy of that creature and that's blocking that creature.
+/// Exile those tokens at end of combat."
+///
+/// Lowers to `Effect::CopyTokenBlockingAttacker` (the copy-and-block half, whose
+/// resolver copies each matched attacker and puts the copy onto the battlefield
+/// blocking it, CR 506.3e) chained via `sub_ability` to a delayed end-of-combat
+/// exile of "those tokens" (`TargetFilter::LastCreated`, snapshotted at
+/// creation by the delayed-trigger resolver, CR 603.7c). The casting
+/// restriction ("only during the declare blockers step") is handled separately
+/// by the casting-line parser; an optional leading copy of that sentence is
+/// stripped here defensively in case it reaches this entry inline.
+///
+/// `FilterProp::AttackingController` matches every attacker whose defending
+/// player is the controller — which the engine records as the controller of an
+/// attacked planeswalker/battle too, so "attacking you" and "or a planeswalker
+/// you control" collapse onto the one predicate.
+fn try_parse_for_each_attacker_copy_blocker(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let lower = text.to_ascii_lowercase();
+    // Optional leading casting-restriction sentence, if not pre-stripped.
+    let i = opt(tag::<_, _, OracleError<'_>>(
+        "cast this spell only during the declare blockers step.",
+    ))
+    .parse(lower.as_str())
+    .map(|(rest, _)| rest.trim_start())
+    .unwrap_or(lower.as_str());
+
+    // "for each creature attacking you[ or a planeswalker you control], "
+    let (i, _) = tag::<_, _, OracleError<'_>>("for each creature attacking you")
+        .parse(i)
+        .ok()?;
+    let (i, _) = opt(tag::<_, _, OracleError<'_>>(
+        " or a planeswalker you control",
+    ))
+    .parse(i)
+    .ok()?;
+    let (i, _) = tag::<_, _, OracleError<'_>>(", ").parse(i).ok()?;
+
+    // "create a token that's a copy of <anaphor> and that's blocking <anaphor>"
+    let (i, _) = tag::<_, _, OracleError<'_>>("create a token that's a copy of ")
+        .parse(i)
+        .ok()?;
+    let (i, _) = alt((tag::<_, _, OracleError<'_>>("that creature"), tag("it")))
+        .parse(i)
+        .ok()?;
+    let (i, _) = tag::<_, _, OracleError<'_>>(" and that's blocking ")
+        .parse(i)
+        .ok()?;
+    let (i, _) = alt((tag::<_, _, OracleError<'_>>("that creature"), tag("it")))
+        .parse(i)
+        .ok()?;
+    let (i, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(i).ok()?;
+    let i = i.trim_start();
+
+    // Optional trailing "exile those tokens at end of combat." sentence. When
+    // present, it chains a delayed end-of-combat exile of the created tokens;
+    // when the body ends after the copy clause, the recognizer still matches
+    // (the copy-and-block half alone). Any other trailing text disqualifies the
+    // whole-card match so the generic pipeline can attempt it instead.
+    let exiles_tokens = if i.is_empty() {
+        false
+    } else {
+        let (rest, _) = tag::<_, _, OracleError<'_>>("exile those tokens at end of combat")
+            .parse(i)
+            .ok()?;
+        let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        true
+    };
+
+    let source_filter = TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
+    );
+    let mut def = AbilityDefinition::new(
+        kind,
+        Effect::CopyTokenBlockingAttacker {
+            source_filter,
+            owner: TargetFilter::Controller,
+        },
+    );
+    if exiles_tokens {
+        // CR 603.7c + CR 701.36a: "those tokens" → the tokens created above,
+        // snapshotted at delayed-trigger creation via `TargetFilter::LastCreated`.
+        let exile = AbilityDefinition::new(
+            kind,
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::LastCreated,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        );
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            kind,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::EndCombat,
+                },
+                effect: Box::new(exile),
+                uses_tracked_set: false,
+            },
+        )));
+    }
+    Some(def)
 }
 
 fn try_parse_return_target_and_same_name_from_your_graveyard(
@@ -14334,7 +14581,7 @@ pub(crate) fn parse_effect_chain_ir(
         if matches!(
             clause.effect,
             Effect::Choose {
-                choice_type: ChoiceType::Player,
+                choice_type: ChoiceType::Player | ChoiceType::Opponent,
                 ..
             }
         ) {
@@ -20981,6 +21228,52 @@ mod tests {
                     .any(|p| matches!(p, FilterProp::EnteredThisTurn)));
             }
             other => panic!("expected CopyTokenOf with typed source_filter, got {other:?}"),
+        }
+    }
+
+    /// CR 509.1g + CR 506.3e + CR 603.7: Mirror Match lowers to
+    /// `CopyTokenBlockingAttacker` over attackers-against-you plus a delayed
+    /// end-of-combat exile of the created tokens.
+    #[test]
+    fn effect_mirror_match_copy_blockers_and_delayed_exile() {
+        let def = parse_effect_chain(
+            "For each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::CopyTokenBlockingAttacker {
+                source_filter: TargetFilter::Typed(tf),
+                owner,
+            } => {
+                assert_eq!(*owner, TargetFilter::Controller);
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::AttackingController)));
+            }
+            other => panic!("expected CopyTokenBlockingAttacker, got {other:?}"),
+        }
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("delayed end-of-combat exile sub_ability present");
+        match &*sub.effect {
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase },
+                effect,
+                ..
+            } => {
+                assert_eq!(*phase, Phase::EndCombat);
+                assert!(matches!(
+                    &*effect.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        target: TargetFilter::LastCreated,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected delayed exile trigger, got {other:?}"),
         }
     }
 
@@ -28933,6 +29226,33 @@ mod tests {
         assert_eq!(result, "lose 2 life");
     }
 
+    /// CR 508.6 + CR 104.3e: An "[source] attacked this turn" relative clause
+    /// narrows the player set to `OpponentAttackedBySourceThisTurn` (Angel of Destiny,
+    /// issue #1599). General over the predicate verb and over the self-ref
+    /// spelling ("this creature" / "~" / "it"). The controller is excluded by
+    /// the scope, so an attack trigger never eliminates its own controller.
+    #[test]
+    fn strip_each_player_subject_attacked_this_turn_clause() {
+        for subject in ["each player", "each opponent"] {
+            for selfref in ["this creature", "~", "it"] {
+                let text = format!("{subject} {selfref} attacked this turn loses the game");
+                let (scope, result) = strip_each_player_subject(&text);
+                assert_eq!(
+                    scope,
+                    Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
+                    "scope must narrow to OpponentAttackedBySourceThisTurn for {text:?}",
+                );
+                assert_eq!(result, "lose the game", "predicate for {text:?}");
+            }
+        }
+
+        // General over the predicate verb (not just "loses the game").
+        let (scope, result) =
+            strip_each_player_subject("each player this creature attacked this turn loses 2 life");
+        assert_eq!(scope, Some(PlayerFilter::OpponentAttackedBySourceThisTurn));
+        assert_eq!(result, "lose 2 life");
+    }
+
     #[test]
     fn strip_each_player_subject_strips_leading_also() {
         // CR 608.2c: Leading "also" continuation adverb after a player scope is
@@ -34232,6 +34552,36 @@ mod tests {
                 }
                 other => panic!("expected Sacrifice for {text:?}, got: {other:?}"),
             }
+        }
+    }
+
+    /// CR 503.1a + CR 608.2d (issue #1535): Braids, Conjurer Adept — "at the
+    /// beginning of each player's upkeep, that player may put a ... card from
+    /// their hand onto the battlefield." Under the scoped-player context the
+    /// trigger establishes, the moved-object filter must be scoped to the acting
+    /// (per-iteration) player, so the card is drawn from THEIR hand — not any
+    /// player's — and the choice is presented to them, not the ability's
+    /// controller. Before the fix the typed ChangeZone target kept no owner
+    /// constraint, so it drew from every hand.
+    #[test]
+    fn that_player_put_from_hand_scopes_change_zone_to_scoped_player() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        let clause = parse_effect_clause(
+            "that player may put a creature card from their hand onto the battlefield",
+            &mut ctx,
+        );
+        match &clause.effect {
+            Effect::ChangeZone { target, .. } => {
+                assert_eq!(
+                    target_filter_controller_ref(target),
+                    Some(ControllerRef::ScopedPlayer),
+                    "moved-object filter must be scoped to ScopedPlayer, got {target:?}",
+                );
+            }
+            other => panic!("expected ChangeZone, got: {other:?}"),
         }
     }
 
@@ -40050,6 +40400,55 @@ mod snapshot_tests {
             )
             .is_none(),
             "interceptor must reject inputs whose inner quantity is not the equalization shape"
+        );
+    }
+
+    /// GitHub issue #1504 — Baleful Mastery: "an opponent draws a card" must not
+    /// require targeting an opponent at cast; opponent is chosen on resolution.
+    #[test]
+    fn baleful_mastery_opponent_draw_uses_choose_not_cast_target() {
+        let text = "If the {1}{B} cost was paid, an opponent draws a card. Exile target creature or planeswalker.";
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+
+        // Chain order: conditional opponent draw is the head; exile is sub_ability.
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent,
+                    ..
+                }
+            ),
+            "opponent draw must be Choose(Opponent), got {:?}",
+            def.effect
+        );
+        assert!(
+            matches!(
+                def.condition,
+                Some(AbilityCondition::AlternativeManaCostPaid)
+            ),
+            "draw must be gated on alternative mana cost payment, got {:?}",
+            def.condition
+        );
+        let draw_effect = def
+            .sub_ability
+            .as_ref()
+            .expect("Choose should chain to Draw");
+        let Effect::Draw { target, .. } = draw_effect.effect.as_ref() else {
+            panic!("expected Draw sub-ability, got {:?}", draw_effect.effect);
+        };
+        assert!(
+            target.chosen_player_index() == Some(0),
+            "Draw must target ChosenPlayer {{0}}, got {target:?}"
+        );
+        let exile = draw_effect
+            .sub_ability
+            .as_ref()
+            .expect("Draw should chain to exile");
+        assert!(
+            matches!(exile.effect.as_ref(), Effect::ChangeZone { .. }),
+            "exile must be chained after draw, got {:?}",
+            exile.effect
         );
     }
 

@@ -10,6 +10,7 @@ import type {
   LegalActionsResult,
   ManaCost,
   MatchConfig,
+  PlayerId,
   WaitingFor,
 } from "../adapter/types";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
@@ -89,6 +90,15 @@ interface GameStoreState {
    * `resolved`/`total` are engine-provided counts, never frontend-derived.
    */
   resolutionProgress: { resolved: number; total: number } | null;
+  /**
+   * Pure-data carrier for the starting-player d20 contest (CR 103.1): the
+   * game-start `DieRolled` batch plus the engine's authoritative starting
+   * player. Set once by `initGame` (null when the starter was chosen
+   * explicitly). A GamePage effect consumes it to drive the dice overlay and
+   * clears it via `clearStartingContest`. The store holds only data — it never
+   * calls the UI store, keeping the layer boundary clean.
+   */
+  startingContest: { events: GameEvent[]; startingPlayer: PlayerId } | null;
 }
 
 interface GameStoreActions {
@@ -120,6 +130,8 @@ interface GameStoreActions {
   setGameMode: (mode: GameMode) => void;
   setLobbyProgress: (progress: { joined: number; total: number } | null) => void;
   setResolutionProgress: (progress: { resolved: number; total: number } | null) => void;
+  /** Clear the starting-player contest after the overlay has consumed it. */
+  clearStartingContest: () => void;
 }
 
 export type GameStore = GameStoreState & GameStoreActions;
@@ -142,6 +154,7 @@ const initialState: GameStoreState = {
   turnCheckpoints: [],
   lobbyProgress: null,
   resolutionProgress: null,
+  startingContest: null,
 };
 
 export const useGameStore = create<GameStore>()(
@@ -157,6 +170,19 @@ export const useGameStore = create<GameStore>()(
         ...entry,
         seq: i,
       }));
+      // CR 103.1: capture the starting-player d20 contest as pure data so the
+      // dice overlay can animate the engine's authoritative result. Present only
+      // when the engine rolled (random starter); empty for an explicit
+      // play/draw choice. `current_starting_player` is the engine's pick — never
+      // recomputed from the rolls on the frontend.
+      const initEvents = initResult.events ?? [];
+      const rolledStart = initEvents[0]?.type === "DieRolled";
+      const startingContest = rolledStart
+        ? {
+            events: initEvents,
+            startingPlayer: state.current_starting_player ?? state.active_player,
+          }
+        : null;
       set({
         gameId,
         adapter,
@@ -169,6 +195,7 @@ export const useGameStore = create<GameStore>()(
         nextLogSeq: initLogEntries.length,
         stateHistory: [],
         turnCheckpoints: [],
+        startingContest,
       });
       saveGame(gameId, state);
     },
@@ -328,6 +355,10 @@ export const useGameStore = create<GameStore>()(
 
     setResolutionProgress: (progress) => {
       set({ resolutionProgress: progress });
+    },
+
+    clearStartingContest: () => {
+      set({ startingContest: null });
     },
   })),
 );

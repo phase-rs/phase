@@ -34,10 +34,10 @@ use crate::convert::token;
 use crate::convert::trigger as trigger_mod;
 use crate::schema::types::{
     Action, Actions, CardInExile, CardInGraveyard, CardType, CardsInHand, CounterType,
-    CreatureType, DamageRecipient, DamageToRecipients, DistributedTarget, Distribution,
-    FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent, Player, Players,
-    ReplacementActionWouldEnter, RevealTheTopNumberCardsOfLibraryAction, Rule, SearchLibraryAction,
-    Spell, Spells, Target, TokenFlag,
+    CreatableToken, CreatureType, DamageRecipient, DamageToRecipients, DistributedTarget,
+    Distribution, FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Permanent, Player,
+    Players, ReplacementActionWouldEnter, RevealTheTopNumberCardsOfLibraryAction, Rule,
+    SearchLibraryAction, Spell, Spells, Target, TokenCopyEffects, TokenFlag,
 };
 
 /// Modal-choice arity for `ActionsConversion::Modal`. Mirrors the engine's
@@ -3464,6 +3464,66 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 });
             };
             apply_token_flags(token::convert(single)?, flags)?
+        }
+
+        // CR 509.1g + CR 506.3e + CR 707.2: "For each attacking creature, create
+        // a token that's a copy of that creature. Those tokens block those
+        // creatures." (Mirror Match.) The only supported shape is a single
+        // copy-of-each-permanent spec carrying just the "enters blocking the
+        // attacker it copies" flag — it lowers to
+        // `Effect::CopyTokenBlockingAttacker`, whose resolver copies each matched
+        // attacker and puts the copy onto the battlefield blocking it. The
+        // end-of-combat exile is a separate `CreateFutureTrigger` action over
+        // "those tokens". Any other token spec, copy-effect, or flag combination
+        // strict-fails until it has a dedicated slot.
+        Action::ForEachPermanentCreateTokensWithFlags(perms, specs, flags) => {
+            let [CreatableToken::TokenCopyOfPermanent(copy_perm, copy_effects)] = specs.as_slice()
+            else {
+                return Err(ConversionGap::MalformedIdiom {
+                    idiom: "Action::ForEachPermanentCreateTokensWithFlags",
+                    path: String::new(),
+                    detail: format!(
+                        "expected single copy-of-each token spec, got {} specs",
+                        specs.len()
+                    ),
+                });
+            };
+            if !matches!(**copy_perm, Permanent::EachablePermanent) {
+                return Err(ConversionGap::MalformedIdiom {
+                    idiom: "Action::ForEachPermanentCreateTokensWithFlags",
+                    path: String::new(),
+                    detail: "copy source is not the iterated EachablePermanent".to_string(),
+                });
+            }
+            // CR 707.2: a plain copy ("a copy of that creature") — copy-effect
+            // overrides on a blocking copy have no engine slot yet.
+            if !matches!(copy_effects, TokenCopyEffects::NoTokenCopyEffects) {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "Effect::CopyTokenBlockingAttacker",
+                    needed_variant: "copy-effects on a for-each blocking copy".to_string(),
+                });
+            }
+            match flags.as_slice() {
+                // CR 506.3e: "that token blocks the attacker it copies." The flag
+                // names the iterated permanent (the copy source) as the blocked
+                // attacker, which the resolver binds per-iteration.
+                [TokenFlag::EntersBlockingAttacker(block_perm)]
+                    if matches!(**block_perm, Permanent::EachablePermanent) =>
+                {
+                    Effect::CopyTokenBlockingAttacker {
+                        source_filter: convert_permanents(perms)?,
+                        owner: TargetFilter::Controller,
+                    }
+                }
+                _ => {
+                    return Err(ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "Effect::CopyTokenBlockingAttacker",
+                        needed_variant:
+                            "for-each copy-token flags beyond EntersBlockingAttacker(Eachable)"
+                                .to_string(),
+                    });
+                }
+            }
         }
 
         // CR 701.13 + CR 400.7: "Exile the top card of your library." Maps onto

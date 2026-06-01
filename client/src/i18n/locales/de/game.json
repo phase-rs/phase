@@ -1144,6 +1144,10 @@
     "cleaveNormalLabel": "Normal wirken",
     "cleaveAltLabel": "Mit Abspalten wirken",
     "cleaveSubtitle": "Wirke {{name}} normal oder zahle seine Abspaltungskosten, um den Text in eckigen Klammern zu entfernen.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Eine Karte ins Exil schicken",
     "additionalSacrifice": "+ Eine bleibende Karte opfern",
     "additionalPayLife": "+ Leben bezahlen",
@@ -1155,6 +1159,10 @@
     "title": "Beschützer wählen",
     "battleFallback": "Schlacht",
     "subtitle": "{{name}} benötigt einen neuen Beschützer. Wähle, welcher Gegner sie verteidigt."
+  },
+  "clashOpponent": {
+    "title": "Kampf-Gegner wählen",
+    "subtitle": "Wähle, welcher Gegner mit dir kämpft."
   },
   "cardDataMissing": {
     "title": "Kartendaten fehlen",

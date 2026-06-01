@@ -88,6 +88,14 @@ function keywordCopy(
         showOracleText: true,
         subtitle: t("alternativeCost.cleaveSubtitle", { name: cardName }),
       };
+    case "MoreThanMeetsTheEye":
+      return {
+        eyebrow: t("alternativeCost.mtmteEyebrow"),
+        normalLabel: t("alternativeCost.mtmteNormalLabel"),
+        altLabel: t("alternativeCost.mtmteAltLabel"),
+        showOracleText: true,
+        subtitle: t("alternativeCost.mtmteSubtitle", { name: cardName }),
+      };
   }
 }
 

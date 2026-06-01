@@ -1194,6 +1194,9 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             "each opponent who was dealt combat damage this turn"
         }
         PlayerFilter::OpponentAttackedThisTurn => "each opponent you attacked this turn",
+        PlayerFilter::OpponentAttackedBySourceThisTurn => {
+            "each opponent this source attacked this turn"
+        }
         PlayerFilter::All => "each player",
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
@@ -2368,6 +2371,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Learn
         | Effect::SwitchPT { .. }
         | Effect::Myriad
+        | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::Populate
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -5077,6 +5081,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // (crates/engine/src/game/effects/mod.rs).
         AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
+        AbilityCondition::AlternativeManaCostPaid => ("AlternativeManaCostPaid", Handled),
         AbilityCondition::EffectOutcome { signal } => match signal {
             EffectOutcomeSignal::OptionalEffectPerformed => {
                 ("EffectOutcomeOptionalPerformed", Handled)
@@ -5290,6 +5295,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
         PlayerFilter::OpponentDealtCombatDamage { .. } => ("OpponentDealtCombatDamage", Handled),
         PlayerFilter::OpponentAttackedThisTurn => ("OpponentAttackedThisTurn", Handled),
+        PlayerFilter::OpponentAttackedBySourceThisTurn => {
+            ("OpponentAttackedBySourceThisTurn", Handled)
+        }
         PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),
         // Previously emitted via Debug formatting; never appeared in the handled set.
         PlayerFilter::Controller => ("Controller", Unhandled),

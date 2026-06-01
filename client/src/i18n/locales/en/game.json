@@ -1144,6 +1144,10 @@
     "cleaveNormalLabel": "Cast Normally",
     "cleaveAltLabel": "Cast with Cleave",
     "cleaveSubtitle": "Cast {{name}} normally, or pay its Cleave cost to remove the bracketed text.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Exile a card",
     "additionalSacrifice": "+ Sacrifice a permanent",
     "additionalPayLife": "+ Pay life",
@@ -1155,6 +1159,10 @@
     "title": "Choose a Protector",
     "battleFallback": "Battle",
     "subtitle": "{{name}} needs a new protector. Choose which opponent will defend it."
+  },
+  "clashOpponent": {
+    "title": "Choose Clash Opponent",
+    "subtitle": "Choose which opponent will clash with you."
   },
   "cardDataMissing": {
     "title": "Card Data Missing",

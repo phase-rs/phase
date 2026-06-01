@@ -1144,6 +1144,10 @@
     "cleaveNormalLabel": "Lancia normalmente",
     "cleaveAltLabel": "Lancia con Fendere",
     "cleaveSubtitle": "Lancia {{name}} normalmente, o paga il suo costo di Fendere per rimuovere le parole tra parentesi quadre.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Esilia una carta",
     "additionalSacrifice": "+ Sacrifica un permanente",
     "additionalPayLife": "+ Paga punti vita",
@@ -1155,6 +1159,10 @@
     "title": "Scegli un protettore",
     "battleFallback": "Battaglia",
     "subtitle": "{{name}} necessita di un nuovo protettore. Scegli quale avversario la difenderà."
+  },
+  "clashOpponent": {
+    "title": "Scegli l'avversario per lo scontro",
+    "subtitle": "Scegli quale avversario si scontrerà con te."
   },
   "cardDataMissing": {
     "title": "Dati delle carte mancanti",
