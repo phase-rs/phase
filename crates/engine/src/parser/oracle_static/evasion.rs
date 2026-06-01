@@ -81,6 +81,11 @@ pub(crate) fn classify_block_exception(filter_text: &str) -> BlockExceptionKind 
 /// / "of the chosen type"). A bare "permanent you control" needs no filter —
 /// `apply_trigger_doubling`'s controller match already enforces control — so
 /// this returns `None`, leaving `affected` unset (Panharmonicon/Isshin/Drivnod).
+///
+/// CR 603.2d: The source may itself be a flat disjunction of typed clauses
+/// sharing one trailing controller scope — "a Shaman or another Wizard you
+/// control" (Harmonic Prodigy). Such sources are composed into a
+/// controller-scoped `Or`, one disjunct per [`doubler_disjunct_connector`].
 pub(crate) fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
     // The source phrase sits between "a triggered ability of " and the trigger
     // verb: " to trigger" (cause-form: "...causes a triggered ability of X to
@@ -96,33 +101,82 @@ pub(crate) fn parse_doubler_source_filter(lower: &str) -> Option<TargetFilter> {
         .parse(i)
     })?;
 
-    // CR 603.2d: `parse_type_phrase` models a single type clause, so a
-    // disjunctive source ("a Shaman or another Wizard you control",
-    // Harmonic Prodigy) parses to only the first disjunct — silently dropping
-    // the remaining disjuncts AND the "you control" scope, yielding a
-    // controller-less `Subtype(Shaman)` that would wrongly double an opponent's
-    // Shaman's triggers. Until `parse_type_phrase` models top-level
-    // disjunctions, bail to `None` on a disjunctive source so the doubler keeps
-    // its controller-scoped "all your triggers" fallback (the pre-existing
-    // behavior) rather than mis-scoping to a single uncontrolled subtype.
-    if nom_primitives::scan_contains(source_phrase, "or ") {
+    // Parse the leading typed clause. A bare controlled permanent
+    // ("a permanent you control", Panharmonicon) adds nothing the controller
+    // match doesn't already enforce, so an unrestrictive clause yields `None`.
+    let (first, remainder) = parse_type_phrase(source_phrase);
+    if !doubler_source_is_restrictive(&first) {
         return None;
     }
 
-    let (filter, _) = parse_type_phrase(source_phrase);
-    let TargetFilter::Typed(tf) = &filter else {
-        return None;
+    // CR 603.2d: The source may be a flat type union sharing one trailing
+    // controller scope — "a Shaman or another Wizard you control" (Harmonic
+    // Prodigy). `parse_type_phrase`'s own disjunction recursion only fires when
+    // the trailing disjunct opens with a bare type word, not an article or an
+    // "another"/"other" designation ("another Wizard"), so it stops after the
+    // first disjunct and leaves the connector in the remainder. Dispatch on that
+    // connector here: no connector means a single clause (the remainder is
+    // informational and ignored, preserving the prior single-clause behavior);
+    // a connector means a union, parsed disjunct-by-disjunct below.
+    let Ok((mut rest, ())) = doubler_disjunct_connector(remainder.trim_start()) else {
+        return Some(first);
     };
-    // Only narrow when the source carries a restriction beyond a controlled
-    // permanent: `Permanent`/`Card`/`Any` core types add nothing the controller
-    // match doesn't already enforce.
-    let restrictive = tf.type_filters.iter().any(|t| {
+
+    let mut branches = vec![first];
+    loop {
+        let (filter, remainder) = parse_type_phrase(rest);
+        // Each disjunct must independently narrow to a restrictive typed clause.
+        // If one does not — e.g. a stray "or" inside an unrelated suffix
+        // ("power 4 or greater") split the phrase mid-clause — bail so the
+        // doubler falls back to its conservative controller-only scope. This
+        // keeps the fallback strictly safe: a mis-parse can only widen back to
+        // "all your triggers", never narrow to a wrong subset.
+        if !doubler_source_is_restrictive(&filter) {
+            return None;
+        }
+        branches.push(filter);
+        match doubler_disjunct_connector(remainder.trim_start()) {
+            Ok((next, ())) => rest = next,
+            Err(_) => break,
+        }
+    }
+
+    // The shared "you control" scope is stated once, on the final disjunct;
+    // distribute it to every branch so the union never doubles an opponent's
+    // matching permanent.
+    Some(distribute_controller_to_or(TargetFilter::Or {
+        filters: branches,
+    }))
+}
+
+/// CR 603.2d: Match the connector between two typed disjuncts in a flat union —
+/// "or", the Oxford-comma "`, or`", or a bare list comma "`, `"
+/// ("a Shaman, a Wizard, or a Cleric"). Longest-match-first so "`, or`" wins
+/// over the bare "`, `". Combinator-based so the union is parsed, not
+/// string-split.
+fn doubler_disjunct_connector(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((tag::<_, _, OracleError<'_>>(", or "), tag(", "), tag("or "))),
+    )
+    .parse(input)
+}
+
+/// CR 603.2d: A doubler `affected` filter must narrow beyond a bare controlled
+/// permanent — `apply_trigger_doubling`'s controller match already enforces
+/// control, so `Permanent`/`Card`/`Any` core types add nothing. A clause is
+/// restrictive when it carries a concrete type/subtype restriction or any
+/// property (subtype designations, "another", "of the chosen type", etc.).
+fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
+    let TargetFilter::Typed(tf) = filter else {
+        return false;
+    };
+    tf.type_filters.iter().any(|t| {
         !matches!(
             t,
             TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any
         )
-    }) || !tf.properties.is_empty();
-    restrictive.then_some(filter)
+    }) || !tf.properties.is_empty()
 }
 
 pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {

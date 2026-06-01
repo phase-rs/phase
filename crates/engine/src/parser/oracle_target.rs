@@ -2451,7 +2451,12 @@ fn distribute_properties_to_or(filter: TargetFilter) -> TargetFilter {
 /// to all preceding `Typed` elements that have `controller: None`.
 /// Handles "artifacts, creatures, and lands your opponents control" where only
 /// the final type parses the controller suffix.
-fn distribute_controller_to_or(filter: TargetFilter) -> TargetFilter {
+///
+/// Exposed `pub(crate)` so disjunctive grammars that compose their own `Or` from
+/// independently-parsed disjuncts (e.g. the trigger-doubler source filter in
+/// `oracle_static::evasion`, "a Shaman or another Wizard you control") can reuse
+/// the same shared-controller-scope distribution instead of duplicating it.
+pub(crate) fn distribute_controller_to_or(filter: TargetFilter) -> TargetFilter {
     let TargetFilter::Or { mut filters } = filter else {
         return filter;
     };

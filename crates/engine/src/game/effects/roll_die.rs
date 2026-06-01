@@ -60,6 +60,16 @@ pub fn resolve(
         result: actual,
     });
 
+    // CR 706.2: The stored value is the actual die-roll result.
+    // CR 706.4: Record the actual result so an inline "equal to the
+    // result" sub_ability (no results table) reads the roll via
+    // QuantityRef::EventContextAmount instead of the triggering event's amount.
+    // Deliberately NOT cleared at this function's exit: for `results: []` cards
+    // (Ancient Copper/Gold/Silver, Adorable Kitten) the consuming effect is the
+    // RollDie's sub_ability, resolved by the outer resolve_ability_chain at depth+1
+    // AFTER this returns. Clearing here would erase the value before it is read.
+    state.die_result_this_resolution = Some(actual);
+
     // CR 706.2: Find the matching result branch and resolve its effect.
     if let Some(branch) = results.iter().find(|b| actual >= b.min && actual <= b.max) {
         let sub = ResolvedAbility::new(
@@ -560,6 +570,111 @@ mod tests {
             state.players[0].hand.len(),
             2,
             "result ≥ 1 must not fire the guarded Discard"
+        );
+    }
+
+    /// CR 706.2: After a RollDie resolves, the actual result is stamped into
+    /// `state.die_result_this_resolution` so an inline "equal to
+    /// the result" sub_ability (no results table) reads the roll via
+    /// `QuantityRef::EventContextAmount`. The stamped value must equal the
+    /// `DieRolled` event's result.
+    #[test]
+    fn roll_die_stamps_die_result_this_resolution() {
+        let mut state = GameState::new_two_player(7);
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 20,
+                results: vec![],
+                modifier: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let result = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::DieRolled { result, .. } => Some(*result),
+                _ => None,
+            })
+            .expect("DieRolled event must be present");
+        assert_eq!(
+            state.die_result_this_resolution,
+            Some(result),
+            "die_result_this_resolution must mirror the actual rolled result"
+        );
+    }
+
+    /// CR 706.4 (issue #1602, building-block guard): "roll a d20. You create a
+    /// number of Treasure tokens equal to the result." With a
+    /// triggering combat-damage event of 6 already set, the inline sub_ability
+    /// whose count is `EventContextAmount` must consume the ROLL, not the 6.
+    /// Modeled with a Draw sub_ability (count == EventContextAmount) so we can
+    /// assert exactly `result` cards were drawn.
+    #[test]
+    fn roll_die_subability_reads_roll_not_trigger_event() {
+        use crate::types::ability::{QuantityRef, TargetFilter, TargetRef};
+        let mut state = GameState::new_two_player(7);
+        // Seed enough library cards that any d20 result (≤ 20) can be drawn.
+        for i in 0..20 {
+            crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(4000 + i as u64),
+                PlayerId(0),
+                format!("Card {i}"),
+                crate::types::zones::Zone::Library,
+            );
+        }
+        // The triggering event carries amount 6 (combat damage). If the cascade
+        // is wrong, the sub_ability would draw 6 instead of the rolled result.
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 6,
+            is_combat: true,
+            excess: 0,
+        });
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                sides: 20,
+                results: vec![],
+                modifier: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .sub_ability(draw);
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        let rolled = events
+            .iter()
+            .find_map(|e| match e {
+                GameEvent::DieRolled { result, .. } => Some(*result as usize),
+                _ => None,
+            })
+            .expect("DieRolled event must be present");
+        assert!(
+            (1..=20).contains(&rolled),
+            "d20 result out of range: {rolled}"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            rolled,
+            "sub_ability must draw cards equal to the rolled result ({rolled}), not the combat damage (6)"
         );
     }
 }

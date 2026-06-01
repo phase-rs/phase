@@ -10370,7 +10370,7 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, BounceSelection,
         CastingPermission, Comparator, ContinuousModification, ControllerRef, CountScope,
-        DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp,
+        DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
         ManaSpendPermission, ObjectScope, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
         QuantityExpr, QuantityRef, SharedQuality, TargetFilter, TypeFilter, TypedFilter,
     };
@@ -11599,6 +11599,53 @@ mod tests {
         }
     }
 
+    /// Issue #1585 — Pantlaza, Sun-Favored: "Whenever Pantlaza or another
+    /// Dinosaur you control enters, you may discover X, where X is that
+    /// creature's toughness. Do this only once each turn." The trigger must be
+    /// an ETB (`ChangesZone` → Battlefield), constrained to once per turn, and
+    /// its execute must be a `Discover` whose limit binds to the *entering*
+    /// creature's toughness — NOT a `Variable("X")` placeholder, which resolves
+    /// to 0 at runtime and makes discover a silent no-op ("did not discover").
+    #[test]
+    fn trigger_pantlaza_etb_discover_x_is_entering_creature_toughness() {
+        let def = parse_trigger_line(
+            "Whenever Pantlaza or another Dinosaur you control enters, you may \
+             discover X, where X is that creature's toughness. Do this only \
+             once each turn. (Exile cards from the top of your library until \
+             you exile a nonland card with that mana value or less. Cast it \
+             without paying its mana cost or put it into your hand. Put the \
+             rest on the bottom in a random order.)",
+            "Pantlaza, Sun-Favored",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.constraint,
+            Some(crate::types::ability::TriggerConstraint::OncePerTurn),
+            "\"Do this only once each turn\" must map to OncePerTurn",
+        );
+
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("trigger should have execute step");
+        match execute.effect.as_ref() {
+            Effect::Discover { mana_value_limit } => {
+                assert!(
+                    matches!(
+                        mana_value_limit,
+                        QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::Toughness { .. }
+                        }
+                    ),
+                    "discover X must bind to the entering creature's toughness, \
+                     not a Variable placeholder (got {mana_value_limit:?})",
+                );
+            }
+            other => panic!("Expected Discover, got {other:?}"),
+        }
+    }
+
     #[test]
     fn trigger_battalion() {
         let def = parse_trigger_line(
@@ -12700,6 +12747,59 @@ mod tests {
             transform_sub.sub_link,
             SubAbilityLink::ContinuationStep,
             "Transform sub_link must be ContinuationStep (chain extension of the Untap clause)",
+        );
+    }
+
+    /// CR 104.3e + CR 603.4 + CR 508.6 + CR 119: Angel of Destiny (issue #1599).
+    /// "At the beginning of your end step, if you have at least 15 life more than
+    /// your starting life total, each player this creature attacked this turn
+    /// loses the game."
+    ///
+    /// Two clauses were silently dropped before this fix:
+    ///   1. The intervening-if (life ≥ starting life + 15) parsed as `None`, so
+    ///      the loss fired every end step regardless of life total.
+    ///   2. The subject "each player this creature attacked this turn" was
+    ///      stripped, leaving `LoseTheGame` with no targets and no `player_scope`
+    ///      — which `win_lose::resolve_lose` routes to the controller (CR 104.3a),
+    ///      making the Angel eliminate its own controller.
+    #[test]
+    fn parse_angel_of_destiny_end_step_loss_issue_1599() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you have at least 15 life more than your starting life total, each player this creature attacked this turn loses the game.",
+            "Angel of Destiny",
+        );
+
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+
+        // Clause 1 — intervening-if (CR 603.4): LifeAboveStarting ≥ 15, i.e.
+        // current life is at least 15 above the starting life total (CR 119).
+        // Reuses the `LifeAboveStarting` building block (life − starting life).
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeAboveStarting,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 15 },
+            }),
+            "condition must be QuantityComparison LifeAboveStarting GE Fixed(15), got {:?}",
+            def.condition,
+        );
+
+        // Clause 2 — effect + player scope: LoseTheGame fanned out over each
+        // player the source creature attacked this turn (CR 508.6). The
+        // controller is excluded by `OpponentAttackedBySourceThisTurn`, so the
+        // Angel never eliminates itself — directly fixing the "my own Angel
+        // killed me" report.
+        let execute = def.execute.as_ref().expect("execute must be Some");
+        assert_eq!(*execute.effect, Effect::LoseTheGame);
+        assert_eq!(
+            execute.player_scope,
+            Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
+            "LoseTheGame must scope to players the source attacked this turn (issue #1599), got {:?}",
+            execute.player_scope,
         );
     }
 
@@ -14935,7 +15035,7 @@ mod tests {
                 // subject by a post-hoc `player_scope` override.
                 assert_eq!(
                     player,
-                    &crate::types::ability::GainLifePlayer::Controller,
+                    &crate::types::ability::TargetFilter::Controller,
                     "Exquisite Blood: 'you gain' recipient must be the ability controller"
                 );
             }
@@ -18279,6 +18379,61 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(def.origin, Some(Zone::Graveyard));
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        match &*execute.effect {
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source,
+            } => {
+                assert_eq!(*target, TargetFilter::Any);
+                assert_eq!(*damage_source, Some(DamageSource::TriggeringSource));
+                assert!(matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource,
+                        },
+                    }
+                ));
+            }
+            other => panic!("expected DealDamage, got {other:?}"),
+        }
+    }
+
+    /// CR 120.1 + CR 603.6: Pyrogoyf's "that creature deals damage equal to
+    /// its power" trigger must use the entering Lhurgoyf as both the damage
+    /// source and power source, while keeping "any target" as the chosen damage
+    /// recipient.
+    #[test]
+    fn pyrogoyf_etb_damage_uses_entering_lhurgoyf_as_damage_source() {
+        let def = parse_trigger_line(
+            "Whenever this creature or another Lhurgoyf creature you control enters, that creature deals damage equal to its power to any target.",
+            "Pyrogoyf",
+        );
+
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        match &*execute.effect {
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source,
+            } => {
+                assert_eq!(*target, TargetFilter::Any);
+                assert_eq!(*damage_source, Some(DamageSource::TriggeringSource));
+                assert!(matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::EventSource,
+                        },
+                    }
+                ));
+            }
+            other => panic!("expected DealDamage, got {other:?}"),
+        }
     }
 
     /// CR 603.6 + CR 603.6a — origin extraction for "enters from exile"
@@ -23020,6 +23175,95 @@ mod tests {
                 )),
                 "gate for {keyword:?} must check WithKeyword({keyword:?}), props: {:?}",
                 tf.properties
+            );
+        }
+    }
+
+    /// Issue #1592 — Odric, Lunarch Marshal's CURRENT (post-errata) Oracle text:
+    /// the trigger is now "At the beginning of each combat" and the
+    /// "same is true for" list gained `skulk` (13 keywords total). Each grant
+    /// must still be an `IsPresent`-gated `StaticDefinition` (gated on a creature
+    /// you control having that keyword) — NOT an unconditional grant of every
+    /// keyword. This guards the runtime symptom reported in #1592 ("it's getting
+    /// all of the abilities") against the current card text.
+    #[test]
+    fn parse_odric_current_errata_text_gates_all_thirteen_keywords() {
+        use crate::types::keywords::Keyword;
+
+        let def = parse_trigger_line(
+            "At the beginning of each combat, creatures you control gain first \
+             strike until end of turn if a creature you control has first strike. \
+             The same is true for flying, deathtouch, double strike, haste, \
+             hexproof, indestructible, lifelink, menace, reach, skulk, trample, \
+             and vigilance.",
+            "Odric, Lunarch Marshal",
+        );
+        let execute = def.execute.expect("Odric trigger must have an execute");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*execute.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", execute.effect);
+        };
+        // First strike + 12 "same is true for" keywords = 13 definitions.
+        assert_eq!(
+            static_abilities.len(),
+            13,
+            "expected 13 conditioned StaticDefinitions, got {}",
+            static_abilities.len()
+        );
+        assert!(
+            execute.sub_ability.is_none(),
+            "the 'same is true for' sentence must fold into static_abilities"
+        );
+
+        let expected = [
+            Keyword::FirstStrike,
+            Keyword::Flying,
+            Keyword::Deathtouch,
+            Keyword::DoubleStrike,
+            Keyword::Haste,
+            Keyword::Hexproof,
+            Keyword::Indestructible,
+            Keyword::Lifelink,
+            Keyword::Menace,
+            Keyword::Reach,
+            Keyword::Skulk,
+            Keyword::Trample,
+            Keyword::Vigilance,
+        ];
+        for (sdef, keyword) in static_abilities.iter().zip(expected.iter()) {
+            // Grant: one AddKeyword for this keyword.
+            assert!(
+                sdef.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword { keyword: k } if k == keyword
+                )),
+                "static def must grant {keyword:?}, mods: {:?}",
+                sdef.modifications
+            );
+            // Gate: IsPresent of a creature YOU CONTROL with the SAME keyword.
+            let Some(crate::types::ability::StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf)),
+            }) = &sdef.condition
+            else {
+                panic!(
+                    "static def for {keyword:?} must be IsPresent-gated, got {:?}",
+                    sdef.condition
+                );
+            };
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::WithKeyword { value } if value == keyword
+                )),
+                "gate for {keyword:?} must check WithKeyword({keyword:?}), props: {:?}",
+                tf.properties
+            );
+            assert_eq!(
+                tf.controller,
+                Some(crate::types::ability::ControllerRef::You),
+                "gate for {keyword:?} must be scoped to creatures you control"
             );
         }
     }

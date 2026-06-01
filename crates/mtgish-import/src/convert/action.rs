@@ -9,10 +9,10 @@
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, GainLifePlayer, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
-    QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
-    TargetFilter, TriggerDefinition, TypedFilter,
+    FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
+    MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    SearchSelectionConstraint, SharedQuality, StaticDefinition, TargetFilter, TriggerDefinition,
+    TypedFilter,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
@@ -2625,7 +2625,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         },
         Action::GainLife(n) => Effect::GainLife {
             amount: quantity::convert(n)?,
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         },
         Action::LoseLife(n) => Effect::LoseLife {
             amount: quantity::convert(n)?,
@@ -3051,11 +3051,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         //
         // CR 115.2 + CR 601.2c: For target-player references
         // (`Ref_TargetPlayer*`), the announced player is wired onto the
-        // inner Effect's player-target slot via `apply_player_target`.
-        // The engine extracts the chosen player at resolution time via
-        // `ResolvedAbility::target_player()`. Other non-You scopes that
-        // can't be expressed as a per-effect target (predicate-filtered,
-        // dynamic anaphor, etc.) strict-fail.
+        // inner Effect's player-target slot via `apply_player_target`. Other
+        // non-You scopes that can't be expressed as a per-effect target
+        // (predicate-filtered, dynamic anaphor, etc.) strict-fail.
         Action::PlayerAction(player, inner) => match &**player {
             Player::You => convert(inner)?,
             other => {
@@ -3624,7 +3622,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             };
             Effect::GainLife {
                 amount,
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             }
         }
 
@@ -5336,16 +5334,9 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             target: target_filter,
         },
         // CR 119.3 + CR 115.2: "Target player gains N life."
-        // The `target_filter` parameter is consumed implicitly: the
-        // engine reads the announced player from `ability.targets` via
-        // `target_player()` when `player` is `TargetPlayer`. The filter
-        // value itself doesn't carry through (`GainLifePlayer` is enum-
-        // tagged, not filter-parameterized) — this branch only fires
-        // for target-player refs which all map to the same announced
-        // slot, so the loss of `target_filter` distinction is sound.
         Effect::GainLife { amount, .. } => Effect::GainLife {
             amount,
-            player: GainLifePlayer::TargetPlayer,
+            player: target_filter,
         },
         // CR 119.3 + CR 115.2: "Target player loses N life."
         Effect::LoseLife { amount, .. } => Effect::LoseLife {
@@ -7124,6 +7115,21 @@ mod tests {
             .type_filters
             .iter()
             .any(|filter| matches!(filter, TypeFilter::Creature)));
+    }
+
+    #[test]
+    fn target_player_gain_life_preserves_player_filter() {
+        let effect = convert(&Action::PlayerAction(
+            Box::new(Player::Ref_TargetPlayer),
+            Box::new(Action::GainLife(Box::new(GameNumber::Integer(2)))),
+        ))
+        .unwrap();
+
+        let Effect::GainLife { amount, player } = effect else {
+            panic!("expected GainLife");
+        };
+        assert_eq!(amount, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(player, TargetFilter::Player);
     }
 
     #[test]

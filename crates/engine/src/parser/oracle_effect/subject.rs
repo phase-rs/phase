@@ -10,8 +10,8 @@ use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, GainLifePlayer, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+    FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -1655,8 +1655,10 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
         alt((
             value(Duration::UntilEndOfTurn, tag(" until end of turn")),
             value(Duration::UntilEndOfTurn, tag(" this turn")),
+            // CR 514.2: "until the end of your next turn" persists through
+            // that turn's cleanup step.
             value(
-                Duration::UntilNextTurnOf {
+                Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
                 tag(" until the end of your next turn"),
@@ -1667,8 +1669,10 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
                 },
                 tag(" until your next turn"),
             ),
+            // CR 514.2: third-person next-turn duration in granted-effect
+            // clauses follows the same controller/grantee binding.
             value(
-                Duration::UntilNextTurnOf {
+                Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
                 tag(" until the end of their next turn"),
@@ -2589,7 +2593,7 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
     };
     Some(parsed_clause(Effect::GainLife {
         amount,
-        player: GainLifePlayer::TargetedController,
+        player: TargetFilter::ParentTargetController,
     }))
 }
 
@@ -3320,7 +3324,7 @@ mod tests {
                         scope: crate::types::ability::ObjectScope::Target
                     }
                 },
-                player: GainLifePlayer::TargetedController
+                player: TargetFilter::ParentTargetController
             }
         ));
     }
@@ -3340,7 +3344,7 @@ mod tests {
                         scope: crate::types::ability::ObjectScope::Target
                     }
                 },
-                player: GainLifePlayer::TargetedController
+                player: TargetFilter::ParentTargetController
             }
         ));
     }
@@ -3360,7 +3364,7 @@ mod tests {
                         scope: crate::types::ability::ObjectScope::Target
                     }
                 },
-                player: GainLifePlayer::TargetedController
+                player: TargetFilter::ParentTargetController
             }
         ));
     }
@@ -3374,7 +3378,7 @@ mod tests {
             clause.effect,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::TargetedController
+                player: TargetFilter::ParentTargetController
             }
         ));
     }

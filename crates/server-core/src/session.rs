@@ -716,7 +716,6 @@ impl SessionManager {
         &mut self,
         game_code: &str,
         display_name: String,
-        password_protected: bool,
     ) -> Result<SeatReservation, String> {
         let session = self
             .sessions
@@ -731,11 +730,7 @@ impl SessionManager {
             .first_open_seat()
             .ok_or_else(|| "Game is already full".to_string())?;
         let token = generate_player_token();
-        let expires_at_ms = if password_protected {
-            None
-        } else {
-            Some(now_ms() + PUBLIC_SEAT_RESERVATION_MS)
-        };
+        let expires_at_ms = Some(now_ms() + PUBLIC_SEAT_RESERVATION_MS);
         let reservation = SeatReservation {
             token: token.clone(),
             display_name,

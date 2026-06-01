@@ -70,6 +70,17 @@ fn players_for_filter(
             .filter(|player| player.id != controller && state.has_attacked(controller, player.id))
             .map(|player| player.id)
             .collect(),
+        // CR 508.6: each opponent this source creature attacked this turn.
+        PlayerFilter::OpponentAttackedBySourceThisTurn => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                player.id != controller
+                    && state.creature_attacked_player_this_turn(source_id, player.id)
+            })
+            .map(|player| player.id)
+            .collect(),
         PlayerFilter::All => state
             .players
             .iter()

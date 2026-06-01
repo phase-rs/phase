@@ -1243,7 +1243,7 @@ mod tests {
     }
 
     /// Issue #1518 (Pithing Needle): a permanent's chosen card name is public
-    /// information (CR 605.1a) and MUST remain visible to opponents after the
+    /// information (CR 400.2) and MUST remain visible to opponents after the
     /// per-viewer redaction. `filter_state_for_viewer` only redacts cards in
     /// hidden zones; a face-up battlefield permanent keeps its
     /// `chosen_attributes` for every viewer, so the opponent can see which name

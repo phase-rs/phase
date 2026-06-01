@@ -11,8 +11,8 @@ use crate::types::ability::{
     AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
     ContinuousModification, ControllerRef, CountScope, CounterSourceRider, DelayedTriggerCondition,
     DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal, FilterProp,
-    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
+    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation,
     SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition,
     TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
@@ -773,6 +773,9 @@ fn fmt_duration(d: &Duration) -> String {
         Duration::UntilNextTurnOf { player } => {
             format!("until next turn ({})", fmt_player_scope(player))
         }
+        Duration::UntilEndOfNextTurnOf { player } => {
+            format!("until end of next turn ({})", fmt_player_scope(player))
+        }
         Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
         Duration::UntilNextStepOf { step, player } => {
             format!(
@@ -1191,6 +1194,9 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             "each opponent who was dealt combat damage this turn"
         }
         PlayerFilter::OpponentAttackedThisTurn => "each opponent you attacked this turn",
+        PlayerFilter::OpponentAttackedBySourceThisTurn => {
+            "each opponent this source attacked this turn"
+        }
         PlayerFilter::All => "each player",
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
@@ -1771,16 +1777,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::GainLife { amount, player } => {
             d.push(("amount".into(), fmt_quantity(amount)));
-            if !matches!(player, GainLifePlayer::Controller) {
-                d.push((
-                    "player".into(),
-                    match player {
-                        GainLifePlayer::TargetedController => "target's controller",
-                        GainLifePlayer::TargetPlayer => "target player",
-                        GainLifePlayer::Controller => unreachable!(),
-                    }
-                    .into(),
-                ));
+            if !player.is_context_ref() {
+                d.push(("player".into(), fmt_target(player)));
             }
         }
         Effect::LoseLife { amount, .. } => {
@@ -5295,6 +5293,9 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
         PlayerFilter::OpponentDealtCombatDamage { .. } => ("OpponentDealtCombatDamage", Handled),
         PlayerFilter::OpponentAttackedThisTurn => ("OpponentAttackedThisTurn", Handled),
+        PlayerFilter::OpponentAttackedBySourceThisTurn => {
+            ("OpponentAttackedBySourceThisTurn", Handled)
+        }
         PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),
         // Previously emitted via Debug formatting; never appeared in the handled set.
         PlayerFilter::Controller => ("Controller", Unhandled),

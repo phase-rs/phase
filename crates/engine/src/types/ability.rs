@@ -768,35 +768,6 @@ pub enum ZoneRef {
     Hand,
 }
 
-/// Who gains life from a GainLife effect.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum GainLifePlayer {
-    /// The ability's controller (default).
-    #[default]
-    Controller,
-    /// The controller of the targeted permanent.
-    TargetedController,
-    /// CR 115.2 + CR 601.2c + CR 119.3: An announced target player. The
-    /// engine resolves this via `ResolvedAbility::target_player()`, which
-    /// returns the first `TargetRef::Player` from `ability.targets` (and
-    /// falls back to controller when no Player target was announced).
-    /// Set by the parser/converter when the Oracle text is "target player
-    /// gains N life" rather than "you gain N life" or "[permanent's]
-    /// controller gains N life."
-    TargetPlayer,
-}
-
-/// How much life is gained — a fixed amount or derived from the targeted permanent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value")]
-pub enum LifeAmount {
-    /// Gain a specific number of life.
-    Fixed(i32),
-    /// Gain life equal to the targeted permanent's power.
-    TargetPower,
-}
-
 /// CR 701.10d-f: What aspect to double (counters, life total, or mana pool).
 /// Used by `Effect::Double` per locked decision D-05.
 /// DoublePT/DoublePTAll handle CR 701.10a-c (power/toughness) separately.
@@ -1343,6 +1314,16 @@ pub enum Duration {
     /// next turn. `PlayerScope::Controller` corresponds to the legacy
     /// "until your next turn" reading.
     UntilNextTurnOf {
+        player: PlayerScope,
+    },
+    /// CR 514.2: Effect expires at the **cleanup step of `player`'s next turn**
+    /// — it persists through that entire turn. This is the "until the end of
+    /// [your/their] next turn" reading (Light Up the Stage, Slip Out the Back),
+    /// distinct from `UntilNextTurnOf` which expires at the *beginning* of the
+    /// next turn. At the player's next untap step the effect is "armed"
+    /// (converted to `UntilEndOfTurn`) so the existing cleanup-step prune ends
+    /// it at that turn's cleanup; it survives the creation turn's own cleanup.
+    UntilEndOfNextTurnOf {
         player: PlayerScope,
     },
     /// CR 611.2a: Effect expires when the source object leaves the
@@ -3416,6 +3397,11 @@ pub enum PlayerFilter {
     /// Used by "the number of opponents you attacked this turn" (Militant Angel).
     /// (CR 508.1b: declare-attackers announcement; CR 506.2: active = attacking player.)
     OpponentAttackedThisTurn,
+    /// CR 508.6: Each opponent the ability's source creature attacked this turn.
+    /// Uses `state.creature_attacked_defenders_this_turn[source_id]` for
+    /// source-specific text like "each player this creature attacked this turn"
+    /// (Angel of Destiny).
+    OpponentAttackedBySourceThisTurn,
     /// All players.
     All,
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
@@ -5298,9 +5284,12 @@ pub enum Effect {
     GainLife {
         #[serde(default = "default_quantity_one")]
         amount: QuantityExpr,
-        /// Who gains the life.
-        #[serde(default)]
-        player: GainLifePlayer,
+        /// CR 119.3: Who gains the life. Defaults to Controller (omitted from JSON).
+        #[serde(
+            default = "default_target_filter_controller",
+            skip_serializing_if = "is_target_filter_controller"
+        )]
+        player: TargetFilter,
     },
     LoseLife {
         #[serde(default = "default_quantity_one")]
@@ -5498,6 +5487,11 @@ pub enum Effect {
         destination: Zone,
         #[serde(default = "default_target_filter_none")]
         target: TargetFilter,
+        /// CR 110.2a: Controller override on mass ETB zone changes. `Some(ref)`
+        /// routes each entering object to the player resolved from `ref`.
+        /// `None` leaves each object under its default controller.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under: Option<ControllerRef>,
         /// CR 110.5b: When true, objects enter the battlefield tapped during
         /// a mass zone move.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -7109,6 +7103,10 @@ fn default_target_filter_controller() -> TargetFilter {
     TargetFilter::Controller
 }
 
+fn is_target_filter_controller(t: &TargetFilter) -> bool {
+    matches!(t, TargetFilter::Controller)
+}
+
 fn default_target_filter_self_ref() -> TargetFilter {
     TargetFilter::SelfRef
 }
@@ -7621,7 +7619,11 @@ impl Effect {
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
             | Effect::ExchangeLifeWithStat { player, .. }
-            | Effect::ExileFromTopUntil { player, .. } => Some(player),
+            | Effect::ExileFromTopUntil { player, .. }
+            // CR 119.3: `GainLife.player` is a TargetFilter. `extract_target_filter_from_effect`
+            // drops context-refs (Controller) via `.filter(|t| !t.is_context_ref())`, so the
+            // default "you gain life" still surfaces no target slot.
+            | Effect::GainLife { player, .. } => Some(player),
 
             // CR 115.1a + CR 601.2c: "Create a [Role/Aura] token attached to
             // target creature" targets its host — surface `attach_to` as the
@@ -7662,7 +7664,6 @@ impl Effect {
             Effect::StartYourEngines { .. }
             | Effect::Myriad
             | Effect::ChangeSpeed { .. }
-            | Effect::GainLife { .. }
             | Effect::PumpAll { .. }
             | Effect::DamageAll { .. }
             | Effect::DamageEachPlayer { .. }
@@ -12631,7 +12632,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ))),
             valid_card: Some(TargetFilter::SelfRef),
@@ -12910,6 +12911,9 @@ mod tests {
             },
             Duration::UntilNextStepOf {
                 step: Phase::End,
+                player: PlayerScope::Controller,
+            },
+            Duration::UntilEndOfNextTurnOf {
                 player: PlayerScope::Controller,
             },
             Duration::UntilHostLeavesPlay,
@@ -13513,7 +13517,7 @@ mod modal_ability_tests {
             AbilityKind::Spell,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
         let modal = ModalChoice {
