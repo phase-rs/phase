@@ -1599,6 +1599,26 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         ));
     }
 
+    // CR 119: "you have at least N life more than your starting life total"
+    // (Angel of Destiny intervening-if; also the "as long as" static gate) →
+    // LifeAboveStarting ≥ N. Reuses the `LifeAboveStarting` building block
+    // (current life − starting life total) so the trigger and static paths share
+    // one canonical condition shape. Both "at least N" and "N or more" wordings
+    // map to GE; the trailing-suffix tag gates this branch, so non-matching
+    // "at least"/"or more" life phrases fall through to the bare-life arms below.
+    if let Ok((after_n, n)) = alt((
+        preceded(tag::<_, _, OracleError<'_>>("at least "), parse_number),
+        terminated(parse_number, tag::<_, _, OracleError<'_>>(" or more")),
+    ))
+    .parse(rest)
+    {
+        if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>(" life more than your starting life total").parse(after_n)
+        {
+            return Ok((rest, make_quantity_ge(QuantityRef::LifeAboveStarting, n)));
+        }
+    }
+
     // "you have N or more [you-only quantity-suffix]"
     let (rest, n) = parse_number(rest)?;
 
@@ -7497,6 +7517,55 @@ mod tests {
                 other => panic!("expected life total comparison for {text}, got {other:?}"),
             }
         }
+    }
+
+    /// CR 119: "you have at least N life more than your starting life total"
+    /// (Angel of Destiny class) — reuses the `LifeAboveStarting` building block
+    /// (current life − starting life total), so the canonical shape is
+    /// `LifeAboveStarting GE Fixed(N)`. Both "at least N" and "N or more"
+    /// wordings resolve identically. This is the same shape the static
+    /// "as long as …" gate produces (see oracle_static `shared.rs`).
+    #[test]
+    fn test_you_have_life_more_than_starting_life_total() {
+        for text in [
+            "you have at least 15 life more than your starting life total",
+            "you have 15 or more life more than your starting life total",
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "must fully consume {text:?}");
+            assert_eq!(
+                c,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeAboveStarting,
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 15 },
+                },
+                "expected LifeAboveStarting GE Fixed(15) for {text:?}",
+            );
+        }
+    }
+
+    /// Regression guard: the new life-offset branch must NOT steal the plain
+    /// "you have N or more life" condition (no "more than" suffix) — it falls
+    /// through to the bare LifeTotal-GE comparison.
+    #[test]
+    fn test_you_have_or_more_life_still_parses_without_offset() {
+        let (rest, c) = parse_inner_condition("you have 5 or more life").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            },
+        );
     }
 
     #[test]

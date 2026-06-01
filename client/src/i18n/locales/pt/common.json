@@ -199,6 +199,16 @@
   "turnBanner": {
     "turn": "Turno {{number}}"
   },
+  "diceRoll": {
+    "rollingForFirst": "Rolagem para ver quem começa",
+    "versus": "VS",
+    "skip": "Toque para pular",
+    "you": "Você",
+    "youPlayFirst": "Você joga primeiro",
+    "playerPlaysFirst": "{{name}} joga primeiro",
+    "heads": "Cara",
+    "tails": "Coroa"
+  },
   "chrome": {
     "back": "Voltar",
     "settings": "Configurações",

@@ -21,6 +21,7 @@ use engine::ai_support::{
 use engine::database::CardDatabase;
 use engine::game::derived_views::derive_views;
 use engine::game::validate_name_deck_for_format;
+use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use http::HeaderValue;
@@ -67,10 +68,20 @@ type SharedDraftSpectators = Arc<
     >,
 >;
 
+/// Build the `GameStarted` message for a single seat.
+///
+/// `events` carries the engine's start-of-game events (the d20 first-player
+/// contest's `DieRolled` batch). Only the INITIAL post-start fan-out
+/// (`build_game_started_messages`) passes a non-empty batch; late joiners and
+/// reconnects pass an empty `Vec` so they never re-see the contest dice. The
+/// full batch goes to every seat unchanged — rolls are public (no
+/// `visibility.rs` redaction), so this deliberately does NOT apply the
+/// `is_actor` gating used for `legal_actions`.
 fn build_game_started_message(
     session: &GameSession,
     player: PlayerId,
     player_token: Option<String>,
+    events: Vec<GameEvent>,
 ) -> ServerMessage {
     let (legal_actions, spell_costs_all, by_object_all) = engine_legal_actions_full(&session.state);
     let auto_pass = engine_auto_pass(&session.state, &legal_actions);
@@ -107,14 +118,25 @@ fn build_game_started_message(
         },
         derived,
         player_token,
+        events,
     }
 }
 
-fn build_game_started_messages(session: &GameSession) -> Vec<(PlayerId, ServerMessage)> {
+/// Initial post-start fan-out. DRAINS `session.start_events` so the first-player
+/// contest dice are sent exactly once — every subsequent `GameStarted` build
+/// (late joiners, reconnects) sees an empty batch and never re-shows the dice.
+/// Every seat receives the full contest batch (public; not actor-gated).
+fn build_game_started_messages(session: &mut GameSession) -> Vec<(PlayerId, ServerMessage)> {
+    let start_events = std::mem::take(&mut session.start_events);
     (0..session.player_count)
         .map(PlayerId)
         .filter(|player| !session.ai_seats.contains(player))
-        .map(|player| (player, build_game_started_message(session, player, None)))
+        .map(|player| {
+            (
+                player,
+                build_game_started_message(session, player, None, start_events.clone()),
+            )
+        })
         .collect()
 }
 
@@ -2047,10 +2069,18 @@ async fn handle_client_message(
                     let started_messages = if session.is_full() {
                         session.run_ai();
                         persist_session_async(game_db, &game_code, session);
-                        Some((
-                            build_game_started_message(session, joiner, Some(player_token.clone())),
-                            build_game_started_messages(session),
-                        ))
+                        // The joiner is excluded from the fan-out send below
+                        // (`pid != joiner`), so it receives the contest dice via
+                        // its own message here. Snapshot the events before the
+                        // fan-out drains `start_events`.
+                        let joiner_events = session.start_events.clone();
+                        let joiner_msg = build_game_started_message(
+                            session,
+                            joiner,
+                            Some(player_token.clone()),
+                            joiner_events,
+                        );
+                        Some((joiner_msg, build_game_started_messages(session)))
                     } else {
                         None
                     };
@@ -2376,8 +2406,10 @@ async fn handle_client_message(
                             if ai_result.is_some() {
                                 persist_session_async(game_db, &game_code, session);
                             }
+                            // Reconnect: no contest dice (the player must not
+                            // re-see the first-player roll).
                             let game_started_msg =
-                                build_game_started_message(session, player, None);
+                                build_game_started_message(session, player, None, Vec::new());
                             ReconnectOutcome::InGame {
                                 player,
                                 game_started_msg: Box::new(game_started_msg),
@@ -2674,7 +2706,12 @@ async fn handle_client_message(
 
                     let session = mgr.sessions.get_mut(&game_code).unwrap();
                     session.run_ai();
-                    let game_started_msg = build_game_started_message(session, PlayerId(0), None);
+                    // Initial start of a Play-vs-AI game: the human seat sees
+                    // the first-player contest dice. Drain so they are not
+                    // re-sent on reconnect.
+                    let start_events = std::mem::take(&mut session.start_events);
+                    let game_started_msg =
+                        build_game_started_message(session, PlayerId(0), None, start_events);
 
                     // Persist the AI game session
                     persist_session_async(game_db, &game_code, session);
@@ -3621,13 +3658,17 @@ async fn handle_client_message(
                     .collect::<Vec<_>>();
 
                 session.apply_seat_delta(seat_state, &delta, db.as_ref());
-                // Match `seat_reducer::apply_start` — token occupancy alone can
-                // disagree with seat kinds (reservations, mid-mutation slots).
-                let seat_state_after = session.seat_state();
-                let mut started = delta.now_started
-                    || (seat_state_after.is_full()
-                        && session.start_when_full
-                        && session.is_pregame());
+                // Issue #1506: a `SeatMutate` is an *explicit* host edit (Start,
+                // Kick, Remove, add-AI). Only `SeatMutation::Start` — surfaced as
+                // `delta.now_started` — may begin the game here. Folding in an
+                // `is_full() && start_when_full` auto-start made every seat edit
+                // (e.g. kicking a player from a full room) silently start the game,
+                // while the real Start button appeared inert because the room had
+                // already auto-started on the join that filled it. Auto-start-when-
+                // full is handled in the `JoinGame` path (a guest filling the last
+                // seat), per the `GameSession` contract; it does not belong on the
+                // host's seat-editing path.
+                let mut started = delta.now_started;
                 // Collect a bracket-violation message to broadcast after releasing the state lock.
                 // start_game guarantees no mutation on Err, so session state is untouched.
                 let bracket_error: Option<String> = if started {

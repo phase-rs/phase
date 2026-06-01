@@ -77,3 +77,8 @@ export const CARD_SLAM_FLIGHT_MS = 200;
 /** Base "your turn / opponent's turn" banner display duration, before any
  *  pacing multipliers apply. */
 export const TURN_BANNER_DURATION_MS = 1500;
+
+/** Base dice-roll overlay display duration (the 3D tumble + settle + a beat to
+ *  read the result), before pacing multipliers. The tumble itself is ~1.6s
+ *  inside Dice3D; this is the total time the overlay stays mounted. */
+export const DICE_ROLL_DURATION_MS = 2400;

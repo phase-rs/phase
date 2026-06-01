@@ -153,6 +153,12 @@ pub enum GameAction {
     ChooseExert {
         exert: bool,
     },
+    /// CR 701.30b: The clashing player's choice of which opponent to clash with,
+    /// answering a pending `WaitingFor::ClashChooseOpponent`. `opponent` must be
+    /// one of that prompt's `candidates`.
+    ChooseClashOpponent {
+        opponent: PlayerId,
+    },
     /// CR 103.5 + 103.5b: A player's decision at a `WaitingFor::MulliganDecision`
     /// prompt. See [`MulliganChoice`] for the three branches.
     MulliganDecision {
@@ -1153,6 +1159,7 @@ impl GameAction {
             | GameAction::DiscoverChoice { .. }
             | GameAction::CascadeChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
+            | GameAction::ChooseClashOpponent { .. }
             | GameAction::ChooseBattleProtector { .. }
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass

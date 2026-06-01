@@ -907,6 +907,11 @@ fn collect_matching_players(
                     PlayerFilter::OpponentAttackedThisTurn => {
                         p.id != source_controller && state.has_attacked(source_controller, p.id)
                     }
+                    // CR 508.6: opponent this source creature attacked this turn.
+                    PlayerFilter::OpponentAttackedBySourceThisTurn => {
+                        p.id != source_controller
+                            && state.creature_attacked_player_this_turn(source_id, p.id)
+                    }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
                             .players
@@ -1073,6 +1078,11 @@ pub fn resolve_each_player(
                     // CR 508.6: opponent this player attacked this turn.
                     PlayerFilter::OpponentAttackedThisTurn => {
                         p.id != ability.controller && state.has_attacked(ability.controller, p.id)
+                    }
+                    // CR 508.6: opponent this source creature attacked this turn.
+                    PlayerFilter::OpponentAttackedBySourceThisTurn => {
+                        p.id != ability.controller
+                            && state.creature_attacked_player_this_turn(ability.source_id, p.id)
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state

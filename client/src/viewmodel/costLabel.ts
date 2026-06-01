@@ -45,6 +45,26 @@ export function manaCostToShards(cost: ManaCost): string[] {
   return shards;
 }
 
+/** Extract the mana component of an activation/additional ability cost for payment UI. */
+export function abilityCostToManaShards(cost: SerializedAbilityCost | undefined): string[] | null {
+  if (!cost) return null;
+  const serialized = cost as SerializedCost;
+  switch (serialized.type) {
+    case "Mana":
+      return serialized.cost ? manaCostToShards(serialized.cost as ManaCost) : [];
+    case "Composite":
+    case "OneOf": {
+      for (const part of serialized.costs ?? []) {
+        const shards = abilityCostToManaShards(part);
+        if (shards != null && shards.length > 0) return shards;
+      }
+      return [];
+    }
+    default:
+      return [];
+  }
+}
+
 // Mirrors Rust AbilityCost serialization shape (serde tag = "type").
 // `amount`/`count` on PayLife/Discard are `QuantityExpr` (a typed enum), not
 // raw numbers — the engine serializes `{ type: "Fixed", value: N }` etc.

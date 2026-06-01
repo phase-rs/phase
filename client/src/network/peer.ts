@@ -258,9 +258,26 @@ export function createPeerSession(
 
       if (pendingMessages.length > 0) {
         const queued = pendingMessages.splice(0);
-        for (const msg of queued) {
-          handler(msg);
-        }
+        // Flush buffered messages through the same serialized recvQueue used by
+        // onData, rather than dispatching them synchronously and un-awaited.
+        // That keeps three guarantees the engine relies on:
+        //  - async handlers are awaited, so a handler-triggered send completes
+        //    before the next inbound message is dispatched (ordering invariant);
+        //  - the buffered messages stay ordered relative to any inbound message
+        //    already queued on recvQueue;
+        //  - a throwing/rejecting handler is caught here instead of dropping an
+        //    unhandled rejection or breaking the chain (matches onData).
+        recvQueue = recvQueue
+          .catch(() => {})
+          .then(async () => {
+            for (const msg of queued) {
+              try {
+                await handler(msg);
+              } catch (e) {
+                console.warn("[PeerSession] pending message handler threw:", e, msg.type);
+              }
+            }
+          });
       }
 
       return () => {
