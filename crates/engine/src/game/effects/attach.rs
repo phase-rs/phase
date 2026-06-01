@@ -139,37 +139,7 @@ pub fn attach_to(
     attachment_id: ObjectId,
     target_id: ObjectId,
 ) -> Option<TargetRef> {
-    // CR 701.3, CR 702.5, CR 702.6: Attachment prohibitions on the target.
-    // `CantBeAttached` blocks any attachment (Aura / Equipment / Fortification);
-    // `CantBeEnchanted` blocks Auras specifically; `CantBeEquipped` blocks Equipment.
-    // A blocked attachment is a silent no-op — no state mutation, no events.
-    if crate::game::static_abilities::object_has_static_other(state, target_id, "CantBeAttached") {
-        return None;
-    }
-    let attacher_is_aura = state
-        .objects
-        .get(&attachment_id)
-        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"));
-    let attacher_is_equipment = state
-        .objects
-        .get(&attachment_id)
-        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Equipment"));
-    if attacher_is_aura
-        && crate::game::static_abilities::object_has_static_other(
-            state,
-            target_id,
-            "CantBeEnchanted",
-        )
-    {
-        return None;
-    }
-    if attacher_is_equipment
-        && crate::game::static_abilities::object_has_static_other(
-            state,
-            target_id,
-            "CantBeEquipped",
-        )
-    {
+    if !can_attach_to_object(state, attachment_id, target_id) {
         return None;
     }
 
@@ -204,8 +174,50 @@ pub fn attach_to(
         }
     }
 
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     old_target
+}
+
+pub(crate) fn can_attach_to_object(
+    state: &GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+) -> bool {
+    // CR 701.3, CR 702.5, CR 702.6: Attachment prohibitions on the target.
+    // `CantBeAttached` blocks any attachment (Aura / Equipment / Fortification);
+    // `CantBeEnchanted` blocks Auras specifically; `CantBeEquipped` blocks Equipment.
+    // A blocked attachment is not legal for non-spell Aura entry choices.
+    if crate::game::static_abilities::object_has_static_other(state, target_id, "CantBeAttached") {
+        return false;
+    }
+    let attacher_is_aura = state
+        .objects
+        .get(&attachment_id)
+        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"));
+    let attacher_is_equipment = state
+        .objects
+        .get(&attachment_id)
+        .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Equipment"));
+    if attacher_is_aura
+        && crate::game::static_abilities::object_has_static_other(
+            state,
+            target_id,
+            "CantBeEnchanted",
+        )
+    {
+        return false;
+    }
+    if attacher_is_equipment
+        && crate::game::static_abilities::object_has_static_other(
+            state,
+            target_id,
+            "CantBeEquipped",
+        )
+    {
+        return false;
+    }
+
+    true
 }
 
 /// CR 303.4 + CR 702.5: Attach an Aura to a player (Curse cycle, Faith's
@@ -260,7 +272,7 @@ pub fn attach_to_player(
         attachment.attached_to = Some(AttachTarget::Player(target_player));
     }
 
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     old_target
 }
 
@@ -283,7 +295,7 @@ pub(crate) fn unattach(state: &mut GameState, attachment_id: ObjectId) -> Option
     if let Some(attachment) = state.objects.get_mut(&attachment_id) {
         attachment.attached_to = None;
     }
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     Some(old_target)
 }
 

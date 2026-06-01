@@ -17,7 +17,8 @@ use engine::types::ability::{
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::statics::{
-    CastFrequency, CastingProhibitionScope as ProhibitionScope, HandSizeModification, StaticMode,
+    CastFrequency, CastingProhibitionScope as ProhibitionScope, CostModifyMode,
+    HandSizeModification, StaticMode,
 };
 use engine::types::zones::Zone;
 
@@ -106,28 +107,31 @@ fn player_effect_to_static(
         // skip variants need engine work (multi-step phases) and stay
         // unsupported below.
         // CR 601.2f: "Spells [player] casts of [type] cost {N} less to cast."
-        // Maps directly to the engine's existing `ReduceCost` static. Player
-        // scope rides on `affected` (set below); spell scope rides on
+        // Maps directly to the engine's existing `ModifyCost` (Reduce) static.
+        // Player scope rides on `affected` (set below); spell scope rides on
         // `spell_filter`.
-        PlayerEffect::DecreaseSpellCost(spells, reduction) => StaticMode::ReduceCost {
+        PlayerEffect::DecreaseSpellCost(spells, reduction) => StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: mana_conv::convert_reduction(reduction)?,
             spell_filter: Some(spells_to_filter(spells)?),
             dynamic_count: None,
         },
         // CR 601.2f: "Spells [player] casts of [type] cost {N} more to cast."
         // `IncreaseSpellCost(Spells, Cost)` carries a generic `Cost`; only
-        // pure-mana increases fit `RaiseCost.amount: ManaCost`.
-        PlayerEffect::IncreaseSpellCost(spells, cost) => StaticMode::RaiseCost {
+        // pure-mana increases fit `ModifyCost.amount: ManaCost`.
+        PlayerEffect::IncreaseSpellCost(spells, cost) => StaticMode::ModifyCost {
+            mode: CostModifyMode::Raise,
             amount: require_pure_mana_cost(cost, "PlayerEffect::IncreaseSpellCost")?,
             spell_filter: Some(spells_to_filter(spells)?),
             dynamic_count: None,
         },
         // CR 601.2f: "Spells [player] casts of [type] cost {N} less to cast for
-        // each [thing]." Reuses `ReduceCost` with a non-None `dynamic_count`
-        // — the engine multiplies the per-unit `amount` by the resolved
-        // `QuantityRef` at cast time.
+        // each [thing]." Reuses `ModifyCost` (Reduce) with a non-None
+        // `dynamic_count` — the engine multiplies the per-unit `amount` by the
+        // resolved `QuantityRef` at cast time.
         PlayerEffect::DecreaseSpellCostForEach(spells, reduction, count) => {
-            StaticMode::ReduceCost {
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount: mana_conv::convert_reduction(reduction)?,
                 spell_filter: Some(spells_to_filter(spells)?),
                 dynamic_count: Some(quantity_ref_only(count)?),
@@ -352,7 +356,7 @@ fn u32_from_fixed(g: &GameNumber) -> ConvResult<u32> {
 
 /// CR 107.3 + CR 601.2f: Resolve a `GameNumber` to a `QuantityRef`
 /// (not a `QuantityExpr`) for slots that only accept the ref
-/// shape — `StaticMode::ReduceCost.dynamic_count` is one such
+/// shape — `StaticMode::ModifyCost.dynamic_count` is one such
 /// slot. Wraps `quantity_conv::convert` and unwraps the inner
 /// `QuantityRef`; non-Ref shapes (Fixed/Offset/Multiply/...)
 /// strict-fail with `EnginePrerequisiteMissing` so the report

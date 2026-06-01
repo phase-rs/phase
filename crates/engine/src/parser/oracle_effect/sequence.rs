@@ -3,7 +3,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::multispace1;
 use nom::combinator::{all_consuming, eof, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
@@ -18,7 +18,7 @@ use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CastingPermission, Chooser, CopyRetargetPermission,
     CounterSourceRider, Effect, LibraryPosition, PermissionGrantee, QuantityExpr, QuantityRef,
-    StaticDefinition, TargetFilter,
+    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -408,6 +408,42 @@ fn parse_exile_rest_after_dig(lower: &str) -> bool {
         .is_ok()
 }
 
+/// CR 406.3 + CR 701.16a: Recognize the "[then] exile it/them/that card/those
+/// cards/the card [face down]" clause that follows a private `Dig` look step —
+/// the Gonti, Canny Acquisitor impulse idiom. Returns `Some(face_down)` when the
+/// whole clause matches (`face_down = true` only for the explicit hidden-
+/// information suffix). Composes the (pronoun × optional "face down") axes with
+/// nom combinators rather than enumerating the permutations as match-arm
+/// literals; the clause-boundary splitter has already stripped the leading
+/// "then" connector.
+fn parse_exile_looked_at_card(lower: &str) -> Option<bool> {
+    let trimmed = lower.trim().trim_end_matches('.').trim_end();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("exile ").parse(trimmed).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it"),
+        tag("them"),
+        tag("that card"),
+        tag("those cards"),
+        tag("the card"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, face_down) = alt((
+        value(
+            true,
+            preceded(
+                multispace1::<_, OracleError<'_>>,
+                tag::<_, _, OracleError<'_>>("face down"),
+            ),
+        ),
+        value(false, eof::<_, OracleError<'_>>),
+    ))
+    .parse(rest)
+    .ok()?;
+    eof::<_, OracleError<'_>>(rest).ok()?;
+    Some(face_down)
+}
+
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -529,8 +565,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // "with that name" or "with the same name as that card" suffixes.
                     let has_search_prefix = nom_primitives::scan_contains(&before_lower, "search ");
                     let search_with_that_name = has_search_prefix
-                        && (before_lower.ends_with("with that name")
-                            || before_lower.ends_with("with the same name as that card"))
+                        && parse_search_exile_name_suffix(&before_lower).is_ok()
                         && tag::<_, _, OracleError<'_>>("exile them")
                             .parse(remainder_trimmed)
                             .is_ok();
@@ -555,6 +590,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             && (opt(tag::<_, _, OracleError<'_>>("put ")), tag("the rest"))
                                 .parse(remainder_trimmed)
                                 .is_ok();
+                    let sacrifice_rest_remainder = preceded(
+                        opt(tag::<_, _, OracleError<'_>>("then ")),
+                        alt((
+                            tag::<_, _, OracleError<'_>>("sacrifices the rest"),
+                            tag("sacrifice the rest"),
+                        )),
+                    )
+                    .parse(remainder_trimmed)
+                    .is_ok();
                     // CR 109.5 + CR 608.2c + CR 800.4g: "you and that player each <body>"
                     // (and analogous "you and <player-noun> each <body>" compound
                     // subjects) is a SINGLE compound subject distributing the body
@@ -643,7 +687,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         && alt((tag::<_, _, OracleError<'_>>("add "), tag("subtract ")))
                             .parse(remainder_trimmed)
                             .is_ok();
-                    let suppress = nom_primitives::scan_contains(&before_lower, "from among")
+                    let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
+                        && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
                         || targeted_compound_continuation
                         || prevent_then_put_continuation
@@ -712,6 +757,18 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     .parse(trimmed_lower.as_str())
     .is_ok();
     sequence_starts
+}
+
+fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (rest, _) = take_until::<_, _, OracleError<'_>>("with ").parse(input)?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("with that name"),
+        tag("with the chosen name"),
+        tag("with the same name as that card"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = eof.parse(rest)?;
+    Ok((rest, ()))
 }
 
 fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(ClauseBoundary, usize)> {
@@ -1171,6 +1228,18 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // exceeds the 2-word cap.
     .or(value((), tag("reveal ")))
     .or(value((), tag("returns ")))
+    // CR 122.1 + CR 608.2c: third-person "puts" conjugation. Oversimplify
+    // class: "Each player creates a … token and puts a number of +1/+1
+    // counters on it equal to …" — the subject ("Each player") iterates and
+    // the followup must split as its own clause so the Token effect's
+    // continuation absorber (`try_parse_put_counters_on_token_followup`)
+    // sees the counter-placement on its own and lifts it onto
+    // `Token.enter_with_counters`. Mirrors the imperative `put ` axis above
+    // — same verb, different conjugation. Sits in the `.or()` chain rather
+    // than the first `alt()` tuple because the tuple is already at nom's
+    // 21-arm limit; adding it inline would push the cluster over and trip
+    // the `Choice<...>` trait-bound check at compile time.
+    .or(value((), tag("puts ")))
     .or(alt((
         // CR 608.2c: Subject-prefixed verb patterns — "you [verb]" is always a clause start.
         value((), tag("you gain ")),
@@ -1238,6 +1307,60 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         )),
         value((), tag("endures ")),
     ))
+    .or(alt((
+        // CR 608.2c: Anaphoric back-reference subject + continuous-modification
+        // predicate. The subject phrases ("those creatures" / "that creature" /
+        // "those permanents" / "that permanent") reference the targets or
+        // affected objects established by a prior conjunct in the same chain —
+        // e.g. Nalia de'Arnise's "put a +1/+1 counter on each creature you
+        // control and those creatures gain deathtouch until end of turn".
+        // Without this split, the compound stays as one chunk;
+        // `try_split_targeted_compound` bisects it and feeds the conjunct to
+        // the imperative-only `parse_imperative_effect`, which has no
+        // subject-predicate path and emits `Effect::Unimplemented { name:
+        // "those", ... }`. Splitting here routes the conjunct through
+        // `parse_clause_ast` → `try_parse_subject_continuous_clause` so the
+        // keyword grant and its duration land on the sub-clause. Verb agreement
+        // pairs each subject number with its matching continuous predicate:
+        // "gain"/"have"/"lose" are the plural-subject stems, "gains"/"has"/
+        // "loses" are the singular conjugations. Safe to split: an anaphoric
+        // noun phrase followed by a conjugated continuous-modification verb
+        // cannot be a continuation noun phrase.
+        // Plural anaphoric subjects: "those {creatures,permanents,tokens}" +
+        // plural-stem continuous verb. Nested-prefix form (CLAUDE.md "Nest
+        // nom combinators by prefix dispatch") so subject ∈ {3 phrases} and
+        // verb ∈ {gain,get,have,lose} compose without enumerating all 12
+        // tuples, and the overall `alt(...)` arity stays under nom's
+        // 21-tuple limit. The first inner `tag` binds the error type for
+        // the rest of the tree.
+        value(
+            (),
+            (
+                alt((
+                    tag::<_, _, OracleError<'_>>("those creatures "),
+                    tag("those permanents "),
+                    tag("those tokens "),
+                )),
+                alt((tag("gain "), tag("get "), tag("have "), tag("lose "))),
+            ),
+        ),
+        // Singular anaphoric subjects: "that {creature,permanent,token}" +
+        // singular-conjugation continuous verb (gains/gets/has/loses).
+        // Single-token grants ("create one X token, that token gains haste")
+        // are rarer than the plural form but real, so all three subject
+        // nouns are paired with the singular verb set.
+        value(
+            (),
+            (
+                alt((
+                    tag("that creature "),
+                    tag("that permanent "),
+                    tag("that token "),
+                )),
+                alt((tag("gains "), tag("gets "), tag("has "), tag("loses "))),
+            ),
+        ),
+    )))
     .parse(s)
     .is_ok();
     if has_verb_prefix {
@@ -1255,6 +1378,34 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         let conjugated = tag::<_, _, OracleError<'_>>("gains ").parse(s).is_ok()
             || tag::<_, _, OracleError<'_>>("loses ").parse(s).is_ok();
         if !conjugated && next_token_is_count(rest) {
+            return true;
+        }
+    }
+    // CR 119.3 + CR 121.1 + CR 608.2c: Conjugated third-person-singular player
+    // action verb + count argument. When the prior conjunct established a
+    // targeted player subject ("Target player draws X cards and loses X life"
+    // — Pact of the Serpent; "Target player draws a card and loses 1 life" —
+    // Shadrix Silverquill mode), the second conjunct's verb appears in the
+    // singular conjugation with the player subject elided. The verb axis is
+    // restricted to player-only actions: "draws N cards" (CR 121.1), "loses
+    // N life" (CR 119.3), "gains N life" (CR 119.3). These verbs never apply
+    // to non-player subjects in Magic — life is a player-only attribute (CR
+    // 119) and drawing is a player-only action (CR 121) — so the split is
+    // safe regardless of prior subject. The count+noun discriminator keeps
+    // conjugated continuous-modifier forms ("gains flying", "loses all
+    // abilities") on the un-split path: those are never followed by a player
+    // action count such as "a card" or "1 life". Sibling-clause X-binding
+    // (`compute_sentence_where_x`) and player-subject inheritance
+    // (`carried_targeted_player_subject`) handle the rest once both chunks
+    // reach the chain loop.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("draws "),
+        tag("loses "),
+        tag("gains "),
+    ))
+    .parse(s)
+    {
+        if next_token_is_player_action_count(rest) {
             return true;
         }
     }
@@ -1385,6 +1536,20 @@ fn next_token_is_count(s: &str) -> bool {
         return next.map(|c| !c.is_alphanumeric()).unwrap_or(true);
     }
     false
+}
+
+/// CR 121.1 / CR 119.3: Returns true when a conjugated player-action verb is
+/// followed by a count plus the matching player-action noun (`card(s)` or
+/// `life`). Unlike the imperative `gain`/`lose` heuristic above, this accepts
+/// article counts ("draws a card") without false-splitting continuous keyword
+/// grants such as "gains flying" or "loses all abilities".
+fn next_token_is_player_action_count(s: &str) -> bool {
+    let count = alt((
+        value((), nom_primitives::parse_number),
+        value((), tag::<_, _, OracleError<'_>>("x")),
+    ));
+    let noun = alt((tag("cards"), tag("card"), tag("life")));
+    (count, multispace1, noun).parse(s.trim_start()).is_ok()
 }
 
 /// Checks if text starts with a subject-prefixed damage verb.
@@ -1551,20 +1716,33 @@ pub(super) fn apply_clause_continuation(
             reveal,
             attach_to_source,
         } => {
+            // CR 701.23a: A multi-zone tutor ("graveyard, hand, and/or library")
+            // finds the card in any searched zone, so the put-step must move it
+            // from wherever it actually is (`origin: None`). A library-only
+            // search keeps `origin: Some(Library)` — that origin doubles as the
+            // CR 701.23b fail-to-find signal for the change-zone resolver.
+            let mut multi_zone_search = false;
             if let Some(previous) = defs.last_mut() {
                 if let Effect::SearchLibrary {
                     reveal: existing_reveal,
+                    source_zones,
                     ..
                 } = &mut *previous.effect
                 {
                     *existing_reveal |= reveal;
+                    multi_zone_search = source_zones.iter().any(|zone| *zone != Zone::Library);
                 }
                 apply_search_destination_to_ability_chain(previous, destination, enter_tapped);
             }
+            let put_origin = if multi_zone_search {
+                None
+            } else {
+                Some(Zone::Library)
+            };
             let mut change_zone = AbilityDefinition::new(
                 kind,
                 Effect::ChangeZone {
-                    origin: Some(Zone::Library),
+                    origin: put_origin,
                     destination,
                     target: TargetFilter::Any,
                     owner_library: false,
@@ -2083,6 +2261,48 @@ pub(super) fn apply_clause_continuation(
                 *rest_destination = destination;
             }
         }
+        // CR 406.3 + CR 701.16a: Rewrite the preceding private `Dig` (the
+        // "look at the top N cards of <player>'s library" look step) into an
+        // `Effect::ExileTop` so the looked-at card(s) actually leave the
+        // library — the Gonti, Canny Acquisitor impulse idiom. `player`/`count`
+        // were lifted from the `Dig` (with `ParentTarget` re-bound to the
+        // triggering player) during recognition; `face_down` carries the
+        // hidden-information suffix. ExileTop publishes a tracked set the
+        // following `GrantCastingPermission(PlayFromExile)` binds to, so the
+        // exiled card becomes playable.
+        ContinuationAst::ExileLookedAtCard {
+            player,
+            count,
+            face_down,
+        } => {
+            let Some(previous) = defs
+                .iter_mut()
+                .rev()
+                .find(|d| matches!(&*d.effect, Effect::Dig { .. }))
+            else {
+                return;
+            };
+            *previous.effect = Effect::ExileTop {
+                player,
+                count,
+                face_down,
+            };
+        }
+        ContinuationAst::ChooseAndSacrificeRestFilter { sacrifice_filter } => {
+            let Some(filter) = sacrifice_filter else {
+                return;
+            };
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::ChooseAndSacrificeRest {
+                sacrifice_filter: existing,
+                ..
+            } = &mut *previous.effect
+            {
+                *existing = filter;
+            }
+        }
     }
 }
 
@@ -2176,6 +2396,11 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::GrantExtraTurnAfterControlledTurn => true,
         ContinuationAst::RevealUntilKept { .. } => true,
         ContinuationAst::RevealUntilAllToZone { .. } => true,
+        // Recognition was already gated on a preceding `Dig` in
+        // parse_followup_continuation_ast; the "exile it [face down]" clause is
+        // folded into that Dig (rewritten to ExileTop) and emits no sibling def.
+        ContinuationAst::ExileLookedAtCard { .. } => true,
+        ContinuationAst::ChooseAndSacrificeRestFilter { .. } => true,
     }
 }
 
@@ -2734,6 +2959,7 @@ pub(super) fn parse_followup_continuation_ast(
     let lower = text.to_lowercase();
 
     match previous_effect {
+        Effect::ChooseAndSacrificeRest { .. } => parse_choose_and_sacrifice_rest_followup(&lower),
         Effect::SearchLibrary { .. } if is_search_result_reveal_clause(&lower) => {
             Some(ContinuationAst::SearchRevealResult)
         }
@@ -2899,6 +3125,43 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::PutRest {
                 destination: Zone::Exile,
                 reorder_all: false,
+            })
+        }
+        // CR 406.3 + CR 701.16a: "[then] exile it/them [face down]" after a
+        // private `Dig` (the "look at the top N cards of <player>'s library"
+        // look step). This is the Gonti, Canny Acquisitor impulse idiom —
+        // "look at the top card of that player's library, then exile it face
+        // down. You may play that card ...". Plain `Dig` only inspects the top
+        // cards (CR 701.16a); without a destination they stay in the library,
+        // so the exile clause must rewrite the `Dig` into an `Effect::ExileTop`
+        // (the face-down impulse-exile primitive shared with Cunning Rhetoric /
+        // Bomat Courier) for the looked-at card to actually leave the library.
+        //
+        // `reveal: false` scopes this to the private "look at" form — a public
+        // "reveal the top card ... then exile it" is a different visibility
+        // class and is not the impulse idiom. `parse_exile_looked_at_card`
+        // composes the pronoun and optional "face down" axes with combinators.
+        Effect::Dig {
+            player: dig_player,
+            count,
+            reveal: false,
+            ..
+        } if parse_exile_looked_at_card(&lower).is_some() => {
+            // CR 406.3: hidden-information suffix → the card is exiled face down.
+            let face_down = parse_exile_looked_at_card(&lower).unwrap_or(false);
+            // CR 608.2c: "that player's library" parsed to `ParentTarget` at the
+            // Dig site; re-resolve it through the shared library-owner combinator
+            // so a damage/attack trigger binds to `TriggeringPlayer` (the proven
+            // Cunning Rhetoric path) rather than the blocked-attacker object that
+            // `ParentTarget` resolves to in a combat-damage context.
+            let player = match dig_player {
+                TargetFilter::ParentTarget => super::imperative::that_player_library_filter(ctx),
+                other => other.clone(),
+            };
+            Some(ContinuationAst::ExileLookedAtCard {
+                player,
+                count: count.clone(),
+                face_down,
             })
         }
         // "put the rest on the bottom" / "put those cards into your graveyard"
@@ -3263,6 +3526,66 @@ pub(super) fn parse_followup_continuation_ast(
     }
 }
 
+fn parse_choose_and_sacrifice_rest_followup(lower: &str) -> Option<ContinuationAst> {
+    type E<'a> = OracleError<'a>;
+    let lower = lower.trim();
+
+    all_consuming(terminated(
+        preceded(
+            opt(tag::<_, _, E>("then ")),
+            alt((
+                parse_bare_choose_and_sacrifice_rest_filter,
+                parse_explicit_choose_and_sacrifice_rest_filter,
+            )),
+        ),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .ok()
+    .map(|(_, sacrifice_filter)| ContinuationAst::ChooseAndSacrificeRestFilter { sacrifice_filter })
+}
+
+fn parse_bare_choose_and_sacrifice_rest_filter(
+    input: &str,
+) -> Result<(&str, Option<TargetFilter>), nom::Err<OracleError<'_>>> {
+    let (input, _) =
+        alt((tag::<_, _, OracleError<'_>>("sacrifices"), tag("sacrifice"))).parse(input)?;
+    let (input, _) = tag(" the rest").parse(input)?;
+    Ok((input, None))
+}
+
+fn parse_explicit_choose_and_sacrifice_rest_filter(
+    input: &str,
+) -> Result<(&str, Option<TargetFilter>), nom::Err<OracleError<'_>>> {
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("each player ")).parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("sacrifices "),
+        tag("sacrifice "),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("all other ").parse(input)?;
+    let (input, filter) = parse_nonland_permanent_domain(input)?;
+    Ok((input, Some(filter)))
+}
+
+fn parse_nonland_permanent_domain(
+    input: &str,
+) -> Result<(&str, TargetFilter), nom::Err<OracleError<'_>>> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("nonland permanents ").parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("they control"),
+        tag("you control"),
+        tag("that player controls"),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        TargetFilter::Typed(
+            TypedFilter::permanent().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        ),
+    ))
+}
+
 /// CR 122.6a: Parse "the token/it enters with X [counter type] counter(s) on it[, where X is ...]".
 /// Returns `TokenEntersWithCounters` continuation on success.
 fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> {
@@ -3348,29 +3671,63 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
 }
 
 /// CR 122.6a + CR 614.1c: Parse the imperative followup form
-/// "put N [counter type] counter(s) on it[, where X is ...]" that follows a
-/// `create a [token]` clause. "It" refers to the just-created token; the
-/// counters must be lifted onto `Token.enter_with_counters` so they apply as
-/// the token enters the battlefield (CR 122.6a) rather than as a post-ETB
-/// PutCounter effect targeting the ability source.
+/// "put N [counter type] counter(s) on it[, where X is ...]" /
+/// "put[s] a number of [counter type] counter(s) on it equal to <quantity>"
+/// that follows a `create a [token]` clause. "It" refers to the just-created
+/// token; the counters must be lifted onto `Token.enter_with_counters` so they
+/// apply as the token enters the battlefield (CR 614.1c) rather than as a
+/// post-ETB PutCounter effect targeting the ability source.
 ///
-/// Mirrors `try_parse_token_enters_with_counters` but matches the imperative
-/// "put ..." prefix produced by clause-splitting on " and ". Returns
-/// `TokenEntersWithCounters` so it shares the same continuation absorption.
+/// Verb axis: `put ` (imperative, "create a token and put …") or `puts `
+/// (third-person, "Each player creates a token and puts …" — Oversimplify
+/// class). The verb is a single `alt()` over the two conjugations — adding
+/// a third form means extending the `alt()`, not duplicating the function.
+///
+/// Quantity axis: three forms in priority order —
+///   1. `"a number of <type> counter(s) on it equal to <quantity>"` →
+///      delegated to the shared `parse_dynamic_counter_suffix_body` building
+///      block (single source of truth for "enters with N counters equal to
+///      X"; also used by `Effect::ChangeZone.enter_with_counters`).
+///   2. `"N <type> counter(s) on it, where x is <quantity>"` → fixed N with
+///      a deferred X-binding (Fractal Anomaly class).
+///   3. `"N <type> counter(s) on it"` → fixed N.
+///
+/// Returns `TokenEntersWithCounters` so it shares the continuation absorption
+/// path with `try_parse_token_enters_with_counters` (declarative form).
 fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationAst> {
     // Optional leading "and " (rare — usually consumed by the splitter),
-    // then the imperative "put " verb.
+    // then the verb. Both `put ` (imperative) and `puts ` (third-person,
+    // "Each player … puts a number of counters on it …") feed the same
+    // counter-suffix grammar — the verb is a single `alt()` axis.
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("and "))
         .parse(lower)
         .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>("put ").parse(rest).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("puts "),
+        tag::<_, _, OracleError<'_>>("put "),
+    ))
+    .parse(rest)
+    .ok()?;
 
-    // Parse count: "x ", "a ", "an ", "a number of ", or a literal number.
-    // Word "a"/"an" is a singular article (count = 1).
+    // Form 1 (priority): dynamic "a number of <type> counters on it equal to
+    // <quantity>". Delegates to the shared building block in `oracle_effect/
+    // mod.rs`. The body consumes the full clause (including trailing period),
+    // so on success we're done — emit the continuation directly.
+    if let Ok((_, (counter_type, count))) =
+        super::parse_dynamic_counter_suffix_body(rest.trim_end_matches('.').trim_end())
+    {
+        return Some(ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        });
+    }
+
+    // Forms 2 + 3 (fixed N with optional "where x is" rebind): the original
+    // grammar, retained for the Fractal Anomaly / G'raha Tia class. Counter
+    // count is `x` (deferred), an article (1), or a literal number.
     let (rest, count_prefix) = alt((
         // "x " — variable resolved later via "where X is" or by caller payment
         value(None, tag::<_, _, OracleError<'_>>("x ")),
-        value(None, tag("a number of ")),
         value(Some(1u32), tag("a ")),
         value(Some(1u32), tag("an ")),
     ))
@@ -3412,6 +3769,15 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
             // allow-noncombinator: trailing-period cleanup on a pre-tokenized
             // suffix; not parsing dispatch.
             let qty_text = rest_where.trim().trim_end_matches('.');
+            parse_cda_quantity(qty_text)
+                .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
+        } else if let Ok((rest_equal, _)) =
+            tag::<_, _, OracleError<'_>>("equal to ").parse(rest.trim_start_matches(['.', ' ']))
+        {
+            // CR 122.6a: "put a number of counters on it equal to [qty]" — dynamic
+            // counter count in the imperative followup form (Primo, the Unbounded).
+            // allow-noncombinator: trailing-period cleanup on a pre-tokenized suffix.
+            let qty_text = rest_equal.trim().trim_end_matches('.');
             parse_cda_quantity(qty_text)
                 .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
         } else {
@@ -3501,6 +3867,28 @@ pub(super) fn try_parse_same_is_true_continuation(text: &str) -> Option<Vec<Keyw
     }
 }
 
+/// CR 608.2c: Parse "Repeat this process for <keyword list>." — Kathril, Aspect
+/// Warper. Returns the keyword list; the chunk loop wraps it in
+/// `SpecialClause::RepeatProcessForKeywords` and lowering replicates the
+/// antecedent conditional keyword-counter clause once per keyword. Mirrors
+/// `try_parse_same_is_true_continuation`; covers every "repeat this process for
+/// <list>" card, not Kathril alone.
+pub(super) fn try_parse_repeat_process_for_keywords(text: &str) -> Option<Vec<Keyword>> {
+    let lower = text.to_lowercase();
+    let (keywords, rest) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = tag("repeat this process for ").parse(i)?;
+        parse_keyword_list(i)
+    })?;
+    // The sentence must be fully consumed by the keyword list (modulo a trailing
+    // period) — a leftover tail means this is some other "repeat this process …"
+    // form (e.g. "repeat this process any number of times") and must not match.
+    if rest.trim().trim_end_matches('.').is_empty() {
+        Some(keywords)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3551,6 +3939,17 @@ mod tests {
         // Lotho: "you lose 1 life and create a Treasure token"
         let chunks = clause_texts("you lose 1 life and create a Treasure token");
         assert_eq!(chunks, vec!["you lose 1 life", "create a Treasure token"]);
+    }
+
+    #[test]
+    fn bare_and_keeps_chosen_name_search_exile_compound() {
+        // CR 701.23a + CR 701.18a: "search ... with the chosen name and exile
+        // them" is one search compound, not a SearchLibrary followed by a second
+        // standalone ChangeZone.
+        let chunks = clause_texts(
+            "search target opponent's graveyard, hand, and library for any number of cards with the chosen name and exile them",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
 
     #[test]
@@ -3950,6 +4349,38 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0], "you gain 1 life");
         assert!(chunks[1].starts_with("~ deals 1 damage"));
+    }
+
+    #[test]
+    fn from_among_sacrifice_rest_splits_for_absorption() {
+        let chunks = clause_texts(
+            "each player chooses an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control, then sacrifices the rest.",
+        );
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[1], "sacrifices the rest",
+            "sacrifice-rest continuation must be a separate chunk"
+        );
+    }
+
+    #[test]
+    fn choose_and_sacrifice_rest_followup_accepts_then_and_period() {
+        let effect = Effect::ChooseAndSacrificeRest {
+            categories: vec![crate::types::card_type::CoreType::Artifact],
+            chooser_scope: crate::types::ability::CategoryChooserScope::EachPlayerSelf,
+            choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "then sacrifices the rest.",
+                &effect,
+                &mut ParseContext::default(),
+            ),
+            Some(ContinuationAst::ChooseAndSacrificeRestFilter {
+                sacrifice_filter: None,
+            })
+        );
     }
 
     #[test]
@@ -4923,6 +5354,31 @@ mod tests {
     }
 
     #[test]
+    fn put_counters_on_token_followup_equal_to_damage_dealt() {
+        // Primo, the Unbounded: "Put a number of +1/+1 counters on it equal to
+        // the damage dealt." After sentence splitting the continuation sees:
+        // "put a number of +1/+1 counters on it equal to the damage dealt"
+        let result = try_parse_put_counters_on_token_followup(
+            "put a number of +1/+1 counters on it equal to the damage dealt",
+        );
+        let Some(ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        }) = result
+        else {
+            panic!("expected TokenEntersWithCounters, got {result:?}");
+        };
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+            "count must be EventContextAmount (the damage dealt)"
+        );
+    }
+
+    #[test]
     fn put_counters_on_it_followup_minus_counters() {
         // -1/-1 counter form (uncommon for tokens, but the helper supports it).
         let result = try_parse_put_counters_on_token_followup("put a -1/-1 counter on it");
@@ -4950,12 +5406,120 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// CR 122.1 + CR 614.1c + CR 607.2a: Oversimplify's third-person
+    /// dynamic followup. "Each player creates ... and puts a number of +1/+1
+    /// counters on it equal to the total power of creatures they controlled
+    /// that were exiled this way." After clause splitting the followup is
+    /// "puts a number of +1/+1 counters on it equal to <quantity>". Must
+    /// lower to `TokenEntersWithCounters{Plus1Plus1, Aggregate{Sum,Power,
+    /// And[Typed{Creature,ScopedPlayer}, ExiledBySource]}}`.
+    ///
+    /// This is the building-block test for the "puts" (third-person) verb
+    /// axis AND the dynamic "a number of … equal to …" quantity axis. Any
+    /// future card with the same shape lights up through these axes; the
+    /// test deliberately exercises both new axes simultaneously to lock in
+    /// the Oversimplify-class repair.
+    #[test]
+    fn put_counters_on_it_followup_third_person_dynamic_quantity() {
+        use crate::types::ability::{
+            AggregateFunction, ControllerRef, ObjectProperty, QuantityRef, TargetFilter,
+            TypedFilter,
+        };
+
+        let result = try_parse_put_counters_on_token_followup(
+            "puts a number of +1/+1 counters on it equal to the total power of creatures they controlled that were exiled this way",
+        )
+        .expect("third-person dynamic followup must parse");
+        let ContinuationAst::TokenEntersWithCounters {
+            counter_type,
+            count,
+        } = result
+        else {
+            panic!("expected TokenEntersWithCounters, got {result:?}");
+        };
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
+        let expected_qty = QuantityExpr::Ref {
+            qty: QuantityRef::Aggregate {
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+                filter: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                        ),
+                        TargetFilter::ExiledBySource,
+                    ],
+                },
+            },
+        };
+        assert_eq!(count, expected_qty);
+    }
+
+    /// CR 122.1 + CR 614.1c: The same dynamic-counter combinator also accepts
+    /// the imperative "put a number of ..." form (no third-person -s). This
+    /// guards the verb-axis `alt()` against future regressions.
+    #[test]
+    fn put_counters_on_it_followup_imperative_dynamic_quantity() {
+        let result = try_parse_put_counters_on_token_followup(
+            "put a number of +1/+1 counters on it equal to the number of creatures you control",
+        )
+        .expect("imperative dynamic followup must parse");
+        let ContinuationAst::TokenEntersWithCounters { counter_type, .. } = result else {
+            panic!("expected TokenEntersWithCounters, got {result:?}");
+        };
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
+    }
+
     #[test]
     fn bare_and_clause_starts_on_self_reference_continuous_subjects() {
         assert!(starts_bare_and_clause(
             "this creature gets +2/+0 until end of turn"
         ));
         assert!(starts_bare_and_clause("~ gets +2/+0 until end of turn"));
+    }
+
+    /// CR 608.2c: Anaphoric back-reference conjuncts. Nalia de'Arnise's third
+    /// ability is the canonical exemplar — "put a +1/+1 counter on each
+    /// creature you control and those creatures gain deathtouch until end of
+    /// turn". Each plural / singular subject pair must split so the conjunct
+    /// reaches the subject-predicate parser instead of falling through to the
+    /// imperative-only path that produces `Effect::Unimplemented { name:
+    /// "those", ... }`.
+    #[test]
+    fn bare_and_clause_starts_on_anaphoric_continuous_subjects() {
+        assert!(starts_bare_and_clause(
+            "those creatures gain deathtouch until end of turn"
+        ));
+        assert!(starts_bare_and_clause(
+            "those creatures get +1/+1 until end of turn"
+        ));
+        assert!(starts_bare_and_clause("those creatures have flying"));
+        assert!(starts_bare_and_clause("those creatures lose flying"));
+        assert!(starts_bare_and_clause("those permanents gain hexproof"));
+        assert!(starts_bare_and_clause(
+            "that creature gains haste until end of turn"
+        ));
+        assert!(starts_bare_and_clause(
+            "that creature gets +2/+2 until end of turn"
+        ));
+        assert!(starts_bare_and_clause("that creature has lifelink"));
+        assert!(starts_bare_and_clause("that creature loses flying"));
+        assert!(starts_bare_and_clause(
+            "that permanent gains indestructible"
+        ));
+        // Token anaphors — "create N tokens. Those tokens gain haste."
+        assert!(starts_bare_and_clause("those tokens gain haste"));
+        assert!(starts_bare_and_clause(
+            "those tokens get +1/+1 until end of turn"
+        ));
+        assert!(starts_bare_and_clause("those tokens have flying"));
+        assert!(starts_bare_and_clause("those tokens lose flying"));
+        assert!(starts_bare_and_clause("that token gains haste"));
+        assert!(starts_bare_and_clause(
+            "that token gets +1/+0 until end of turn"
+        ));
+        assert!(starts_bare_and_clause("that token has lifelink"));
+        assert!(starts_bare_and_clause("that token loses flying"));
     }
 
     /// CR 702: "The same is true for <keyword list>." — Odric, Lunarch

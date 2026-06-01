@@ -4,6 +4,7 @@ import { isMultiplayerMode, useGameStore } from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
 import { dispatchAction } from "../game/dispatch";
 import { useAltToggle } from "./useAltToggle";
+import { useShiftHeld } from "./useShiftHeld";
 import {
   copyGameStateDebugSnapshot,
   exportGameStateDebugZip,
@@ -26,6 +27,7 @@ import {
  */
 export function useKeyboardShortcuts(): void {
   useAltToggle();
+  useShiftHeld();
 
   // Triple-tap gesture for debug panel on touch devices (no keyboard)
   useEffect(() => {

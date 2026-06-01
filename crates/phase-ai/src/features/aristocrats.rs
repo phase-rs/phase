@@ -487,6 +487,7 @@ mod tests {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
         ability.cost = Some(AbilityCost::Composite {
@@ -525,6 +526,7 @@ mod tests {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
         ability.cost = Some(AbilityCost::Sacrifice {

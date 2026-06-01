@@ -10,7 +10,7 @@ use crate::game::mana_sources;
 use crate::types::ability::AbilityKind;
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -140,7 +140,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (
             WaitingFor::ReturnAsAuraTarget { legal_targets, .. },
             GameAction::ChooseTarget { target },
-        ) => !matches_target_choice(target, legal_targets),
+        ) => !matches_waiting_target_choice(legal_targets, target),
         (WaitingFor::TargetSelection { selection, .. }, GameAction::ChooseTarget { target })
         | (
             WaitingFor::TriggerTargetSelection { selection, .. },
@@ -251,10 +251,22 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
         }
-        (WaitingFor::DiscoverChoice { .. }, GameAction::DiscoverChoice { .. })
+        (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { .. },
+                ..
+            },
+            GameAction::DiscoverChoice { .. },
+        )
         | (WaitingFor::RevealUntilKeptChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::RepeatDecision { .. }, GameAction::DecideOptionalEffect { .. })
-        | (WaitingFor::CascadeChoice { .. }, GameAction::CascadeChoice { .. })
+        | (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { .. },
+                ..
+            },
+            GameAction::CascadeChoice { .. },
+        )
         | (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { .. })
         | (WaitingFor::BetweenGamesChoosePlayDraw { .. }, GameAction::ChoosePlayDraw { .. })
         | (WaitingFor::TopOrBottomChoice { .. }, GameAction::ChooseTopOrBottom { .. })
@@ -274,7 +286,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { .. })
         | (WaitingFor::UnlessPaymentChooseCost { .. }, GameAction::ChooseUnlessCostBranch { .. })
         | (WaitingFor::CombatTaxPayment { .. }, GameAction::PayCombatTax { .. })
-        | (WaitingFor::AdventureCastChoice { .. }, GameAction::ChooseAdventureFace { .. })
+        | (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Adventure { .. },
+                ..
+            },
+            GameAction::ChooseAdventureFace { .. },
+        )
         | (WaitingFor::ModalFaceChoice { .. }, GameAction::ChooseModalFace { .. })
         | (WaitingFor::AlternativeCastChoice { .. }, GameAction::ChooseAlternativeCast { .. })
         | (WaitingFor::CastingVariantChoice { .. }, GameAction::ChooseCastingVariant { .. }) => {
@@ -346,42 +364,6 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             GameAction::SelectCards { cards: chosen },
         )
         | (
-            WaitingFor::DiscardForCost {
-                player: _,
-                cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::SacrificeForCost {
-                player: _,
-                permanents: cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::ReturnToHandForCost {
-                player: _,
-                permanents: cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::ExileForCost {
-                player: _,
-                cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
             WaitingFor::ConniveDiscard {
                 player: _,
                 cards,
@@ -397,53 +379,39 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 count,
             },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::TapCreaturesForManaAbility {
-                player: _,
-                creatures: cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::ExileForManaAbility {
-                player: _,
-                cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::SacrificeForManaAbility {
-                player: _,
-                permanents: cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(*count)),
+        // CR 118.3: RemoveCounter chooses exactly one counter source.
         (
-            WaitingFor::RemoveCounterForCost {
-                permanents: cards, ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => selection_mismatch(chosen, cards, Some(1)),
-        // CR 701.68a: Blight always selects exactly one creature, regardless of N.
-        (WaitingFor::BlightChoice { creatures, .. }, GameAction::SelectCards { cards: chosen }) => {
-            selection_mismatch(chosen, creatures, Some(1))
-        }
-        (
-            WaitingFor::BeholdForCost {
-                player: _,
-                count,
+            WaitingFor::PayCost {
+                kind: PayCostKind::RemoveCounter { .. },
                 choices,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        ) => selection_mismatch(chosen, choices, Some(*count)),
+        ) => selection_mismatch(chosen, choices, Some(1)),
+        // CR 118.3: Sacrifice honors the [min_count, count] range.
+        (
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices,
+                count,
+                min_count,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            selection_mismatch(chosen, choices, None)
+                || chosen.len() < *min_count
+                || chosen.len() > *count
+        }
+        // CR 118.3 + CR 605.3b: every other PayCost kind selects exactly `count`.
+        (WaitingFor::PayCost { choices, count, .. }, GameAction::SelectCards { cards: chosen }) => {
+            selection_mismatch(chosen, choices, Some(*count))
+        }
+        // CR 701.68a: Blight always selects exactly one creature, regardless of N.
+        (WaitingFor::BlightChoice { creatures, .. }, GameAction::SelectCards { cards: chosen }) => {
+            selection_mismatch(chosen, creatures, Some(1))
+        }
         (
             WaitingFor::EffectZoneChoice {
                 player: _,
@@ -875,7 +843,9 @@ mod tests {
         candidate_actions, cheap_reject_candidate, legal_actions, legal_actions_for_viewer,
         legal_actions_full, validated_candidate_actions,
     };
+    use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
+    use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
         ManaProduction, QuantityExpr, ResolvedAbility, SearchSelectionConstraint, TargetFilter,
@@ -887,7 +857,7 @@ mod tests {
         CastingVariant, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::mana::{ManaColor, ManaCost};
+    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -2158,6 +2128,94 @@ mod tests {
             shards,
             &vec![ManaCostShard::Red],
             "colored shards remain untouched by Affinity"
+        );
+    }
+
+    /// Issue #1542: Emergence Zone must expose TapLandForMana alongside its
+    /// sacrifice-for-flash activated ability.
+    #[test]
+    fn emergence_zone_exposes_tap_for_mana() {
+        let mut state = setup_priority();
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+        let land_id = create_object(
+            &mut state,
+            CardId(1542),
+            PlayerId(0),
+            "Emergence Zone".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            let parsed = parse_oracle_text(
+                "{T}: Add {C}.\n\
+                 {1}, {T}, Sacrifice this land: You may cast spells this turn as though they had flash.",
+                "Emergence Zone",
+                &[],
+                &[String::from("Land")],
+                &[],
+            );
+            Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+        }
+
+        let (_, _, grouped) = legal_actions_full(&state);
+        let land_actions = grouped
+            .get(&land_id)
+            .expect("Emergence Zone should expose legal actions");
+        assert!(
+            land_actions.iter().any(|action| matches!(
+                action,
+                GameAction::TapLandForMana { object_id } if *object_id == land_id
+            )),
+            "expected TapLandForMana in grouped actions, got {land_actions:?}"
+        );
+        assert!(
+            land_actions.iter().any(|action| matches!(
+                action,
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index: 1,
+                } if *source_id == land_id
+            )),
+            "flash sacrifice ability must be activatable when {{1}} is payable"
+        );
+
+        let flash_effect = &state.objects[&land_id].abilities[1].effect;
+        assert!(
+            matches!(*flash_effect.clone(), Effect::GenericEffect { .. }),
+            "flash ability must parse as GenericEffect, not CastFromZone — got {flash_effect:?}"
+        );
+        assert_eq!(state.objects[&land_id].abilities.len(), 2);
+
+        apply_as_current(
+            &mut state,
+            GameAction::TapLandForMana { object_id: land_id },
+        )
+        .expect("TapLandForMana must succeed when flash ability is also legal");
+        assert!(
+            state.objects[&land_id].tapped,
+            "Emergence Zone should be tapped after TapLandForMana"
+        );
+        assert!(
+            state.players[0].mana_pool.total() >= 1,
+            "mana should be added to pool"
         );
     }
 }

@@ -571,7 +571,7 @@ mod tests {
     /// `GainLife`. It is a runtime test, not a shape test.
     fn renegade_reaper_chain() -> ResolvedAbility {
         use crate::types::ability::{
-            AbilityCondition, GainLifePlayer, TargetFilter as TF, TypeFilter, TypedFilter,
+            AbilityCondition, TargetFilter as TF, TypeFilter, TypedFilter,
         };
         ResolvedAbility::new(
             Effect::Mill {
@@ -587,7 +587,7 @@ mod tests {
             let mut gain = ResolvedAbility::new(
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 4 },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
                 vec![],
                 ObjectId(100),

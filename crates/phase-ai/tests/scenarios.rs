@@ -26,6 +26,7 @@ fn scenario_prefers_opponent_target_over_self() {
             legal_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
             optional: false,
         }],
+        mode_labels: Vec::new(),
         target_constraints: Vec::new(),
         selection: TargetSelectionProgress {
             current_slot: 0,
@@ -57,6 +58,7 @@ fn scenario_skips_optional_target_with_no_legal_choices() {
             legal_targets: Vec::new(),
             optional: true,
         }],
+        mode_labels: Vec::new(),
         target_constraints: Vec::new(),
         selection: Default::default(),
         source_id: None,

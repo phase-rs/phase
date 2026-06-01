@@ -81,6 +81,8 @@
     "waitTimeHours": "il y a {{count}} h",
     "buildMismatchTitle": "L'hôte est en {{version}} ({{commit}}) — votre version est différente. Actualisez pour mettre à jour.",
     "gameFull": "Cette partie est complète.",
+    "youAreHosting": "Vous hébergez cette partie.",
+    "hosting": "Hébergement",
     "sandboxConfirm": "Il s'agit d'une partie bac à sable. Les joueurs disposant de la permission de débogage peuvent manipuler directement l'état de la partie. Continuer ?",
     "draftBadgeTitle": "Draft {{kind}} — {{setCode}}",
     "draftBadge": "Draft {{setCode}}",
@@ -88,7 +90,8 @@
     "sandboxBadgeTitle": "Cette partie autorise les actions de débogage. À utiliser pour des tests — pas pour un match compétitif.",
     "anonymous": "Anonyme",
     "by": "par {{name}}",
-    "passwordProtected": "Protégé par mot de passe"
+    "passwordProtected": "Protégé par mot de passe",
+    "join": "Rejoindre"
   },
   "serverPicker": {
     "title": "Serveur",

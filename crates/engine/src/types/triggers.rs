@@ -153,6 +153,8 @@ pub enum TriggerEventKey {
     /// CR 701.14: A fight resolution (separate from generic deals-damage
     /// because the matcher dispatches on `EffectResolved { kind: Fight }`).
     Fight,
+    /// CR 702.26c: A permanent phased in.
+    PhaseIn,
 }
 
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.

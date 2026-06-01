@@ -65,14 +65,21 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
 /// Mark layers dirty if this counter type projects into a derived characteristic
 /// computed by the layer system. P/T counters feed layer 7c (CR 613.4c);
 /// Loyalty/Defense are cached fields mirrored from the counter map; keyword
-/// counters grant abilities at layer 6 (CR 613.1f + CR 122.1b). Setting
+/// counters grant abilities at layer 6 (CR 613.1f + CR 122.1b); generic
+/// counters can gate static/trigger conditions (e.g. Spacecraft Station
+/// thresholds) whose effects are realized by layer recomputation. Setting
 /// `layers_dirty` for these is defensive — the layer reset/re-derive path is
 /// idempotent when counters already match.
 pub(crate) fn counter_type_affects_layers(counter_type: &CounterType) -> bool {
+    // CR 613.1: Recompute the continuous-effect layer system whenever a
+    // counter change can alter condition-gated effects.
     counter_type.power_toughness_delta().is_some()
         || matches!(
             counter_type,
-            CounterType::Loyalty | CounterType::Defense | CounterType::Keyword(_)
+            CounterType::Loyalty
+                | CounterType::Defense
+                | CounterType::Keyword(_)
+                | CounterType::Generic(_)
         )
 }
 
@@ -151,7 +158,7 @@ pub(crate) fn apply_counter_addition(
     sync_derived_from_counters(obj, &counter_type);
 
     if counter_type_affects_layers(&counter_type) {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 
     state.counter_added_this_turn.push(CounterAddedRecord {
@@ -206,7 +213,7 @@ pub(crate) fn apply_counter_removal(
     sync_derived_from_counters(obj, &counter_type);
 
     if counter_type_affects_layers(&counter_type) {
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 
     // CR 122.1: Only emit when counters were actually removed,
@@ -1380,7 +1387,7 @@ mod tests {
         };
         let mut events = Vec::new();
 
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
         apply_counter_addition(
             &mut state,
             PlayerId(0),
@@ -1389,11 +1396,11 @@ mod tests {
             1,
             &mut events,
         );
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
 
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
         apply_counter_removal(&mut state, obj_id, counter_type, 1, &mut events);
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
     }
 
     #[test]
@@ -1634,7 +1641,10 @@ mod tests {
             1,
             "SelfRef counter must land on the source object"
         );
-        assert!(state.layers_dirty, "layers must be dirtied for P/T counter");
+        assert!(
+            state.layers_dirty.is_dirty(),
+            "layers must be dirtied for P/T counter"
+        );
     }
 
     #[test]
@@ -1847,6 +1857,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: lki_counters,
             },
         );

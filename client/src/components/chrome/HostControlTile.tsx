@@ -254,6 +254,11 @@ export function HostControlTile() {
   const playerSlots = useMultiplayerStore((s) => s.playerSlots);
   const hostSession = useMultiplayerStore((s) => s.hostSession);
   const seatMutate = useMultiplayerStore((s) => s.seatMutate);
+  const seatMutateAsync = useMultiplayerStore((s) => s.seatMutateAsync);
+  const startLobbyWithCurrentPlayers = useMultiplayerStore(
+    (s) => s.startLobbyWithCurrentPlayers,
+  );
+  const showToast = useMultiplayerStore((s) => s.showToast);
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
@@ -321,27 +326,24 @@ export function HostControlTile() {
     return null;
   }
 
-  const startWithCurrentPlayers = () => {
-    for (const slot of [...waitingSeats].sort((a, b) => b.playerId - a.playerId)) {
-      seatMutate({ type: "Remove", data: { seatIndex: slot.playerId } });
-    }
-    seatMutate({ type: "Start" });
-  };
-
   const fillWithAiAndStart = () => {
     if (!haveAnyDeck) return;
-    for (const slot of waitingSeats) {
-      const deck = pickRandomAiDeck();
-      if (!deck) return;
-      seatMutate({
-        type: "SetKind",
-        data: {
-          seatIndex: slot.playerId,
-          kind: { type: "Ai", data: { difficulty: "Medium", deck } },
-        },
-      });
-    }
-    seatMutate({ type: "Start" });
+    void (async () => {
+      for (const slot of waitingSeats) {
+        const deck = pickRandomAiDeck();
+        if (!deck) return;
+        await seatMutateAsync({
+          type: "SetKind",
+          data: {
+            seatIndex: slot.playerId,
+            kind: { type: "Ai", data: { difficulty: "Medium", deck } },
+          },
+        });
+      }
+      await seatMutateAsync({ type: "Start" });
+    })().catch((err) => {
+      showToast(err instanceof Error ? err.message : String(err));
+    });
   };
 
   return (
@@ -433,7 +435,11 @@ export function HostControlTile() {
                   {occupiedSeats >= minPlayers && (
                     <button
                       type="button"
-                      onClick={startWithCurrentPlayers}
+                      onClick={() => {
+                        void startLobbyWithCurrentPlayers().catch((err) => {
+                          showToast(err instanceof Error ? err.message : String(err));
+                        });
+                      }}
                       className="rounded border border-emerald-500/20 px-2 py-1 text-xs font-medium text-emerald-300"
                     >
                       {t("hostControl.startNow")}

@@ -72,6 +72,20 @@ let shatterIdCounter = 0;
 let castArcIdCounter = 0;
 let millRevealIdCounter = 0;
 
+/**
+ * Resolve the rendered card element for an object id. Collapsed identical-
+ * permanent groups (GroupedPermanent collapsed mode) render only their
+ * representative card, which carries `data-grouped-ids` listing every id it
+ * stands in for — so a non-rendered swarm member falls back to that
+ * representative instead of resolving to nothing (no slam, no impact FX).
+ */
+function findCardElement(objectId: number): HTMLElement | null {
+  return (
+    document.querySelector<HTMLElement>(`[data-object-id="${objectId}"]`) ??
+    document.querySelector<HTMLElement>(`[data-grouped-ids~="${objectId}"]`)
+  );
+}
+
 export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const activeStep = useAnimationStore((s) => s.activeStep);
   const advanceStep = useAnimationStore((s) => s.advanceStep);
@@ -92,10 +106,13 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
 
   const getObjectPosition = useCallback(
     (objectId: number): { x: number; y: number } | null => {
-      // Check snapshot first (pre-dispatch positions), then live registry
-      const snapshotRect = currentSnapshot.get(objectId);
-      const registryRect = getPosition(objectId);
-      const rect = snapshotRect ?? registryRect;
+      // Fallback chain: pre-dispatch snapshot, then live registry, then the
+      // group representative for a collapsed swarm member that has no node of
+      // its own (resolved live via data-grouped-ids — see findCardElement).
+      const rect =
+        currentSnapshot.get(objectId) ??
+        getPosition(objectId) ??
+        findCardElement(objectId)?.getBoundingClientRect();
       if (!rect) return null;
       return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
     },
@@ -147,12 +164,11 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                 (e.event.data.target as { Object: number }).Object === source_id,
             );
 
-            if (!isPairedReturn) {
-              const sourceEl = document.querySelector<HTMLElement>(
-                `[data-object-id="${source_id}"]`,
-              );
-              if (sourceEl) {
-                applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
+            // Resolve via the group representative when this attacker is a
+            // non-rendered member of a collapsed swarm (findCardElement).
+            const sourceEl = isPairedReturn ? null : findCardElement(source_id);
+            const slammed = sourceEl
+              ? applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
                   // Impact effects: SFX, shockwave, floating number, screen shake
                   audioManager.playSfx("DamageDealt");
                   particleRef.current?.slamImpact(pos.x, pos.y, amount);
@@ -167,48 +183,50 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                     const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
                     applyScreenShake(containerRef.current, intensity, speedMultiplier);
                   }
-                });
-                break;
-              }
-            }
+                })
+              : false;
 
-            // Paired return or source element not found: just show floating damage + immediate SFX
-            audioManager.playSfx("DamageDealt");
-            const floatId = ++floatIdCounter;
-            setActiveFloats((prev) => [
-              ...prev,
-              { id: floatId, value: -amount, position: pos, color: "#ef4444" },
-            ]);
+            if (!slammed) {
+              // Paired return, missing source element, or representative already
+              // mid-slam: show the floating damage number (+ SFX) without a slam.
+              audioManager.playSfx("DamageDealt");
+              const floatId = ++floatIdCounter;
+              setActiveFloats((prev) => [
+                ...prev,
+                { id: floatId, value: -amount, position: pos, color: "#ef4444" },
+              ]);
+            }
             break;
           }
 
           // Creature-to-player: card slam at the player HUD
           {
-            const sourceEl = document.querySelector<HTMLElement>(
-              `[data-object-id="${source_id}"]`,
-            );
-            if (sourceEl && vfxQuality !== "minimal") {
-              applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
-                audioManager.playSfx("DamageDealt");
-                particleRef.current?.playerDamage(pos.x, pos.y, amount);
+            // Resolve via the group representative for a collapsed swarm member.
+            const sourceEl = vfxQuality !== "minimal" ? findCardElement(source_id) : null;
+            const slammed = sourceEl
+              ? applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
+                  audioManager.playSfx("DamageDealt");
+                  particleRef.current?.playerDamage(pos.x, pos.y, amount);
 
-                const fid = ++floatIdCounter;
-                setActiveFloats((prev) => [
-                  ...prev,
-                  { id: fid, value: -amount, position: pos, color: "#ef4444" },
-                ]);
+                  const fid = ++floatIdCounter;
+                  setActiveFloats((prev) => [
+                    ...prev,
+                    { id: fid, value: -amount, position: pos, color: "#ef4444" },
+                  ]);
 
-                if (vfxQuality === "full" && containerRef.current) {
-                  const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
-                  applyScreenShake(containerRef.current, intensity, speedMultiplier);
-                }
+                  if (vfxQuality === "full" && containerRef.current) {
+                    const intensity = amount >= 7 ? "heavy" : amount >= 4 ? "medium" : "light";
+                    applyScreenShake(containerRef.current, intensity, speedMultiplier);
+                  }
 
-                if (isPlayerTarget) {
-                  setActiveVignette({ damageAmount: amount });
-                  setTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
-                }
-              });
-            } else {
+                  if (isPlayerTarget) {
+                    setActiveVignette({ damageAmount: amount });
+                    setTimeout(() => setActiveVignette(null), 500 * speedMultiplier);
+                  }
+                })
+              : false;
+
+            if (!slammed) {
               audioManager.playSfx("DamageDealt");
               const fid = ++floatIdCounter;
               setActiveFloats((prev) => [

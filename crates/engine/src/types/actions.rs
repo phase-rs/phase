@@ -392,7 +392,7 @@ pub enum GameAction {
         card_id: CardId,
         payment_mode: CastPaymentMode,
     },
-    /// CR 702.35a: Accept a pending `WaitingFor::MadnessCastOffer` and cast
+    /// CR 702.35a: Accept a pending `WaitingFor::CastOffer` (Madness) and cast
     /// `object_id` from exile for its madness cost. Decline is via the shared
     /// `DecideOptionalEffect { accept: false }`.
     CastSpellAsMadness {
@@ -594,14 +594,14 @@ pub enum GameAction {
         source: ObjectId,
     },
     /// CR 702.xxx: Paradigm (Strixhaven) — accept the turn-based offer during
-    /// `WaitingFor::ParadigmCastOffer`, casting a token copy of the exiled
+    /// `WaitingFor::CastOffer` (Paradigm), casting a token copy of the exiled
     /// source spell without paying its mana cost. The exiled source stays in
     /// exile. Assign when WotC publishes SOS CR update.
     CastParadigmCopy {
         source: ObjectId,
     },
     /// CR 702.xxx: Paradigm (Strixhaven) — decline the turn-based offer during
-    /// `WaitingFor::ParadigmCastOffer`. The exiled source stays in exile and
+    /// `WaitingFor::CastOffer` (Paradigm). The exiled source stays in exile and
     /// may be offered again next turn. Assign when WotC publishes SOS CR
     /// update.
     PassParadigmOffer,

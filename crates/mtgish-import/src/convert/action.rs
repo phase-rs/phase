@@ -9,10 +9,10 @@
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    GainLifePlayer, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
-    QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, StaticDefinition,
-    TargetFilter, TriggerDefinition, TypedFilter,
+    FilterProp, LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
+    MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    SearchSelectionConstraint, SharedQuality, StaticDefinition, TargetFilter, TriggerDefinition,
+    TypedFilter,
 };
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
 use engine::types::game_state::DistributionUnit;
@@ -1362,36 +1362,25 @@ fn distributed_target_to_target_filter(
         });
     };
 
-    let fixed_max = |n: &GameNumber, idiom: &'static str| -> ConvResult<usize> {
-        match quantity::convert(n)? {
-            QuantityExpr::Fixed { value } if value >= 0 => Ok(value as usize),
-            other => Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "MultiTargetSpec",
-                needed_variant: format!("{idiom} dynamic target count: {other:?}"),
-            }),
-        }
+    let dynamic_max = |n: &GameNumber, min: usize| -> ConvResult<MultiTargetSpec> {
+        let max = quantity::convert(n)?;
+        Ok(MultiTargetSpec::bounded(min, max))
     };
 
     match target {
-        DistributedTarget::BetweenOneAndNumberAnyTargets(n) => Ok((
-            TargetFilter::Any,
-            MultiTargetSpec::fixed(1, fixed_max(n, "BetweenOneAndNumberAnyTargets")?),
-        )),
-        DistributedTarget::UptoNumberAnyTargets(n) => Ok((
-            TargetFilter::Any,
-            MultiTargetSpec::fixed(0, fixed_max(n, "UptoNumberAnyTargets")?),
-        )),
+        DistributedTarget::BetweenOneAndNumberAnyTargets(n) => {
+            Ok((TargetFilter::Any, dynamic_max(n, 1)?))
+        }
+        DistributedTarget::UptoNumberAnyTargets(n) => Ok((TargetFilter::Any, dynamic_max(n, 0)?)),
         DistributedTarget::AnyNumberOfAnyTargets => {
             Ok((TargetFilter::Any, MultiTargetSpec::unlimited(1)))
         }
-        DistributedTarget::BetweenOneAndNumberTargetPermanents(n, permanents) => Ok((
-            convert_permanents(permanents)?,
-            MultiTargetSpec::fixed(1, fixed_max(n, "BetweenOneAndNumberTargetPermanents")?),
-        )),
-        DistributedTarget::UptoNumberTargetPermanents(n, permanents) => Ok((
-            convert_permanents(permanents)?,
-            MultiTargetSpec::fixed(0, fixed_max(n, "UptoNumberTargetPermanents")?),
-        )),
+        DistributedTarget::BetweenOneAndNumberTargetPermanents(n, permanents) => {
+            Ok((convert_permanents(permanents)?, dynamic_max(n, 1)?))
+        }
+        DistributedTarget::UptoNumberTargetPermanents(n, permanents) => {
+            Ok((convert_permanents(permanents)?, dynamic_max(n, 0)?))
+        }
         DistributedTarget::AnyNumberOfTargetPermanents(permanents) => Ok((
             convert_permanents(permanents)?,
             MultiTargetSpec::unlimited(1),
@@ -2636,7 +2625,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         },
         Action::GainLife(n) => Effect::GainLife {
             amount: quantity::convert(n)?,
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         },
         Action::LoseLife(n) => Effect::LoseLife {
             amount: quantity::convert(n)?,
@@ -2859,6 +2848,28 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             enter_with_counters: vec![],
         },
 
+        // CR 701.13a + CR 400.3: "Exile target player's graveyard" moves the
+        // cards in that player's graveyard to exile; graveyard membership is
+        // owner-scoped, not controller-scoped.
+        Action::ExilePlayersGraveyard(player) => {
+            let ctrl = filter_mod::player_to_controller(player)?;
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(
+                    engine::types::ability::TypedFilter::default()
+                        .properties(vec![FilterProp::Owned { controller: ctrl }]),
+                ),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            }
+        }
+
         // CR 701.18: Return to owner's hand (Bounce).
         Action::ReturnAnyNumberOfPermanentsToTheirOwnersHands(filter) => Effect::Bounce {
             target: convert_permanents(filter)?,
@@ -3040,11 +3051,9 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         //
         // CR 115.2 + CR 601.2c: For target-player references
         // (`Ref_TargetPlayer*`), the announced player is wired onto the
-        // inner Effect's player-target slot via `apply_player_target`.
-        // The engine extracts the chosen player at resolution time via
-        // `ResolvedAbility::target_player()`. Other non-You scopes that
-        // can't be expressed as a per-effect target (predicate-filtered,
-        // dynamic anaphor, etc.) strict-fail.
+        // inner Effect's player-target slot via `apply_player_target`. Other
+        // non-You scopes that can't be expressed as a per-effect target
+        // (predicate-filtered, dynamic anaphor, etc.) strict-fail.
         Action::PlayerAction(player, inner) => match &**player {
             Player::You => convert(inner)?,
             other => {
@@ -3613,7 +3622,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             };
             Effect::GainLife {
                 amount,
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             }
         }
 
@@ -5325,16 +5334,9 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             target: target_filter,
         },
         // CR 119.3 + CR 115.2: "Target player gains N life."
-        // The `target_filter` parameter is consumed implicitly: the
-        // engine reads the announced player from `ability.targets` via
-        // `target_player()` when `player` is `TargetPlayer`. The filter
-        // value itself doesn't carry through (`GainLifePlayer` is enum-
-        // tagged, not filter-parameterized) — this branch only fires
-        // for target-player refs which all map to the same announced
-        // slot, so the loss of `target_filter` distinction is sound.
         Effect::GainLife { amount, .. } => Effect::GainLife {
             amount,
-            player: GainLifePlayer::TargetPlayer,
+            player: target_filter,
         },
         // CR 119.3 + CR 115.2: "Target player loses N life."
         Effect::LoseLife { amount, .. } => Effect::LoseLife {
@@ -5460,6 +5462,7 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             target_player: Some(target_filter),
             selection_constraint,
             split,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         // No player-target slot on this effect. Strict-fail so the
         // shape-mismatch surfaces in the report rather than silently
@@ -6029,6 +6032,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         target_player: None,
         selection_constraint,
         split: None,
+        source_zones: vec![engine::types::zones::Zone::Library],
     });
     out.push(Effect::ChangeZone {
         origin: Some(Zone::Library),
@@ -6091,6 +6095,7 @@ fn convert_multi_filter_search_library(
             target_player: None,
             selection_constraint: SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         });
         out.push(Effect::ChangeZone {
             origin: Some(Zone::Library),
@@ -6567,8 +6572,8 @@ mod tests {
         TokenFlag, PT,
     };
     use engine::types::ability::{
-        AbilityKind, Comparator, Effect, FilterProp, QuantityRef, TargetFilter, TypeFilter,
-        TypedFilter,
+        AbilityKind, Comparator, ControllerRef, Effect, FilterProp, QuantityRef, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use engine::types::mana::ManaColor;
 
@@ -7113,6 +7118,21 @@ mod tests {
     }
 
     #[test]
+    fn target_player_gain_life_preserves_player_filter() {
+        let effect = convert(&Action::PlayerAction(
+            Box::new(Player::Ref_TargetPlayer),
+            Box::new(Action::GainLife(Box::new(GameNumber::Integer(2)))),
+        ))
+        .unwrap();
+
+        let Effect::GainLife { amount, player } = effect else {
+            panic!("expected GainLife");
+        };
+        assert_eq!(amount, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(player, TargetFilter::Player);
+    }
+
+    #[test]
     fn targeted_wrapper_rewrite_covers_prevention_and_discard_targets() {
         let typed = TargetFilter::Typed(TypedFilter::creature());
         let mut effects = vec![
@@ -7193,6 +7213,29 @@ mod tests {
                 EngineCounterType::Plus1Plus1,
                 QuantityExpr::Fixed { value: 2 }
             )]
+        );
+    }
+
+    #[test]
+    fn exile_players_graveyard_targets_owned_graveyard_cards() {
+        let effect = convert(&Action::ExilePlayersGraveyard(Box::new(Player::You))).unwrap();
+
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } = effect
+        else {
+            panic!("expected ChangeZone, got {effect:?}");
+        };
+        assert_eq!(origin, Some(Zone::Graveyard));
+        assert_eq!(destination, Zone::Exile);
+        assert_eq!(
+            target,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You,
+            }]))
         );
     }
 
