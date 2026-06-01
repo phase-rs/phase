@@ -390,4 +390,26 @@ mod tests {
     fn ping_has_no_bounded_fields() {
         assert!(validate_lobby_message(&M::Ping { timestamp: 1 }).is_ok());
     }
+
+    #[test]
+    fn guard_rejects_oversized_main_deck() {
+        use crate::inbound_guard::{guard_inbound, MAX_MAIN_DECK_ENTRIES};
+
+        let mut msg = create_with("Alice");
+        if let M::CreateGameWithSettings { deck, .. } = &mut msg {
+            deck.main_deck = vec!["Card".to_string(); MAX_MAIN_DECK_ENTRIES + 1];
+        }
+        assert!(guard_inbound(&msg).is_err());
+    }
+
+    #[test]
+    fn guard_rejects_oversized_card_name_in_deck() {
+        use crate::inbound_guard::{guard_inbound, MAX_DECK_CARD_NAME_LEN};
+
+        let mut msg = create_with("Alice");
+        if let M::CreateGameWithSettings { deck, .. } = &mut msg {
+            deck.main_deck = vec!["x".repeat(MAX_DECK_CARD_NAME_LEN + 1)];
+        }
+        assert!(guard_inbound(&msg).is_err());
+    }
 }
