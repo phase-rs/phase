@@ -1316,6 +1316,16 @@ pub enum Duration {
     UntilNextTurnOf {
         player: PlayerScope,
     },
+    /// CR 514.2: Effect expires at the **cleanup step of `player`'s next turn**
+    /// — it persists through that entire turn. This is the "until the end of
+    /// [your/their] next turn" reading (Light Up the Stage, Slip Out the Back),
+    /// distinct from `UntilNextTurnOf` which expires at the *beginning* of the
+    /// next turn. At the player's next untap step the effect is "armed"
+    /// (converted to `UntilEndOfTurn`) so the existing cleanup-step prune ends
+    /// it at that turn's cleanup; it survives the creation turn's own cleanup.
+    UntilEndOfNextTurnOf {
+        player: PlayerScope,
+    },
     /// CR 611.2a: Effect expires when the source object leaves the
     /// battlefield.
     UntilHostLeavesPlay,
@@ -12896,6 +12906,9 @@ mod tests {
             },
             Duration::UntilNextStepOf {
                 step: Phase::End,
+                player: PlayerScope::Controller,
+            },
+            Duration::UntilEndOfNextTurnOf {
                 player: PlayerScope::Controller,
             },
             Duration::UntilHostLeavesPlay,

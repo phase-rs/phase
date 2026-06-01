@@ -2083,8 +2083,10 @@ pub(super) fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
     if let Some((duration, rest)) = nom_on_lower(text, &lower, |i| {
         alt((
             value(Duration::UntilEndOfTurn, tag("until end of turn, ")),
+            // CR 514.2: "until the end of your next turn" persists through
+            // that turn's cleanup step.
             value(
-                Duration::UntilNextTurnOf {
+                Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
                 tag("until the end of your next turn, "),
@@ -2136,21 +2138,22 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         (" this turn", Duration::UntilEndOfTurn),
         (" until end of turn", Duration::UntilEndOfTurn),
         (
+            // CR 514.2: cleanup-pruned next-turn duration.
             " until the end of your next turn",
-            Duration::UntilNextTurnOf {
+            Duration::UntilEndOfNextTurnOf {
                 player: PlayerScope::Controller,
             },
         ),
         (" until end of combat", Duration::UntilEndOfCombat),
-        // CR 611.2a + CR 108.3: Third-person "their next turn" appears in grants
-        // whose grantee is not the ability's controller (Suspend Aggression:
-        // "its owner may play it"; Expedited Inheritance: "its controller may
-        // ... They may play those cards"). Theme D's `granted_to` binds to the
-        // grantee, so `UntilNextTurnOf { Controller }` is semantically "until
-        // the end of the grantee's next turn" at prune time.
+        // CR 514.2 + CR 611.2a + CR 108.3: Third-person "their next turn"
+        // appears in grants whose grantee is not the ability's controller
+        // (Suspend Aggression: "its owner may play it"; Expedited Inheritance:
+        // "its controller may ... They may play those cards"). Theme D's
+        // `granted_to` binds to the grantee, so `UntilNextTurnOf { Controller }`
+        // is semantically "until the end of the grantee's next turn" at prune time.
         (
             " until the end of their next turn",
-            Duration::UntilNextTurnOf {
+            Duration::UntilEndOfNextTurnOf {
                 player: PlayerScope::Controller,
             },
         ),
