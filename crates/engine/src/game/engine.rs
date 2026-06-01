@@ -5646,7 +5646,7 @@ pub fn start_game(state: &mut GameState) -> ActionResult {
 
     let mut result = start_game_with_starting_player(state, starting_player);
     // Sequence: all DieRolled (every round) → GameStarted → TurnStarted.
-    dice_events.extend(result.events.drain(..));
+    dice_events.append(&mut result.events);
     result.events = dice_events;
     result
 }
