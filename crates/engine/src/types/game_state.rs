@@ -1617,6 +1617,8 @@ pub enum AlternativeCastKeyword {
     /// CR 702.148a-b + CR 612: Paying the cleave cost removes every
     /// square-bracketed span from the spell's text (a text-changing effect).
     Cleave,
+    /// CR 702.162a: Cast converted (back face up, CR 712.14a) for the MTMTE cost.
+    MoreThanMeetsTheEye,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -3633,6 +3635,13 @@ pub enum CastingVariant {
     /// spell — there is no on-resolve special behavior, so the spell goes to its
     /// owner's graveyard like any instant/sorcery.
     Cleave,
+    /// CR 702.162a + CR 712.14a: Cast from any castable zone via the More Than
+    /// Meets the Eye alternative cost. The printed mana cost is replaced by the
+    /// `Keyword::MoreThanMeetsTheEye(cost)` payload at cast preparation (mirrors
+    /// Overload). On resolution the spell is cast CONVERTED — the resulting
+    /// permanent enters the battlefield transformed (back face up) via the
+    /// existing `enter_transformed` ZoneChange seed. CR 701.28 (Convert).
+    MoreThanMeetsTheEye,
 }
 
 impl CastingVariant {

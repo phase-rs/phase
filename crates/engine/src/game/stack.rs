@@ -412,16 +412,24 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // ExileWithAltCost permission with `cast_transformed`, the
             // permanent enters the battlefield transformed (resolving to its
             // back face). Used by the Siege victory trigger.
+            //
+            // CR 702.162a + CR 712.14a + CR 701.28: More Than Meets the Eye is
+            // also a converted cast — a spell cast for its MTMTE alternative cost
+            // (`CastingVariant::MoreThanMeetsTheEye`) enters transformed for the
+            // same reason. Combine both sources into a single `enter_transformed`
+            // seed point so the variant alone encodes the behavior (no new bool on
+            // PreparedSpellCast/StackEntry).
             if let Some(obj) = state.objects.get(&entry.id) {
-                let cast_transformed = obj.casting_permissions.iter().any(|p| {
-                    matches!(
-                        p,
-                        CastingPermission::ExileWithAltCost {
-                            cast_transformed: true,
-                            ..
-                        }
-                    )
-                });
+                let cast_transformed = casting_variant == CastingVariant::MoreThanMeetsTheEye
+                    || obj.casting_permissions.iter().any(|p| {
+                        matches!(
+                            p,
+                            CastingPermission::ExileWithAltCost {
+                                cast_transformed: true,
+                                ..
+                            }
+                        )
+                    });
                 if cast_transformed {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                         enter_transformed,

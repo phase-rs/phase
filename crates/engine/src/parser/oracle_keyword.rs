@@ -819,6 +819,16 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // CR 702.162a: "more than meets the eye {cost}" — alternative cost to cast the
+    // card converted (back face up). The Oracle line supplies the alternative cost.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("more than meets the eye ").parse(text) {
+        let cost_str = rest.trim();
+        if !cost_str.is_empty() {
+            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            return Some(Keyword::MoreThanMeetsTheEye(cost));
+        }
+    }
+
     // CR 701.57a: "discover N"
     // Delegates to nom combinator for number parsing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("discover ").parse(text) {
@@ -1556,6 +1566,35 @@ mod tests {
         // CR 702.157: Squad {cost}
         let kw = parse_keyword_from_oracle("squad {2}").unwrap();
         assert!(matches!(kw, Keyword::Squad(ManaCost::Cost { .. })));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_more_than_meets_the_eye() {
+        use crate::types::mana::ManaCostShard;
+        // CR 702.162a: "more than meets the eye {cost}" — the alternative cost
+        // is supplied by the Oracle line. Colored cost case (Flamewar: {B}{R}).
+        let kw = parse_keyword_from_oracle("more than meets the eye {b}{r}").unwrap();
+        match kw {
+            Keyword::MoreThanMeetsTheEye(ManaCost::Cost { shards, generic }) => {
+                assert_eq!(generic, 0);
+                assert!(shards.contains(&ManaCostShard::Black));
+                assert!(shards.contains(&ManaCostShard::Red));
+                assert_eq!(shards.len(), 2);
+            }
+            other => panic!("expected MoreThanMeetsTheEye({{B}}{{R}}), got {other:?}"),
+        }
+
+        // Class-general: a generic + single color cost parses the same way,
+        // proving the arm is not specialized to one card's cost.
+        let kw2 = parse_keyword_from_oracle("more than meets the eye {2}{u}").unwrap();
+        match kw2 {
+            Keyword::MoreThanMeetsTheEye(ManaCost::Cost { shards, generic }) => {
+                assert_eq!(generic, 2);
+                assert!(shards.contains(&ManaCostShard::Blue));
+                assert_eq!(shards.len(), 1);
+            }
+            other => panic!("expected MoreThanMeetsTheEye({{2}}{{U}}), got {other:?}"),
+        }
     }
 
     #[test]
