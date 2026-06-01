@@ -281,10 +281,28 @@ export type LibraryPosition =
   | { type: "Bottom" }
   | { type: "NthFromTop"; n: number };
 
-// Narrow source-zone type for `WaitingFor::ExileForCost` — only `Hand` (pitch
-// spells) and `Graveyard` (escape) are valid (mirrors the engine's
-// `ExileCostSourceZone`).
+// Narrow source-zone type for a `PayCost` exile-from-hand/graveyard cost —
+// only `Hand` (pitch spells) and `Graveyard` (escape) are valid (mirrors the
+// engine's `ExileCostSourceZone`).
 export type ExileCostSourceZone = "Hand" | "Graveyard";
+
+// CR 118.3 + CR 601.2b + CR 605.3b: which action a `PayCost` selection applies
+// to the chosen objects. Internally tagged (`#[serde(tag = "type")]`).
+export type PayCostKind =
+  | { type: "Discard" }
+  | { type: "Sacrifice" }
+  | { type: "ReturnToHand" }
+  | { type: "ExileFromZone"; zone: ExileCostSourceZone }
+  | { type: "ExileFromManaZone"; zone: Zone }
+  | { type: "RemoveCounter"; counter_type: CounterMatch }
+  | { type: "TapCreatures" }
+  | { type: "Behold"; action: "ChooseOrReveal" | "ExileChosen" };
+
+// CR 601.2b + CR 605.3b: resumption context after a `PayCost` choice. The
+// frontend treats the inner pending payload as opaque pass-through.
+export type CostResume =
+  | { type: "Spell"; Spell: PendingCast }
+  | { type: "ManaAbility"; ManaAbility: unknown };
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";
 
@@ -416,7 +434,9 @@ export type CastingVariant =
   | { type: "Plot" }
   | { type: "Foretell" }
   | { type: "Overload" }
-  | { type: "Bestow" };
+  | { type: "Bestow" }
+  | { type: "Awaken" }
+  | { type: "Cleave" };
 
 export interface CastingVariantChoiceOption {
   variant: CastingVariant;
@@ -970,6 +990,14 @@ export interface PendingTriggerSummary {
 
 export type OpeningHandBottomReason = { type: "TinyLeadersMultiCommander" };
 
+export type CastOfferKind =
+  | { type: "Adventure"; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode }
+  | { type: "Miracle"; object_id: ObjectId; cost: ManaCost }
+  | { type: "Madness"; object_id: ObjectId; cost: ManaCost }
+  | { type: "Paradigm"; offers: ObjectId[] }
+  | { type: "Cascade"; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number }
+  | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[] };
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "ActivationCostOneOfChoice"; data: { player: PlayerId; costs: SerializedAbilityCost[]; pending_cast: PendingCast } }
@@ -997,7 +1025,7 @@ export type WaitingFor =
       data: { player: PlayerId; min?: number; max: number; pending_cast: PendingCast };
     }
   | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId } }
-  | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; selection: TargetSelectionProgress } }
+  | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[] } }
   | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, number> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
@@ -1018,7 +1046,7 @@ export type WaitingFor =
   | { type: "SearchPartitionChoice"; data: { player: PlayerId; cards: ObjectId[]; primary_destination: Zone; primary_count: number; primary_enter_tapped: boolean; rest_destination: Zone; source_id: ObjectId } }
   | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
   | { type: "ChooseOneOfBranch"; data: { player: PlayerId; controller: PlayerId; source_id: ObjectId; branches: unknown[]; branch_descriptions?: string[]; parent_targets?: TargetRef[]; context?: unknown; remaining_players?: PlayerId[] } }
-  | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
+  | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source_id?: ObjectId } }
@@ -1028,25 +1056,29 @@ export type WaitingFor =
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; pending_cast: PendingCast } }
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
-  | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode } }
+  | { type: "CastOffer"; data: { player: PlayerId; kind: CastOfferKind } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
-  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Overload" } | { type: "Bestow" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
   | { type: "CastingVariantChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; options: CastingVariantChoiceOption[] } }
   | { type: "ChoosePermanentTypeSlot"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; source: ObjectId; payment_mode?: CastPaymentMode; available_slots: CoreType[] } }
   | { type: "MultiTargetSelection"; data: { player: PlayerId; legal_targets: ObjectId[]; min_targets: number; max_targets: number; pending_ability: unknown } }
   | { type: "MiracleReveal"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
-  | { type: "MiracleCastOffer"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
-  | { type: "MadnessCastOffer"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
-  | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "SacrificeForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "ReturnToHandForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "RemoveCounterForCost"; data: { player: PlayerId; count: number; counter_type: CounterMatch; permanents: ObjectId[]; pending_cast: PendingCast } }
+  // CR 118.3 + CR 601.2b + CR 605.3b: unified cost-payment selection. Replaces
+  // DiscardForCost, SacrificeForCost, ReturnToHandForCost, ExileForCost,
+  // RemoveCounterForCost, TapCreaturesForSpellCost, BeholdForCost, and the four
+  // mana-ability cost variants.
+  | {
+      type: "PayCost";
+      data: {
+        player: PlayerId;
+        kind: PayCostKind;
+        choices: ObjectId[];
+        count: number;
+        min_count: number;
+        resume: CostResume;
+      };
+    }
   | { type: "BlightChoice"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "BeholdForCost"; data: { player: PlayerId; count: number; choices: ObjectId[]; action: "ChooseOrReveal" | "ExileChosen"; pending_cast: PendingCast } }
-  | { type: "TapCreaturesForManaAbility"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_mana_ability: unknown } }
-  | { type: "DiscardForManaAbility"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_mana_ability: unknown } }
-  | { type: "ExileForManaAbility"; data: { player: PlayerId; count: number; zone: Zone; cards: ObjectId[]; pending_mana_ability: unknown } }
-  | { type: "SacrificeForManaAbility"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_mana_ability: unknown } }
   | { type: "PayManaAbilityMana"; data: { player: PlayerId; options: ManaType[][]; pending_mana_ability: unknown } }
   | {
       type: "ChooseManaColor";
@@ -1061,8 +1093,6 @@ export type WaitingFor =
           | { type: "ResolvingEffect"; data: unknown };
       };
     }
-  | { type: "TapCreaturesForSpellCost"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
-  | { type: "ExileForCost"; data: { player: PlayerId; zone: ExileCostSourceZone; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
   | { type: "HarmonizeTapChoice"; data: { player: PlayerId; eligible_creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "OptionalEffectChoice"; data: { player: PlayerId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey } }
@@ -1077,12 +1107,9 @@ export type WaitingFor =
   | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
-  | { type: "DiscoverChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[] } }
   | { type: "RevealUntilKeptChoice"; data: { player: PlayerId; hit_card: ObjectId; source_id: ObjectId; accept_zone: string; decline_zone: string; enter_tapped: boolean; enters_attacking: boolean; revealed_misses: ObjectId[]; rest_destination: string } }
   | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }
-  | { type: "CascadeChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
-  | { type: "ParadigmCastOffer"; data: { player: PlayerId; offers: ObjectId[] } }
   | { type: "PopulateChoice"; data: { player: PlayerId; source_id: ObjectId; valid_tokens: ObjectId[] } }
   | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: [string, number][] } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
@@ -1154,10 +1181,15 @@ export type WaitingFor =
       player: PlayerId;
       target_player: PlayerId;
       categories: string[];
+      chooser_scope?: "EachPlayerSelf" | "ControllerForAll";
+      choose_filter?: TargetFilter;
+      sacrifice_filter?: TargetFilter;
+      source_controller?: PlayerId;
       eligible_per_category: ObjectId[][];
       source_id: ObjectId;
       remaining_players: PlayerId[];
       all_kept: ObjectId[];
+      scoped_players: PlayerId[];
     } }
   | { type: "CopyRetarget"; data: { player: PlayerId; copy_id: ObjectId; target_slots: CopyTargetSlot[]; current_slot?: number } }
   // CR 700.3 + CR 700.3a: Subject is partitioning their own eligible objects
@@ -1574,6 +1606,10 @@ export interface DerivedViews {
    * `engine::game::derived_views::DerivedViews::auras_attached_to_player`.
    */
   auras_attached_to_player?: Record<string, ObjectId[]>;
+  /** CR 702.188a: web-slinging alt-cost for each qualifying card in the viewing player's
+   *  own hand (incl. granted). Keyed by hand ObjectId (string). Mirrors
+   *  engine::game::derived_views::DerivedViews::web_slinging_costs. */
+  web_slinging_costs?: Record<string, ManaCost>;
 }
 
 export interface GameState {
@@ -1869,6 +1905,9 @@ export interface BatchResolveResult {
   waitingFor: WaitingFor;
   logEntries?: GameLogEntry[];
   itemsResolved: number;
+  /** Stack depth at this chunk's entry; the drive loop latches the first
+   *  chunk's value as the "resolving X of Y" denominator. */
+  total: number;
 }
 
 export interface EngineAdapter {

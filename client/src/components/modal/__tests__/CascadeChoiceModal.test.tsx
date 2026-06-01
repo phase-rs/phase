@@ -73,8 +73,11 @@ describe("CascadeChoiceModal", () => {
 
   it("renders DiscoverChoice and dispatches DiscoverChoice actions", () => {
     setWaitingFor({
-      type: "DiscoverChoice",
-      data: { player: 0, hit_card: 52, exiled_misses: [1, 2, 3] },
+      type: "CastOffer",
+      data: {
+        player: 0,
+        kind: { type: "Discover", hit_card: 52, exiled_misses: [1, 2, 3] },
+      },
     });
 
     render(<CascadeChoiceModal />);
@@ -97,8 +100,11 @@ describe("CascadeChoiceModal", () => {
 
   it("keeps CascadeChoice routing intact", () => {
     setWaitingFor({
-      type: "CascadeChoice",
-      data: { player: 0, hit_card: 52, exiled_misses: [1], source_mv: 3 },
+      type: "CastOffer",
+      data: {
+        player: 0,
+        kind: { type: "Cascade", hit_card: 52, exiled_misses: [1], source_mv: 3 },
+      },
     });
 
     render(<CascadeChoiceModal />);

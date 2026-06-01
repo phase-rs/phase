@@ -10,7 +10,7 @@ use crate::game::mana_sources;
 use crate::types::ability::AbilityKind;
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -251,10 +251,22 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
         }
-        (WaitingFor::DiscoverChoice { .. }, GameAction::DiscoverChoice { .. })
+        (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { .. },
+                ..
+            },
+            GameAction::DiscoverChoice { .. },
+        )
         | (WaitingFor::RevealUntilKeptChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::RepeatDecision { .. }, GameAction::DecideOptionalEffect { .. })
-        | (WaitingFor::CascadeChoice { .. }, GameAction::CascadeChoice { .. })
+        | (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { .. },
+                ..
+            },
+            GameAction::CascadeChoice { .. },
+        )
         | (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { .. })
         | (WaitingFor::BetweenGamesChoosePlayDraw { .. }, GameAction::ChoosePlayDraw { .. })
         | (WaitingFor::TopOrBottomChoice { .. }, GameAction::ChooseTopOrBottom { .. })
@@ -274,7 +286,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { .. })
         | (WaitingFor::UnlessPaymentChooseCost { .. }, GameAction::ChooseUnlessCostBranch { .. })
         | (WaitingFor::CombatTaxPayment { .. }, GameAction::PayCombatTax { .. })
-        | (WaitingFor::AdventureCastChoice { .. }, GameAction::ChooseAdventureFace { .. })
+        | (
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Adventure { .. },
+                ..
+            },
+            GameAction::ChooseAdventureFace { .. },
+        )
         | (WaitingFor::ModalFaceChoice { .. }, GameAction::ChooseModalFace { .. })
         | (WaitingFor::AlternativeCastChoice { .. }, GameAction::ChooseAlternativeCast { .. })
         | (WaitingFor::CastingVariantChoice { .. }, GameAction::ChooseCastingVariant { .. }) => {
@@ -346,42 +364,6 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             GameAction::SelectCards { cards: chosen },
         )
         | (
-            WaitingFor::DiscardForCost {
-                player: _,
-                cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::SacrificeForCost {
-                player: _,
-                permanents: cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::ReturnToHandForCost {
-                player: _,
-                permanents: cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::ExileForCost {
-                player: _,
-                cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
             WaitingFor::ConniveDiscard {
                 player: _,
                 cards,
@@ -397,53 +379,39 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 count,
             },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::TapCreaturesForManaAbility {
-                player: _,
-                creatures: cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::ExileForManaAbility {
-                player: _,
-                cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        )
-        | (
-            WaitingFor::SacrificeForManaAbility {
-                player: _,
-                permanents: cards,
-                count,
-                ..
-            },
-            GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(*count)),
+        // CR 118.3: RemoveCounter chooses exactly one counter source.
         (
-            WaitingFor::RemoveCounterForCost {
-                permanents: cards, ..
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => selection_mismatch(chosen, cards, Some(1)),
-        // CR 701.68a: Blight always selects exactly one creature, regardless of N.
-        (WaitingFor::BlightChoice { creatures, .. }, GameAction::SelectCards { cards: chosen }) => {
-            selection_mismatch(chosen, creatures, Some(1))
-        }
-        (
-            WaitingFor::BeholdForCost {
-                player: _,
-                count,
+            WaitingFor::PayCost {
+                kind: PayCostKind::RemoveCounter { .. },
                 choices,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        ) => selection_mismatch(chosen, choices, Some(*count)),
+        ) => selection_mismatch(chosen, choices, Some(1)),
+        // CR 118.3: Sacrifice honors the [min_count, count] range.
+        (
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices,
+                count,
+                min_count,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            selection_mismatch(chosen, choices, None)
+                || chosen.len() < *min_count
+                || chosen.len() > *count
+        }
+        // CR 118.3 + CR 605.3b: every other PayCost kind selects exactly `count`.
+        (WaitingFor::PayCost { choices, count, .. }, GameAction::SelectCards { cards: chosen }) => {
+            selection_mismatch(chosen, choices, Some(*count))
+        }
+        // CR 701.68a: Blight always selects exactly one creature, regardless of N.
+        (WaitingFor::BlightChoice { creatures, .. }, GameAction::SelectCards { cards: chosen }) => {
+            selection_mismatch(chosen, creatures, Some(1))
+        }
         (
             WaitingFor::EffectZoneChoice {
                 player: _,

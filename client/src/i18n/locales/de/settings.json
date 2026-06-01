@@ -49,6 +49,17 @@
     "showKeywords": "Schlüsselwörter auf Schlachtfeldkarten anzeigen",
     "opponentHoverPreview": "Gegner-Hover-Vorschau",
     "showOpponentBoard": "Spielfeld des Gegners beim Hovern über das HUD anzeigen",
+    "cardPreview": "Karten-Hover-Vorschau",
+    "cardPreviewOptions": {
+      "follow": "Dem Cursor folgen",
+      "side": "Am Rand andocken",
+      "shift": "Umschalt halten"
+    },
+    "cardPreviewHint": {
+      "follow": "Die vergrößerte Vorschau folgt deinem Cursor, während du über eine Karte fährst.",
+      "side": "Die Vorschau dockt am Bildschirmrand an, sodass sie das Spielfeld nie verdeckt.",
+      "shift": "Die Vorschau erscheint nur, solange du die Umschalttaste gedrückt hältst, wie bei Tabletop Simulator."
+    },
     "cardArtPreferences": "Karten-Artwork-Einstellungen",
     "clearArtOverrides_one": "Alle Artwork-Überschreibungen aufheben ({{count}})",
     "clearArtOverrides_other": "Alle Artwork-Überschreibungen aufheben ({{count}})",

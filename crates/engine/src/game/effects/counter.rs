@@ -148,6 +148,7 @@ pub fn resolve(
                 events.push(GameEvent::SpellCountered {
                     object_id: obj_id,
                     countered_by: ability.source_id,
+                    countered_by_controller: ability.controller,
                 });
             }
         }
@@ -301,6 +302,7 @@ pub fn resolve_all(
         events.push(GameEvent::SpellCountered {
             object_id: obj_id,
             countered_by: ability.source_id,
+            countered_by_controller: ability.controller,
         });
     }
 

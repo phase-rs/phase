@@ -99,7 +99,7 @@ pub(super) fn handle_replacement_choice(
                         }
                     }
                     if to == Zone::Battlefield || from == Zone::Battlefield {
-                        state.layers_dirty = true;
+                        crate::game::layers::mark_layers_full(state);
                     }
                     enters_battlefield = to == Zone::Battlefield;
                     zone_change_object_id = Some(object_id);
@@ -487,7 +487,7 @@ pub(super) fn handle_copy_target_choice(
         }
     }
     apply_etb_counters(state, source_id, &enter_modifiers.counters, events);
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
     // captured into `state.deferred_entry_events` when `CopyTargetChoice` was
     // set up, *before* `BecomeCopy` had a chance to push the copied object's

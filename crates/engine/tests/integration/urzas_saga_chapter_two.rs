@@ -126,7 +126,7 @@ fn chapter_two_construct_survives_sba_via_self_count_boost() {
         obj.summoning_sick = false;
         std::sync::Arc::make_mut(&mut obj.abilities).push(chapter_two_granted_ability());
         std::sync::Arc::make_mut(&mut obj.base_abilities).push(chapter_two_granted_ability());
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         id
     };
 

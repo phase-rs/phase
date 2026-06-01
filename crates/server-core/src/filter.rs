@@ -175,6 +175,7 @@ mod tests {
                 triggers: vec![],
                 static_abilities: vec![],
                 replacements: vec![],
+                cleave_variant: None,
                 color_override: None,
                 color_identity: vec![],
                 scryfall_oracle_id: None,

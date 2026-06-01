@@ -87,6 +87,24 @@ pub struct TokenImageRef {
     pub preset_id: String,
 }
 
+/// CR 702.148a-b + CR 612: The alternate (cleave-cost) text variant of a spell
+/// with Cleave. Cleave's second ability is a text-changing effect that removes
+/// every square-bracketed span from the spell's rules text. Because the removal
+/// can change which effects/triggers/statics/replacements the spell produces
+/// (Dig Up loses its "reveal it" step; Winged Portent loses its flyer filter),
+/// the parser runs a second pass over the bracket-removed text and stores the
+/// resulting ability set here. When a spell is cast for its cleave cost
+/// (`CastingVariant::Cleave`), the casting flow swaps these onto the stack
+/// object before the spell is prepared. Absent for every non-cleave face, so
+/// `card-data.json` stays byte-identical for the rest of the corpus.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleaveVariant {
+    pub abilities: Vec<AbilityDefinition>,
+    pub triggers: Vec<TriggerDefinition>,
+    pub static_abilities: Vec<StaticDefinition>,
+    pub replacements: Vec<ReplacementDefinition>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardFace {
     pub name: String,
@@ -104,6 +122,11 @@ pub struct CardFace {
     pub triggers: Vec<TriggerDefinition>,
     pub static_abilities: Vec<StaticDefinition>,
     pub replacements: Vec<ReplacementDefinition>,
+    /// CR 702.148a-b: Alternate ability set used when this face is cast for its
+    /// cleave cost (bracketed text removed). `None` for every non-cleave face,
+    /// keeping serialized card data byte-identical for the rest of the corpus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleave_variant: Option<CleaveVariant>,
     pub color_override: Option<Vec<ManaColor>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub color_identity: Vec<ManaColor>,

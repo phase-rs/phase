@@ -21,7 +21,7 @@ const MAX_SBA_ITERATIONS: u32 = 9;
 /// capped at MAX_SBA_ITERATIONS.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
-    if state.layers_dirty {
+    if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
         let pt_snapshot: Vec<(crate::types::identifiers::ObjectId, i32, i32)> = state
             .battlefield
@@ -32,7 +32,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             })
             .collect();
 
-        layers::evaluate_layers(state);
+        layers::flush_layers(state);
 
         // Emit events for P/T changes (creatures only — skip objects that lost P/T).
         for (id, old_p, old_t) in &pt_snapshot {
@@ -209,7 +209,7 @@ fn check_city_blessing(
 
     for player_id in players_to_bless {
         state.city_blessing.insert(player_id);
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
         events.push(GameEvent::CityBlessingGained { player_id });
         *any_performed = true;
     }
@@ -495,10 +495,14 @@ fn check_zero_toughness(
         })
         .collect();
 
-    for id in to_destroy {
+    for &id in &to_destroy {
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
+    // these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &to_destroy);
 }
 
 /// CR 704.5g / CR 704.5h: A creature with lethal damage (or deathtouch damage) is destroyed.
@@ -532,7 +536,7 @@ fn check_lethal_damage(
 
     // CR 701.19b: Route each destruction through the replacement pipeline
     // so regeneration shields can intercept.
-    for id in to_destroy {
+    for &id in &to_destroy {
         let proposed = ProposedEvent::Destroy {
             object_id: id,
             source: None,
@@ -582,6 +586,12 @@ fn check_lethal_damage(
             }
         }
     }
+    // CR 603.10a + CR 704.3: creatures destroyed by lethal damage in this SBA
+    // check died simultaneously as a single event — record the group so
+    // co-departing dies/LTB observers (Blood Artist) observe each other.
+    // CR 701.19a/b: a creature whose destruction was Prevented (regeneration)
+    // stays on the battlefield, so `departed_subset` excludes it from the group.
+    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &to_destroy));
 }
 
 /// CR 704.5j: A legendary permanent is exempt from the legend rule while an
@@ -936,10 +946,14 @@ fn check_zero_loyalty(
         })
         .collect();
 
-    for id in to_destroy {
+    for &id in &to_destroy {
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
+    // these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &to_destroy);
 }
 
 /// CR 704.5v + CR 310.7: A battle with defense 0 is put into its owner's graveyard,
@@ -979,10 +993,14 @@ fn check_zero_defense(
         })
         .collect();
 
-    for id in to_destroy {
+    for &id in &to_destroy {
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
+    // these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &to_destroy);
 }
 
 /// CR 704.5p + CR 310.9: A battle can't be attached to players or permanents.
@@ -1238,7 +1256,7 @@ fn check_counter_cancellation(state: &mut GameState, any_performed: &mut bool) {
             obj.counters
                 .insert(CounterType::Minus1Minus1, m1m1 - cancel);
             obj.counters.retain(|_, v| *v > 0);
-            state.layers_dirty = true; // P/T affected via Layer 7d
+            state.layers_dirty.mark_full(); // P/T affected via Layer 7d
             *any_performed = true;
         }
     }
@@ -2895,13 +2913,13 @@ mod tests {
         for i in 0..9 {
             add_filler_permanent(&mut state, PlayerId(0), &format!("Filler{i}"));
         }
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
 
         // CR 702.131d: continuous effects reapply after grant — layers must re-evaluate.
-        assert!(state.layers_dirty || state.city_blessing.contains(&PlayerId(0)));
+        assert!(state.layers_dirty.is_dirty() || state.city_blessing.contains(&PlayerId(0)));
         assert!(state.city_blessing.contains(&PlayerId(0)));
     }
 

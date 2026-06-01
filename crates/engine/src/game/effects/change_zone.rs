@@ -69,16 +69,15 @@ fn resolution_choice_cardinality(
         return (1, 0, up_to);
     };
 
-    let max = spec
-        .max
-        .as_ref()
-        .map(|expr| crate::game::quantity::resolve_quantity_with_targets(state, expr, ability))
-        .map(|value| value.max(0) as usize)
-        .unwrap_or(eligible_count)
-        .max(spec.min)
-        .min(eligible_count);
-    let min = spec.min.min(max);
-    (max, min, min != max)
+    match crate::game::ability_utils::resolve_multi_target_bounds(
+        state,
+        ability,
+        spec,
+        eligible_count,
+    ) {
+        Ok(bounds) => (bounds.max, bounds.min, bounds.min != bounds.max),
+        Err(_) => (0, 0, up_to),
+    }
 }
 
 /// Result of a single zone-move attempt through the replacement pipeline.
@@ -112,7 +111,7 @@ pub(crate) fn deliver_replaced_zone_change(
     {
         zones::move_to_zone(state, object_id, to, events);
         if to == Zone::Battlefield || from == Zone::Battlefield {
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
         // CR 712.14a: Apply transformation if entering the battlefield transformed.
         if should_transform && to == Zone::Battlefield {
@@ -476,7 +475,16 @@ pub fn resolve(
         // targeting, the effect resolves doing nothing. Don't fall through to the
         // untargeted zone-scan path (which is for genuinely untargeted effects like
         // "sacrifice a creature" where the choice happens at resolution).
-        if ability.optional_targeting {
+        // CR 608.2b: Use `targeting_is_optional()` not `optional_targeting`: "up to one"
+        // expressed via `multi_target.min = 0` (per-opponent fanout) must also
+        // short-circuit here, not reach the zone-scan and spuriously set
+        // `cost_payment_failed_flag`.
+        // Exception: when `target_choice_timing == Resolution` the player has not
+        // yet had a chance to choose — targets are empty by design and the zone-scan
+        // path must be reached so `EffectZoneChoice` can be issued.
+        if ability.targeting_is_optional()
+            && !matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution)
+        {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -504,7 +512,17 @@ pub fn resolve(
         // across every library in the game and let the player pick any card.
         // Hand/Graveyard/Exile zone-scan semantics (Show-and-Tell, Regrowth,
         // etc.) are unaffected.
-        if origin == Some(Zone::Library) && matches!(target_filter, TargetFilter::Any) {
+        //
+        // CR 701.23a: A multi-zone tutor's put-step carries `origin: None`
+        // (the found card may come from graveyard/hand/library, so the move
+        // reads the card's actual zone) with `target: Any`. The same fail-to-find
+        // no-op applies: empty targets means the search found nothing, so the
+        // put-step must do nothing rather than fall through to an `origin=None,
+        // Any` battlefield wildcard scan. Untargeted `None + Any` is never a
+        // real standalone effect — it only arises as this continuation artifact.
+        if (origin == Some(Zone::Library) || origin.is_none())
+            && matches!(target_filter, TargetFilter::Any)
+        {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -961,6 +979,7 @@ pub fn resolve_all(
     }
 
     let mut moved_count: i32 = 0;
+    let mut departed: Vec<ObjectId> = Vec::new();
     for obj_id in matching {
         // CR 400.3: Each object's actual current zone is the source zone for the
         // move. Single-zone callers pass `origin_zones = [zone]`; multi-zone
@@ -989,6 +1008,19 @@ pub fn resolve_all(
         ) {
             ZoneMoveResult::Done => {
                 moved_count += 1;
+                // CR 603.10a + CR 608.2f: Collect battlefield-origin objects that
+                // actually left (post-move zone != Battlefield). `execute_zone_move`
+                // returns `Done` even when a replacement Prevented the move, so the
+                // post-move zone check excludes prevented members from the
+                // co-departed group.
+                if per_object_origin == Zone::Battlefield
+                    && state
+                        .objects
+                        .get(&obj_id)
+                        .is_some_and(|o| o.zone != Zone::Battlefield)
+                {
+                    departed.push(obj_id);
+                }
                 // CR 400.7 + CR 608.2c: Track hand-origin exiles separately so
                 // QuantityRef::ExiledFromHandThisResolution can resolve "draws a
                 // card for each card exiled from their hand this way".
@@ -1009,6 +1041,11 @@ pub fn resolve_all(
             }
         }
     }
+
+    // CR 603.10a + CR 608.2f: Every battlefield-origin object that left did so as
+    // part of the same mass zone-change event, so leaves-the-battlefield observers
+    // among the departed group observe each other via last-known information.
+    zones::mark_simultaneous_departures(events, &departed);
 
     // CR 608.2c: "that many" in a later instruction refers back to the prior
     // action's count. Record the number of objects moved so downstream
@@ -1074,8 +1111,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, FilterProp, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetFilter,
-        TargetRef,
+        ControllerRef, FilterProp, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr,
+        QuantityRef, TargetFilter, TargetRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::ZoneChangeRecord;
@@ -2752,6 +2789,63 @@ mod tests {
         assert!(
             !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
             "should not prompt for zone choice when optional targeting chose 0"
+        );
+    }
+
+    #[test]
+    fn multi_target_min_zero_with_zero_targets_resolves_as_noop() {
+        // CR 115.6: `multi_target.min = 0` is the same zero-target choice as
+        // `optional_targeting`; it must not fall through to resolution-time
+        // zone scanning after the player chooses no targets.
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![], // zero targets chosen
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::fixed(0, 1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&creature).unwrap().zone,
+            Zone::Battlefield
+        );
+        assert!(
+            !state.cost_payment_failed_flag,
+            "zero chosen targets for min=0 targeting must not signal payment failure"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "should not prompt for zone choice when multi-target min=0 chose 0"
         );
     }
 

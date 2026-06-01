@@ -3,6 +3,7 @@ use std::str::FromStr;
 use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
+use crate::parser::oracle_util::{apply_bracket_mode, BracketMode};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
     AdditionalCostPaymentSource, AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType,
@@ -16,6 +17,7 @@ use crate::types::ability::{
 };
 use crate::types::statics::StaticMode;
 use crate::types::card::{CardFace, CardLayout};
+use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::{BloodthirstValue, BuybackCost, CyclingCost, Keyword, PartnerType};
@@ -28,6 +30,60 @@ use crate::types::zones::Zone;
 // ---------------------------------------------------------------------------
 // Shared helpers for building card faces from MTGJSON data
 // ---------------------------------------------------------------------------
+
+/// CR 702.148a-b + CR 612: Parse a face's Oracle text under Cleave's
+/// text-changing semantics, returning the printed-cost parse and (when the face
+/// has Cleave) the bracket-removed cleave variant.
+///
+/// Single authority for the cleave bracket prep so the real card-data build
+/// pipeline (`build_oracle_face_inner`) and the test scenario harness
+/// (`scenario::build_face_from_oracle`) cannot silently diverge:
+///   * The base parse keeps the bracketed clause but drops the bracket
+///     characters (`BracketMode::KeepContent`) so the printed-cost spell parses
+///     correctly. For non-cleave faces the strip is a no-op (the text never
+///     enters the strip), preserving every other parse — and the strip is GATED
+///     on the face having Cleave so the ~362 planeswalkers using `[+N]`/`[−N]`
+///     loyalty brackets are never corrupted.
+///   * When the face has Cleave, a SECOND parse over the bracket-removed text
+///     (`BracketMode::RemoveSpan`) is stashed in the returned `CleaveVariant`.
+///     The casting flow swaps this onto the stack object when the spell is cast
+///     for its cleave cost. This is a leaf parse — never re-projected, so there
+///     is no cleave recursion.
+pub(crate) fn parse_oracle_with_cleave_brackets(
+    raw_oracle_text: &str,
+    card_name: &str,
+    keyword_names: &[String],
+    types: &[String],
+    subtypes: &[String],
+) -> (
+    crate::parser::oracle::ParsedAbilities,
+    Option<CleaveVariant>,
+) {
+    let has_cleave = keyword_names.iter().any(|n| n == "cleave");
+
+    let base_oracle_text = if has_cleave {
+        apply_bracket_mode(raw_oracle_text, BracketMode::KeepContent)
+    } else {
+        raw_oracle_text.to_string()
+    };
+    let parsed = parse_oracle_text(&base_oracle_text, card_name, keyword_names, types, subtypes);
+
+    let cleave_variant = if has_cleave {
+        let cleave_text = apply_bracket_mode(raw_oracle_text, BracketMode::RemoveSpan);
+        let cleave_parsed =
+            parse_oracle_text(&cleave_text, card_name, keyword_names, types, subtypes);
+        Some(CleaveVariant {
+            abilities: cleave_parsed.abilities,
+            triggers: cleave_parsed.triggers,
+            static_abilities: cleave_parsed.statics,
+            replacements: cleave_parsed.replacements,
+        })
+    } else {
+        None
+    };
+
+    (parsed, cleave_variant)
+}
 
 /// Internal layout classification from MTGJSON layout strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1154,6 +1210,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
                         split: None,
+                        source_zones: vec![crate::types::zones::Zone::Library],
                     },
                 )
                 .cost(composite_cost);
@@ -4161,6 +4218,11 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_plot(face);
     synthesize_siege_intrinsics(face);
     synthesize_tribute_intrinsics(face);
+    // CR 702.124j: Partner with — ETB trigger letting target player fetch the
+    // named partner card from their library into their hand, then shuffle.
+    // The parenthetical reminder text is stripped by the oracle parser, so
+    // this trigger must be synthesized from the Keyword::Partner(With(name)).
+    synthesize_partner_with(face);
     // CR 721.2b: Spacecraft creature-shift at the max station-symbol striation
     // threshold. Must run after Oracle parsing so `face.power`/`face.toughness`
     // are in place and `Keyword::Station` has been normalized.
@@ -4170,6 +4232,107 @@ pub fn synthesize_all(face: &mut CardFace) {
     // since it reads face.triggers/abilities/static_abilities to build the
     // ability-grant sub-ability.
     synthesize_backup(face);
+}
+
+/// CR 702.124j: Synthesize the "Partner with [Name]" ETB trigger.
+///
+/// Oracle reminder text (stripped by the parser):
+///   "When this creature enters, target player may put [Name] into their
+///    hand from their library, then shuffle."
+///
+/// The trigger searches the target player's library for a card with the exact
+/// partner name and puts it in their hand, then shuffles. The "may" is modeled
+/// as `optional: true` on the execute ability so the target player can decline.
+/// Idempotent: skips if the trigger is already present (re-synthesis guards).
+pub fn synthesize_partner_with(face: &mut CardFace) {
+    let partner_name = face.keywords.iter().find_map(|kw| {
+        if let Keyword::Partner(PartnerType::With(name)) = kw {
+            Some(name.clone())
+        } else {
+            None
+        }
+    });
+    let Some(partner_name) = partner_name else {
+        return;
+    };
+
+    // Idempotency: skip if an ETB trigger already references this partner by name.
+    let already_present = face.triggers.iter().any(|t| {
+        t.mode == TriggerMode::ChangesZone
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && t.execute.as_deref().is_some_and(|ex| {
+                matches!(
+                    ex.effect.as_ref(),
+                    Effect::SearchLibrary {
+                        filter: TargetFilter::Named { name },
+                        ..
+                    } if name == &partner_name
+                )
+            })
+    });
+    if already_present {
+        return;
+    }
+
+    // Shuffle target player's library after the search.
+    let shuffle = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Shuffle {
+            // TargetFilter::Player resolves against ability.targets (the chosen
+            // target player), shuffling the correct library.
+            target: TargetFilter::Player,
+        },
+    );
+
+    // Put the found card from the library into the target player's hand.
+    let put_in_hand = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: Some(Zone::Library),
+            destination: Zone::Hand,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+        },
+    )
+    .sub_ability(shuffle);
+
+    // Search target player's library for the named partner card.
+    let mut search = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::SearchLibrary {
+            filter: TargetFilter::Named {
+                name: partner_name.clone(),
+            },
+            count: QuantityExpr::Fixed { value: 1 },
+            reveal: true,
+            source_zones: vec![Zone::Library],
+            // CR 702.124j: the target player searches their own library.
+            target_player: Some(TargetFilter::Player),
+            selection_constraint: SearchSelectionConstraint::None,
+            split: None,
+        },
+    )
+    .sub_ability(put_in_hand);
+    // "may" — the target player can decline to search.
+    search.optional = true;
+
+    face.triggers.push(
+        TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Battlefield)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Battlefield])
+            .execute(search)
+            .description(format!(
+                "When ~ enters, target player may put {partner_name} into their hand from their library, then shuffle."
+            )),
+    );
 }
 
 /// CR 310.11a + CR 310.11b: Synthesize the two intrinsic abilities every Siege has:
@@ -4397,14 +4560,18 @@ fn build_oracle_face_inner(
             .unwrap_or_default()
     };
 
-    let oracle_text = mtgjson.text.as_deref().unwrap_or("");
+    let raw_oracle_text = mtgjson.text.as_deref().unwrap_or("");
     let face_name = mtgjson.face_name.as_deref().unwrap_or(&mtgjson.name);
 
     let types: Vec<String> = mtgjson.types.clone();
     let subtypes: Vec<String> = mtgjson.subtypes.clone();
 
-    let parsed = parse_oracle_text(
-        oracle_text,
+    // CR 702.148a-b + CR 612: Cleave's text-changing effect removes every
+    // square-bracketed span from the spell's rules text. `parse_oracle_with_cleave_brackets`
+    // is the single authority for the dual (printed-cost / cleave-cost) parse,
+    // shared with the test scenario harness so the two pipelines cannot diverge.
+    let (parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
+        raw_oracle_text,
         face_name,
         &parser_keyword_names,
         &types,
@@ -4426,11 +4593,11 @@ fn build_oracle_face_inner(
     }
     keywords.extend(parsed.extracted_keywords);
 
-    // CR 702.124c: "Partner with [Name]" — upgrade Generic → With(name).
+    // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
     // Partner(Generic) via FromStr. Scan Oracle text for the actual partner name.
     if mtgjson_keyword_names.contains(&"partner with".to_string()) {
-        let lower_oracle = oracle_text.to_lowercase();
+        let lower_oracle = raw_oracle_text.to_lowercase();
         if let Some(line) = lower_oracle
             .lines()
             .find(|l| l.starts_with("partner with "))
@@ -4524,6 +4691,7 @@ fn build_oracle_face_inner(
         triggers: parsed.triggers,
         static_abilities: parsed.statics,
         replacements: parsed.replacements,
+        cleave_variant,
         color_override,
         color_identity: mtgjson
             .color_identity
@@ -11853,13 +12021,14 @@ mod bloodthirst_runtime_tests {
 
         let mut state = setup_state_with_priority(PlayerId(0));
         // Record direct damage to opponent (PlayerId(1)) earlier this turn.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(999), // any source; CR 702.54a doesn't care
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
             target_controller: PlayerId(1),
             amount: 1,
             is_combat: false,
+            ..Default::default()
         });
 
         let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
@@ -11906,6 +12075,7 @@ mod bloodthirst_runtime_tests {
                 target_controller: PlayerId(1),
                 amount: 2,
                 is_combat: false,
+                ..Default::default()
             },
             DamageRecord {
                 source_id,
@@ -11914,6 +12084,7 @@ mod bloodthirst_runtime_tests {
                 target_controller: PlayerId(1),
                 amount: 3,
                 is_combat: true,
+                ..Default::default()
             },
             DamageRecord {
                 source_id,
@@ -11922,6 +12093,7 @@ mod bloodthirst_runtime_tests {
                 target_controller: PlayerId(0),
                 amount: 7,
                 is_combat: false,
+                ..Default::default()
             },
         ]);
 
@@ -11948,13 +12120,14 @@ mod bloodthirst_runtime_tests {
 
         let mut state = setup_state_with_priority(PlayerId(0));
         let source_id = create_damage_source(&mut state, PlayerId(0));
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id,
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
             target_controller: PlayerId(1),
             amount: 4,
             is_combat: true,
+            ..Default::default()
         });
         state.objects.remove(&source_id);
 
@@ -11986,13 +12159,14 @@ mod bloodthirst_runtime_tests {
 
         // After the permanent has entered, record damage to the opponent.
         // This must NOT retroactively add counters.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(999),
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
             target_controller: PlayerId(1),
             amount: 4,
             is_combat: false,
+            ..Default::default()
         });
 
         let obj = state.objects.get(&obj_id).expect("object exists");
@@ -12028,13 +12202,14 @@ mod bloodthirst_runtime_tests {
 
         // Damage dealt to the SECOND opponent (PlayerId(2)) — not the
         // primary opponent (PlayerId(1)). Bloodthirst still triggers.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(999),
             source_controller: PlayerId(0),
             target: TargetRef::Player(third_player),
             target_controller: third_player,
             amount: 2,
             is_combat: false,
+            ..Default::default()
         });
 
         let obj_id = spawn_bloodthirst_via_etb_pipeline(&mut state, &face, PlayerId(0));
@@ -12061,13 +12236,14 @@ mod bloodthirst_runtime_tests {
 
         let mut state = setup_state_with_priority(PlayerId(0));
         // Condition satisfied: an opponent was damaged earlier this turn.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(999),
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
             target_controller: PlayerId(1),
             amount: 1,
             is_combat: true,
+            ..Default::default()
         });
 
         // Install Hardened Scales as a battlefield object.
@@ -12114,13 +12290,14 @@ mod bloodthirst_runtime_tests {
 
         let mut state = setup_state_with_priority(PlayerId(0));
         // Turn 1: opponent took damage.
-        state.damage_dealt_this_turn.push(DamageRecord {
+        state.damage_dealt_this_turn.push_back(DamageRecord {
             source_id: ObjectId(999),
             source_controller: PlayerId(0),
             target: TargetRef::Player(PlayerId(1)),
             target_controller: PlayerId(1),
             amount: 2,
             is_combat: true,
+            ..Default::default()
         });
 
         // Advance to the next turn via the real engine path that clears
@@ -12313,6 +12490,86 @@ mod living_weapon_synthesis_tests {
     }
 
     /// CR 702.92a — Issue #974: Living weapon synthesis produces exactly one
+    /// CR 702.124j + #1143: "Partner with [Name]" synthesizes an ETB trigger
+    /// that lets the target player fetch the named partner from their library.
+    #[test]
+    fn synthesize_partner_with_emits_etb_search_trigger() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Partner(PartnerType::With(
+            "Bebop, Skull & Crossbones".to_string(),
+        )));
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_partner_with(&mut face);
+
+        assert_eq!(face.triggers.len(), 1, "exactly one Partner With trigger");
+        let trigger = &face.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        let execute = trigger.execute.as_deref().expect("must have execute");
+        assert!(execute.optional, "must be optional (\"may\")");
+        match execute.effect.as_ref() {
+            Effect::SearchLibrary {
+                filter: TargetFilter::Named { name },
+                target_player: Some(TargetFilter::Player),
+                reveal: true,
+                ..
+            } => {
+                assert_eq!(name, "Bebop, Skull & Crossbones");
+            }
+            other => panic!("expected SearchLibrary(Named, Player), got {other:?}"),
+        }
+        // Idempotency: calling again should not add a second trigger.
+        synthesize_partner_with(&mut face);
+        assert_eq!(face.triggers.len(), 1, "idempotent: no duplicate triggers");
+    }
+
+    #[test]
+    fn synthesize_partner_with_idempotency_matches_exact_partner_name() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Partner(PartnerType::With(
+            "Bebop, Skull & Crossbones".to_string(),
+        )));
+        face.triggers.push(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .destination(Zone::Battlefield)
+                .valid_card(TargetFilter::SelfRef)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::SearchLibrary {
+                        filter: TargetFilter::Named {
+                            name: "Different Partner".to_string(),
+                        },
+                        count: QuantityExpr::Fixed { value: 1 },
+                        reveal: true,
+                        source_zones: vec![Zone::Library],
+                        target_player: Some(TargetFilter::Player),
+                        selection_constraint: SearchSelectionConstraint::None,
+                        split: None,
+                    },
+                )),
+        );
+
+        synthesize_partner_with(&mut face);
+
+        assert_eq!(
+            face.triggers.len(),
+            2,
+            "other named searches must not suppress Partner With synthesis"
+        );
+        assert!(face.triggers.iter().any(|trigger| {
+            trigger.execute.as_deref().is_some_and(|execute| {
+                matches!(
+                    execute.effect.as_ref(),
+                    Effect::SearchLibrary {
+                        filter: TargetFilter::Named { name },
+                        ..
+                    } if name == "Bebop, Skull & Crossbones"
+                )
+            })
+        }));
+    }
+
     /// ChangesZone ETB trigger whose execute chain is `Token(Phyrexian Germ,
     /// 0/0 black) → Attach(SelfRef, LastCreated)`. Mirrors the job-select
     /// regression shape (both share the keyword-to-ETB-attach synthesis

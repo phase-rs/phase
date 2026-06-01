@@ -120,7 +120,7 @@ export function DungeonBadge({ dungeonName, roomIndex }: DungeonBadgeProps) {
   );
 }
 
-type CounterBadgeKind = "poison" | "speed" | "rad" | "energy" | "ring";
+type CounterBadgeKind = "poison" | "speed" | "rad" | "energy" | "ring" | "experience";
 
 interface CounterBadgeProps {
   kind: CounterBadgeKind;
@@ -223,6 +223,25 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
           className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-amber-950/28 blur-[1px]"
         />
         <span className="relative">☢{value}</span>
+      </span>
+    );
+  }
+
+  if (kind === "experience") {
+    // CR 122.1: Experience counters are player counters; surfaced so the player can
+    // see their total without activating an ability that consumes them.
+    return (
+      <span
+        role="img"
+        aria-label={t("badges.experienceAriaLabel", { count: value })}
+        title={t("badges.experienceTooltip", { count: value })}
+        className="relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center gap-px overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-indigo-950 ring-1 bg-indigo-300 ring-indigo-100 shadow-[0_0_12px_rgba(165,180,252,0.5)]"
+      >
+        <span
+          aria-hidden
+          className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.95)_0_9%,transparent_11%),radial-gradient(circle_at_68%_30%,rgba(224,231,255,0.9)_0_7%,transparent_9%),radial-gradient(circle_at_38%_74%,rgba(79,70,229,0.7)_0_11%,transparent_13%),linear-gradient(135deg,#eef2ff_0%,#a5b4fc_36%,#4f46e5_72%,#1e1b4b_100%)]"
+        />
+        <span className="relative">✦{value}</span>
       </span>
     );
   }

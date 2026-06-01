@@ -132,7 +132,7 @@ pub fn resolve(
                 ..
             }) => {
                 crate::game::zones::move_to_zone(state, object_id, dest, events);
-                state.layers_dirty = true;
+                crate::game::layers::mark_layers_full(state);
             }
             ReplacementResult::Execute(_) => {
                 // Pipeline preserves the event variant; other variants are

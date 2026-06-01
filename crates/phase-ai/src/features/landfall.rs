@@ -272,6 +272,7 @@ mod tests {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         };
         let put_in_play = AbilityDefinition::new(
             AbilityKind::Activated,
