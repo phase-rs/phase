@@ -71,7 +71,7 @@
     "vite": "^6.4.2",
     "vite-plugin-compression2": "^2.5.1",
     "vite-plugin-pwa": "^1.2.0",
-    "vitest": "^3.0.0",
+    "vitest": "^4.1.0",
     "workbox-window": "^7.4.0",
     "wrangler": "^4.76.0"
   }
