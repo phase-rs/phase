@@ -1750,14 +1750,38 @@ fn spawn_pick_timer(
         let views: Vec<_> = (0..pod_size).map(|i| session.view_for_seat(i)).collect();
         drop(mgr);
 
-        let conns = timer_connections.lock().await;
-        if let Some(players) = conns.get(&timer_draft_code) {
-            for (pid, sender) in players.iter() {
-                let seat = pid.0 as usize;
-                if let Some(view) = views.get(seat) {
-                    let _ = sender.send(ServerMessage::DraftStateUpdate { view: view.clone() });
+        {
+            let conns = timer_connections.lock().await;
+            if let Some(players) = conns.get(&timer_draft_code) {
+                for (pid, sender) in players.iter() {
+                    let seat = pid.0 as usize;
+                    if let Some(view) = views.get(seat) {
+                        let _ = sender.send(ServerMessage::DraftStateUpdate { view: view.clone() });
+                    }
                 }
             }
+        }
+
+        // Re-arm for the next pick window if the draft is still in progress.
+        // Without this a fully idle pod (every seat disconnected or AFK) would
+        // stall after this single auto-pick: the timer must keep advancing the
+        // draft pick by pick until it completes. Re-arming stops once the draft
+        // leaves the Drafting status.
+        let still_drafting = {
+            let mgr = timer_draft_state.lock().await;
+            let status = mgr
+                .sessions
+                .get(&timer_draft_code)
+                .map(|s| s.session.status);
+            status == Some(draft_core::types::DraftStatus::Drafting)
+        };
+        if still_drafting {
+            spawn_pick_timer(
+                timer_draft_state.clone(),
+                timer_connections.clone(),
+                timer_draft_code.clone(),
+                pick_seconds,
+            );
         }
     });
 
@@ -4058,8 +4082,20 @@ async fn handle_client_message(
                     // Broadcast DraftStateUpdate to all connected sockets in the pod
                     broadcast_draft_views(&draft_code, &views, connections, draft_state).await;
 
-                    // If draft just started, spawn pick timer
-                    if is_start {
+                    // (Re)arm the pick timer for the next pick window whenever
+                    // the draft is actively drafting. It was previously armed
+                    // only on StartDraft, so once it fired it was never
+                    // renewed: every pick window after the first had no
+                    // auto-pick protection, and a single idle or disconnected
+                    // seat could stall the whole pod indefinitely.
+                    // spawn_pick_timer aborts any prior timer, so each pick
+                    // resets the window.
+                    let drafting = {
+                        let mgr = draft_state.lock().await;
+                        let status = mgr.sessions.get(&draft_code).map(|s| s.session.status);
+                        status == Some(draft_core::types::DraftStatus::Drafting)
+                    };
+                    if drafting {
                         spawn_pick_timer(
                             draft_state.clone(),
                             connections.clone(),
