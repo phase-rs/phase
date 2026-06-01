@@ -24,7 +24,10 @@ use engine::game::validate_name_deck_for_format;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use http::HeaderValue;
-use lobby_broker::{check_build_commit, Broker, BrokerEnv, BuildCommitCheck, ConnState, Outbound};
+use lobby_broker::{
+    check_build_commit, conn_holds_reservation, Broker, BrokerEnv, BuildCommitCheck, ConnState,
+    Outbound, NOT_OWNED_RESERVATION,
+};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::draft_session::DraftSessionManager;
 use server_core::lobby::RegisterGameRequest;
@@ -2918,6 +2921,21 @@ async fn handle_client_message(
             };
 
             if let Some(token) = release_reservation_token.as_deref() {
+                let held = if info.is_p2p {
+                    conn_holds_reservation(&identity.lobby_reservations, &game_code, token)
+                } else {
+                    conn_holds_reservation(&identity.seat_reservations, &game_code, token)
+                };
+                if !held {
+                    let msg = ServerMessage::Error {
+                        message: NOT_OWNED_RESERVATION.to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+
                 if info.is_p2p {
                     let released = {
                         let mut lob = lobby.lock().await;
@@ -3179,6 +3197,18 @@ async fn handle_client_message(
                         }
                         return;
                     }
+                }
+            }
+
+            if let Some(token) = reservation_token.as_deref() {
+                if !conn_holds_reservation(&identity.seat_reservations, &game_code, token) {
+                    let msg = ServerMessage::Error {
+                        message: NOT_OWNED_RESERVATION.to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
                 }
             }
 
