@@ -27,7 +27,8 @@ expression: "&lowered"
   "statics": [
     {
       "mode": {
-        "RaiseCost": {
+        "ModifyCost": {
+          "mode": "Raise",
           "amount": {
             "type": "Cost",
             "shards": [],
@@ -42,8 +43,7 @@ expression: "&lowered"
             ],
             "controller": null,
             "properties": []
-          },
-          "dynamic_count": null
+          }
         }
       },
       "affected": {

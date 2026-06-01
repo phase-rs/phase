@@ -4284,7 +4284,7 @@ pub(super) fn max_x_value_excluding(
     object_id: Option<ObjectId>,
     excluded_sources: &HashSet<ObjectId>,
 ) -> u32 {
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{CostModifyMode, StaticMode};
 
     let ManaCost::Cost { shards, generic } = cost else {
         return 0;
@@ -4390,8 +4390,16 @@ pub(super) fn max_x_value_excluding(
     // non-functional floor is correctly skipped there, yielding `formula_max` for
     // that candidate. The vast majority of games have zero `MinimumCost` statics,
     // so the hot X-announce / legal-actions path pays only one short-circuiting scan.
-    let floor_active = super::functioning_abilities::battlefield_functioning_statics(state)
-        .any(|(_, def)| matches!(def.mode, StaticMode::MinimumCost { .. }));
+    let floor_active =
+        super::functioning_abilities::battlefield_functioning_statics(state).any(|(_, def)| {
+            matches!(
+                def.mode,
+                StaticMode::ModifyCost {
+                    mode: CostModifyMode::Minimum,
+                    ..
+                }
+            )
+        });
     if !floor_active {
         return formula_max;
     }

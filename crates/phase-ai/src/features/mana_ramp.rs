@@ -19,7 +19,7 @@
 //! - Controller scoping: `TypedFilter.controller: Option<ControllerRef>` at
 //!   `ability.rs:815-818`.
 //!
-//! `StaticMode::ReduceCost` is deliberately out of scope — cost reducers are a
+//! `StaticMode::ModifyCost` is deliberately out of scope — cost reducers are a
 //! follow-up feature.
 
 use engine::game::DeckEntry;
