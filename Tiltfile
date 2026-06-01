@@ -127,6 +127,7 @@ local_resource('clippy',
     cmd = 'cargo clippy --all-targets -- -D warnings',
     deps = ['crates/'],
     auto_init = 'lint' in enabled,
+    allow_parallel = True,
     labels = ['lint'],
 )
 
