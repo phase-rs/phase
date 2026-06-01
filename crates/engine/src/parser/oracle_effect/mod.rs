@@ -10028,6 +10028,28 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
                 }
             }
         }
+        // CR 400.7 + CR 608.2c (issue #1535): "that player may put a [typed]
+        // card from their hand onto the battlefield" (Braids, Conjurer Adept) /
+        // "each player puts a [typed] card from their graveyard ...". When the
+        // subject is a player reference and the `ChangeZone` target is a *typed*
+        // filter, the `Any`-guarded injection in the object-targeting group above
+        // was skipped, leaving the moved-object filter with no owner constraint —
+        // so at resolution it draws from every player's zone and the choice is
+        // mis-routed to the controller. Stamp the subject's controller onto the
+        // filter (mirroring the `Sacrifice` arm) so the card is taken from, and
+        // the choice presented to, the acting (per-iteration) player.
+        Effect::ChangeZone { target, .. }
+            if player_filter_as_controller_ref(&subject_filter).is_some() =>
+        {
+            if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
+                let effective_ctrl = if subject.target.is_some() {
+                    ControllerRef::TargetPlayer
+                } else {
+                    ctrl
+                };
+                force_controller(target, effective_ctrl);
+            }
+        }
         // CR 119.3 + CR 115.1d: "they lose N life" — inject subject's player reference.
         // LoseLife.target is Option<TargetFilter>, unlike other effects' non-optional targets.
         // Guard on is_none() to only inject when no target was explicitly parsed.
@@ -34016,6 +34038,34 @@ mod tests {
                 }
                 other => panic!("expected Sacrifice for {text:?}, got: {other:?}"),
             }
+        }
+    }
+
+    /// CR 400.7 + CR 503.1a (issue #1535): Braids, Conjurer Adept — "at the
+    /// beginning of each player's upkeep, that player may put a ... card from
+    /// their hand onto the battlefield." Under the scoped-player context the
+    /// trigger establishes, the moved-object filter must be scoped to the acting
+    /// (per-iteration) player, so the card is drawn from THEIR hand — not any
+    /// player's — and the choice is presented to them, not the ability's
+    /// controller. Before the fix the typed ChangeZone target kept no owner
+    /// constraint, so it drew from every hand.
+    #[test]
+    fn that_player_put_from_hand_scopes_change_zone_to_scoped_player() {
+        let mut ctx = ParseContext::default();
+        ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
+        let clause = parse_effect_clause(
+            "that player may put a creature card from their hand onto the battlefield",
+            &mut ctx,
+        );
+        match &clause.effect {
+            Effect::ChangeZone { target, .. } => {
+                assert_eq!(
+                    target_filter_controller_ref(target),
+                    Some(ControllerRef::ScopedPlayer),
+                    "moved-object filter must be scoped to ScopedPlayer, got {target:?}",
+                );
+            }
+            other => panic!("expected ChangeZone, got: {other:?}"),
         }
     }
 

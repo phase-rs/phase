@@ -11599,6 +11599,38 @@ mod tests {
         }
     }
 
+    /// Issue #1499 — Arabella, Abandoned Doll: "Whenever Arabella attacks, it
+    /// deals X damage to each opponent and you gain X life, where X is the
+    /// number of creatures you control with power 2 or less." The attack trigger
+    /// must bind X to a dynamic creature count (a `QuantityRef::ObjectCount`),
+    /// not a `Variable("X")` placeholder that resolves to 0 at runtime.
+    #[test]
+    fn arabella_attack_trigger_binds_x_to_creature_count() {
+        let def = parse_trigger_line(
+            "Whenever Arabella, Abandoned Doll attacks, it deals X damage to each \
+             opponent and you gain X life, where X is the number of creatures you \
+             control with power 2 or less.",
+            "Arabella, Abandoned Doll",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("Arabella attack trigger must have an execute");
+        match &*execute.effect {
+            Effect::DamageEachPlayer { amount, .. } => assert!(
+                matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::ObjectCount { .. }
+                    }
+                ),
+                "X must bind to a dynamic creature count, got {amount:?}"
+            ),
+            other => panic!("expected DamageEachPlayer top effect, got {other:?}"),
+        }
+    }
+
     #[test]
     fn trigger_battalion() {
         let def = parse_trigger_line(

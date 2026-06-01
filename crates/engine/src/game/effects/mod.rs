@@ -2305,10 +2305,35 @@ fn filter_uses_relative_controller_you(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 603.1 + CR 503.1a (issue #1535): True when the filter is scoped to the
+/// resolution's scoped player — e.g. "that player ... a card they control"
+/// bound by an "at the beginning of each player's upkeep, that player may ..."
+/// trigger (Braids, Conjurer Adept). Such a filter must resolve its acting
+/// player and candidate pool against the per-iteration scoped player, not the
+/// ability's controller.
+fn filter_uses_relative_controller_scoped(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller == Some(ControllerRef::ScopedPlayer),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_uses_relative_controller_scoped)
+        }
+        TargetFilter::Not { filter } => filter_uses_relative_controller_scoped(filter),
+        _ => false,
+    }
+}
+
 pub(crate) fn controller_for_relative_filter(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> PlayerId {
+    // CR 603.1 + CR 503.1a (issue #1535): a filter scoped to the per-iteration
+    // scoped player ("that player ... from their hand" under "each player's
+    // upkeep") resolves to that scoped player, not the ability's controller.
+    if let Some(scoped) = ability.scoped_player {
+        if filter_uses_relative_controller_scoped(target_filter) {
+            return scoped;
+        }
+    }
     if filter_uses_relative_controller_you(target_filter)
         && ability.scoped_player.is_none()
         && ability
