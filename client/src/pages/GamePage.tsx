@@ -1933,7 +1933,19 @@ function MulliganBottomCardsPrompt({
   const objects = useGameStore((s) => s.gameState?.objects);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
   const cycleSelectedCard = useUiStore((s) => s.cycleSelectedCard);
+  const clearSelectedCards = useUiStore((s) => s.clearSelectedCards);
   const hoverProps = useInspectHoverProps();
+
+  // Issue #1546: `selectedCardIds` is a single store array shared with targeting,
+  // convoke, and tap-for-mana overlays. If a prior overlay left a stale selection
+  // (e.g. an Opening-Hand bottom prompt immediately followed by a Mulligan bottom
+  // prompt, or game 2+ of a match), the bottoming selection starts already at the
+  // cap and clicks appear unresponsive. Clear the shared selection on mount and
+  // unmount, mirroring `TargetingOverlay`, so bottoming always begins empty.
+  useEffect(() => {
+    clearSelectedCards();
+    return () => clearSelectedCards();
+  }, [clearSelectedCards]);
 
   if (!player || !objects) return null;
 

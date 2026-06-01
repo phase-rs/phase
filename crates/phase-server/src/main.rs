@@ -3622,8 +3622,17 @@ async fn handle_client_message(
                     .collect::<Vec<_>>();
 
                 session.apply_seat_delta(seat_state, &delta, db.as_ref());
-                let mut started = delta.now_started
-                    || (session.is_full() && session.start_when_full && session.is_pregame());
+                // Issue #1506: a `SeatMutate` is an *explicit* host edit (Start,
+                // Kick, Remove, add-AI). Only `SeatMutation::Start` — surfaced as
+                // `delta.now_started` — may begin the game here. Folding in an
+                // `is_full() && start_when_full` auto-start made every seat edit
+                // (e.g. kicking a player from a full room) silently start the game,
+                // while the real Start button appeared inert because the room had
+                // already auto-started on the join that filled it. Auto-start-when-
+                // full is handled in the `JoinGame` path (a guest filling the last
+                // seat), per the `GameSession` contract; it does not belong on the
+                // host's seat-editing path.
+                let mut started = delta.now_started;
                 // Collect a bracket-violation message to broadcast after releasing the state lock.
                 // start_game guarantees no mutation on Err, so session state is untouched.
                 let bracket_error: Option<String> = if started {
