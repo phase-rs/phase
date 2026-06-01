@@ -2492,6 +2492,14 @@ pub enum TargetFilter {
     SpecificPlayer {
         id: PlayerId,
     },
+    /// CR 102.1 + CR 103.1: living player seated immediately to controller's
+    /// left/right; clockwise turn order, right = previous seat; resolved
+    /// against `state.seat_order`. The recipient is computed at the resolver
+    /// (`game::players::neighbor`), never selected as an interactive target
+    /// slot.
+    Neighbor {
+        direction: SeatDirection,
+    },
     /// CR 115.10 + CR 608.2c: The current player being affected by an
     /// "each player/opponent" instruction during resolution. This is not the
     /// ability controller; "you" and "your" still refer to `controller`.
@@ -3343,6 +3351,21 @@ pub enum UntilCondition {
 pub struct CostPaidObjectSnapshot {
     pub object_id: ObjectId,
     pub lki: LKISnapshot,
+}
+
+/// CR 102.1 + CR 103.1: Seating direction relative to a player. The game's
+/// default turn order proceeds clockwise (CR 103.1); the next player in turn
+/// order is seated to the active player's left (CR 101.4). Thus walking
+/// forward through `seat_order` is `Left`, and walking backward is `Right`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SeatDirection {
+    /// The living player seated immediately to the controller's left — the
+    /// next player in turn order (CR 101.4). Forward through `seat_order`.
+    Left,
+    /// The living player seated immediately to the controller's right — the
+    /// previous player in turn order. Backward through `seat_order`.
+    Right,
 }
 
 /// CR 102.1 / CR 102.2 / CR 109.5: Relative player set for player filters that
@@ -7355,6 +7378,10 @@ impl TargetFilter {
                 | TargetFilter::TriggeringPlayer
                 | TargetFilter::TriggeringSource
                 | TargetFilter::DefendingPlayer
+                // CR 102.1 + CR 103.1: the seating neighbor is computed at the
+                // resolver (`game::players::neighbor`), never declared as a
+                // chosen target slot — so it is a context ref.
+                | TargetFilter::Neighbor { .. }
                 | TargetFilter::AttachedTo
                 | TargetFilter::CostPaidObject
                 | TargetFilter::ParentTarget

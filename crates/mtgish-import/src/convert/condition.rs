@@ -1026,6 +1026,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::StackSpell => "StackSpell",
         TargetFilter::SpecificObject { .. } => "SpecificObject",
         TargetFilter::SpecificPlayer { .. } => "SpecificPlayer",
+        TargetFilter::Neighbor { .. } => "Neighbor",
         TargetFilter::AttachedTo => "AttachedTo",
         TargetFilter::LastCreated => "LastCreated",
         TargetFilter::CostPaidObject => "CostPaidObject",
