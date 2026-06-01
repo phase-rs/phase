@@ -10946,12 +10946,9 @@ fn attach_repeat_process_keywords(defs: &mut Vec<AbilityDefinition>, keywords: &
 /// by `attach_repeat_process_keywords` to rewrite the "if a creature card in
 /// your graveyard has <keyword>" gate of each replicated counter clause.
 fn rewrite_ability_condition_keyword(condition: &mut AbilityCondition, new_keyword: &Keyword) {
-    match condition {
-        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
-            rewrite_quantity_expr_keyword(lhs, new_keyword);
-            rewrite_quantity_expr_keyword(rhs, new_keyword);
-        }
-        _ => {}
+    if let AbilityCondition::QuantityCheck { lhs, rhs, .. } = condition {
+        rewrite_quantity_expr_keyword(lhs, new_keyword);
+        rewrite_quantity_expr_keyword(rhs, new_keyword);
     }
 }
 
