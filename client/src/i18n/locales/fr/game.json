@@ -31,7 +31,29 @@
     "damage": "Blessures : {{amount}}",
     "ptDeltaFrom": "{{delta}} depuis {{source}}",
     "colors": "Couleurs : {{colors}}",
-    "colorless": "Incolore"
+    "colorless": "Incolore",
+    "chosen": {
+      "title": "Choisi",
+      "entry": "{{kind}} : {{value}}",
+      "playerValue": "Joueur {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Inconnu",
+      "kind": {
+        "color": "Couleur",
+        "creatureType": "Type de créature",
+        "basicLandType": "Type de terrain de base",
+        "cardType": "Type de carte",
+        "oddOrEven": "Pair ou impair",
+        "cardName": "Nom de carte",
+        "number": "Nombre",
+        "player": "Joueur",
+        "twoColors": "Deux couleurs",
+        "tributeOutcome": "Tribut",
+        "keyword": "Mot-clé",
+        "label": "Libellé",
+        "fallback": "Choix"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Effacer les attaquants",

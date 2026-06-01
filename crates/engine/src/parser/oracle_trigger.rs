@@ -23047,6 +23047,98 @@ mod snapshot_tests {
         insta::assert_json_snapshot!(def);
     }
 
+    /// CR 608.2c (issue #1584): Kathril's "Repeat this process for <10 keywords>"
+    /// must replicate the conditional keyword-counter placement once per keyword
+    /// — each placing that keyword's counter gated on a creature card in the
+    /// graveyard with the SAME keyword — instead of silently dropping the list.
+    #[test]
+    fn kathril_repeats_keyword_counters_across_graveyard_keywords() {
+        use crate::types::ability::{Effect, FilterProp, QuantityExpr, QuantityRef, TargetFilter};
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::{Keyword, KeywordKind};
+
+        fn condition_keyword(cond: &AbilityCondition) -> Option<Keyword> {
+            let AbilityCondition::QuantityCheck { lhs, .. } = cond else {
+                return None;
+            };
+            let QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } = lhs
+            else {
+                return None;
+            };
+            let TargetFilter::Typed(typed) = filter else {
+                return None;
+            };
+            typed.properties.iter().find_map(|prop| match prop {
+                FilterProp::WithKeyword { value } => Some(value.clone()),
+                _ => None,
+            })
+        }
+
+        let def = parse_trigger_line(
+            "When Kathril enters, put a flying counter on any creature you control \
+             if a creature card in your graveyard has flying. Repeat this process \
+             for first strike, double strike, deathtouch, hexproof, indestructible, \
+             lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 \
+             counter on Kathril for each counter put on a creature this way.",
+            "Kathril, Aspect Warper",
+        );
+
+        // Walk the execute chain, collecting each keyword counter with the
+        // keyword its graveyard gate checks.
+        let mut node = def.execute.as_deref();
+        let mut keyword_counters: Vec<(KeywordKind, KeywordKind)> = Vec::new();
+        let mut saw_p1p1 = false;
+        while let Some(d) = node {
+            if let Effect::PutCounter { counter_type, .. } = &*d.effect {
+                match counter_type {
+                    CounterType::Keyword(kind) => {
+                        let cond_kw = d
+                            .condition
+                            .as_ref()
+                            .and_then(condition_keyword)
+                            .expect("keyword counter keeps its graveyard-keyword gate");
+                        keyword_counters.push((*kind, cond_kw.kind()));
+                    }
+                    CounterType::Plus1Plus1 => saw_p1p1 = true,
+                    other => panic!("unexpected counter type {other:?}"),
+                }
+            }
+            node = d.sub_ability.as_deref();
+        }
+
+        let expected = [
+            KeywordKind::Flying,
+            KeywordKind::FirstStrike,
+            KeywordKind::DoubleStrike,
+            KeywordKind::Deathtouch,
+            KeywordKind::Hexproof,
+            KeywordKind::Indestructible,
+            KeywordKind::Lifelink,
+            KeywordKind::Menace,
+            KeywordKind::Reach,
+            KeywordKind::Trample,
+            KeywordKind::Vigilance,
+        ];
+        assert_eq!(
+            keyword_counters.len(),
+            expected.len(),
+            "all 11 keyword counters present (flying + the 10 repeated)"
+        );
+        for ((counter_kw, gate_kw), exp) in keyword_counters.iter().zip(expected) {
+            assert_eq!(*counter_kw, exp, "placed counter keyword matches the list");
+            assert_eq!(
+                *gate_kw, exp,
+                "the graveyard gate checks the SAME keyword as the placed counter"
+            );
+        }
+        assert!(
+            saw_p1p1,
+            "the +1/+1-on-Kathril follow-up survives the expansion"
+        );
+    }
+
     #[test]
     fn trigger_conditional_upkeep() {
         let def = parse_trigger_line(

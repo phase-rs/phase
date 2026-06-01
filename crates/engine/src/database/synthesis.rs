@@ -6,15 +6,16 @@ use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::parser::oracle_keyword::{keyword_display_name, parse_keyword_from_oracle};
 use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, BracketMode};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost,
-    AdditionalCostPaymentSource, AggregateFunction, CardPlayMode, CastVariantPaid, ChoiceType,
-    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
-    CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp, GainLifePlayer,
-    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    RuntimeHandler, SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
+    ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
+    CardPlayMode, CastVariantPaid, ChoiceType, Comparator, ContinuousModification, ControllerRef,
+    CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp,
+    GainLifePlayer, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -354,6 +355,58 @@ pub fn synthesize_equip(face: &mut CardFace) {
         .collect();
 
     face.abilities.extend(equip_abilities);
+}
+
+/// CR 702.151a: Reconfigure represents two activated abilities —
+/// "[Cost]: Attach this permanent to another target creature you control.
+/// Activate only as a sorcery." and "[Cost]: Unattach this permanent. Activate
+/// only if this permanent is attached to a creature and only as a sorcery."
+/// Both are synthesized as sorcery-speed activated abilities whose cost is the
+/// reconfigure cost. The attach mode mirrors `synthesize_equip`; the unattach
+/// mode uses `Effect::UnattachAll { attachment: SelfRef }` (CR 701.3d). This
+/// makes Equipment with Reconfigure (e.g. The Reality Chip) actually
+/// attachable/detachable instead of offering no ability at all.
+pub fn synthesize_reconfigure(face: &mut CardFace) {
+    let mut abilities: Vec<AbilityDefinition> = Vec::new();
+    for kw in &face.keywords {
+        let Keyword::Reconfigure(cost) = kw else {
+            continue;
+        };
+        // CR 702.151a: "[Cost]: Attach this permanent to another target creature
+        // you control. Activate only as a sorcery."
+        abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ),
+                },
+            )
+            .cost(AbilityCost::Mana { cost: cost.clone() })
+            .sorcery_speed(),
+        );
+        // CR 702.151a + CR 701.3d: "[Cost]: Unattach this permanent." Unattaches
+        // this Equipment from whatever creature it is attached to.
+        abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::UnattachAll {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::Any,
+                },
+            )
+            .cost(AbilityCost::Mana { cost: cost.clone() })
+            .activation_restrictions(vec![ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::SourceAttachedTo {
+                    required_type: CoreType::Creature,
+                }),
+            }])
+            .sorcery_speed(),
+        );
+    }
+    face.abilities.extend(abilities);
 }
 
 /// CR 702.49: Synthesize marker activated abilities for the Ninjutsu family
@@ -4405,6 +4458,8 @@ pub fn synthesize_plot(face: &mut CardFace) {
 pub fn synthesize_all(face: &mut CardFace) {
     synthesize_basic_land_mana(face);
     synthesize_equip(face);
+    // CR 702.151a: Reconfigure — attach/unattach activated abilities.
+    synthesize_reconfigure(face);
     // CR 702.122a: Crew has no synthesized ability — activation is handled by
     // GameAction::CrewVehicle directly, not through ActivateAbility dispatch.
     // The Keyword::Crew(N) on the card provides display information.
@@ -9735,6 +9790,55 @@ mod sorcery_speed_invariant_tests {
             def.activation_restrictions
                 .contains(&ActivationRestriction::AsSorcery),
             "AsSorcery restriction pushed for runtime enforcement (CR 702.6a)"
+        );
+    }
+
+    /// CR 702.151a (issue #1559): Reconfigure synthesizes two sorcery-speed
+    /// activated abilities — attach and unattach — so Equipment with Reconfigure
+    /// (e.g. The Reality Chip) can actually be attached/detached for its cost.
+    #[test]
+    fn synthesize_reconfigure_pushes_attach_and_unattach_as_sorcery() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Reconfigure(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        }));
+        synthesize_reconfigure(&mut face);
+
+        assert_eq!(
+            face.abilities.len(),
+            2,
+            "reconfigure synthesizes attach + unattach abilities"
+        );
+        for def in &face.abilities {
+            assert!(def.sorcery_speed, "reconfigure abilities are sorcery-speed");
+            assert!(
+                def.activation_restrictions
+                    .contains(&ActivationRestriction::AsSorcery),
+                "AsSorcery restriction enforced (CR 702.151a)"
+            );
+        }
+        assert!(
+            matches!(*face.abilities[0].effect, Effect::Attach { .. }),
+            "first reconfigure ability attaches the Equipment"
+        );
+        assert!(
+            matches!(*face.abilities[1].effect, Effect::UnattachAll { .. }),
+            "second reconfigure ability unattaches the Equipment"
+        );
+        assert!(
+            face.abilities[1]
+                .activation_restrictions
+                .iter()
+                .any(|restriction| matches!(
+                    restriction,
+                    ActivationRestriction::RequiresCondition {
+                        condition: Some(ParsedCondition::SourceAttachedTo {
+                            required_type: CoreType::Creature
+                        })
+                    }
+                )),
+            "unattach mode is legal only while attached to a creature (CR 702.151a)"
         );
     }
 

@@ -830,6 +830,19 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
+    // CR 102.1 + CR 103.1: "the player to your right/left" as subject — a
+    // seating-relative neighbor (Bucknard's Everfull Purse: "The player to your
+    // right gains control of this artifact"). Delegate to `parse_target`, which
+    // is the single authority for the `Neighbor` mapping. Must precede the bare
+    // "the player" anaphor arm below so the longer seating phrase wins, and the
+    // GainControl→GiveControl rewrite receives `recipient: Neighbor` rather than
+    // a generic `Any`/`TriggeringPlayer`.
+    {
+        let (neighbor_filter, rest) = parse_target(subject);
+        if rest.trim().is_empty() && matches!(neighbor_filter, TargetFilter::Neighbor { .. }) {
+            return subject_filter_application(neighbor_filter, false);
+        }
+    }
     // CR 608.2c + CR 117.3a: "that player" / "the player" as subject,
     // optionally carrying a "may" modal ("that player may pay {2}").
     // In trigger context (`ctx.subject` is Some — set exclusively by
@@ -3141,6 +3154,28 @@ mod tests {
                 mode: StaticMode::CantUntap
             }
         )));
+    }
+
+    /// CR 102.1 + CR 103.1: "the player to your right" as a subject resolves to
+    /// the seating-relative `Neighbor` filter (untargeted), so the
+    /// GainControl→GiveControl rewrite gets `recipient: Neighbor { Right }`
+    /// rather than a generic `Any`. Regression for Bucknard's Everfull Purse.
+    #[test]
+    fn parse_subject_the_player_to_your_right_is_neighbor() {
+        use crate::types::ability::SeatDirection;
+        let mut ctx = ParseContext::default();
+        let app = parse_subject_application("the player to your right", &mut ctx)
+            .expect("seating-neighbor subject should parse");
+        assert_eq!(
+            app.affected,
+            TargetFilter::Neighbor {
+                direction: SeatDirection::Right
+            }
+        );
+        assert!(
+            app.target.is_none(),
+            "neighbor recipient is computed, not a chosen target slot"
+        );
     }
 
     #[test]

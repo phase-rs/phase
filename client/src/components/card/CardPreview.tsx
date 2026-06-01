@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameObject, ManaCost } from "../../adapter/types.ts";
+import type { ChosenAttribute, GameObject, ManaCost } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
@@ -759,6 +759,50 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
   const deref = { objects, transientContinuousEffects };
   const keywordSources = buildGrantedKeywordSources(attribution, obj.id, deref);
   const ptSources = buildPTSources(attribution, obj.id, deref);
+  const chosenAttributes = obj.chosen_attributes ?? [];
+
+  const formatChosenAttribute = (attribute: ChosenAttribute): { label: string; value: string } => {
+    switch (attribute.type) {
+      case "Color":
+        return { label: t("preview.chosen.kind.color"), value: attribute.value };
+      case "CreatureType":
+        return { label: t("preview.chosen.kind.creatureType"), value: attribute.value };
+      case "BasicLandType":
+        return { label: t("preview.chosen.kind.basicLandType"), value: attribute.value };
+      case "CardType":
+        return { label: t("preview.chosen.kind.cardType"), value: attribute.value };
+      case "OddOrEven":
+        return { label: t("preview.chosen.kind.oddOrEven"), value: attribute.value };
+      case "CardName":
+        return { label: t("preview.chosen.kind.cardName"), value: attribute.value };
+      case "Number":
+        return { label: t("preview.chosen.kind.number"), value: String(attribute.value) };
+      case "Player":
+        return {
+          label: t("preview.chosen.kind.player"),
+          value: t("preview.chosen.playerValue", { id: attribute.value }),
+        };
+      case "TwoColors":
+        return {
+          label: t("preview.chosen.kind.twoColors"),
+          value: t("preview.chosen.twoColorsValue", {
+            first: attribute.value[0],
+            second: attribute.value[1],
+          }),
+        };
+      case "TributeOutcome":
+        return { label: t("preview.chosen.kind.tributeOutcome"), value: attribute.value };
+      case "Keyword":
+        return {
+          label: t("preview.chosen.kind.keyword"),
+          value: getKeywordDisplayText(attribute.value),
+        };
+      case "Label":
+        return { label: t("preview.chosen.kind.label"), value: attribute.value };
+      default:
+        return { label: t("preview.chosen.kind.fallback"), value: t("preview.chosen.unknown") };
+    }
+  };
 
   return (
     <div className="relative w-full border-t border-gray-600 bg-gray-900/95 px-3 py-2 text-xs text-gray-200">
@@ -846,6 +890,25 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
       {colorsChanged && (
         <div className="mt-1 text-gray-400">
           {t("preview.colors", { colors: obj.color.length > 0 ? obj.color.join(", ") : t("preview.colorless") })}
+        </div>
+      )}
+
+      {chosenAttributes.length > 0 && (
+        <div className="mt-1 text-gray-400">
+          <div className="font-semibold text-gray-300">{t("preview.chosen.title")}</div>
+          <div className="mt-0.5 space-y-0.5">
+            {chosenAttributes.map((attribute, index) => {
+              const formatted = formatChosenAttribute(attribute);
+              return (
+                <div key={`${attribute.type}-${index}`}>
+                  {t("preview.chosen.entry", {
+                    kind: formatted.label,
+                    value: formatted.value,
+                  })}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
