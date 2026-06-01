@@ -701,6 +701,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
+        | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }

@@ -15,7 +15,8 @@ use crate::types::zones::Zone;
 ///
 /// The second MV check (resulting-spell MV) is enforced at cast time in
 /// `casting_costs::finalize_cast_with_phyrexian_choices` via the
-/// `CastPermissionConstraint::CascadeResultingMvBelow` predicate, because X
+/// `CastPermissionConstraint::ManaValue` predicate carried on the hit's
+/// cast-during-resolution `ExileWithAltCost` permission (CR 608.2g), because X
 /// and other variable costs are only resolved at that point.
 pub fn resolve(
     state: &mut GameState,

@@ -7,6 +7,7 @@ import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -499,6 +500,7 @@ interface OpponentTabProps {
 
 function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, isTargeting, legalObjectTargetIds, showMana, incomingAttackerIds, onSelectFocus, onTargetPlayer, onKick }: OpponentTabProps) {
   const { t } = useTranslation("game");
+  const isMobile = useIsMobile();
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
   const seatColor = getSeatColor(playerId, gameState?.seat_order);
@@ -865,6 +867,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
           ref={auraBadgeRef}
           role="button"
           tabIndex={0}
+          data-testid={`opponent-aura-badge-${playerId}`}
           aria-label={t("enchantmentsBadge.ariaLabel", { count: auraIds.length })}
           title={t("enchantmentsBadge.tooltip", { count: auraIds.length })}
           onClick={(e) => {
@@ -878,17 +881,17 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
               setEnchantmentsDialogPlayer(playerId);
             }
           }}
-          onMouseEnter={onAuraEnter}
-          onMouseLeave={onAuraLeave}
-          onFocus={onAuraEnter}
-          onBlur={onAuraLeave}
-          className={`absolute -right-1.5 z-10 flex h-5 min-w-5 cursor-pointer items-center justify-center rounded-full bg-gradient-to-b from-violet-500 to-violet-700 px-1 text-[10px] font-bold text-violet-50 shadow ring-2 ring-violet-300/70 transition-all hover:from-violet-400 hover:to-violet-600 ${compact ? "-bottom-5" : "-bottom-1.5"}`}
+          onMouseEnter={isMobile ? undefined : onAuraEnter}
+          onMouseLeave={isMobile ? undefined : onAuraLeave}
+          onFocus={isMobile ? undefined : onAuraEnter}
+          onBlur={isMobile ? undefined : onAuraLeave}
+          className={`absolute -right-1.5 z-10 flex min-w-5 cursor-pointer items-center justify-center rounded-full bg-gradient-to-b from-violet-500 to-violet-700 px-1 text-[10px] font-bold text-violet-50 shadow ring-2 ring-violet-300/70 transition-all hover:from-violet-400 hover:to-violet-600 ${compact ? "-top-1.5 h-6" : "-bottom-1.5 h-5"}`}
         >
           <span aria-hidden className="text-[11px] leading-none">✧</span>
           {auraIds.length > 1 ? <span className="ml-0.5 tabular-nums">×{auraIds.length}</span> : null}
         </span>
       )}
-      {auraHoverOpen && auraBadgeRef.current && (
+      {!isMobile && auraHoverOpen && auraBadgeRef.current && (
         <AurasHoverPreview anchorEl={auraBadgeRef.current} attachmentIds={auraIds} />
       )}
       {hoverPopover === "incoming" && tabRef.current && (

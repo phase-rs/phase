@@ -2371,6 +2371,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Learn
         | Effect::SwitchPT { .. }
         | Effect::Myriad
+        | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::Populate
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -5080,6 +5081,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // (crates/engine/src/game/effects/mod.rs).
         AbilityCondition::AdditionalCostPaid { .. } => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
+        AbilityCondition::AlternativeManaCostPaid => ("AlternativeManaCostPaid", Handled),
         AbilityCondition::EffectOutcome { signal } => match signal {
             EffectOutcomeSignal::OptionalEffectPerformed => {
                 ("EffectOutcomeOptionalPerformed", Handled)

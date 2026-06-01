@@ -121,6 +121,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::RepeatDecision { .. }
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
+        | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesPartition { .. }

@@ -1160,6 +1160,10 @@
     "battleFallback": "Bataille",
     "subtitle": "{{name}} a besoin d'un nouveau protecteur. Choisissez quel adversaire la défendra."
   },
+  "clashOpponent": {
+    "title": "Choisir l'adversaire pour la confrontation",
+    "subtitle": "Choisissez quel adversaire fera la confrontation avec vous."
+  },
   "cardDataMissing": {
     "title": "Données de cartes manquantes",
     "body": "<code>card-data.json</code> est introuvable. Le jeu a besoin des définitions de cartes pour jouer avec de vraies cartes.",

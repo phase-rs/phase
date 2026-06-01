@@ -2451,6 +2451,7 @@ mod tests {
                     cast_transformed: false,
                     constraint: None,
                     granted_to: None,
+                    resolution_cleanup: None,
                 });
         }
 

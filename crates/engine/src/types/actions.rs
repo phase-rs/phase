@@ -25,9 +25,10 @@ use crate::game::game_object::AttachTarget;
 #[serde(tag = "type")]
 pub enum CastChoice {
     /// CR 701.57a + CR 702.85a: Cast the offered card without paying its mana
-    /// cost. The cast pipeline still enforces target legality, alternative
-    /// constraints (e.g., `CascadeResultingMvBelow`), and other CR 601.2
-    /// checks.
+    /// cost. The cast pipeline still enforces target legality, the
+    /// cast-during-resolution resulting-MV constraint (`ManaValue` carried on
+    /// the `ExileWithAltCost` permission with `resolution_cleanup`), and other
+    /// CR 601.2 checks.
     Cast,
     /// CR 701.57a + CR 702.85a: Decline the offer. For Discover the card goes
     /// to hand; for Cascade the card joins the misses on the bottom of the
@@ -152,6 +153,12 @@ pub enum GameAction {
     /// in the pending `WaitingFor::ExertChoice`. `exert: false` declines.
     ChooseExert {
         exert: bool,
+    },
+    /// CR 701.30b: The clashing player's choice of which opponent to clash with,
+    /// answering a pending `WaitingFor::ClashChooseOpponent`. `opponent` must be
+    /// one of that prompt's `candidates`.
+    ChooseClashOpponent {
+        opponent: PlayerId,
     },
     /// CR 103.5 + 103.5b: A player's decision at a `WaitingFor::MulliganDecision`
     /// prompt. See [`MulliganChoice`] for the three branches.
@@ -1153,6 +1160,7 @@ impl GameAction {
             | GameAction::DiscoverChoice { .. }
             | GameAction::CascadeChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
+            | GameAction::ChooseClashOpponent { .. }
             | GameAction::ChooseBattleProtector { .. }
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass

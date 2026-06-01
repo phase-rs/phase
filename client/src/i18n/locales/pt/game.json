@@ -1160,6 +1160,10 @@
     "battleFallback": "Batalha",
     "subtitle": "{{name}} precisa de um novo protetor. Escolha qual oponente a defenderá."
   },
+  "clashOpponent": {
+    "title": "Escolher oponente para confronto",
+    "subtitle": "Escolha qual oponente fará confronto com você."
+  },
   "cardDataMissing": {
     "title": "Dados das Cartas Ausentes",
     "body": "<code>card-data.json</code> não foi encontrado. O jogo precisa das definições das cartas para jogar com cartas reais.",

@@ -1018,7 +1018,7 @@ export type CastOfferKind =
   | { type: "Madness"; object_id: ObjectId; cost: ManaCost }
   | { type: "Paradigm"; offers: ObjectId[] }
   | { type: "Cascade"; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number }
-  | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[] };
+  | { type: "Discover"; hit_card: ObjectId; exiled_misses: ObjectId[]; discover_value: number };
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
@@ -1174,6 +1174,7 @@ export type WaitingFor =
   | { type: "DiscardChoice"; data: { player: PlayerId; count: number; cards: ObjectId[]; source_id: ObjectId; effect_kind: string; up_to?: boolean; unless_filter?: TargetFilter } }
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } }
+  | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
   | { type: "VoteChoice"; data: {
       player: PlayerId;
@@ -1463,6 +1464,7 @@ export type GameAction =
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
+  | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }
   | { type: "SetPhaseStops"; data: { stops: Phase[] } }
@@ -1581,7 +1583,14 @@ export type GameEvent =
   | { type: "InitiativeTaken"; data: { player_id: PlayerId } }
   | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
   | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
-  | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } };
+  | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } }
+  // CR 706: a die was rolled. Animated by DiceRollOverlay. `sides`/`result` are
+  // the engine's authoritative roll (1..=sides after modifiers).
+  | { type: "DieRolled"; data: { player_id: PlayerId; sides: number; result: number } }
+  // CR 705: a coin was flipped. `won` is whether the flipping player won the flip
+  // (relative to that player) — there is no engine-named face; the heads/tails
+  // depiction is a presentation choice.
+  | { type: "CoinFlipped"; data: { player_id: PlayerId; won: boolean } };
 
 // ── Game State ───────────────────────────────────────────────────────────
 

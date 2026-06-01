@@ -1581,6 +1581,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 // CR 611.2a: bound to the ability controller by
                 // `grant_permission::resolve`.
                 granted_to: None,
+                resolution_cleanup: None,
             },
             target,
             grantee: Default::default(),

@@ -30,6 +30,10 @@ expression: "&ir"
                   "core_type": "Creature"
                 },
                 {
+                  "type": "RemoveAllSubtypes",
+                  "set": "Creature"
+                },
+                {
                   "type": "AddSubtype",
                   "subtype": "Kithkin"
                 },
@@ -93,6 +97,10 @@ expression: "&ir"
                 {
                   "type": "AddType",
                   "core_type": "Creature"
+                },
+                {
+                  "type": "RemoveAllSubtypes",
+                  "set": "Creature"
                 },
                 {
                   "type": "AddSubtype",
@@ -172,6 +180,10 @@ expression: "&ir"
                 {
                   "type": "AddKeyword",
                   "keyword": "FirstStrike"
+                },
+                {
+                  "type": "RemoveAllSubtypes",
+                  "set": "Creature"
                 },
                 {
                   "type": "AddSubtype",
