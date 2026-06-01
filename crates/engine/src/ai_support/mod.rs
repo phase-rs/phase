@@ -843,7 +843,9 @@ mod tests {
         candidate_actions, cheap_reject_candidate, legal_actions, legal_actions_for_viewer,
         legal_actions_full, validated_candidate_actions,
     };
+    use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
+    use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
         ManaProduction, QuantityExpr, ResolvedAbility, SearchSelectionConstraint, TargetFilter,
@@ -855,7 +857,7 @@ mod tests {
         CastingVariant, GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::mana::{ManaColor, ManaCost};
+    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -2133,10 +2135,7 @@ mod tests {
     /// sacrifice-for-flash activated ability.
     #[test]
     fn emergence_zone_exposes_tap_for_mana() {
-        use crate::parser::oracle::parse_oracle_text;
-
         let mut state = setup_priority();
-        use crate::types::mana::{ManaType, ManaUnit};
         state.players[0].mana_pool.add(ManaUnit {
             color: ManaType::Colorless,
             source_id: ObjectId(0),
@@ -2205,12 +2204,9 @@ mod tests {
         );
         assert_eq!(state.objects[&land_id].abilities.len(), 2);
 
-        use crate::game::engine::apply_as_current;
         apply_as_current(
             &mut state,
-            GameAction::TapLandForMana {
-                object_id: land_id,
-            },
+            GameAction::TapLandForMana { object_id: land_id },
         )
         .expect("TapLandForMana must succeed when flash ability is also legal");
         assert!(

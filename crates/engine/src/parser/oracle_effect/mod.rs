@@ -10376,60 +10376,32 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
     let ((type_text_orig, flash_duration), _) = nom_on_lower(tp.original, tp.lower, |i| {
         let (i, _) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
         let (i, _) = tag("cast ").parse(i)?;
-        let (i, type_part) = take_until(" spells this turn as though they had flash").parse(i)?;
-        let (i, _) = tag(" spells this turn as though they had flash").parse(i)?;
-        let (i, _) = eof.parse(i)?;
-        Ok((
-            i,
-            (
-                type_part.trim().to_string(),
-                Duration::UntilEndOfTurn,
+        let (i, (type_part, duration)) = alt((
+            map(
+                terminated(
+                    take_until(" spells this turn as though they had flash"),
+                    tag(" spells this turn as though they had flash"),
+                ),
+                |type_part: &str| (type_part.trim(), Duration::UntilEndOfTurn),
+            ),
+            map(
+                terminated(
+                    take_until(" spells as though they had flash"),
+                    tag(" spells as though they had flash"),
+                ),
+                |type_part: &str| {
+                    (
+                        type_part.trim(),
+                        Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        },
+                    )
+                },
             ),
         ))
-    })
-    .or_else(|| {
-        nom_on_lower(tp.original, tp.lower, |i| {
-            let (i, _) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
-            let (i, _) = tag("cast ").parse(i)?;
-            let (i, type_part) = take_until(" spells as though they had flash").parse(i)?;
-            let (i, _) = tag(" spells as though they had flash").parse(i)?;
-            let (i, _) = eof.parse(i)?;
-            Ok((
-                i,
-                (
-                    type_part.trim().to_string(),
-                    Duration::UntilNextTurnOf {
-                        player: PlayerScope::Controller,
-                    },
-                ),
-            ))
-        })
-    })
-    .or_else(|| {
-        nom_on_lower(tp.original, tp.lower, |i| {
-            let (i, _) = opt(tag("you may ")).parse(i)?;
-            let (i, _) = tag("cast ").parse(i)?;
-            let (i, _) = tag("spells this turn as though they had flash").parse(i)?;
-            let (i, _) = eof.parse(i)?;
-            Ok((i, (String::new(), Duration::UntilEndOfTurn)))
-        })
-    })
-    .or_else(|| {
-        nom_on_lower(tp.original, tp.lower, |i| {
-            let (i, _) = opt(tag("you may ")).parse(i)?;
-            let (i, _) = tag("cast ").parse(i)?;
-            let (i, _) = tag("spells as though they had flash").parse(i)?;
-            let (i, _) = eof.parse(i)?;
-            Ok((
-                i,
-                (
-                    String::new(),
-                    Duration::UntilNextTurnOf {
-                        player: PlayerScope::Controller,
-                    },
-                ),
-            ))
-        })
+        .parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, (type_part.to_string(), duration)))
     })?;
 
     let mut spell_filter = if type_text_orig.is_empty() {
@@ -34564,21 +34536,21 @@ mod tests {
     fn parse_cast_spells_this_turn_as_though_flash() {
         // Emergence Zone (issue #1542): "this turn" is part of the permission
         // phrase, not a separate duration prefix — must not fall through to
-        // `CastFromZone`.
-        let def = parse_effect_chain(
+        // `CastFromZone`. Covers both bare "spells" and type-filtered spells.
+        for text in [
             "You may cast spells this turn as though they had flash.",
-            AbilityKind::Activated,
-        );
-        let Effect::GenericEffect {
-            duration,
-            target,
-            ..
-        } = *def.effect
-        else {
-            panic!("expected GenericEffect flash grant, got {:?}", def.effect);
-        };
-        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
-        assert_eq!(target, Some(TargetFilter::Controller));
+            "You may cast creature spells this turn as though they had flash.",
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Activated);
+            let Effect::GenericEffect {
+                duration, target, ..
+            } = *def.effect
+            else {
+                panic!("expected GenericEffect flash grant, got {:?}", def.effect);
+            };
+            assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+            assert_eq!(target, Some(TargetFilter::Controller));
+        }
     }
 
     #[test]
