@@ -7529,16 +7529,22 @@ fn pay_ability_cost_inner(
         // any zone) are still handled by the catch-all below.
         AbilityCost::Exile {
             filter: Some(TargetFilter::SelfRef),
-            zone: Some(z),
+            zone,
             count: 1,
         } => {
             let obj = state.objects.get(&source_id).ok_or_else(|| {
                 EngineError::InvalidAction("Source object not found for exile cost".to_string())
             })?;
-            if obj.zone != *z {
-                return Err(EngineError::ActionNotAllowed(format!(
-                    "Cannot exile self for cost: source is not in {z:?}"
-                )));
+            // CR 118.3 + CR 602.2b: an explicit zone validates the source's
+            // location during cost payment; a missing zone exiles the source
+            // from whatever zone it is currently in (e.g. a land's "Exile this
+            // land" paid from the battlefield).
+            if let Some(z) = zone {
+                if obj.zone != *z {
+                    return Err(EngineError::ActionNotAllowed(format!(
+                        "Cannot exile self for cost: source is not in {z:?}"
+                    )));
+                }
             }
             super::zones::move_to_zone(state, source_id, Zone::Exile, events);
         }
@@ -10979,6 +10985,44 @@ mod tests {
         assert_eq!(state.objects[&source].zone, Zone::Graveyard);
         assert!(state.objects[&alternate].tapped);
         assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn composite_tap_self_exile_activation_moves_battlefield_source_to_exile() {
+        let mut state = setup_game_at_main_phase();
+        let source_cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Exile {
+                    count: 1,
+                    zone: None,
+                    filter: Some(TargetFilter::SelfRef),
+                },
+            ],
+        };
+        let source = create_colorless_tap_activated_source(
+            &mut state,
+            PlayerId(0),
+            source_cost,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+
+        assert!(can_activate_ability_now(&state, PlayerId(0), source, 1));
+
+        let mut events = Vec::new();
+        let waiting =
+            handle_activate_ability(&mut state, PlayerId(0), source, 1, &mut events).unwrap();
+
+        assert!(matches!(waiting, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects[&source].zone, Zone::Exile);
+        assert_eq!(state.stack.len(), 1);
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == source),
+            "activation should reach the stack after the source exiles itself"
+        );
     }
 
     #[test]

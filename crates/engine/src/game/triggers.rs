@@ -1446,8 +1446,12 @@ fn collect_pending_triggers(
                     );
                     storm_ability.repeat_for = Some(QuantityExpr::Fixed { value: copy_count });
                     let storm_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
-                        .description("Storm".to_string())
-                        .condition(TriggerCondition::WasCast { zone: None });
+                        .description("Storm".to_string());
+                    // CR 702.40a: Storm fires when the spell is cast. The
+                    // WasCast intervening-if is intentionally omitted: this
+                    // synthesized trigger is only collected from SpellCast,
+                    // which is only emitted for an actual cast, so cast-ness is
+                    // already implied by the trigger event itself.
                     let timestamp = state.next_timestamp() as u32;
                     pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: *cast_obj_id,
