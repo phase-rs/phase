@@ -4994,7 +4994,8 @@ pub fn handle_cast_spell_with_payment_mode(
     // re-enters this function; the swap clears the back face's Modal
     // `layout_kind`, so the re-entry casts the chosen face without re-prompting.
     if let Some(obj) = state.objects.get(&object_id) {
-        if cast_face_choice_offered_from_zone(state, obj) && modal_spell_face_choice_available(obj) {
+        if cast_face_choice_offered_from_zone(state, obj) && modal_spell_face_choice_available(obj)
+        {
             return Ok(WaitingFor::ModalFaceChoice {
                 player,
                 object_id,

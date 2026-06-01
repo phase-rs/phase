@@ -20660,6 +20660,17 @@ mod mdfc_land_tests {
             ));
         }
 
+        let cast_actions = crate::ai_support::legal_actions(&state)
+            .iter()
+            .filter(|action| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == obj_id)
+            })
+            .count();
+        assert_eq!(
+            cast_actions, 1,
+            "the MDFC commander must be offered as castable from the command zone"
+        );
+
         let result = apply_as_current(
             &mut state,
             GameAction::CastSpell {
