@@ -10377,6 +10377,9 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
         let (i, _) = opt(tag::<_, _, OracleError<'_>>("you may ")).parse(i)?;
         let (i, _) = tag("cast ").parse(i)?;
         let (i, (type_part, duration)) = alt((
+            map(tag("spells this turn as though they had flash"), |_| {
+                ("", Duration::UntilEndOfTurn)
+            }),
             map(
                 terminated(
                     take_until(" spells this turn as though they had flash"),
@@ -10384,6 +10387,14 @@ fn try_parse_cast_as_though_flash_permission(tp: TextPair<'_>) -> Option<ParsedE
                 ),
                 |type_part: &str| (type_part.trim(), Duration::UntilEndOfTurn),
             ),
+            map(tag("spells as though they had flash"), |_| {
+                (
+                    "",
+                    Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    },
+                )
+            }),
             map(
                 terminated(
                     take_until(" spells as though they had flash"),
