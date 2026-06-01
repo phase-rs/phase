@@ -17,6 +17,7 @@ import { computePTDisplay, formatCounterType, formatTypeLine, toRoman } from "..
 import {
   getKeywordDisplayText,
   getKeywordName,
+  getKeywordReminderText,
   isGrantedKeyword,
   sortKeywords,
 } from "../../viewmodel/keywordProps.ts";
@@ -868,19 +869,25 @@ function CardInfoPanel({
 
       {/* Keywords */}
       {keywords.length > 0 && (
-        <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
+        <div className="pointer-events-auto mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
           {keywords.map((kw, i) => {
             const granted = isGrantedKeyword(kw, obj.base_keywords);
             const source = keywordSources.get(getKeywordName(kw));
+            const reminder = getKeywordReminderText(kw);
             return (
               <span
                 key={i}
-                className={granted ? "text-indigo-300" : "text-white"}
+                className={`group relative cursor-default ${granted ? "text-indigo-300" : "text-white"}`}
               >
                 {getKeywordDisplayText(kw)}
                 {source && (
                   <span className="ml-1 text-[10px] text-indigo-400/80">
                     {t("preview.fromSource", { source })}
+                  </span>
+                )}
+                {reminder && (
+                  <span className="pointer-events-none absolute left-0 bottom-full z-50 mb-1.5 hidden w-52 rounded border border-white/10 bg-slate-950/95 px-2.5 py-1.5 text-[10px] leading-snug font-normal text-slate-200 shadow-xl backdrop-blur-md group-hover:block">
+                    {reminder}
                   </span>
                 )}
               </span>
