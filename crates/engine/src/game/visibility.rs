@@ -1242,6 +1242,43 @@ mod tests {
         }
     }
 
+    /// Issue #1518 (Pithing Needle): a permanent's chosen card name is public
+    /// information (CR 400.2) and MUST remain visible to opponents after the
+    /// per-viewer redaction. `filter_state_for_viewer` only redacts cards in
+    /// hidden zones; a face-up battlefield permanent keeps its
+    /// `chosen_attributes` for every viewer, so the opponent can see which name
+    /// was chosen.
+    #[test]
+    fn chosen_card_name_on_battlefield_permanent_is_visible_to_opponents() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let needle = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pithing Needle".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&needle)
+            .unwrap()
+            .chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::CardName(
+                "Goblin Guide".to_string(),
+            ));
+
+        // The opponent (PlayerId(1)) must still see the chosen name.
+        let filtered = filter_state_for_viewer(&state, PlayerId(1));
+        let seen = &filtered.objects[&needle].chosen_attributes;
+        assert!(
+            seen.iter().any(|a| matches!(
+                a,
+                crate::types::ability::ChosenAttribute::CardName(name) if name == "Goblin Guide"
+            )),
+            "opponent must see the chosen card name on a battlefield permanent, got {seen:?}"
+        );
+    }
+
     #[test]
     fn drawn_this_turn_choice_private_tracking_is_hidden_from_non_controller() {
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
