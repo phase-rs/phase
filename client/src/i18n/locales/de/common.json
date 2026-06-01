@@ -199,6 +199,13 @@
   "turnBanner": {
     "turn": "Zug {{number}}"
   },
+  "diceRoll": {
+    "you": "Du",
+    "youPlayFirst": "Du beginnst",
+    "playerPlaysFirst": "{{name}} beginnt",
+    "heads": "Kopf",
+    "tails": "Zahl"
+  },
   "chrome": {
     "back": "Zurück",
     "settings": "Einstellungen",

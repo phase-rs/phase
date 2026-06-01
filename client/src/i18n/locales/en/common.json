@@ -199,6 +199,13 @@
   "turnBanner": {
     "turn": "Turn {{number}}"
   },
+  "diceRoll": {
+    "you": "You",
+    "youPlayFirst": "You play first",
+    "playerPlaysFirst": "{{name}} plays first",
+    "heads": "Heads",
+    "tails": "Tails"
+  },
   "chrome": {
     "back": "Back",
     "settings": "Settings",

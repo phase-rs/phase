@@ -199,6 +199,13 @@
   "turnBanner": {
     "turn": "Tura {{number}}"
   },
+  "diceRoll": {
+    "you": "Ty",
+    "youPlayFirst": "Zaczynasz",
+    "playerPlaysFirst": "{{name}} zaczyna",
+    "heads": "Orzeł",
+    "tails": "Reszka"
+  },
   "chrome": {
     "back": "Wstecz",
     "settings": "Ustawienia",

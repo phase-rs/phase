@@ -22,6 +22,8 @@ import { audioManager } from "../audio/AudioManager.ts";
 import { useAudioContext } from "../audio/useAudioContext.ts";
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
+import { DiceRollOverlay } from "../components/animation/DiceRollOverlay.tsx";
+import { flashStartingPlayerContest } from "../game/diceContest.ts";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
 import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
 import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
@@ -701,6 +703,20 @@ function GamePageContent({
   const isSandboxGame = useGameStore(
     (s) => s.gameState?.format_config?.allow_debug_actions === true,
   );
+
+  // CR 103.1: present the starting-player d20 contest once on game load. The
+  // store holds it as pure data; this presentation-layer effect drives the dice
+  // overlay with the engine's authoritative winner and clears the carrier. The
+  // identity-ref latch makes the consume idempotent under React StrictMode's
+  // double-invoke and after the clear (the re-run sees `null`).
+  const startingContest = useGameStore((s) => s.startingContest);
+  const consumedContestRef = useRef<typeof startingContest>(null);
+  useEffect(() => {
+    if (!startingContest || consumedContestRef.current === startingContest) return;
+    consumedContestRef.current = startingContest;
+    flashStartingPlayerContest(startingContest.events, startingContest.startingPlayer);
+    useGameStore.getState().clearStartingContest();
+  }, [startingContest]);
   const [showAiHand, setShowAiHand] = useState(false);
   const [showDebugBounds, setShowDebugBounds] = useState(false);
   const [viewingZone, setViewingZone] = useState<{
@@ -1321,6 +1337,7 @@ function GamePageContent({
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay containerRef={containerRef} />
       <TurnBanner />
+      <DiceRollOverlay />
 
       {/* Combat SVG overlays: blocker assignments + attack target arrows */}
       <BlockAssignmentLines />

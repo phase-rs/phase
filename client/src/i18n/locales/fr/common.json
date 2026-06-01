@@ -199,6 +199,13 @@
   "turnBanner": {
     "turn": "Tour {{number}}"
   },
+  "diceRoll": {
+    "you": "Vous",
+    "youPlayFirst": "Vous jouez en premier",
+    "playerPlaysFirst": "{{name}} joue en premier",
+    "heads": "Face",
+    "tails": "Pile"
+  },
   "chrome": {
     "back": "Retour",
     "settings": "Paramètres",
