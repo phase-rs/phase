@@ -5111,7 +5111,7 @@ mod tests {
     #[test]
     fn cost_paid_multi_sacrifice_blood_artist_co_departed() {
         use crate::game::engine::apply_as_current;
-        use crate::types::ability::{GainLifePlayer, TargetFilter, TriggerDefinition};
+        use crate::types::ability::{TargetFilter, TriggerDefinition};
         use crate::types::phase::Phase;
         use crate::types::triggers::TriggerMode;
         use crate::types::GameAction;
@@ -5159,7 +5159,7 @@ mod tests {
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ));
             obj.trigger_definitions.push(trig.clone());
@@ -5271,7 +5271,7 @@ mod tests {
                 is unreadable. Shares Unit B's cross-action consumption gap. See plan Unit B."]
     fn cost_paid_multi_sacrifice_kicker_paused_under_observes() {
         use crate::game::engine::apply_as_current;
-        use crate::types::ability::{GainLifePlayer, TargetFilter, TriggerDefinition};
+        use crate::types::ability::{TargetFilter, TriggerDefinition};
         use crate::types::phase::Phase;
         use crate::types::triggers::TriggerMode;
         use crate::types::GameAction;
@@ -5319,7 +5319,7 @@ mod tests {
                     AbilityKind::Database,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 ));
             obj.trigger_definitions.push(trig.clone());

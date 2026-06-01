@@ -8,7 +8,7 @@
 //! `TriggeringPlayer` whenever the trigger's subject was opponent-scoped. That
 //! ignored the *effect*-level subject ("you"), causing the opponent to gain
 //! life instead of the controller. The fix deletes the rewire and relies on
-//! the effect's own subject (`GainLifePlayer::Controller`) to route correctly.
+//! the effect's own subject (`TargetFilter::Controller`) to route correctly.
 //!
 //! CR 119.3: If an effect causes a player to gain life, that player's life
 //!           total is adjusted accordingly — the recipient is determined by
@@ -18,7 +18,7 @@
 //! the ability controller, regardless of the trigger's subject.
 
 use engine::game::effects;
-use engine::types::ability::{Effect, GainLifePlayer, QuantityExpr, QuantityRef, ResolvedAbility};
+use engine::types::ability::{Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter};
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -46,7 +46,7 @@ fn exquisite_blood_heals_controller_not_triggering_opponent() {
             amount: QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
             },
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         },
         vec![],
         ObjectId(100), // Exquisite Blood

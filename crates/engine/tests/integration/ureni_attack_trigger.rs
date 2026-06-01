@@ -22,8 +22,8 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, GainLifePlayer, QuantityExpr, StaticDefinition,
-    TargetFilter, TriggerDefinition, TypedFilter,
+    AbilityDefinition, AbilityKind, Effect, QuantityExpr, StaticDefinition, TargetFilter,
+    TriggerDefinition, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::ExtraPhase;
@@ -43,7 +43,7 @@ fn ureni_style_trigger() -> TriggerDefinition {
             AbilityKind::Spell,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         ))
         .valid_card(TargetFilter::SelfRef)
