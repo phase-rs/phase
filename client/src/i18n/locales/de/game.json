@@ -31,7 +31,29 @@
     "damage": "Schaden: {{amount}}",
     "ptDeltaFrom": "{{delta}} von {{source}}",
     "colors": "Farben: {{colors}}",
-    "colorless": "Farblos"
+    "colorless": "Farblos",
+    "chosen": {
+      "title": "Gewählt",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Spieler {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Unbekannt",
+      "kind": {
+        "color": "Farbe",
+        "creatureType": "Kreaturentyp",
+        "basicLandType": "Standardlandtyp",
+        "cardType": "Kartentyp",
+        "oddOrEven": "Ungerade oder gerade",
+        "cardName": "Kartenname",
+        "number": "Zahl",
+        "player": "Spieler",
+        "twoColors": "Zwei Farben",
+        "tributeOutcome": "Tribut",
+        "keyword": "Schlüsselwort",
+        "label": "Label",
+        "fallback": "Auswahl"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Angreifer löschen",
