@@ -2811,34 +2811,25 @@ fn parse_superlative_property_suffix(
     ctx: &mut ParseContext,
 ) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
-    let (rest, (function, property)) = alt((
+    // "with the <greatest|highest> <property> among " — greatest/highest are
+    // synonyms (both AggregateFunction::Max), property is the second axis.
+    // Factor the 2×3 cross product into two alts (PATTERNS.md §8b).
+    let (rest, (function, property)) = (
+        tag::<_, _, OracleError<'_>>("with the "),
         value(
-            (AggregateFunction::Max, ObjectProperty::Power),
-            tag::<_, _, OracleError<'_>>("with the greatest power among "),
+            AggregateFunction::Max,
+            alt((tag("greatest "), tag("highest "))),
         ),
-        value(
-            (AggregateFunction::Max, ObjectProperty::Power),
-            tag("with the highest power among "),
-        ),
-        value(
-            (AggregateFunction::Max, ObjectProperty::Toughness),
-            tag("with the greatest toughness among "),
-        ),
-        value(
-            (AggregateFunction::Max, ObjectProperty::Toughness),
-            tag("with the highest toughness among "),
-        ),
-        value(
-            (AggregateFunction::Max, ObjectProperty::ManaValue),
-            tag("with the greatest mana value among "),
-        ),
-        value(
-            (AggregateFunction::Max, ObjectProperty::ManaValue),
-            tag("with the highest mana value among "),
-        ),
-    ))
-    .parse(trimmed)
-    .ok()?;
+        alt((
+            value(ObjectProperty::Power, tag("power")),
+            value(ObjectProperty::Toughness, tag("toughness")),
+            value(ObjectProperty::ManaValue, tag("mana value")),
+        )),
+        tag(" among "),
+    )
+        .parse(trimmed)
+        .map(|(rest, (_, function, property, _))| (rest, (function, property)))
+        .ok()?;
     // Delegate the "<type-set> <controller> control(s)" clause to the
     // authoritative type-phrase combinator — it parses the multi-type
     // or/and list, any leading article, and the trailing controller suffix.

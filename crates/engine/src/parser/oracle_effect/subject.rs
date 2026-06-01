@@ -1956,25 +1956,21 @@ fn try_parse_become_and_attack_if_able(
 }
 
 fn parse_attack_if_able_duration(input: &str) -> OracleResult<'_, Duration> {
-    alt((
-        value(
-            Duration::UntilEndOfTurn,
-            alt((
-                tag("attacks this turn if able"),
-                tag("attack this turn if able"),
-            )),
-        ),
-        value(
-            Duration::UntilEndOfCombat,
-            alt((
-                tag("attacks this combat if able"),
-                tag("attack this combat if able"),
-                tag("attacks that combat if able"),
-                tag("attack that combat if able"),
-            )),
-        ),
-    ))
-    .parse(input)
+    // verb axis × phase axis (PATTERNS.md §8b): factor "attack(s)" out front,
+    // then map the phase clause to its duration ("this turn" → end of turn,
+    // "this/that combat" → end of combat).
+    let (rest, _) = alt((tag("attacks"), tag("attack"))).parse(input)?;
+    preceded(
+        tag(" "),
+        alt((
+            value(Duration::UntilEndOfTurn, tag("this turn if able")),
+            value(
+                Duration::UntilEndOfCombat,
+                alt((tag("this combat if able"), tag("that combat if able"))),
+            ),
+        )),
+    )
+    .parse(rest)
 }
 
 /// CR 119.5: Parse "life total becomes N" into SetLifeTotal effect.
