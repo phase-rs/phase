@@ -1784,11 +1784,52 @@ where
             }
         }
         other => {
+            if let Some(mode) = deserialize_legacy_modify_cost_object(&other) {
+                return mode.map_err(serde::de::Error::custom);
+            }
             // Data-carrying variant path. Delegate to the derived Deserialize
             // which handles all struct/newtype variants correctly.
             serde_json::from_value::<StaticMode>(other).map_err(serde::de::Error::custom)
         }
     }
+}
+
+#[derive(Deserialize)]
+struct LegacyModifyCostPayload {
+    #[serde(default)]
+    amount: ManaCost,
+    #[serde(default)]
+    spell_filter: Option<TargetFilter>,
+    #[serde(default)]
+    dynamic_count: Option<QuantityRef>,
+}
+
+fn deserialize_legacy_modify_cost_object(
+    raw: &serde_json::Value,
+) -> Option<serde_json::Result<StaticMode>> {
+    let map = raw.as_object()?;
+    if map.len() != 1 {
+        return None;
+    }
+
+    let (name, payload) = map.iter().next()?;
+    let mode = match name.as_str() {
+        "ReduceCost" => CostModifyMode::Reduce,
+        "RaiseCost" => CostModifyMode::Raise,
+        "MinimumCost" => CostModifyMode::Minimum,
+        _ => return None,
+    };
+
+    Some(
+        serde_json::from_value::<LegacyModifyCostPayload>(payload.clone()).map(|payload| {
+            StaticMode::ModifyCost {
+                mode,
+                amount: payload.amount,
+                spell_filter: payload.spell_filter,
+                dynamic_count: payload.dynamic_count,
+            }
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -2023,6 +2064,37 @@ mod tests {
         let json2 = r#"{"mode":"GrantsExtraVote"}"#;
         let w2: Wrapper = serde_json::from_str(json2).unwrap();
         assert_eq!(w2.mode, StaticMode::GrantsExtraVote);
+    }
+
+    #[test]
+    fn fwd_compat_legacy_cost_modify_objects_map_to_modify_cost() {
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_static_mode_fwd")]
+            mode: StaticMode,
+        }
+
+        let cases = [
+            ("ReduceCost", CostModifyMode::Reduce),
+            ("RaiseCost", CostModifyMode::Raise),
+            ("MinimumCost", CostModifyMode::Minimum),
+        ];
+
+        for (legacy_name, expected_mode) in cases {
+            let json = format!(
+                r#"{{"mode":{{"{legacy_name}":{{"amount":{{"type":"Cost","shards":[],"generic":2}},"spell_filter":null,"dynamic_count":null}}}}}}"#
+            );
+            let wrapper: Wrapper = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                wrapper.mode,
+                StaticMode::ModifyCost {
+                    mode: expected_mode,
+                    amount: ManaCost::generic(2),
+                    spell_filter: None,
+                    dynamic_count: None,
+                }
+            );
+        }
     }
 
     #[test]
