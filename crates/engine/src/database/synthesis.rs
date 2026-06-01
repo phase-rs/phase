@@ -444,6 +444,74 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
     }
 }
 
+/// CR 702.134a: Mentor — "Whenever this creature attacks, put a +1/+1 counter on
+/// target attacking creature with power less than this creature's power."
+/// Synthesized as a `TriggerMode::Attacks` trigger whose source is the
+/// mentoring creature. The "power less than this creature's" target is composed
+/// from existing filter building blocks — an `Attacking` creature whose current
+/// power is `< Power { scope: Source }` (the mentoring creature's post-layer
+/// power, CR 208.1) — so no new filter variant is required. CR 702.134b:
+/// multiple Mentor instances trigger separately, hence one synthesized trigger
+/// per `Keyword::Mentor` copy.
+pub fn synthesize_mentor(face: &mut CardFace) {
+    use crate::types::triggers::TriggerMode;
+
+    for kw in &face.keywords {
+        if !matches!(kw, Keyword::Mentor) {
+            continue;
+        }
+        // Idempotency: skip if a Mentor counter trigger was already synthesized.
+        let already = face.triggers.iter().any(|t| {
+            matches!(t.mode, TriggerMode::Attacks)
+                && matches!(
+                    t.execute.as_deref().map(|a| &*a.effect),
+                    Some(Effect::PutCounter { counter_type: CounterType::Plus1Plus1, target, .. })
+                        if matches!(target, TargetFilter::Typed(tf)
+                            if tf.properties.iter().any(|p| matches!(p, FilterProp::PtComparison { .. })))
+                )
+        });
+        if already {
+            continue;
+        }
+
+        let mut target_filter = TypedFilter::creature();
+        target_filter.properties = vec![
+            // CR 702.134a: only attacking creatures are legal targets.
+            FilterProp::Attacking,
+            // CR 702.134a + CR 208.1: power strictly less than this creature's.
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LT,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source,
+                    },
+                },
+            },
+        ];
+
+        let put_counter = Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(target_filter),
+        };
+
+        face.triggers.push(
+            // CR 702.134a: "Whenever THIS creature attacks" — `valid_card:
+            // SelfRef` so the trigger fires only when the mentoring creature
+            // attacks, not when any other attacker is declared.
+            TriggerDefinition::new(TriggerMode::Attacks)
+                .valid_card(TargetFilter::SelfRef)
+                .execute(AbilityDefinition::new(AbilityKind::Spell, put_counter))
+                .description(
+                    "Mentor — put a +1/+1 counter on target attacking creature with lesser power"
+                        .to_string(),
+                ),
+        );
+    }
+}
+
 /// CR 603.6a + CR 205.3 + CR 105.2: Synthesize a "keyword ETB → create
 /// typed token → attach this Equipment" trigger. Shared shape for any
 /// keyword whose CR text follows the template:
@@ -4418,6 +4486,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_case_solve(face);
     // Warp: no synthesis needed — runtime handled by Keyword::Warp directly
     synthesize_mobilize(face);
+    // CR 702.134a: Mentor — attack trigger placing a +1/+1 counter on a
+    // lesser-power attacking creature.
+    synthesize_mentor(face);
     synthesize_job_select(face);
     // CR 702.92a: Living weapon — Equipment ETB trigger creating a 0/0
     // black Phyrexian Germ creature token, then attaching this Equipment
@@ -6921,6 +6992,99 @@ mod annihilator_synthesis_tests {
                 .count(),
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod mentor_synthesis_tests {
+    //! CR 702.134a: Mentor synthesizes an `Attacks` trigger (source = this
+    //! creature) that puts a +1/+1 counter on a lesser-power attacking creature.
+    use super::*;
+    use crate::types::ability::{Comparator, FilterProp, ObjectScope, PtStat, PtValueScope};
+    use crate::types::counter::CounterType;
+
+    fn mentor_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Mentor);
+        face
+    }
+
+    #[test]
+    fn synthesize_mentor_adds_lesser_power_attack_trigger() {
+        let mut face = mentor_face();
+        synthesize_mentor(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::Attacks))
+            .expect("mentor should add an Attacks trigger");
+
+        // CR 702.134a: "Whenever THIS creature attacks" — fires only for the source.
+        assert!(
+            matches!(trigger.valid_card, Some(TargetFilter::SelfRef)),
+            "valid_card must be SelfRef (only when the mentoring creature attacks)"
+        );
+
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("execute body must be Effect::PutCounter");
+        };
+        assert_eq!(*counter_type, CounterType::Plus1Plus1);
+        assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+
+        let TargetFilter::Typed(tf) = target else {
+            panic!("counter target must be a TypedFilter");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::Attacking),
+            "target must be an attacking creature (CR 702.134a)"
+        );
+        // CR 702.134a + CR 208.1: power strictly less than this creature's power.
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::LT,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source
+                        }
+                    },
+                }
+            )),
+            "target power must be strictly less than the source's power, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
+    fn synthesize_mentor_is_idempotent() {
+        let mut face = mentor_face();
+        synthesize_mentor(&mut face);
+        synthesize_mentor(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| matches!(t.mode, TriggerMode::Attacks))
+                .count(),
+            1,
+            "repeated synthesis must not duplicate the Mentor trigger"
+        );
+    }
+
+    #[test]
+    fn synthesize_mentor_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_mentor(&mut face);
+        assert!(face.triggers.is_empty());
     }
 }
 
