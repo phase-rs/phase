@@ -77,6 +77,12 @@ pub struct PendingTrigger {
     /// filter (or `valid_card: SelfRef`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_match_count: Option<u32>,
+    /// CR 706.2 + CR 706.4 + CR 603.12: die-roll result captured at trigger
+    /// push so a reflexive "When you do … the result" sub-ability that resolves
+    /// on its own stack entry (in a later apply(), after the original
+    /// resolution scope cleared) can re-stamp `die_result_this_resolution`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_result: Option<u8>,
 }
 
 pub(super) struct TriggerEventContextSnapshot {
@@ -517,6 +523,7 @@ fn collect_matching_triggers(
                             },
                         }),
                         subject_match_count,
+                        die_result: None,
                     },
                     trigger_events,
                     batched: trig_def.batched,
@@ -955,6 +962,7 @@ fn collect_pending_triggers(
                             description: prowess_trig_def.description,
                             may_trigger_origin: None,
                             subject_match_count: None,
+                            die_result: None,
                         }));
                     }
                 }
@@ -1001,6 +1009,7 @@ fn collect_pending_triggers(
                             description: ravenous_trigger.description,
                             may_trigger_origin: None,
                             subject_match_count: None,
+                            die_result: None,
                         }));
                     }
                 }
@@ -1043,6 +1052,7 @@ fn collect_pending_triggers(
                                 keyword: KeywordKind::Firebending,
                             }),
                             subject_match_count: None,
+                            die_result: None,
                         }));
                     }
                 }
@@ -1087,6 +1097,7 @@ fn collect_pending_triggers(
                         description: decayed_trigger.description,
                         may_trigger_origin: None,
                         subject_match_count: None,
+                        die_result: None,
                     }));
                 }
             }
@@ -1132,6 +1143,7 @@ fn collect_pending_triggers(
                                 keyword: KeywordKind::Exploit,
                             }),
                             subject_match_count: None,
+                            die_result: None,
                         }));
                     }
                 }
@@ -1198,6 +1210,7 @@ fn collect_pending_triggers(
                                         description: Some("Ward".to_string()),
                                         may_trigger_origin: None,
                                         subject_match_count: None,
+                                        die_result: None,
                                     }));
                                 }
                             }
@@ -1467,6 +1480,7 @@ fn collect_pending_triggers(
                         description: storm_trig_def.description,
                         may_trigger_origin: None,
                         subject_match_count: None,
+                        die_result: None,
                     }));
                 }
             }
@@ -1508,6 +1522,7 @@ fn collect_pending_triggers(
                     description: cascade_trig_def.description,
                     may_trigger_origin: None,
                     subject_match_count: None,
+                    die_result: None,
                 }));
             }
 
@@ -1590,6 +1605,7 @@ fn collect_pending_triggers(
                     description: Some("Casualty".to_string()),
                     may_trigger_origin: None,
                     subject_match_count: None,
+                    die_result: None,
                 }));
             }
         }
@@ -1621,6 +1637,7 @@ fn collect_pending_triggers(
                         description: trig_def.description,
                         may_trigger_origin: None,
                         subject_match_count: None,
+                        die_result: None,
                     }));
                 }
             }
@@ -1655,6 +1672,7 @@ fn collect_pending_triggers(
                         description: trig_def.description,
                         may_trigger_origin: None,
                         subject_match_count: None,
+                        die_result: None,
                     }));
                 }
             }
@@ -1697,6 +1715,7 @@ fn collect_pending_triggers(
                             description: trig_def.description,
                             may_trigger_origin: None,
                             subject_match_count: None,
+                            die_result: None,
                         }));
                     }
                 }
@@ -1738,6 +1757,7 @@ fn collect_pending_triggers(
                             description: trig_def.description,
                             may_trigger_origin: None,
                             subject_match_count: None,
+                            die_result: None,
                         }));
                     }
                 }
@@ -1782,6 +1802,7 @@ fn collect_pending_triggers(
                     description: trig_def.description,
                     may_trigger_origin: None,
                     subject_match_count: None,
+                    die_result: None,
                 }));
                 mark_speed_trigger_used(state, trigger_controller);
             }
@@ -1828,6 +1849,7 @@ fn collect_pending_triggers(
                     description: trig_def.description,
                     may_trigger_origin: None,
                     subject_match_count: None,
+                    die_result: None,
                 }));
             }
         }
@@ -1963,6 +1985,7 @@ fn ring_pending_trigger(
         description: Some(description.to_string()),
         may_trigger_origin: None,
         subject_match_count: None,
+        die_result: None,
     })
 }
 
@@ -2654,6 +2677,7 @@ pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
         description,
         may_trigger_origin,
         subject_match_count,
+        die_result,
         ..
     } = trigger;
 
@@ -2690,6 +2714,7 @@ pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
             description,
             source_name,
             subject_match_count,
+            die_result,
         },
     };
     stack::push_to_stack(state, entry, events);
@@ -3307,6 +3332,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     description: trigger.description.clone(),
                     may_trigger_origin: None,
                     subject_match_count: None,
+                    die_result: None,
                 });
             }
         }
@@ -3392,6 +3418,7 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         push_pending_trigger_to_stack(state, pending, &mut new_events);
     }
@@ -15002,6 +15029,7 @@ pub mod tests {
                 description: None,
                 may_trigger_origin: None,
                 subject_match_count: None,
+                die_result: None,
             },
             &mut Vec::new(),
         );
@@ -15249,6 +15277,7 @@ pub mod tests {
                 description: None,
                 may_trigger_origin: None,
                 subject_match_count: None,
+                die_result: None,
             },
             &mut Vec::new(),
         );
@@ -15348,6 +15377,7 @@ pub mod tests {
                 description: None,
                 may_trigger_origin: None,
                 subject_match_count: None,
+                die_result: None,
             },
             &mut Vec::new(),
         );
@@ -15537,6 +15567,7 @@ pub mod tests {
                 description: None,
                 may_trigger_origin: None,
                 subject_match_count: None,
+                die_result: None,
             },
             &mut Vec::new(),
         );
@@ -15626,6 +15657,7 @@ pub mod tests {
                 description: None,
                 may_trigger_origin: None,
                 subject_match_count: None,
+                die_result: None,
             },
             &mut Vec::new(),
         );
@@ -19013,6 +19045,7 @@ mod push_first_contract_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
 
         let stack_before = state.stack.len();

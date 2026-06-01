@@ -2867,10 +2867,14 @@ pub fn resolve_ability_chain(
         // impossible.
         state.last_vote_ballots = crate::im::Vector::new();
         state.last_effect_amount = None;
-        // CR 706.4: Clear the per-resolution die-roll result at depth-0 chain
-        // entry so a roll consumed by an inline sub_ability cannot leak into a
-        // later, unrelated resolution's EventContextAmount.
-        state.die_result_this_resolution = None;
+        // NOTE: `state.die_result_this_resolution` is intentionally NOT cleared
+        // here. `roll_die::resolve` stamps it AFTER this depth-0 prelude runs
+        // (the prelude runs once at chain top, before `RollDie` executes), so
+        // the inline class still reads a live value. Clearing it here would wipe
+        // the value carried onto a reflexive "When you do … the result"
+        // sub-ability entry before that entry resolves (CR 603.12). Cross-
+        // resolution isolation comes from the four `stack.rs` reset sites and
+        // the `engine.rs` apply() clear. (CR 706.2 + CR 706.4 + CR 603.12)
         state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
         // CR 608.2e: The clause-local equalization snapshot is resolution-
@@ -4240,6 +4244,13 @@ fn resolve_chain_body(
                         description: trigger_description.clone(),
                         may_trigger_origin: None,
                         subject_match_count: None,
+                        // CR 706.2 + CR 603.12: capture the live die-roll result
+                        // (still stamped by the inline `roll_die::resolve` of the
+                        // creating ability) onto the reflexive entry so the
+                        // "When you do … the result" sub-ability — which resolves
+                        // on its own stack entry in a later apply() — can re-stamp
+                        // it into resolution scope.
+                        die_result: state.die_result_this_resolution,
                     };
                     let trigger_events =
                         crate::game::triggers::take_pending_trigger_event_batch(state, &pending);

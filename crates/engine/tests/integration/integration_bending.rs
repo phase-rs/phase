@@ -906,6 +906,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -1273,6 +1274,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(&mut state, entry, &mut vec![]);
@@ -2070,6 +2072,7 @@ fn cast_synthetic_earthbend(
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(state, entry, &mut vec![]);
@@ -2258,6 +2261,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             description: None,
             source_name: String::new(),
             subject_match_count: None,
+            die_result: None,
         },
     };
     stack::push_to_stack(runner.state_mut(), entry, &mut vec![]);

@@ -10136,6 +10136,72 @@ mod tests {
         }
     }
 
+    /// CR 706.2 + CR 706.4 + CR 603.12: Ancient Bronze Dragon's reflexive
+    /// "put X +1/+1 counters on each of up to two target creatures, where X is
+    /// the result" must bind X to the die roll via `EventContextAmount`, NOT to
+    /// a `Variable("the result")` that resolves to 0 (issue #1602, Deliverable 1).
+    #[test]
+    fn ancient_bronze_dragon_reflexive_counts_die_result() {
+        use crate::types::ability::{AbilityDefinition, Effect, QuantityExpr, QuantityRef};
+
+        // Walk an ability-definition chain (effect + sub_ability + else_ability)
+        // collecting every `PutCounter.count` it contains.
+        fn collect_put_counter_counts<'a>(
+            def: &'a AbilityDefinition,
+            out: &mut Vec<&'a QuantityExpr>,
+        ) {
+            if let Effect::PutCounter { count, .. } = def.effect.as_ref() {
+                out.push(count);
+            }
+            if let Effect::RollDie { results, .. } = def.effect.as_ref() {
+                for branch in results {
+                    collect_put_counter_counts(&branch.effect, out);
+                }
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect_put_counter_counts(sub, out);
+            }
+            if let Some(else_def) = def.else_ability.as_deref() {
+                collect_put_counter_counts(else_def, out);
+            }
+        }
+
+        let r = parse(
+            "Flying\nWhenever this creature deals combat damage to a player, roll a \
+             d20. When you do, put X +1/+1 counters on each of up to two target \
+             creatures, where X is the result.",
+            "Ancient Bronze Dragon",
+            &[],
+            &["Creature"],
+            &["Dragon"],
+        );
+
+        let trigger = r
+            .triggers
+            .iter()
+            .find(|t| t.execute.is_some())
+            .expect("Ancient Bronze Dragon should produce a combat-damage trigger");
+        let execute = trigger.execute.as_deref().unwrap();
+        let mut counts = Vec::new();
+        collect_put_counter_counts(execute, &mut counts);
+
+        assert!(
+            !counts.is_empty(),
+            "expected a PutCounter in the reflexive sub-ability chain"
+        );
+        for count in counts {
+            assert_eq!(
+                count,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                "PutCounter.count must bind X to the die result via \
+                 EventContextAmount, not Variable(\"the result\") (which would \
+                 resolve to 0)"
+            );
+        }
+    }
+
     #[test]
     fn parse_harmonize_wild_ride() {
         // Harmonize with lower cost

@@ -3789,6 +3789,13 @@ pub enum StackEntryKind {
         /// `valid_card` filter.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject_match_count: Option<u32>,
+        /// CR 706.2 + CR 706.4 + CR 603.12: die-roll result captured at trigger
+        /// push so a reflexive "When you do … the result" sub-ability that
+        /// resolves on its own stack entry (in a later apply(), after the
+        /// original resolution scope cleared) can re-stamp
+        /// `die_result_this_resolution`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        die_result: Option<u8>,
     },
     /// CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     /// enter the stack after cost-payment + target selection and resolve with
@@ -6539,6 +6546,7 @@ mod tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: PendingTrigger = serde_json::from_str(&json).unwrap();
@@ -6604,6 +6612,7 @@ mod tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         });
 
         let json = serde_json::to_string(&state).unwrap();

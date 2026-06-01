@@ -4234,7 +4234,21 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     {
         return None;
     }
-    parse_cda_quantity(where_x_expression)
+    // CDA-quantity classification takes precedence: it is the more specific
+    // where-X interpreter (object counts, "that spell's mana value",
+    // "the number of age counters on this enchantment", etc.).
+    if let Some(expr) = parse_cda_quantity(where_x_expression) {
+        return Some(expr);
+    }
+    // CR 706.2 + CR 706.4: "where X is the result" of a die roll / coin flip
+    // binds X to the rolled value via the shared `EventContextAmount` channel
+    // (the same one inline "you gain life equal to the result" cards use). This
+    // is a FALLBACK below `parse_cda_quantity` — `parse_event_context_quantity`
+    // has a broad `parse_quantity_ref` fallback that would otherwise mis-classify
+    // CDA-handled phrases, so CDA must win first. `parse_cda_quantity` returns
+    // `None` for the bare die-result phrase (see `cda_quantity_returns_none_for_the_result`),
+    // so this fallback is what binds Ancient Bronze Dragon's "where X is the result".
+    crate::parser::oracle_quantity::parse_event_context_quantity(where_x_expression)
 }
 
 fn parse_where_x_cards_named_in_all_graveyards(where_x_expression: &str) -> Option<QuantityExpr> {
@@ -4709,5 +4723,56 @@ mod tests {
                 "{expression}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod where_x_tests {
+    use super::parse_where_x_quantity_expression;
+    use crate::types::ability::{QuantityExpr, QuantityRef};
+
+    /// CR 706.2 + CR 706.4: "where X is the result" (of a die roll / coin flip)
+    /// binds X to the rolled value via `EventContextAmount` — the same channel
+    /// the inline "equal to the result" class uses. Building-block guard for
+    /// Ancient Bronze Dragon's reflexive "put X +1/+1 counters … where X is the
+    /// result" (issue #1602, Deliverable 1).
+    #[test]
+    fn where_x_is_the_result_binds_event_context_amount() {
+        assert_eq!(
+            parse_where_x_quantity_expression("the result"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            })
+        );
+    }
+
+    /// The new delegation must NOT shadow `parse_cda_quantity`: "the number of
+    /// …" expressions still route through the CDA-quantity path (the event-
+    /// context combinator returns `None` for them).
+    #[test]
+    fn cda_quantity_returns_none_for_the_result() {
+        // Precondition for the "CDA first, event-context fallback" ordering:
+        // `parse_cda_quantity` does not classify the bare die-result phrase, so
+        // the event-context delegation can safely catch it without shadowing any
+        // CDA-handled where-X binding.
+        assert_eq!(
+            crate::parser::oracle_quantity::parse_cda_quantity("the result"),
+            None
+        );
+    }
+
+    #[test]
+    fn where_x_number_of_phrase_not_shadowed_by_event_context() {
+        // "the number of creatures you control" is a CDA-quantity object count,
+        // not an event-context amount — must not resolve to EventContextAmount.
+        let parsed = parse_where_x_quantity_expression("the number of creatures you control");
+        assert_ne!(
+            parsed,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+            "the number-of phrase must route through parse_cda_quantity, not the \
+             event-context delegation"
+        );
     }
 }

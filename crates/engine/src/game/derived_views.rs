@@ -737,6 +737,7 @@ mod tests {
                     description: Some("landfall".into()),
                     source_name: String::new(),
                     subject_match_count: None,
+                    die_result: None,
                 },
             });
         }
@@ -888,6 +889,7 @@ mod tests {
                 description: Some("hidden-zone trigger".to_string()),
                 source_name: "Watcher".to_string(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 
