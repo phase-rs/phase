@@ -54,7 +54,6 @@ const KEYWORD_REMINDER_TEXT: Partial<Record<string, string>> = {
   "Spectacle":     "Can be cast for its spectacle cost if an opponent lost life this turn.",
   "Surge":         "Can be cast for its surge cost if you or a teammate has cast another spell this turn.",
   "Emerge":        "Cast by sacrificing a creature and reducing its cost by that creature's mana value.",
-  "Convoke":       "Tap your creatures to help pay this spell's mana cost.",
   "Awaken":        "Cast for its awaken cost to also put +1/+1 counters on a target land and make it a 0/0 creature.",
   "Renown":        "When this deals combat damage to a player, if not yet renowned, put +1/+1 counters on it and it becomes renowned.",
   "Fabricate":     "When this enters the battlefield, put +1/+1 counters on it or create that many 1/1 Servo artifact creature tokens.",
