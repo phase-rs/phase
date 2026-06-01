@@ -3673,6 +3673,16 @@ impl CastingVariant {
     pub fn replaces_stack_to_graveyard_with_exile(self) -> bool {
         matches!(self.stack_to_graveyard_replacement(), Some(Zone::Exile))
     }
+
+    /// CR 400.7 + CR 712.11a: these variants put a non-front face on the
+    /// stack. If the spell leaves the stack without becoming that face on the
+    /// battlefield, restore the object's normal front-face characteristics.
+    pub fn restores_front_face_after_stack_exit(self) -> bool {
+        matches!(
+            self,
+            CastingVariant::Adventure | CastingVariant::Omen | CastingVariant::MoreThanMeetsTheEye
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

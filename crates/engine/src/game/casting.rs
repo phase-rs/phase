@@ -2445,10 +2445,22 @@ fn prepare_spell_cast_with_variant_override_inner(
     // substitute the alternative mana cost taken from the hand object's
     // `Keyword::MoreThanMeetsTheEye(cost)` payload. Mirrors the Overload pattern.
     let mtmte_cost = if casting_variant == CastingVariant::MoreThanMeetsTheEye {
-        obj.keywords.iter().find_map(|k| match k {
-            crate::types::keywords::Keyword::MoreThanMeetsTheEye(cost) => Some(cost.clone()),
-            _ => None,
-        })
+        obj.keywords
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::MoreThanMeetsTheEye(cost) => Some(cost.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                obj.back_face.as_ref().and_then(|front_face| {
+                    front_face.keywords.iter().find_map(|k| match k {
+                        crate::types::keywords::Keyword::MoreThanMeetsTheEye(cost) => {
+                            Some(cost.clone())
+                        }
+                        _ => None,
+                    })
+                })
+            })
     } else {
         None
     };
@@ -3942,12 +3954,28 @@ pub fn handle_mtmte_cost_choice_with_payment_mode(
     use crate::types::actions::AlternativeCastDecision;
     match decision {
         AlternativeCastDecision::Alternative => {
-            let mut prepared = prepare_spell_cast_with_variant_override(
+            // CR 712.11a + CR 702.162a: a spell cast "converted" is put onto
+            // the stack with its back face up. Swap before preparation so the
+            // stack spell is evaluated using back-face characteristics (CR
+            // 712.11c); `prepare_spell_cast_with_variant_override_inner` reads
+            // the MTMTE cost back through the stored front-face snapshot.
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                swap_to_alternative_spell_face(obj);
+            }
+            let mut prepared = match prepare_spell_cast_with_variant_override(
                 state,
                 player,
                 object_id,
                 Some(CastingVariant::MoreThanMeetsTheEye),
-            )?;
+            ) {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    if let Some(obj) = state.objects.get_mut(&object_id) {
+                        swap_to_alternative_spell_face(obj);
+                    }
+                    return Err(err);
+                }
+            };
             prepared.payment_mode = payment_mode;
             continue_with_prepared(state, player, prepared, events)
         }
@@ -9197,6 +9225,14 @@ pub fn handle_cancel_cast(
         {
             state.stack.remove(pos);
             state.stack_paid_facts.remove(&pending.object_id);
+        }
+    }
+
+    if pending.casting_variant == CastingVariant::MoreThanMeetsTheEye {
+        // CR 601.2i + CR 712.11a: backing out of a converted cast before it
+        // completes restores the card's normal front face in its origin zone.
+        if let Some(obj) = state.objects.get_mut(&pending.object_id) {
+            swap_to_alternative_spell_face(obj);
         }
     }
 
@@ -26804,6 +26840,23 @@ mod tests {
             )
             .expect("MTMTE alternative cast must succeed");
             assert_eq!(state.stack.len(), 1, "the spell must be on the stack");
+            let stacked = state.objects.get(&obj).unwrap();
+            // CR 712.11a: a spell cast converted is put onto the stack with
+            // its back face up. This must be true before resolution, not only
+            // after the permanent enters.
+            assert_eq!(
+                stacked.zone,
+                Zone::Stack,
+                "the committed spell must be on the stack"
+            );
+            assert_eq!(
+                stacked.name, "Streetwise Operative",
+                "MTMTE must use back-face characteristics on the stack"
+            );
+            assert!(
+                !stacked.transformed,
+                "transformed is a permanent-state marker; the stack spell is simply back-face up"
+            );
             // Resolve the permanent spell.
             stack::resolve_top(&mut state, &mut events);
             let resolved = state.objects.get(&obj).unwrap();
