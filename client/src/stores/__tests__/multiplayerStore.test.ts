@@ -6,6 +6,7 @@ const p2pMocks = vi.hoisted(() => ({
   hostDestroy: vi.fn(),
   initialize: vi.fn(async () => undefined),
   applySeatMutation: vi.fn(async () => undefined),
+  startNow: vi.fn(),
   getPlayerSlots: vi.fn(() => []),
   dispose: vi.fn(),
 }));
@@ -23,6 +24,7 @@ vi.mock("../../adapter/p2p-adapter", () => ({
     onEvent: vi.fn(),
     initialize: p2pMocks.initialize,
     applySeatMutation: p2pMocks.applySeatMutation,
+    startNow: p2pMocks.startNow,
     getPlayerSlots: p2pMocks.getPlayerSlots,
     dispose: p2pMocks.dispose,
   })),
