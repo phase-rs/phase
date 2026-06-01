@@ -78,6 +78,7 @@ mod lurking_predators_1604_repro;
 mod madame_null_integration;
 mod magnetic_mountain_choose_and_pay;
 mod mana_drain_refund;
+mod mass_phase_out_1792_repro;
 mod master_of_ceremonies;
 mod militant_angel_attacked_opponents;
 mod morophon_chosen_type_1653;
