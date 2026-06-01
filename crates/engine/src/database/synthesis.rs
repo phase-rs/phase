@@ -15,8 +15,6 @@ use crate::types::ability::{
     RuntimeHandler, SearchSelectionConstraint, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
-use crate::types::statics::StaticMode;
-use crate::types::card::{CardFace, CardLayout};
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -24,6 +22,7 @@ use crate::types::keywords::{BloodthirstValue, BuybackCost, CyclingCost, Keyword
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
+use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -9625,7 +9624,10 @@ mod backup_synthesis_tests {
 
         assert_eq!(backup_trigger.mode, TriggerMode::ChangesZone);
         assert_eq!(backup_trigger.destination, Some(Zone::Battlefield));
-        assert!(matches!(backup_trigger.valid_card, Some(TargetFilter::SelfRef)));
+        assert!(matches!(
+            backup_trigger.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
 
         // Verify the execute body places +1/+1 counters on a creature
         let execute = backup_trigger.execute.as_ref().expect("execute body");
@@ -9651,10 +9653,18 @@ mod backup_synthesis_tests {
     fn synthesize_backup_is_idempotent() {
         let mut face = face_with_backup();
         synthesize_backup(&mut face);
-        let first_count = face.triggers.iter().filter(|t| is_backup_etb_trigger(t)).count();
+        let first_count = face
+            .triggers
+            .iter()
+            .filter(|t| is_backup_etb_trigger(t))
+            .count();
 
         synthesize_backup(&mut face);
-        let second_count = face.triggers.iter().filter(|t| is_backup_etb_trigger(t)).count();
+        let second_count = face
+            .triggers
+            .iter()
+            .filter(|t| is_backup_etb_trigger(t))
+            .count();
 
         assert_eq!(first_count, 1, "first run should add one trigger");
         assert_eq!(second_count, 1, "second run should not add another trigger");
@@ -9696,7 +9706,10 @@ mod backup_synthesis_tests {
 
                 let static_def = &static_abilities[0];
                 assert!(matches!(static_def.mode, StaticMode::Continuous));
-                assert!(matches!(static_def.affected, Some(TargetFilter::ParentTarget)));
+                assert!(matches!(
+                    static_def.affected,
+                    Some(TargetFilter::ParentTarget)
+                ));
 
                 // Verify modifications include Flying keyword and the attack trigger
                 let has_flying = static_def.modifications.iter().any(|mod_| {
@@ -9704,9 +9717,10 @@ mod backup_synthesis_tests {
                 });
                 assert!(has_flying, "should grant Flying keyword");
 
-                let has_trigger = static_def.modifications.iter().any(|mod_| {
-                    matches!(mod_, ContinuousModification::GrantTrigger { .. })
-                });
+                let has_trigger = static_def
+                    .modifications
+                    .iter()
+                    .any(|mod_| matches!(mod_, ContinuousModification::GrantTrigger { .. }));
                 assert!(has_trigger, "should grant attack trigger");
 
                 // Verify Backup itself is NOT granted
@@ -9736,15 +9750,13 @@ mod backup_synthesis_tests {
 
         // Verify the condition is Not(TargetMatchesFilter(SelfRef))
         match &sub_ability.condition {
-            Some(AbilityCondition::Not { condition }) => {
-                match condition.as_ref() {
-                    AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
-                        assert!(matches!(filter, TargetFilter::SelfRef));
-                        assert!(!use_lki);
-                    }
-                    other => panic!("expected TargetMatchesFilter, got {:?}", other),
+            Some(AbilityCondition::Not { condition }) => match condition.as_ref() {
+                AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+                    assert!(matches!(filter, TargetFilter::SelfRef));
+                    assert!(!use_lki);
                 }
-            }
+                other => panic!("expected TargetMatchesFilter, got {:?}", other),
+            },
             other => panic!("expected Not condition, got {:?}", other),
         }
     }
