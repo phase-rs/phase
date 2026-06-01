@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-15T00:00:00Z",
+  "updated": "2026-06-16T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -147,64 +147,24 @@
       "name": "Selesnya Company",
       "author": "MTGGoldfish",
       "colors": [
-        "G",
-        "W"
+        "W",
+        "G"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
-          "count": 2,
-          "name": "Abandoned Air Temple"
-        },
-        {
           "count": 4,
           "name": "Archon of Emeria"
         },
         {
           "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 4,
           "name": "Razorverge Thicket"
-        },
-        {
-          "count": 4,
-          "name": "Ouroboroid"
-        },
-        {
-          "count": 4,
-          "name": "Collected Company"
-        },
-        {
-          "count": 4,
-          "name": "Skyclave Apparition"
-        },
-        {
-          "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 4,
-          "name": "Elvish Mystic"
-        },
-        {
-          "count": 4,
-          "name": "Brushland"
-        },
-        {
-          "count": 3,
-          "name": "Thalia, Guardian of Thraben"
-        },
-        {
-          "count": 1,
-          "name": "Eiganjo, Seat of the Empire"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 4,
-          "name": "Enduring Innocence"
         },
         {
           "count": 1,
@@ -212,53 +172,101 @@
         },
         {
           "count": 2,
+          "name": "Branchloft Pathway"
+        },
+        {
+          "count": 4,
+          "name": "Collected Company"
+        },
+        {
+          "count": 1,
+          "name": "Eiganjo, Seat of the Empire"
+        },
+        {
+          "count": 3,
+          "name": "Thalia, Guardian of Thraben"
+        },
+        {
+          "count": 4,
+          "name": "Enduring Innocence"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 3,
+          "name": "Ouroboroid"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 2,
+          "name": "Abandoned Air Temple"
+        },
+        {
+          "count": 4,
+          "name": "Skyclave Apparition"
+        },
+        {
+          "count": 4,
+          "name": "Brushland"
+        },
+        {
+          "count": 2,
           "name": "Starting Town"
         },
         {
           "count": 4,
-          "name": "Temple Garden"
+          "name": "Elvish Mystic"
         },
         {
-          "count": 3,
-          "name": "Plains"
+          "count": 2,
+          "name": "Elspeth, Storm Slayer"
+        },
+        {
+          "count": 1,
+          "name": "Aven Interrupter"
+        },
+        {
+          "count": 1,
+          "name": "The Wandering Emperor"
         },
         {
           "count": 4,
           "name": "Badgermole Cub"
-        },
-        {
-          "count": 3,
-          "name": "Elspeth, Storm Slayer"
         }
       ],
       "sideboard": [
         {
           "count": 2,
-          "name": "Aven Interrupter"
+          "name": "Beza, the Bounding Spring"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Seam Rip"
-        },
-        {
-          "count": 2,
-          "name": "March of Otherworldly Light"
         },
         {
           "count": 1,
           "name": "Get Lost"
         },
         {
-          "count": 3,
-          "name": "Unlicensed Hearse"
+          "count": 1,
+          "name": "Elesh Norn, Mother of Machines"
         },
         {
           "count": 2,
-          "name": "Aven Interrupter"
+          "name": "High Noon"
         },
         {
           "count": 3,
-          "name": "Beza, the Bounding Spring"
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 3,
+          "name": "Aven Interrupter"
         }
       ]
     },
@@ -405,31 +413,27 @@
       "name": "Niv to Light",
       "author": "MTGGoldfish",
       "colors": [
+        "B",
         "U",
         "G",
-        "B",
-        "W",
-        "R"
+        "R",
+        "W"
       ],
       "tags": [
         "metagame"
       ],
       "main": [
         {
+          "count": 1,
+          "name": "Pillage the Bog"
+        },
+        {
           "count": 4,
-          "name": "Sylvan Caryatid"
+          "name": "Ancient Cornucopia"
         },
         {
-          "count": 2,
-          "name": "Niv-Mizzet Reborn"
-        },
-        {
-          "count": 2,
-          "name": "Breeding Pool"
-        },
-        {
-          "count": 3,
-          "name": "Professor Dellian Fel"
+          "count": 1,
+          "name": "Beza, the Bounding Spring"
         },
         {
           "count": 1,
@@ -440,8 +444,8 @@
           "name": "Blood Crypt"
         },
         {
-          "count": 4,
-          "name": "Fabled Passage"
+          "count": 2,
+          "name": "Breeding Pool"
         },
         {
           "count": 4,
@@ -457,7 +461,7 @@
         },
         {
           "count": 1,
-          "name": "Lightning Helix"
+          "name": "Maelstrom Pulse"
         },
         {
           "count": 1,
@@ -465,7 +469,11 @@
         },
         {
           "count": 1,
-          "name": "Swamp"
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Hushwood Verge"
         },
         {
           "count": 1,
@@ -473,7 +481,7 @@
         },
         {
           "count": 1,
-          "name": "Plains"
+          "name": "Swamp"
         },
         {
           "count": 2,
@@ -496,16 +504,20 @@
           "name": "Leyline Binding"
         },
         {
-          "count": 2,
+          "count": 3,
           "name": "Lightning Helix"
         },
         {
-          "count": 1,
-          "name": "Overgrown Tomb"
+          "count": 3,
+          "name": "Fabled Passage"
         },
         {
           "count": 1,
-          "name": "Mountain"
+          "name": "Island"
+        },
+        {
+          "count": 2,
+          "name": "Niv-Mizzet Reborn"
         },
         {
           "count": 1,
@@ -513,23 +525,23 @@
         },
         {
           "count": 2,
-          "name": "Hushwood Verge"
-        },
-        {
-          "count": 2,
           "name": "Omnath, Locus of Creation"
         },
         {
           "count": 1,
-          "name": "Maelstrom Pulse"
+          "name": "Watery Grave"
         },
         {
           "count": 1,
-          "name": "Pillage the Bog"
+          "name": "Fabled Passage"
         },
         {
           "count": 1,
-          "name": "Island"
+          "name": "Plains"
+        },
+        {
+          "count": 3,
+          "name": "Professor Dellian Fel"
         },
         {
           "count": 1,
@@ -537,7 +549,7 @@
         },
         {
           "count": 1,
-          "name": "Sacred Foundry"
+          "name": "Stomping Ground"
         },
         {
           "count": 1,
@@ -545,7 +557,7 @@
         },
         {
           "count": 1,
-          "name": "Stomping Ground"
+          "name": "Sacred Foundry"
         },
         {
           "count": 1,
@@ -553,15 +565,11 @@
         },
         {
           "count": 1,
-          "name": "Forest"
-        },
-        {
-          "count": 1,
           "name": "Abrupt Decay"
         },
         {
           "count": 1,
-          "name": "Temple Garden"
+          "name": "Overgrown Tomb"
         },
         {
           "count": 1,
@@ -585,7 +593,7 @@
         },
         {
           "count": 1,
-          "name": "Watery Grave"
+          "name": "Temple Garden"
         },
         {
           "count": 2,
@@ -600,30 +608,38 @@
           "name": "Ziatora's Proving Ground"
         },
         {
-          "count": 1,
-          "name": "Beza, the Bounding Spring"
+          "count": 4,
+          "name": "Sylvan Caryatid"
         },
         {
-          "count": 4,
-          "name": "Ancient Cornucopia"
+          "count": 1,
+          "name": "Forest"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Rest in Peace"
+          "count": 1,
+          "name": "Beza, the Bounding Spring"
         },
         {
           "count": 4,
           "name": "Dovin's Veto"
         },
         {
-          "count": 1,
-          "name": "Ultima"
+          "count": 4,
+          "name": "Thoughtseize"
         },
         {
           "count": 1,
           "name": "Surrak Dragonclaw"
+        },
+        {
+          "count": 2,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 1,
+          "name": "Ultima"
         },
         {
           "count": 1,
@@ -632,14 +648,6 @@
         {
           "count": 1,
           "name": "Yorion, Sky Nomad"
-        },
-        {
-          "count": 1,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
         }
       ]
     },
