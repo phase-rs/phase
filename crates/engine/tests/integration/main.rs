@@ -21,6 +21,7 @@ mod bracket_signals;
 mod braids_arisen_nightmare_decline;
 mod brigid_mana_ability;
 mod cascade_intervening_if_pipeline;
+mod cast_during_resolution_pipeline;
 mod chain_of_smog_copy;
 mod chatterstorm_storm;
 mod cleave_text_changing_cost;

@@ -7738,6 +7738,7 @@ mod tests {
                         cast_transformed: false,
                         constraint: None,
                         granted_to: None,
+                        resolution_cleanup: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -7826,6 +7827,7 @@ mod tests {
                         cast_transformed: false,
                         constraint: None,
                         granted_to: None,
+                        resolution_cleanup: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -7888,6 +7890,7 @@ mod tests {
                     cast_transformed: false,
                     constraint: None,
                     granted_to: None,
+                    resolution_cleanup: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
