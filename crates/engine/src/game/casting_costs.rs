@@ -3297,6 +3297,17 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         None
     };
 
+    // CR 601.2a + CR 601.2i: Emit SpellCast BEFORE the Hand→Stack zone move.
+    // This ensures that trigger synthesis (e.g., cascade) can correctly read
+    // granted keywords from static abilities while the object is still in its
+    // origin zone. The zone move below will transition the object to Stack
+    // for zone-change triggers and on-resolution bookkeeping.
+    events.push(GameEvent::SpellCast {
+        card_id,
+        controller: player,
+        object_id,
+    });
+
     // CR 601.2a + CR 601.2i: The spell was announced onto the stack earlier,
     // but the object's `zone` field stayed at its origin through cost payment
     // so continuous effects that granted castability ("cards in your graveyard
@@ -3356,12 +3367,6 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
 
     state.priority_passes.clear();
     state.priority_pass_count = 0;
-
-    events.push(GameEvent::SpellCast {
-        card_id,
-        controller: player,
-        object_id,
-    });
 
     // CR 601.2a + CR 601.2b + CR 110.4: Record permission usage when the spell
     // is finalized onto the stack. This prevents casting a second spell via the
