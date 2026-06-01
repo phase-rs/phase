@@ -1919,6 +1919,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         // CR 611.2a: `grant_permission::resolve` binds this to
                         // the ability controller at grant time.
                         granted_to: None,
+                        resolution_cleanup: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -3468,6 +3469,100 @@ fn try_parse_choose_player_to_verb(
     Some(clause)
 }
 
+/// CR 608.2c + CR 800.4a (issue #1504): "an opponent draws a card" — the
+/// opponent is chosen during resolution, not targeted at cast (contrast with
+/// "target opponent draws"). Decomposed into `Choose { Opponent }` with the
+/// verb phrase as a `sub_ability`, mirroring `try_parse_choose_player_to_verb`
+/// for Skullwinder's "choose an opponent" form.
+fn try_parse_an_opponent_to_verb(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let after_then = opt(tag::<_, _, OracleError<'_>>("then "))
+        .parse(tp.lower)
+        .ok()?
+        .0;
+    let (after_opponent, _) = tag::<_, _, OracleError<'_>>("an opponent ")
+        .parse(after_then)
+        .ok()?;
+    if tag::<_, _, OracleError<'_>>("chooses ")
+        .parse(after_opponent)
+        .is_ok()
+    {
+        return None;
+    }
+
+    let index = ctx.chosen_player_count;
+    ctx.relative_player_scope = Some(ControllerRef::ChosenPlayer { index });
+
+    let verb_lower = after_opponent.trim_start();
+    if verb_lower.is_empty() {
+        return None;
+    }
+    let verb_orig = &tp.original[tp.original.len() - verb_lower.len()..];
+    let mut verb_clause = parse_effect_clause(verb_orig, ctx);
+    if matches!(verb_clause.effect, Effect::Unimplemented { .. }) {
+        return None;
+    }
+    rebind_opponent_player_recipient_to_chosen(&mut verb_clause.effect, index);
+    if let Some(sub) = verb_clause.sub_ability.as_mut() {
+        rebind_opponent_player_recipient_in_chain(sub, index);
+    }
+
+    let mut clause = parsed_clause(Effect::Choose {
+        choice_type: ChoiceType::Opponent,
+        persist: false,
+    });
+    let mut sub = AbilityDefinition::new(AbilityKind::Spell, verb_clause.effect);
+    sub.sub_ability = verb_clause.sub_ability;
+    sub.duration = verb_clause.duration;
+    clause.sub_ability = Some(Box::new(sub));
+    Some(clause)
+}
+
+fn filter_is_bare_opponent_player(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(crate::types::ability::TypedFilter {
+            type_filters,
+            controller: Some(ControllerRef::Opponent),
+            properties,
+        }) if type_filters.is_empty() && properties.is_empty()
+    )
+}
+
+fn rebind_opponent_player_recipient_to_chosen(effect: &mut Effect, index: u8) {
+    let chosen = TargetFilter::Typed(crate::types::ability::TypedFilter {
+        controller: Some(ControllerRef::ChosenPlayer { index }),
+        ..Default::default()
+    });
+    match effect {
+        Effect::Draw { target, .. }
+        | Effect::Mill { target, .. }
+        | Effect::Discard { target, .. } => {
+            if filter_is_bare_opponent_player(target) {
+                *target = chosen;
+            } else {
+                retarget_effect_to_chosen_player(effect, index);
+            }
+        }
+        Effect::GainLife { player, .. } if filter_is_bare_opponent_player(player) => {
+            *player = chosen;
+        }
+        _ => retarget_effect_to_chosen_player(effect, index),
+    }
+}
+
+fn rebind_opponent_player_recipient_in_chain(def: &mut AbilityDefinition, index: u8) {
+    rebind_opponent_player_recipient_to_chosen(&mut def.effect, index);
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rebind_opponent_player_recipient_in_chain(sub, index);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rebind_opponent_player_recipient_in_chain(else_branch, index);
+    }
+}
+
 /// CR 109.4: Rebind a verb effect's player-recipient field to the Nth chosen
 /// player. Covers the player-recipient effect families that follow a "choose a
 /// player to <verb>" clause and carry a `Controller`-defaulted recipient
@@ -3669,6 +3764,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // generic imperative `choose` dispatch (which would consume the prefix
     // and drop the trailing verb).
     if let Some(clause) = try_parse_choose_player_to_verb(tp, ctx) {
+        return clause;
+    }
+
+    // CR 608.2c + CR 800.4a (issue #1504): "an opponent <verb>" before generic
+    // subject dispatch, which would bind `ControllerRef::Opponent` as a cast-time
+    // player target on Draw/Mill/etc.
+    if let Some(clause) = try_parse_an_opponent_to_verb(tp, ctx) {
         return clause;
     }
 
@@ -10075,6 +10177,28 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
                 }
             }
         }
+        // CR 608.2c + CR 608.2d (issue #1535): "that player may put a [typed]
+        // card from their hand onto the battlefield" (Braids, Conjurer Adept) /
+        // "each player puts a [typed] card from their graveyard ...". When the
+        // subject is a player reference and the `ChangeZone` target is a *typed*
+        // filter, the `Any`-guarded injection in the object-targeting group above
+        // was skipped, leaving the moved-object filter with no owner constraint —
+        // so at resolution it draws from every player's zone and the choice is
+        // mis-routed to the controller. Stamp the subject's controller onto the
+        // filter (mirroring the `Sacrifice` arm) so the card is taken from, and
+        // the choice presented to, the acting (per-iteration) player.
+        Effect::ChangeZone { target, .. }
+            if player_filter_as_controller_ref(&subject_filter).is_some() =>
+        {
+            if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
+                let effective_ctrl = if subject.target.is_some() {
+                    ControllerRef::TargetPlayer
+                } else {
+                    ctrl
+                };
+                force_controller(target, effective_ctrl);
+            }
+        }
         // CR 115.1c / CR 602.2b + CR 601.2c / CR 119.3: "Target player gains
         // N life" / "target opponent gains N life" announces a player target;
         // the chosen player, not the source controller, gains the life.
@@ -13093,6 +13217,23 @@ pub(crate) fn fold_speed_floor_sentences(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 109.4 + CR 608.2c: True when a clause's leading/suffix condition is an
+/// anaphoric-control check on the subject — `TargetMatchesFilter` over a
+/// controlled-by-`You` typed filter (the positive antecedent of an inverse
+/// "if you don't control it, …" else-connector). Used to gate the inverse-
+/// control "otherwise" routing so it only engages with a matching positive
+/// antecedent. Accepts both `use_lki` tenses (present "control" / past
+/// "controlled").
+fn clause_has_anaphoric_control_condition(clause: &ClauseIr) -> bool {
+    matches!(
+        clause.condition.as_ref(),
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(tf),
+            ..
+        }) if tf.controller == Some(ControllerRef::You)
+    )
+}
+
 /// Produce an intermediate representation of an effect chain from Oracle text.
 ///
 /// This is the IR-production half of the parse/lower split (Phase 48).
@@ -13319,6 +13460,49 @@ pub(crate) fn parse_effect_chain_ir(
                     is_otherwise: false,
                     unless_pay: None,
                     special: Some(SpecialClause::ManaRetention(expiry)),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                });
+                continue;
+            }
+        }
+
+        // CR 109.4 + CR 608.2c: Inverse anaphoric-control "otherwise" connector —
+        // "If you don't control it, [effect]" following a positively-control-gated
+        // clause ("draw a card if you control that creature."). The negated second
+        // sentence is the `else_ability` of the first over the SAME subject, not an
+        // independent sibling instruction — without this routing the runtime would
+        // either fire both branches or neither (issue #1510, Auntie Ool). Requires a
+        // prior clause to carry an anaphoric-control condition so this only engages
+        // as a genuine else over a matching positive antecedent.
+        if clauses.iter().any(clause_has_anaphoric_control_condition) {
+            if let Some(else_text) = strip_inverse_control_otherwise_connector(normalized_text) {
+                let else_def = {
+                    let ir = parse_effect_chain_ir(&else_text, kind, ctx);
+                    lower_effect_chain_ir(&ir)
+                };
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "otherwise_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: true,
+                    unless_pay: None,
+                    special: Some(SpecialClause::Otherwise(Box::new(else_def))),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
                 });
@@ -14458,7 +14642,7 @@ pub(crate) fn parse_effect_chain_ir(
         if matches!(
             clause.effect,
             Effect::Choose {
-                choice_type: ChoiceType::Player,
+                choice_type: ChoiceType::Player | ChoiceType::Opponent,
                 ..
             }
         ) {
@@ -31203,6 +31387,67 @@ mod tests {
             }
             other => panic!("expected controller-only typed filter, got {other:?}"),
         }
+
+        let present = try_nom_condition_as_ability_condition(
+            "you control that creature",
+            &mut ParseContext::default(),
+        )
+        .expect("present-tense condition should parse");
+        let AbilityCondition::TargetMatchesFilter {
+            filter: present_filter,
+            use_lki,
+        } = present
+        else {
+            panic!("expected TargetMatchesFilter condition");
+        };
+        assert!(!use_lki);
+        match present_filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected typed creature filter, got {other:?}"),
+        }
+
+        let negative_present = try_nom_condition_as_ability_condition(
+            "you don't control it",
+            &mut ParseContext::default(),
+        )
+        .expect("negative present-tense condition should parse");
+        let AbilityCondition::Not { condition } = negative_present else {
+            panic!("expected negated condition");
+        };
+        let AbilityCondition::TargetMatchesFilter { filter, use_lki } = *condition else {
+            panic!("expected inner TargetMatchesFilter condition");
+        };
+        assert!(!use_lki);
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.is_empty());
+            }
+            other => panic!("expected controller-only typed filter, got {other:?}"),
+        }
+
+        let negative_past = try_nom_condition_as_ability_condition(
+            "you didn't control it",
+            &mut ParseContext::default(),
+        )
+        .expect("negative past-tense condition should parse");
+        let AbilityCondition::Not { condition } = negative_past else {
+            panic!("expected negated condition");
+        };
+        let AbilityCondition::TargetMatchesFilter { filter, use_lki } = *condition else {
+            panic!("expected inner TargetMatchesFilter condition");
+        };
+        assert!(use_lki);
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.is_empty());
+            }
+            other => panic!("expected controller-only typed filter, got {other:?}"),
+        }
     }
 
     #[test]
@@ -34429,6 +34674,36 @@ mod tests {
                 }
                 other => panic!("expected Sacrifice for {text:?}, got: {other:?}"),
             }
+        }
+    }
+
+    /// CR 503.1a + CR 608.2d (issue #1535): Braids, Conjurer Adept — "at the
+    /// beginning of each player's upkeep, that player may put a ... card from
+    /// their hand onto the battlefield." Under the scoped-player context the
+    /// trigger establishes, the moved-object filter must be scoped to the acting
+    /// (per-iteration) player, so the card is drawn from THEIR hand — not any
+    /// player's — and the choice is presented to them, not the ability's
+    /// controller. Before the fix the typed ChangeZone target kept no owner
+    /// constraint, so it drew from every hand.
+    #[test]
+    fn that_player_put_from_hand_scopes_change_zone_to_scoped_player() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        let clause = parse_effect_clause(
+            "that player may put a creature card from their hand onto the battlefield",
+            &mut ctx,
+        );
+        match &clause.effect {
+            Effect::ChangeZone { target, .. } => {
+                assert_eq!(
+                    target_filter_controller_ref(target),
+                    Some(ControllerRef::ScopedPlayer),
+                    "moved-object filter must be scoped to ScopedPlayer, got {target:?}",
+                );
+            }
+            other => panic!("expected ChangeZone, got: {other:?}"),
         }
     }
 
@@ -39656,6 +39931,11 @@ mod snapshot_tests {
                     modification,
                     ContinuousModification::AddSubtype { subtype } if subtype == "Vampire"
                 )
+            }) && !static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::RemoveAllSubtypes { .. }
+                )
             })
         }));
     }
@@ -40247,6 +40527,55 @@ mod snapshot_tests {
             )
             .is_none(),
             "interceptor must reject inputs whose inner quantity is not the equalization shape"
+        );
+    }
+
+    /// GitHub issue #1504 — Baleful Mastery: "an opponent draws a card" must not
+    /// require targeting an opponent at cast; opponent is chosen on resolution.
+    #[test]
+    fn baleful_mastery_opponent_draw_uses_choose_not_cast_target() {
+        let text = "If the {1}{B} cost was paid, an opponent draws a card. Exile target creature or planeswalker.";
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+
+        // Chain order: conditional opponent draw is the head; exile is sub_ability.
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent,
+                    ..
+                }
+            ),
+            "opponent draw must be Choose(Opponent), got {:?}",
+            def.effect
+        );
+        assert!(
+            matches!(
+                def.condition,
+                Some(AbilityCondition::AlternativeManaCostPaid)
+            ),
+            "draw must be gated on alternative mana cost payment, got {:?}",
+            def.condition
+        );
+        let draw_effect = def
+            .sub_ability
+            .as_ref()
+            .expect("Choose should chain to Draw");
+        let Effect::Draw { target, .. } = draw_effect.effect.as_ref() else {
+            panic!("expected Draw sub-ability, got {:?}", draw_effect.effect);
+        };
+        assert!(
+            target.chosen_player_index() == Some(0),
+            "Draw must target ChosenPlayer {{0}}, got {target:?}"
+        );
+        let exile = draw_effect
+            .sub_ability
+            .as_ref()
+            .expect("Draw should chain to exile");
+        assert!(
+            matches!(exile.effect.as_ref(), Effect::ChangeZone { .. }),
+            "exile must be chained after draw, got {:?}",
+            exile.effect
         );
     }
 

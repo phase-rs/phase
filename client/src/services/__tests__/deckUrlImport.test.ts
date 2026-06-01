@@ -50,6 +50,12 @@ describe("isSupportedDeckUrl", () => {
     expect(isSupportedDeckUrl("www.archidekt.com/decks/789")).toBe(true);
   });
 
+  it("accepts pasted URLs wrapped with angle brackets or trailing punctuation", () => {
+    expect(isSupportedDeckUrl("<https://archidekt.com/decks/456789/my_deck>")).toBe(true);
+    expect(isSupportedDeckUrl("https://archidekt.com/decks/456789/my_deck.")).toBe(true);
+    expect(isSupportedDeckUrl("<https://archidekt.com/decks/456789/my_deck>.")).toBe(true);
+  });
+
   it("rejects unrelated or malformed URLs", () => {
     expect(isSupportedDeckUrl("https://example.com/decks/abc")).toBe(false);
     expect(isSupportedDeckUrl("https://archidekt.com/decks/not-numeric")).toBe(false);
@@ -93,6 +99,15 @@ describe("fetchDeckFromUrl", () => {
     await fetchDeckFromUrl("moxfield.com/decks/abc");
     const [calledUrl] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(calledUrl).toContain(encodeURIComponent("https://moxfield.com/decks/abc"));
+  });
+
+  it("strips pasted URL wrappers/trailing punctuation before sending to the worker", async () => {
+    mockWorkerText("Name: X\n[Main]\n1 Forest\n");
+    await fetchDeckFromUrl("<https://archidekt.com/decks/123456/my_deck>.");
+    const [calledUrl] = (global.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(calledUrl).toContain(
+      encodeURIComponent("https://archidekt.com/decks/123456/my_deck"),
+    );
   });
 
   it("surfaces the worker's user-facing error message verbatim", async () => {

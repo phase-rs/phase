@@ -1,8 +1,8 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingRestriction,
-    ControllerRef, FilterProp, ParsedCondition, QuantityExpr, SpellCastingOptionKind, TargetFilter,
-    TypeFilter,
+    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingPermission,
+    CastingRestriction, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
+    SpellCastingOptionKind, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -34,6 +34,24 @@ pub fn check_spell_timing(
         casting_variant,
         CastingVariant::Miracle | CastingVariant::Madness
     ) {
+        return Ok(());
+    }
+
+    // CR 608.2g + CR 702.85a / CR 701.57a: A cascade/discover hit is cast DURING
+    // the resolution of its source ability, following the 601.2a-i cast steps but
+    // bypassing normal timing — sorcery-speed, empty-stack, and active-player
+    // gates do not apply (the stack is necessarily non-empty mid-resolution). Such
+    // a cast is driven by `initiate_cast_during_resolution`, which marks the
+    // exiled hit with an `ExileWithAltCost` permission carrying `resolution_cleanup`.
+    if obj.casting_permissions.iter().any(|p| {
+        matches!(
+            p,
+            CastingPermission::ExileWithAltCost {
+                resolution_cleanup: Some(_),
+                ..
+            }
+        )
+    }) {
         return Ok(());
     }
 

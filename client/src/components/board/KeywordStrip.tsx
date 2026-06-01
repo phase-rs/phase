@@ -4,6 +4,7 @@ import type { Keyword } from "../../adapter/types";
 import {
   getKeywordDisplayText,
   getKeywordName,
+  getKeywordReminderText,
   isGrantedKeyword,
   sortKeywords,
 } from "../../viewmodel/keywordProps";
@@ -36,6 +37,7 @@ export const KeywordStrip = memo(function KeywordStrip({
           text: getKeywordDisplayText(kw),
           granted: isGrantedKeyword(kw, baseKeywords),
           source: sourceByKeyword?.get(name),
+          reminder: getKeywordReminderText(kw),
         };
       }),
     [sorted, baseKeywords, sourceByKeyword],
@@ -55,7 +57,10 @@ export const KeywordStrip = memo(function KeywordStrip({
       {items.map((item, i) => (
         <span
           key={i}
-          title={item.source ? `${item.text} \u2014 from ${item.source}` : undefined}
+          title={[
+            item.source ? `${item.text} \u2014 from ${item.source}` : item.text,
+            item.reminder,
+          ].filter(Boolean).join("\n")}
         >
           {i > 0 && <span className="text-gray-500"> &middot; </span>}
           <span className={item.granted ? "text-indigo-300" : "text-white"}>
