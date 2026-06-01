@@ -19540,7 +19540,13 @@ mod tests {
         match &unless_pay.cost {
             AbilityCost::OneOf { costs } => {
                 assert_eq!(costs.len(), 2, "expected Sacrifice|Discard, got {costs:?}");
-                assert!(matches!(costs[0], AbilityCost::Sacrifice { .. }));
+                let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+                    panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+                };
+                let TargetFilter::Typed(tf) = target else {
+                    panic!("sacrifice target should be typed, got {target:?}");
+                };
+                assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert!(matches!(costs[1], AbilityCost::Discard { .. }));
             }
             other => panic!("expected OneOf disjunctive cost, got {other:?}"),
@@ -19562,6 +19568,16 @@ mod tests {
             &unless_pay.cost,
             AbilityCost::OneOf { costs } if costs.len() == 2
         ));
+        let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+            unreachable!("checked OneOf cost above");
+        };
+        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+            panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
         // CR 118.12a: non-scoped "target player" punisher keeps `Player`
         // (the chosen player target), NOT `ScopedPlayer`. No regression.
         assert_eq!(unless_pay.payer, TargetFilter::Player);
@@ -19583,6 +19599,16 @@ mod tests {
             &unless_pay.cost,
             AbilityCost::OneOf { costs } if costs.len() == 2
         ));
+        let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+            unreachable!("checked OneOf cost above");
+        };
+        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+            panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
     }
 
     #[test]

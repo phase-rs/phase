@@ -1838,16 +1838,12 @@ fn parse_unless_they_sacrifice_filter(input: &str) -> Option<(AbilityCost, &str)
     if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
         return None;
     }
-    // CR 109.4 + CR 115.1 + CR 118.12a: "they sacrifice" pins the sacrificed
-    // permanent to the *payer* — the targeted player on the enclosing
-    // activated/triggered ability. `ControllerRef::TargetPlayer` reads the
-    // first `TargetRef::Player` from `ability.targets` at resolution time,
-    // which is exactly the payer the unless-cost surfaces to. Mirrors the
-    // "you sacrifice" branch's controller treatment in
-    // `parse_unless_sacrifice_filter` (which carries `ControllerRef::You`
-    // via the actor dispatch upstream); for the "they" form the actor *is*
-    // the target player and we stamp it explicitly here.
-    let filter = add_controller(filter, ControllerRef::TargetPlayer);
+    // CR 109.5 + CR 118.12a: "they sacrifice" pins the sacrificed permanent
+    // to the player paying the unless-cost. Cost payment evaluates filters with
+    // the payer as the source controller (`FilterContext::from_source_with_controller`),
+    // so `ControllerRef::You` is the payer-relative scope for target-player,
+    // triggering-player, and scoped-player punishers alike.
+    let filter = add_controller(filter, ControllerRef::You);
     Some((
         AbilityCost::Sacrifice {
             target: filter,
@@ -16571,6 +16567,13 @@ mod tests {
             "cost should be Sacrifice, got {:?}",
             unless_pay.cost
         );
+        let AbilityCost::Sacrifice { target, .. } = &unless_pay.cost else {
+            unreachable!("checked sacrifice cost above");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
     }
 
     #[test]
@@ -16633,6 +16636,13 @@ mod tests {
             "first branch should be Sacrifice, got {:?}",
             costs[0]
         );
+        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+            unreachable!("checked sacrifice branch above");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(
             matches!(costs[1], AbilityCost::Discard { .. }),
             "second branch should be Discard, got {:?}",
@@ -16654,6 +16664,13 @@ mod tests {
             "cost should be Sacrifice, got {:?}",
             unless_pay.cost
         );
+        let AbilityCost::Sacrifice { target, .. } = &unless_pay.cost else {
+            unreachable!("checked sacrifice cost above");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
         let execute = def.execute.as_ref().expect("should have execute");
         assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
     }
