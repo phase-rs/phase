@@ -1,9 +1,13 @@
 {
+  "resolutionProgress": {
+    "label": "Resolvendo {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Carta virada para baixo",
     "loading": "Carregando {{name}}",
     "unimplemented": "Não implementado: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Virada"
   },
   "preview": {
     "holdCtrlBack": "Segure Ctrl para a face traseira",
@@ -27,7 +31,29 @@
     "damage": "Dano: {{amount}}",
     "ptDeltaFrom": "{{delta}} de {{source}}",
     "colors": "Cores: {{colors}}",
-    "colorless": "Incolor"
+    "colorless": "Incolor",
+    "chosen": {
+      "title": "Escolhido",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Jogador {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Desconhecido",
+      "kind": {
+        "color": "Cor",
+        "creatureType": "Tipo de criatura",
+        "basicLandType": "Tipo de terreno básico",
+        "cardType": "Tipo de carta",
+        "oddOrEven": "Ímpar ou par",
+        "cardName": "Nome da carta",
+        "number": "Número",
+        "player": "Jogador",
+        "twoColors": "Duas cores",
+        "tributeOutcome": "Tributo",
+        "keyword": "Palavra-chave",
+        "label": "Rótulo",
+        "fallback": "Escolha"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Limpar Atacantes",
@@ -211,6 +237,9 @@
     "radAriaLabel_one": "{{count}} marcador de radiação",
     "radAriaLabel_other": "{{count}} marcadores de radiação",
     "radTooltip": "Marcadores de radiação: {{count}}",
+    "experienceAriaLabel_one": "{{count}} contador de experiência",
+    "experienceAriaLabel_other": "{{count}} contadores de experiência",
+    "experienceTooltip": "Contadores de experiência: {{count}}",
     "speedAriaLabel": "Velocidade {{value}}",
     "speedTooltip": "Velocidade: {{value}}",
     "companion": "Companheiro"
@@ -385,6 +414,7 @@
     "chooseTargetOf": "Escolha o alvo {{current}} de {{total}}",
     "chooseTarget": "Escolha um alvo",
     "noLegalTargets": "Nenhum alvo válido disponível",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "até um {{target}}",
     "one": "um {{target}}",
     "nounPlayer": "jogador",
@@ -1105,6 +1135,14 @@
     "bestowNormalLabel": "Conjurar como Criatura",
     "bestowAltLabel": "Conjurar com Conceder",
     "bestowSubtitle": "Conjure {{name}} normalmente como uma criatura, ou pague seu custo de Conceder para conjurá-la como um Aura.",
+    "awakenEyebrow": "Despertar",
+    "awakenNormalLabel": "Conjurar Normalmente",
+    "awakenAltLabel": "Conjurar com Despertar",
+    "awakenSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Despertar para também colocar marcadores +1/+1 em um terreno que você controla e torná-lo uma criatura 0/0 do tipo Elemental com ímpeto.",
+    "cleaveEyebrow": "Remover",
+    "cleaveNormalLabel": "Conjurar Normalmente",
+    "cleaveAltLabel": "Conjurar com Remover",
+    "cleaveSubtitle": "Conjure {{name}} normalmente, ou pague seu custo de Remover para remover as palavras entre colchetes.",
     "additionalExile": "+ Exile uma carta",
     "additionalSacrifice": "+ Sacrifique um permanente",
     "additionalPayLife": "+ Pague vida",
@@ -1163,8 +1201,8 @@
   },
   "categoryChoice": {
     "title": "Escolher Permanentes para Manter",
-    "subtitleOpponent": "Escolha um permanente de cada tipo dentre os permanentes que não são terrenos que {{name}} controla; o restante é sacrificado.",
-    "subtitleSelf": "Escolha um permanente de cada tipo dentre os permanentes que não são terrenos que você controla; o restante é sacrificado.",
+    "subtitleOpponent": "Escolha um permanente para cada categoria para {{name}}.",
+    "subtitleSelf": "Escolha um permanente para cada categoria.",
     "noneToKeep": "Nenhum {{category}} — nenhum para manter",
     "objectFallback": "Objeto {{id}}"
   },
@@ -1268,7 +1306,9 @@
     "searchSubtitle": "Digite para buscar em todas as cartas",
     "searchPlaceholder": "Buscar por nome...",
     "noCardsFound": "Nenhuma carta encontrada",
-    "buttonSubtitle": "Selecione uma opção"
+    "buttonSubtitle": "Selecione uma opção",
+    "filterPlaceholder": "Filtrar opções...",
+    "noOptionsMatch": "Nenhuma opção corresponde"
   },
   "nonFatalPanic": {
     "heading": "Aviso do motor (não fatal)",

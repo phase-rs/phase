@@ -103,6 +103,7 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             linked_exile_snapshot: Vec::new(),
             is_token: false,
             combat_status: Default::default(),
+            co_departed: Vec::new(),
         }),
     });
 }
@@ -211,6 +212,7 @@ fn lki_fallback_resolves_source_power_after_zone_change() {
             supertypes: vec![],
             keywords: vec![],
             colors: vec![],
+            chosen_attributes: Vec::new(),
             counters: HashMap::new(),
         },
     );

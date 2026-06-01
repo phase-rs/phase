@@ -196,6 +196,19 @@ impl LobbyManager {
             .is_some()
     }
 
+    pub fn has_active_reservation(
+        &mut self,
+        game_code: &str,
+        token: &str,
+        env: &impl BrokerEnv,
+    ) -> bool {
+        let Some(meta) = self.games.get_mut(game_code) else {
+            return false;
+        };
+        Self::cleanup_expired_for(meta, env.now_ms());
+        meta.reservations.contains_key(token)
+    }
+
     pub fn release_reservations(&mut self, reservations: &[(String, String)]) -> bool {
         let mut changed = false;
         for (game_code, token) in reservations {
@@ -215,8 +228,8 @@ impl LobbyManager {
         true
     }
 
-    /// Returns the host-reported seated player count (excluding reservations).
-    pub fn player_count(&self, game_code: &str) -> Option<u32> {
+    /// Returns the seated player count, excluding pending reservations.
+    pub fn seated_player_count(&self, game_code: &str) -> Option<u32> {
         self.games.get(game_code).map(|meta| meta.current_players)
     }
 

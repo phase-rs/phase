@@ -518,6 +518,134 @@ mod tests {
         );
     }
 
+    /// CR 401.2 + CR 608.2c: a `DigChoice` selection must be drawn from the cards
+    /// actually looked at. Regression guard for the freeform-selection hole — the
+    /// old handler skipped this check whenever `selectable_cards` was empty (a
+    /// filtered dig that matched nothing), so an `apply`-level `SelectCards` with
+    /// a foreign object id was accepted and moved into the chooser's hand.
+    #[test]
+    fn dig_choice_rejects_card_not_looked_at() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+        }
+        let cards_on_top = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        // A card the dig never looked at.
+        let foreign = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Foreign".to_string(),
+            Zone::Library,
+        );
+        let original_library = state.players[0].library.iter().copied().collect::<Vec<_>>();
+
+        // Filtered dig that matched nothing -> empty selectable set (the hole).
+        let waiting = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            library_owner: PlayerId(0),
+            selectable_cards: Vec::new(),
+            cards: cards_on_top,
+            keep_count: 1,
+            up_to: true,
+            kept_destination: Some(Zone::Hand),
+            rest_destination: Some(Zone::Graveyard),
+            source_id: Some(ObjectId(100)),
+        };
+
+        let mut events = Vec::new();
+        let result = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: vec![foreign],
+            },
+            &mut events,
+        );
+
+        assert!(
+            result.is_err(),
+            "a card that was not looked at must be rejected (CR 401.2)"
+        );
+        assert!(
+            !state.players[0].hand.contains(&foreign),
+            "rejected selection must not move the foreign card to hand"
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            original_library,
+            "rejected selection must not mutate the library"
+        );
+    }
+
+    /// CR 401.2 + CR 608.2c: when a dig's filter matches nothing, the only legal
+    /// keep-selection is empty — a looked-at card that doesn't match the filter
+    /// must still be rejected. Regression guard for the same empty-`selectable`
+    /// hole: the old handler accepted it and moved it to hand.
+    #[test]
+    fn dig_choice_rejects_card_excluded_by_empty_filter() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+        }
+        let cards_on_top = state.players[0].library.iter().copied().collect::<Vec<_>>();
+        let original_library = cards_on_top.clone();
+
+        let waiting = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            library_owner: PlayerId(0),
+            selectable_cards: Vec::new(),
+            cards: cards_on_top.clone(),
+            keep_count: 1,
+            up_to: true,
+            kept_destination: Some(Zone::Hand),
+            rest_destination: Some(Zone::Graveyard),
+            source_id: Some(ObjectId(100)),
+        };
+
+        let mut events = Vec::new();
+        let result = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: vec![cards_on_top[0]],
+            },
+            &mut events,
+        );
+
+        assert!(
+            result.is_err(),
+            "a looked-at card that doesn't match the filter must be rejected when the filter matched nothing"
+        );
+        assert!(
+            !state.players[0].hand.contains(&cards_on_top[0]),
+            "rejected selection must not move the card to hand"
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            original_library,
+            "rejected selection must not mutate the library"
+        );
+    }
+
     #[test]
     fn dig_choice_forwards_kept_cards_to_conditional_continuation() {
         use crate::game::engine_resolution_choices::{

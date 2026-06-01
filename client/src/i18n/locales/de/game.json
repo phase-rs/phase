@@ -1,9 +1,13 @@
 {
+  "resolutionProgress": {
+    "label": "Auflösen {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Verdeckte Karte",
     "loading": "{{name}} wird geladen",
     "unimplemented": "Nicht implementiert: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Getappt"
   },
   "preview": {
     "holdCtrlBack": "Strg halten für Rückseite",
@@ -27,7 +31,29 @@
     "damage": "Schaden: {{amount}}",
     "ptDeltaFrom": "{{delta}} von {{source}}",
     "colors": "Farben: {{colors}}",
-    "colorless": "Farblos"
+    "colorless": "Farblos",
+    "chosen": {
+      "title": "Gewählt",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Spieler {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Unbekannt",
+      "kind": {
+        "color": "Farbe",
+        "creatureType": "Kreaturentyp",
+        "basicLandType": "Standardlandtyp",
+        "cardType": "Kartentyp",
+        "oddOrEven": "Ungerade oder gerade",
+        "cardName": "Kartenname",
+        "number": "Zahl",
+        "player": "Spieler",
+        "twoColors": "Zwei Farben",
+        "tributeOutcome": "Tribut",
+        "keyword": "Schlüsselwort",
+        "label": "Label",
+        "fallback": "Auswahl"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Angreifer löschen",
@@ -211,6 +237,9 @@
     "radAriaLabel_one": "{{count}} Strahlungsmarke",
     "radAriaLabel_other": "{{count}} Strahlungsmarken",
     "radTooltip": "Strahlungsmarken: {{count}}",
+    "experienceAriaLabel_one": "{{count}} Erfahrungsmarke",
+    "experienceAriaLabel_other": "{{count}} Erfahrungsmarken",
+    "experienceTooltip": "Erfahrungsmarken: {{count}}",
     "speedAriaLabel": "Tempo {{value}}",
     "speedTooltip": "Tempo: {{value}}",
     "companion": "Gefährte"
@@ -385,6 +414,7 @@
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",
     "chooseTarget": "Wähle ein Ziel",
     "noLegalTargets": "Keine legalen Ziele verfügbar",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "bis zu eine {{target}}",
     "one": "eine {{target}}",
     "nounPlayer": "Spieler",
@@ -1105,6 +1135,14 @@
     "bestowNormalLabel": "Als Kreatur wirken",
     "bestowAltLabel": "Mit Verleihen wirken",
     "bestowSubtitle": "Wirke {{name}} normal als Kreatur oder zahle seine Verleihen-Kosten, um es als Aura zu wirken.",
+    "awakenEyebrow": "Erwecken",
+    "awakenNormalLabel": "Normal wirken",
+    "awakenAltLabel": "Mit Erwecken wirken",
+    "awakenSubtitle": "Wirke {{name}} normal oder zahle seine Erwecken-Kosten, um außerdem +1/+1-Marken auf ein Land deiner Wahl zu legen und es in eine 0/0 Elementarwesen-Kreatur mit Eile zu verwandeln.",
+    "cleaveEyebrow": "Abspalten",
+    "cleaveNormalLabel": "Normal wirken",
+    "cleaveAltLabel": "Mit Abspalten wirken",
+    "cleaveSubtitle": "Wirke {{name}} normal oder zahle seine Abspaltungskosten, um den Text in eckigen Klammern zu entfernen.",
     "additionalExile": "+ Eine Karte ins Exil schicken",
     "additionalSacrifice": "+ Eine bleibende Karte opfern",
     "additionalPayLife": "+ Leben bezahlen",
@@ -1163,8 +1201,8 @@
   },
   "categoryChoice": {
     "title": "Bleibende Karten zum Behalten wählen",
-    "subtitleOpponent": "Wähle eine bleibende Karte jedes Typs unter den bleibenden Nichtländer-Karten, die {{name}} kontrolliert; der Rest wird geopfert.",
-    "subtitleSelf": "Wähle eine bleibende Karte jedes Typs unter den bleibenden Nichtländer-Karten, die du kontrollierst; der Rest wird geopfert.",
+    "subtitleOpponent": "Wähle eine bleibende Karte für jede Kategorie für {{name}}.",
+    "subtitleSelf": "Wähle eine bleibende Karte für jede Kategorie.",
     "noneToKeep": "Kein {{category}} — keine zum Behalten",
     "objectFallback": "Objekt {{id}}"
   },
@@ -1268,7 +1306,9 @@
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",
     "searchPlaceholder": "Nach Name suchen...",
     "noCardsFound": "Keine Karten gefunden",
-    "buttonSubtitle": "Wähle eine Option"
+    "buttonSubtitle": "Wähle eine Option",
+    "filterPlaceholder": "Optionen filtern...",
+    "noOptionsMatch": "Keine Option passt"
   },
   "nonFatalPanic": {
     "heading": "Engine-Warnung (nicht fatal)",

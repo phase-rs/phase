@@ -1,9 +1,13 @@
 {
+  "resolutionProgress": {
+    "label": "Resolving {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Face-down card",
     "loading": "Loading {{name}}",
     "unimplemented": "Unimplemented: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Tapped"
   },
   "preview": {
     "holdCtrlBack": "Hold Ctrl for back face",
@@ -27,7 +31,29 @@
     "damage": "Damage: {{amount}}",
     "ptDeltaFrom": "{{delta}} from {{source}}",
     "colors": "Colors: {{colors}}",
-    "colorless": "Colorless"
+    "colorless": "Colorless",
+    "chosen": {
+      "title": "Chosen",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Player {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Unknown",
+      "kind": {
+        "color": "Color",
+        "creatureType": "Creature type",
+        "basicLandType": "Basic land type",
+        "cardType": "Card type",
+        "oddOrEven": "Odd or even",
+        "cardName": "Card name",
+        "number": "Number",
+        "player": "Player",
+        "twoColors": "Two colors",
+        "tributeOutcome": "Tribute",
+        "keyword": "Keyword",
+        "label": "Label",
+        "fallback": "Choice"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Clear Attackers",
@@ -211,6 +237,9 @@
     "radAriaLabel_one": "{{count}} rad counter",
     "radAriaLabel_other": "{{count}} rad counters",
     "radTooltip": "Rad counters: {{count}}",
+    "experienceAriaLabel_one": "{{count}} experience counter",
+    "experienceAriaLabel_other": "{{count}} experience counters",
+    "experienceTooltip": "Experience counters: {{count}}",
     "speedAriaLabel": "Speed {{value}}",
     "speedTooltip": "Speed: {{value}}",
     "companion": "Companion"
@@ -387,6 +416,7 @@
     "chooseTargetOf": "Choose target {{current}} of {{total}}",
     "chooseTarget": "Choose a target",
     "noLegalTargets": "No legal targets available",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "up to one {{target}}",
     "one": "a {{target}}",
     "nounPlayer": "player",
@@ -1105,6 +1135,14 @@
     "bestowNormalLabel": "Cast as Creature",
     "bestowAltLabel": "Cast with Bestow",
     "bestowSubtitle": "Cast {{name}} normally as a creature, or pay its Bestow cost to cast it as an Aura.",
+    "awakenEyebrow": "Awaken",
+    "awakenNormalLabel": "Cast Normally",
+    "awakenAltLabel": "Cast with Awaken",
+    "awakenSubtitle": "Cast {{name}} normally, or pay its Awaken cost to also put +1/+1 counters on a land you control and turn it into a 0/0 Elemental creature with haste.",
+    "cleaveEyebrow": "Cleave",
+    "cleaveNormalLabel": "Cast Normally",
+    "cleaveAltLabel": "Cast with Cleave",
+    "cleaveSubtitle": "Cast {{name}} normally, or pay its Cleave cost to remove the bracketed text.",
     "additionalExile": "+ Exile a card",
     "additionalSacrifice": "+ Sacrifice a permanent",
     "additionalPayLife": "+ Pay life",
@@ -1163,8 +1201,8 @@
   },
   "categoryChoice": {
     "title": "Choose Permanents to Keep",
-    "subtitleOpponent": "Choose one permanent of each type from among the nonland permanents {{name}} controls; the rest are sacrificed.",
-    "subtitleSelf": "Choose one permanent of each type from among the nonland permanents you control; the rest are sacrificed.",
+    "subtitleOpponent": "Choose a permanent for each category for {{name}}.",
+    "subtitleSelf": "Choose a permanent for each category.",
     "noneToKeep": "No {{category}} — none to keep",
     "objectFallback": "Object {{id}}"
   },
@@ -1268,7 +1306,9 @@
     "searchSubtitle": "Type to search all cards",
     "searchPlaceholder": "Search by name...",
     "noCardsFound": "No cards found",
-    "buttonSubtitle": "Select one option"
+    "buttonSubtitle": "Select one option",
+    "filterPlaceholder": "Filter options...",
+    "noOptionsMatch": "No options match"
   },
   "nonFatalPanic": {
     "heading": "Engine warning (non-fatal)",

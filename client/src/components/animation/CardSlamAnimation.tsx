@@ -1,6 +1,16 @@
 import { CARD_SLAM_FLIGHT_MS } from "../../animation/types.ts";
 
 /**
+ * Elements with a slam currently in flight. A collapsed identical-permanent
+ * group renders one representative card for the whole swarm, so several
+ * DamageDealt events in the same combat step resolve to the *same* DOM node.
+ * Without this guard each would start its own rAF loop fighting over the
+ * element's `translate`/`scale`. We animate it once; callers fall back to a
+ * floating number for the rest (so every hit still shows a number).
+ */
+const activeSlams = new WeakSet<HTMLElement>();
+
+/**
  * Arena-style card slam: animates the ACTUAL card DOM element from its
  * battlefield position toward the target, impacts with jitter, then
  * slides back to its original position.
@@ -8,6 +18,10 @@ import { CARD_SLAM_FLIGHT_MS } from "../../animation/types.ts";
  * Uses independent CSS `translate`/`scale` properties so the animation
  * composes on top of Framer Motion's `transform` (rotate, opacity, y)
  * without conflict.
+ *
+ * Returns `true` if the slam started (and will fire `onImpact`), or `false`
+ * if the element is already mid-slam — letting the caller show a floating
+ * number instead of dropping the hit entirely.
  */
 export function applyCardSlam(
   element: HTMLElement,
@@ -15,7 +29,10 @@ export function applyCardSlam(
   targetY: number,
   speedMultiplier: number,
   onImpact: () => void,
-): void {
+): boolean {
+  if (activeSlams.has(element)) return false;
+  activeSlams.add(element);
+
   const rect = element.getBoundingClientRect();
   const centerX = rect.x + rect.width / 2;
   const centerY = rect.y + rect.height / 2;
@@ -40,6 +57,7 @@ export function applyCardSlam(
       element.style.translate = "";
       element.style.scale = "";
       element.style.zIndex = originalZ;
+      activeSlams.delete(element);
       return;
     }
 
@@ -72,4 +90,5 @@ export function applyCardSlam(
   };
 
   requestAnimationFrame(frame);
+  return true;
 }

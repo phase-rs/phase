@@ -4,19 +4,20 @@ use std::collections::HashMap;
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
-    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, FilterProp,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
-    SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, AbilityKind, ChosenAttribute, ControllerRef,
+    CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
+    EffectOutcomeSignal, FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    RepeatContinuation, ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AutoMayChoice, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
+    AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
     MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor, ZoneChangeRecord,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
-use crate::types::player::PlayerId;
+use crate::types::player::{Player, PlayerId};
 
 pub mod adapt;
 pub mod add_restriction;
@@ -25,6 +26,7 @@ pub mod additional_phase;
 pub mod amass;
 pub mod animate;
 pub mod attach;
+pub mod awaken;
 pub mod become_copy;
 pub mod become_monarch;
 pub mod blight;
@@ -216,14 +218,17 @@ pub(crate) fn matches_player_scope(
                     PlayerFilter::OpponentGainedLife => {
                         p.id != controller && p.life_gained_this_turn > 0
                     }
-                    // CR 120.1 + CR 510.1: Each opponent who was dealt combat
-                    // damage this turn (`damage_dealt_this_turn` ledger).
-                    PlayerFilter::OpponentDealtCombatDamage => {
-                        p.id != controller
-                            && state.damage_dealt_this_turn.iter().any(|r| {
-                                r.is_combat
-                                    && matches!(r.target, TargetRef::Player(pid) if pid == p.id)
-                            })
+                    // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent
+                    // who was dealt combat damage this turn, optionally
+                    // restricted to a matching source.
+                    PlayerFilter::OpponentDealtCombatDamage { source } => {
+                        crate::game::quantity::opponent_dealt_combat_damage_matches(
+                            state, p.id, controller, source, source_id,
+                        )
+                    }
+                    // CR 508.6: opponent this player attacked this turn.
+                    PlayerFilter::OpponentAttackedThisTurn => {
+                        p.id != controller && state.has_attacked(controller, p.id)
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -280,51 +285,111 @@ pub(crate) fn matches_player_scope(
                     // `speed_effects::players_for_filter` instead, which has
                     // the ability in scope. Unreachable here.
                     PlayerFilter::ParentObjectTargetController => false,
-                    // CR 109.4 + CR 700.1: "each [player class] who [doesn't]
-                    // control [filter]" — the candidate must satisfy both the
-                    // `relation` predicate and the controls/controls-none
-                    // predicate over the permanents they control.
-                    PlayerFilter::ControlsPermanent {
+                    // CR 109.4 + CR 109.5: "each [player class] who controls
+                    // [comparator] [count] [filter]" — the candidate must
+                    // satisfy both the `relation` predicate and the
+                    // controlled-permanent count comparison.
+                    PlayerFilter::ControlsCount {
                         relation,
-                        presence,
                         filter,
+                        comparator,
+                        count,
                     } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state, count, controller, source_id,
+                        );
                         crate::game::players::matches_relation(p.id, controller, *relation)
-                            && player_controls_matching_permanent(
-                                state, p.id, presence, filter, source_id,
+                            && player_control_count_compares(
+                                state,
+                                p.id,
+                                filter,
+                                *comparator,
+                                threshold,
+                                source_id,
                             )
+                    }
+                    // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                    // whose [scalar attr] [comparator] [value]" — the candidate
+                    // satisfies both `relation` and the per-candidate scalar
+                    // comparison. `value` is the controller-relative threshold,
+                    // resolved once; `attr` is read directly off the candidate.
+                    PlayerFilter::PlayerAttribute {
+                        relation,
+                        attr,
+                        comparator,
+                        value,
+                    } => {
+                        let threshold = crate::game::quantity::resolve_quantity(
+                            state, value, controller, source_id,
+                        );
+                        crate::game::players::matches_relation(p.id, controller, *relation)
+                            && candidate_player_scalar(p, attr)
+                                .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
                 }
         })
 }
 
-/// CR 109.4: Evaluate the controls / controls-none predicate of
-/// `PlayerFilter::ControlsPermanent` for one candidate player. Counts
-/// battlefield permanents the candidate controls that match `filter`;
-/// `Controls` requires at least one, `ControlsNone` requires zero.
+/// CR 109.4 + CR 109.5: Evaluate the controlled-permanent count predicate of
+/// `PlayerFilter::ControlsCount` for one candidate player. Counts battlefield
+/// permanents the candidate controls that match `filter`, then compares that
+/// count to `threshold` under `comparator`.
+///
+/// This exactly preserves the old presence semantics: `{ GE, 1 }` is the old
+/// `Controls` (count >= 1) and `{ EQ, 0 }` is the old `ControlsNone`
+/// (count == 0). Comparative "more X than you" phrasings pass `{ GT, n }` where
+/// `n` is the controller's own resolved count.
 ///
 /// The `filter` ("an Elf", "an artifact", …) carries no controller axis — the
 /// control relationship is enforced here by `obj.controller == player`, so the
 /// shared `matches_target_filter` evaluates only the printed object qualities.
-pub(crate) fn player_controls_matching_permanent(
+pub(crate) fn player_control_count_compares(
     state: &GameState,
-    player: PlayerId,
-    presence: &crate::types::ability::ControlPresence,
+    candidate_player: PlayerId,
     filter: &TargetFilter,
+    comparator: crate::types::ability::Comparator,
+    threshold: i32,
     source_id: ObjectId,
 ) -> bool {
-    use crate::types::ability::ControlPresence;
-    let ctx = filter::FilterContext::from_source_with_controller(source_id, player);
-    let controls_any = state.battlefield.iter().any(|id| {
-        state
-            .objects
-            .get(id)
-            .is_some_and(|obj| obj.controller == player)
-            && filter::matches_target_filter(state, *id, filter, &ctx)
-    });
-    match presence {
-        ControlPresence::Controls => controls_any,
-        ControlPresence::ControlsNone => !controls_any,
+    let ctx = filter::FilterContext::from_source_with_controller(source_id, candidate_player);
+    let count = state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.controller == candidate_player)
+                && filter::matches_target_filter(state, **id, filter, &ctx)
+        })
+        .count();
+    comparator.evaluate(
+        crate::game::arithmetic::usize_to_i32_saturating(count),
+        threshold,
+    )
+}
+
+/// CR 402.1 / 119.1 / 122.1f / 404.1: Read scalar `attr` for one candidate
+/// player DIRECTLY off the candidate `Player` (NOT via the controller-scoped
+/// `resolve_quantity`), so `PlayerFilter::PlayerAttribute` reads each player's
+/// own hand size / life / graveyard / player-counter rather than the
+/// controller's. Returns `None` for any non-scalar `QuantityRef`; the parser
+/// invariant guarantees only the scalar subset reaches here, and `None` fails
+/// the candidate predicate closed.
+pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<i32> {
+    use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
+    match attr {
+        // CR 402.1: cards in the candidate's hand.
+        QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
+        // CR 119.1: the candidate's current life total.
+        QuantityRef::LifeTotal { .. } => Some(p.life),
+        // CR 404.1: cards in the candidate's graveyard.
+        QuantityRef::GraveyardSize { .. } => Some(usize_to_i32_saturating(p.graveyard.len())),
+        // CR 122.1f (poison) + CR 122.1: the candidate's named player-counter total.
+        QuantityRef::PlayerCounter { kind, .. } => {
+            Some(u32_to_i32_saturating(p.player_counter(kind)))
+        }
+        _ => None,
     }
 }
 
@@ -414,11 +479,12 @@ fn drain_pending_repeat_until(state: &mut GameState) {
     }
 }
 
-/// CR 614.12b + CR 614.1c + CR 614.13: Resume a multi-target `ChangeZone`
-/// loop paused when an object's ETB triggered a per-permanent replacement
-/// choice (issue #535). Drives the remaining objects through
-/// `process_one_zone_move`; re-stashes and breaks on a further `NeedsChoice`;
-/// emits the trailing `EffectResolved` event when the loop completes.
+/// CR 303.4f + CR 614.12b + CR 614.1c + CR 614.13: Resume a multi-target
+/// `ChangeZone` loop paused when an object's ETB triggered a per-permanent
+/// replacement choice (issue #535) or an Aura host choice. Drives the
+/// remaining objects through `process_one_zone_move`; re-stashes and breaks on
+/// a further pause; emits the trailing `EffectResolved` event when the loop
+/// completes.
 fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<GameEvent>) {
     while let Some(pending) = state.pending_change_zone_iteration.take() {
         let crate::types::game_state::PendingChangeZoneIteration {
@@ -449,12 +515,40 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             duration,
             track_exiled_by_source,
         };
+        // CR 603.10a: scope this drain pass's battlefield-exit events so the
+        // members moved in THIS resume can be stamped as a co-departed group and
+        // their observer triggers collected. NOTE (no-field DEFERRED residual):
+        // members moved in a PRIOR pause segment (before this resume) cannot be
+        // grouped with these without a co_departed_group carrier field on
+        // PendingChangeZoneIteration — the cross-pause observation gap is
+        // documented by an ignored test. See plan STEP 4b.
+        let events_before_drain = events.len();
         let mut paused = false;
         for (i, obj_id) in remaining.iter().enumerate() {
             match crate::game::effects::change_zone::process_one_zone_move(
                 state, &ctx, *obj_id, events,
             ) {
                 crate::game::effects::change_zone::ZoneMoveResult::Done => {}
+                crate::game::effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    state.pending_change_zone_iteration =
+                        Some(crate::types::game_state::PendingChangeZoneIteration {
+                            remaining: remaining[i + 1..].to_vec(),
+                            source_id: ctx.source_id,
+                            controller: ctx.controller,
+                            origin: ctx.origin,
+                            destination: ctx.destination,
+                            enter_transformed: ctx.enter_transformed,
+                            enter_tapped: ctx.enter_tapped,
+                            enters_under_player: ctx.enters_under_player,
+                            enters_attacking: ctx.enters_attacking,
+                            enter_with_counters: ctx.enter_with_counters.clone(),
+                            duration: ctx.duration.clone(),
+                            track_exiled_by_source: ctx.track_exiled_by_source,
+                            effect_kind,
+                        });
+                    paused = true;
+                    break;
+                }
                 crate::game::effects::change_zone::ZoneMoveResult::NeedsChoice(player) => {
                     state.pending_change_zone_iteration =
                         Some(crate::types::game_state::PendingChangeZoneIteration {
@@ -480,14 +574,50 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             }
         }
         if paused {
+            // CR 603.10a: paused again on a further choice. Stamp the members
+            // this pass moved so any co-departing observer among them observes
+            // the rest, then B2-park their observer triggers: `waiting_for` is
+            // now a choice (not Priority), so `run_post_action_pipeline` will
+            // not scan these events — deferring keeps issue #423 dies-triggers
+            // from being lost across the pause.
+            crate::game::zones::stamp_simultaneous_from_slice(
+                state,
+                &mut events[events_before_drain..],
+            );
+            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+                .iter()
+                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                .cloned()
+                .collect();
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
             break;
         }
-        // Loop completed — emit the trailing EffectResolved event that the
-        // non-pause path emits at the tail of `change_zone::resolve`.
+        // Loop completed — stamp the members this pass moved (CR 603.10a) so a
+        // co-departing observer among the resumed group observes the rest, then
+        // emit the trailing EffectResolved event that the non-pause path emits at
+        // the tail of `change_zone::resolve`.
+        crate::game::zones::stamp_simultaneous_from_slice(
+            state,
+            &mut events[events_before_drain..],
+        );
         events.push(GameEvent::EffectResolved {
             kind: effect_kind,
             source_id: ctx.source_id,
         });
+        // CR 603.2 + CR 603.3b: the resume settled the iteration. When the move
+        // landed us back at Priority (no further replacement choice), B1-drain the
+        // deferred observer triggers parked during earlier pause segments plus the
+        // ones this resume produced; otherwise leave them parked for the next drain.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            crate::game::triggers::drain_deferred_trigger_queue(state, events);
+        } else {
+            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+                .iter()
+                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+                .cloned()
+                .collect();
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        }
     }
 }
 
@@ -726,6 +856,7 @@ fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapsho
         supertypes: record.supertypes.clone(),
         keywords: record.keywords.clone(),
         colors: record.colors.clone(),
+        chosen_attributes: Vec::new(),
         counters: Default::default(),
     }
 }
@@ -743,6 +874,21 @@ fn apply_parent_chain_context(
     effect_context_object: Option<&CostPaidObjectSnapshot>,
 ) {
     child.context = parent.context.clone();
+    // CR 608.2c: A sub-ability is part of the same printed ability instance as
+    // its parent; its instructions are followed in order during a single
+    // resolution. Propagate the parent's `ability_index` so chain-level
+    // `AbilityCondition::NthResolutionThisTurn` gates can identify "this ability"
+    // when evaluated on a chained sub-ability. The per-turn resolution counter is
+    // keyed on `(source_id, ability_index)`; without this the sub carries no
+    // index and the gate always evaluates false, so e.g. Nissa, Resurgent
+    // Animist's "Then if this is the second time this ability has resolved this
+    // turn, reveal ..." never fires its second-resolution half. Sub-abilities
+    // always resolve at depth > 0, so propagating the index never causes a
+    // spurious counter bump (that happens only at the depth-0 top-level
+    // resolution). Guarded on `is_none()` to never clobber an explicit index.
+    if child.ability_index.is_none() {
+        child.ability_index = parent.ability_index;
+    }
     // CR 608.2c + CR 109.4: Carry the resolution-scoped chosen-players list
     // down the chain so `ControllerRef::ChosenPlayer { index }` and later
     // `Choose(Player)` instructions resolve against players chosen by earlier
@@ -777,10 +923,16 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::PairChoice { .. }
             | WaitingFor::OpponentMayChoice { .. }
             | WaitingFor::TributeChoice { .. }
-            | WaitingFor::DiscoverChoice { .. }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { .. },
+                ..
+            }
             | WaitingFor::RevealUntilKeptChoice { .. }
             | WaitingFor::RepeatDecision { .. }
-            | WaitingFor::CascadeChoice { .. }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { .. },
+                ..
+            }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::ProliferateChoice { .. }
             | WaitingFor::ChooseObjectsSelection { .. }
@@ -967,6 +1119,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::DayNightIs { .. }
             | AbilityCondition::NthResolutionThisTurn { .. }
             | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ScopedPlayerMatches { .. }
             | AbilityCondition::EffectOutcome {
                 signal: EffectOutcomeSignal::CurrentScopeSucceeded,
             },
@@ -1324,6 +1477,21 @@ pub(crate) enum BatchExecutionPlan {
         spec: crate::types::proposed_event::TokenSpec,
         run_len: u32,
     },
+    /// CR 608.2c + CR 707.2: Resolve a met copy-instead swap (`CopyTokenOf`)
+    /// `prefix_len` times by replaying `token_copy::resolve` on the swapped
+    /// ability. `swapped` is the once-applied instead-swap (CR 608.2c — done
+    /// ONCE in `try_resolve_batch`, not per iteration). `probe_spec` carries the
+    /// prefix's shared copiable values so Layer C can build the real
+    /// ZoneChanged/TokenCreated probe events from the produced token's true
+    /// characteristics.
+    CopyToken {
+        // Boxed: `ResolvedAbility` is large, and keeping it inline would make
+        // `BatchExecutionPlan` carry that size in every variant (clippy
+        // `large_enum_variant`).
+        swapped: Box<ResolvedAbility>,
+        probe_spec: crate::types::proposed_event::TokenSpec,
+        prefix_len: u32,
+    },
 }
 
 /// A proven-safe batch plan returned by `try_resolve_batch`. The driver
@@ -1345,6 +1513,24 @@ impl BatchPlan {
         }
     }
 
+    /// CR 608.2c + CR 707.2: Build a copy-prefix batch plan: resolve the
+    /// swapped `CopyTokenOf` `prefix_len` times, producing one copy token each
+    /// iteration. Consumes `prefix_len` stack entries (may be < the full run).
+    pub(crate) fn copy_token(
+        swapped: ResolvedAbility,
+        probe_spec: crate::types::proposed_event::TokenSpec,
+        prefix_len: u32,
+    ) -> Self {
+        BatchPlan {
+            plan: BatchExecutionPlan::CopyToken {
+                swapped: Box::new(swapped),
+                probe_spec,
+                prefix_len,
+            },
+            consumed: prefix_len,
+        }
+    }
+
     pub(crate) fn consumed(&self) -> u32 {
         self.consumed
     }
@@ -1355,6 +1541,7 @@ impl BatchPlan {
     pub(crate) fn produced_token_specs(&self) -> Vec<&crate::types::proposed_event::TokenSpec> {
         match &self.plan {
             BatchExecutionPlan::Token { spec, .. } => vec![spec],
+            BatchExecutionPlan::CopyToken { probe_spec, .. } => vec![probe_spec],
         }
     }
 
@@ -1372,6 +1559,21 @@ impl BatchPlan {
             BatchExecutionPlan::Token { run_len, .. } => {
                 for _ in 0..*run_len {
                     let _ = token::resolve(state, ability, events);
+                }
+            }
+            // CR 608.2c + CR 707.2: Replay the swapped `CopyTokenOf` resolver
+            // `prefix_len` times. Like the base Token arm, this intentionally
+            // bypasses `resolve_ability_chain`'s depth-0 prelude (resolution-
+            // scoped clears, NthResolutionThisTurn counter) — the instead-swap
+            // was applied ONCE in `try_resolve_batch`, and each copy is an
+            // independent per-token creation at full multiplicity (§5.2).
+            BatchExecutionPlan::CopyToken {
+                swapped,
+                prefix_len,
+                ..
+            } => {
+                for _ in 0..*prefix_len {
+                    let _ = token_copy::resolve(state, swapped, events);
                 }
             }
         }
@@ -1396,9 +1598,10 @@ pub(crate) fn try_resolve_batch(
     state: &GameState,
     ability: &ResolvedAbility,
     run_len: u32,
+    run_source_ids: &[crate::types::identifiers::ObjectId],
 ) -> Option<BatchPlan> {
     match &ability.effect {
-        Effect::Token { .. } => token::try_resolve_batch(state, ability, run_len),
+        Effect::Token { .. } => token::try_resolve_batch(state, ability, run_len, run_source_ids),
         // Exhaustive conservative default: every other effect is non-batchable
         // in v1. The wildcard encodes "opt-in," not a forgotten arm — new
         // batch-aware handlers add an explicit arm above.
@@ -1566,19 +1769,23 @@ pub fn resolve_effect(
         Effect::Cascade => cascade::resolve(state, ability, events),
         // CR 702.94a: Miracle trigger resolution — offer the cast from hand.
         Effect::MiracleCast { ref cost } => {
-            state.waiting_for = WaitingFor::MiracleCastOffer {
+            state.waiting_for = WaitingFor::CastOffer {
                 player: ability.controller,
-                object_id: ability.source_id,
-                cost: cost.clone(),
+                kind: CastOfferKind::Miracle {
+                    object_id: ability.source_id,
+                    cost: cost.clone(),
+                },
             };
             Ok(())
         }
         // CR 702.35a: Madness trigger resolution — offer the cast from exile.
         Effect::MadnessCast { ref cost } => {
-            state.waiting_for = WaitingFor::MadnessCastOffer {
+            state.waiting_for = WaitingFor::CastOffer {
                 player: ability.controller,
-                object_id: ability.source_id,
-                cost: cost.clone(),
+                kind: CastOfferKind::Madness {
+                    object_id: ability.source_id,
+                    cost: cost.clone(),
+                },
             };
             Ok(())
         }
@@ -2194,6 +2401,13 @@ pub(crate) fn resolve_player_for_context_ref(
             return player;
         }
     }
+    if matches!(target_filter, TargetFilter::SourceChosenPlayer) {
+        // CR 607.2d + CR 608.2c: Resolve "the chosen player" from the
+        // source's linked persisted choice.
+        if let Some(player) = source_chosen_player(state, ability.source_id) {
+            return player;
+        }
+    }
     if let Some(target_ref) = crate::game::targeting::resolve_event_context_target(
         state,
         target_filter,
@@ -2231,6 +2445,30 @@ pub(crate) fn resolve_player_for_context_ref(
         }
     }
     ability.controller
+}
+
+/// CR 607.2d + CR 608.2c: Resolve "the chosen player" from the source's
+/// linked persisted choice. Triggered abilities may resolve after the source
+/// left the battlefield; in that case the LKI cache carries the source choices
+/// as they last existed in the public zone.
+pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| {
+            obj.chosen_attributes.iter().find_map(|attr| match attr {
+                ChosenAttribute::Player(player) => Some(*player),
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            state.lki_cache.get(&source_id).and_then(|lki| {
+                lki.chosen_attributes.iter().find_map(|attr| match attr {
+                    ChosenAttribute::Player(player) => Some(*player),
+                    _ => None,
+                })
+            })
+        })
 }
 
 /// CR 117.3a: Determine which player receives the "may" prompt for an optional
@@ -2322,7 +2560,7 @@ fn ability_with_event_context_targets(
     pending
 }
 
-/// CR 603.7c: Extract an event-context target filter from an effect, if present.
+/// CR 603.2: Extract an event-context target filter from an effect, if present.
 /// Returns the filter only for event-context variants (TriggeringSpellController, etc.)
 /// that auto-resolve from `state.current_trigger_event` at resolution time.
 fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
@@ -2418,6 +2656,8 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
             | TargetFilter::TriggeringSource
             | TargetFilter::DefendingPlayer
             | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::StackSpell
     ) {
         Some(filter)
     } else {
@@ -3291,7 +3531,7 @@ fn resolve_chain_body(
         ability.effect,
         Effect::Unimplemented { .. } | Effect::RuntimeHandled { .. }
     ) {
-        // CR 603.7c: If the ability has empty targets but its effect uses an event-context
+        // CR 603.2: If the ability has empty targets but its effect uses an event-context
         // target filter (TriggeringSpellController, TriggeringSource, etc.), resolve the
         // filter into an actual TargetRef using the current trigger event context.
         let resolved_ability = if ability.targets.is_empty() {
@@ -3817,6 +4057,27 @@ fn resolve_chain_body(
                         effect_context_object.as_ref(),
                     );
                     resolve_ability_chain(state, &else_resolved, events, depth + 1)?;
+                } else if let Some(ref next) = sub.sub_ability {
+                    // CR 608.2c: A separate-sentence sibling after the gated sub is
+                    // the next independent instruction ("...in the order written")
+                    // and resolves regardless of the gate's failure (Wernog clause 3
+                    // "You investigate X times" after the per-opponent decline gate).
+                    // Mirrors the optional-decline handler's SequentialSibling check.
+                    // Predicate is `next.sub_link` (the sibling's link to the gated
+                    // sub), NOT `sub.sub_link` (the gated sub's link to its parent =
+                    // ContinuationStep).
+                    if next.sub_link == SubAbilityLink::SequentialSibling {
+                        let mut next_resolved = next.as_ref().clone();
+                        if next_resolved.targets.is_empty() && !ability.targets.is_empty() {
+                            next_resolved.targets = ability.targets.clone();
+                        }
+                        apply_parent_chain_context(
+                            &mut next_resolved,
+                            ability,
+                            effect_context_object.as_ref(),
+                        );
+                        resolve_ability_chain(state, &next_resolved, events, depth + 1)?;
+                    }
                 }
                 return Ok(());
             }
@@ -3925,6 +4186,7 @@ fn resolve_chain_body(
                     state.waiting_for = WaitingFor::TriggerTargetSelection {
                         player: ability.controller,
                         target_slots,
+                        mode_labels: Vec::new(),
                         target_constraints: vec![],
                         selection,
                         source_id: Some(ability.source_id),
@@ -4139,12 +4401,7 @@ pub(crate) fn evaluate_condition(
             let type_matches = state
                 .last_revealed_ids
                 .first()
-                .and_then(|id| {
-                    state
-                        .objects
-                        .get(id)
-                        .map(|obj| obj.card_types.core_types.contains(card_type))
-                })
+                .map(|id| super::printed_cards::object_has_core_type(state, *id, *card_type))
                 .unwrap_or(false);
             let filter_matches = match additional_filter {
                 // CR 205.3m: "of the chosen type" — check the revealed card's subtype
@@ -4451,6 +4708,82 @@ pub(crate) fn evaluate_condition(
             .objects
             .get(&ability.source_id)
             .is_some_and(|obj| !obj.has_keyword(keyword)),
+        // CR 101.3 + CR 109.5 + CR 608.2c: per-iteration scoped-player filter.
+        // The decline-tail body for a cross-scope decline clause (parent
+        // iterates a wider set than the decline-clause `PlayerFilter`) fires
+        // only when the iterated player matches the decline scope. Outside a
+        // `player_scope` iteration `scoped_player` is `None` and we fall back
+        // to the ability's controller — the canonical
+        // `ScopedPlayer`/`Controller` fallback semantics.
+        AbilityCondition::ScopedPlayerMatches { filter } => {
+            let candidate = ability.scoped_player.unwrap_or(ability.controller);
+            scoped_player_matches_filter(state, ability, candidate, filter)
+        }
+    }
+}
+
+/// CR 101.3 + CR 109.5: Evaluate a `PlayerFilter` against a single per-iteration
+/// candidate player. Mirrors the per-candidate predicates in
+/// `quantity::resolve_player_count`, but applied to one already-bound iteration
+/// player rather than a fold over all players. Set-valued / event-context
+/// variants that have no single-player semantic outside an iteration loop fail
+/// closed — `ScopedPlayerMatches` is only emitted by the parser for `All` /
+/// `Opponent` / `Controller` today (the canonical decline-tail scopes), so the
+/// fall-through is defensive rather than load-bearing.
+fn scoped_player_matches_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    candidate: PlayerId,
+    filter: &PlayerFilter,
+) -> bool {
+    // CR 109.5: During a `player_scope` iteration the driver rebinds
+    // `ability.controller = scoped_player` (effects/mod.rs:2884) so that
+    // body effects whose leaf target is `Controller` resolve to the
+    // iterated player. The decline-clause scope filter, however, evaluates
+    // "Opponent of whom" relative to the PRINTED controller — the canonical
+    // idiom used by `quantity.rs` (see `original_controller.unwrap_or(controller)`
+    // at quantity.rs:479,514,530,721). Without this fallback, `Opponent`
+    // here would evaluate `candidate != iterated_player` and short-circuit
+    // to false for every per-iteration call, silently dropping cross-scope
+    // bodies (e.g. Liliana, Waker of the Dead [+1]).
+    let controller = ability.original_controller.unwrap_or(ability.controller);
+    match filter {
+        PlayerFilter::Controller => candidate == controller,
+        PlayerFilter::Opponent => candidate != controller,
+        PlayerFilter::All => true,
+        PlayerFilter::OpponentLostLife => {
+            candidate != controller
+                && state
+                    .players
+                    .iter()
+                    .find(|p| p.id == candidate)
+                    .is_some_and(|p| p.life_lost_this_turn > 0)
+        }
+        PlayerFilter::OpponentGainedLife => {
+            candidate != controller
+                && state
+                    .players
+                    .iter()
+                    .find(|p| p.id == candidate)
+                    .is_some_and(|p| p.life_gained_this_turn > 0)
+        }
+        // Set-valued / event-context / aggregate variants: not used by
+        // decline-tail today. Fail closed (mirrors the
+        // `TriggerCondition::DuringPlayersTurn` fallthrough pattern at
+        // game/triggers.rs:3703-3723).
+        PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentDealtCombatDamage { .. }
+        | PlayerFilter::OpponentAttackedThisTurn
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ControlsCount { .. }
+        | PlayerFilter::PlayerAttribute { .. } => false,
     }
 }
 
@@ -4718,7 +5051,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
-        CastingPermission, Comparator, ContinuousModification, ControllerRef,
+        CastingPermission, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
         DelayedTriggerCondition, Duration, FilterProp, GainLifePlayer, ManaSpendPermission,
         ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
         QuantityRef, SpellContext, StaticDefinition, TargetFilter, TargetRef, TypeFilter,
@@ -4729,7 +5062,7 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, LinkedExileSnapshot,
+        AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, LKISnapshot, LinkedExileSnapshot,
         MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
@@ -4760,6 +5093,66 @@ mod tests {
             handler: crate::types::ability::RuntimeHandler::NinjutsuFamily,
         };
         assert!(is_known_effect(&runtime));
+    }
+
+    #[test]
+    fn source_chosen_player_reads_live_source_then_lki() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Choice Source".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Player(PlayerId(1)));
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SourceChosenPlayer,
+                damage_source: None,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            source_chosen_player(&state, ability.source_id),
+            Some(PlayerId(1))
+        );
+
+        state.objects.remove(&source);
+        state.lki_cache.insert(
+            source,
+            LKISnapshot {
+                name: "Choice Source".to_string(),
+                power: None,
+                toughness: None,
+                base_power: None,
+                base_toughness: None,
+                mana_value: 4,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Artifact],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: vec![ChosenAttribute::Player(PlayerId(1))],
+                counters: HashMap::new(),
+            },
+        );
+
+        assert_eq!(
+            source_chosen_player(&state, ability.source_id),
+            Some(PlayerId(1))
+        );
     }
 
     /// CR 119.3 + CR 115.10: `effect_has_iteration_bound_recipient` must
@@ -6138,6 +6531,7 @@ mod tests {
                 supertypes: vec![],
                 keywords: vec![],
                 colors: vec![],
+                chosen_attributes: Vec::new(),
                 counters: Default::default(),
             },
         );
@@ -7941,6 +8335,7 @@ mod tests {
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(9000),
@@ -8154,6 +8549,7 @@ mod tests {
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(9000),
@@ -8436,6 +8832,7 @@ mod tests {
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(9000),
@@ -8643,6 +9040,7 @@ mod tests {
                 target_player: Some(TargetFilter::ParentTargetController),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![TargetRef::Object(destroyed_land)],
             ObjectId(9000),
@@ -10218,6 +10616,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             ObjectId(100),
@@ -11361,6 +11760,75 @@ mod tests {
         );
         ability.ability_index = Some(idx);
         ability
+    }
+
+    /// Issue #1595 — Nissa, Resurgent Animist. A chained `SequentialSibling`
+    /// sub-ability gated on `NthResolutionThisTurn{2}` must fire on the SECOND
+    /// resolution this turn. Before the fix, sub-abilities carried no
+    /// `ability_index`, so the gate evaluated false forever and the second-
+    /// resolution half never happened (the reported "only did the first portion
+    /// again and added the mana"). Drives the real `resolve_ability_chain`
+    /// descent (which routes through `apply_parent_chain_context`).
+    #[test]
+    fn nth_resolution_gates_sequential_sibling_subability() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(1);
+
+        // Sub: gain 100 life, gated on the 2nd resolution (SequentialSibling).
+        let mut sub = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 100 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        sub.condition = Some(AbilityCondition::NthResolutionThisTurn { n: 2 });
+        sub.sub_link = SubAbilityLink::SequentialSibling;
+        // The sub is built WITHOUT an ability_index, exactly as the trigger
+        // pipeline produces it (only the top-level trigger gets a stamp).
+        assert!(sub.ability_index.is_none());
+
+        // Top-level: gain 1 life ALWAYS (the "add mana" analogue), index stamped.
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        ability.ability_index = Some(0);
+
+        let start = state.players[0].life;
+        let mut events = Vec::new();
+
+        // Resolution 1: only the top-level fires (+1); gated sub must NOT fire.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state.players[0].life,
+            start + 1,
+            "1st resolution: only the top-level (+1) should fire"
+        );
+
+        // Resolution 2: top-level (+1) AND the gated sub (+100) both fire.
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert_eq!(
+            state.players[0].life,
+            start + 1 + 1 + 100,
+            "2nd resolution: top-level (+1) AND gated sub (+100) must BOTH fire"
+        );
+
+        // Counter must read exactly 2 — the propagated index must not have
+        // caused the sub to bump the counter a second time per resolution.
+        assert_eq!(
+            state.ability_resolutions_this_turn[&(source_id, 0)],
+            2,
+            "counter must be bumped exactly once per top-level resolution"
+        );
     }
 
     #[test]
@@ -12612,6 +13080,100 @@ mod tests {
         assert_eq!(
             state.waiting_for, initial_waiting,
             "empty counter set must not prompt"
+        );
+    }
+
+    /// CR 402.1 / 119.1 / 122.1f / 404.1: `candidate_player_scalar` reads each
+    /// of the four scalar `QuantityRef` attributes directly off the candidate
+    /// `Player`, and returns `None` for any non-scalar `QuantityRef` (failing
+    /// the predicate closed). Exercises the building block across its full input
+    /// range, not a single card.
+    #[test]
+    fn candidate_player_scalar_reads_each_attribute() {
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        // Give the player distinguishable scalar values so the wrong attribute
+        // can never accidentally pass.
+        {
+            let p = &mut state.players[1];
+            p.life = 17;
+            p.poison_counters = 4;
+            p.hand.push_back(ObjectId(1));
+            p.hand.push_back(ObjectId(2));
+            p.hand.push_back(ObjectId(3));
+            p.graveyard.push_back(ObjectId(4));
+            p.graveyard.push_back(ObjectId(5));
+            p.player_counter(&PlayerCounterKind::Experience); // no-op read
+            p.add_player_counters(&PlayerCounterKind::Experience, 6);
+        }
+        let p = &state.players[1];
+
+        // CR 402.1: hand size reads p.hand.len(), ignoring the inert PlayerScope.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::HandSize {
+                    player: PlayerScope::Controller
+                }
+            ),
+            Some(3)
+        );
+        // CR 119.1: life total reads p.life.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer
+                }
+            ),
+            Some(17)
+        );
+        // CR 404.1: graveyard size reads p.graveyard.len().
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::GraveyardSize {
+                    player: PlayerScope::Controller
+                }
+            ),
+            Some(2)
+        );
+        // CR 122.1f: poison reads the dedicated poison_counters field.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Poison,
+                    scope: crate::types::ability::CountScope::ScopedPlayer,
+                }
+            ),
+            Some(4)
+        );
+        // CR 122.1: a generic player counter reads the player_counters map.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::PlayerCounter {
+                    kind: PlayerCounterKind::Experience,
+                    scope: crate::types::ability::CountScope::ScopedPlayer,
+                }
+            ),
+            Some(6)
+        );
+        // Non-scalar QuantityRef → None (parser invariant; fails the predicate
+        // closed rather than reading a controller-scoped quantity off a
+        // candidate).
+        assert_eq!(
+            candidate_player_scalar(p, &QuantityRef::Variable { name: "X".into() }),
+            None
+        );
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::ObjectCount {
+                    filter: TargetFilter::Any
+                }
+            ),
+            None
         );
     }
 }

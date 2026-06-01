@@ -181,7 +181,7 @@ fn setup_kaito_on_battlefield(phase: Phase) -> (GameRunner, ObjectId) {
             generic: 2,
         };
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
     }
 
     (runner, kaito_id)
@@ -315,7 +315,7 @@ fn kaito_emblem_creation() {
         obj.base_power = Some(2);
         obj.base_toughness = Some(2);
         obj.entered_battlefield_turn = Some(state.turn_number.saturating_sub(1));
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         id
     };
 
@@ -332,7 +332,7 @@ fn kaito_emblem_creation() {
         obj.base_power = Some(1);
         obj.base_toughness = Some(1);
         obj.entered_battlefield_turn = Some(state.turn_number.saturating_sub(1));
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
         id
     };
 
@@ -442,7 +442,7 @@ fn kaito_not_animated_on_opponents_turn() {
 
     // Switch to opponent's turn
     runner.state_mut().active_player = P1;
-    runner.state_mut().layers_dirty = true;
+    runner.state_mut().layers_dirty.mark_full();
     let _ = runner.act(GameAction::PassPriority);
 
     let state = runner.state();
@@ -475,7 +475,7 @@ fn kaito_not_animated_without_loyalty_counters() {
         .unwrap()
         .counters
         .remove(&CounterType::Loyalty);
-    runner.state_mut().layers_dirty = true;
+    runner.state_mut().layers_dirty.mark_full();
     let _ = runner.act(GameAction::PassPriority);
 
     let state = runner.state();

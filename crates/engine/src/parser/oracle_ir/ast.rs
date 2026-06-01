@@ -121,6 +121,10 @@ pub(crate) struct SearchLibraryDetails {
     /// destinations (cultivate-class "put one onto the battlefield tapped and
     /// the other into your hand"). Lowered to `Effect::SearchLibrary.split`.
     pub(crate) split: Option<SearchDestinationSplit>,
+    /// CR 701.23a: Zones the search looks through. Defaults to `[Library]`;
+    /// God-Pharaoh's-Gift-class cards set `[Graveyard, Hand, Library]`. Lowered
+    /// to `Effect::SearchLibrary.source_zones`.
+    pub(crate) source_zones: Vec<Zone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -319,6 +323,26 @@ pub(crate) enum ContinuationAst {
     /// and Destroy the Evidence where "those cards" refers to all cards revealed
     /// during the RevealUntil resolution, not only the non-matching ones.
     RevealUntilAllToZone { destination: Zone },
+    /// CR 406.3 + CR 701.16a: "[then] exile it/them [face down]" after a private
+    /// `Dig` (the "look at the top N cards of <player>'s library" look step).
+    /// Rewrites the preceding `Dig` into an `Effect::ExileTop` so the looked-at
+    /// card(s) actually leave the library — the Gonti, Canny Acquisitor impulse
+    /// idiom ("look at the top card of that player's library, then exile it face
+    /// down. You may play that card ..."). `player`/`count` are lifted from the
+    /// `Dig` (with `ParentTarget` re-bound to the triggering player via
+    /// `that_player_library_filter`); `face_down` reflects the explicit
+    /// hidden-information suffix.
+    ExileLookedAtCard {
+        player: TargetFilter,
+        count: QuantityExpr,
+        face_down: bool,
+    },
+    /// CR 608.2c + CR 701.21a: absorbs the explicit/bare sacrifice-rest clause
+    /// following a choose-and-sacrifice-rest effect, optionally narrowing the
+    /// final sacrifice sweep ("all other nonland permanents they control").
+    ChooseAndSacrificeRestFilter {
+        sacrifice_filter: Option<TargetFilter>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -648,6 +672,8 @@ pub(crate) enum TargetedImperativeAst {
         enters_under: Option<ControllerRef>,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
+        /// CR 508.4: "tapped and attacking" — enters attacking.
+        enters_attacking: bool,
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
         /// enters the battlefield.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
@@ -723,6 +749,9 @@ pub(crate) enum SearchCreationImperativeAst {
         /// onto the battlefield tapped and the other into your hand"). Lowered
         /// to `Effect::SearchLibrary.split`.
         split: Option<SearchDestinationSplit>,
+        /// CR 701.23a: Zones searched. `[Library]` for ordinary tutors;
+        /// `[Graveyard, Hand, Library]` for God-Pharaoh's-Gift-class cards.
+        source_zones: Vec<Zone>,
     },
     SearchOutsideGame {
         filter: TargetFilter,
@@ -868,6 +897,8 @@ pub(crate) enum ChooseImperativeAst {
     CategoryAndSacrificeRest {
         categories: Vec<crate::types::card_type::CoreType>,
         chooser_scope: crate::types::ability::CategoryChooserScope,
+        choose_filter: crate::types::ability::TargetFilter,
+        sacrifice_filter: crate::types::ability::TargetFilter,
     },
     /// CR 115.1c + CR 601.2c: "choose target X and target Y" — two independent
     /// target slots declared in a single targeting clause (Goblin Welder shape).
@@ -909,7 +940,7 @@ pub(crate) enum PutImperativeAst {
         /// CR 107.1c + CR 608.2c: Cardinality for non-targeted zone-change
         /// choices made during resolution, e.g. "put any number of creature
         /// cards from your hand onto the battlefield."
-        choice_count: Option<MultiTargetSpec>,
+        choice_count: Option<Box<MultiTargetSpec>>,
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.

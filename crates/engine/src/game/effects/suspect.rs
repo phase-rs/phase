@@ -61,7 +61,7 @@ pub fn resolve(
         }
     }
 
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Suspect,

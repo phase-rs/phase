@@ -91,7 +91,7 @@ When converting `Action::Unless(cond, body)`, prefer the parameter form if the i
 - `ReplacementDefinition` fields: `damage_modification`, `damage_source_filter`, `damage_target_filter`, `combat_scope`, `quantity_modification`, `redirect_target`, `valid_card`, `valid_player`, `destination_zone`, `mana_modification`, `additional_token_spec`, `ensure_token_specs`, `shield_kind`, `is_consumed`.
 - `TriggerDefinition` fields: `damage_kind: DamageKindFilter` (CombatOnly/NoncombatOnly), `combat_scope: Option<CombatDamageScope>`, `valid_player`, `valid_card`, `destination_zone`. Combat-damage triggers populate these on the existing `DamageDone` mode — don't add new variants.
 - `AbilityDefinition::player_scope: Option<PlayerFilter>` — exists for non-You PlayerAction scoping. Pure converter threading.
-- `StaticMode::ReduceCost { amount, spell_filter, dynamic_count }` / `RaiseCost` — cost-modification statics.
+- `StaticMode::ModifyCost { mode, amount, spell_filter, dynamic_count }` — cost-modification statics (`mode: CostModifyMode::{Reduce, Raise, Minimum}`).
 - `SpellCastingOption` family — alternative-cost / additional-cost / as-though-flash framework.
 - `CastingRestriction::RequiresCondition { condition }` — gated casting. **`condition: None` evaluates as ALWAYS-PASS** via `is_none_or` in `restrictions.rs:494` — never drop the condition to None as a "permissive fallback."
 

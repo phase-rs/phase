@@ -1,9 +1,10 @@
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, CardTypeSetSource, CastManaSpentMetric,
     CombatRelationSubject, ControllerRef, CounterMoveSelection, Effect, FilterProp,
-    GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, ObjectScope,
-    PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
-    TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+    MultiTargetSpec, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
+    RestrictionPlayerScope, SpellContext, TargetChoiceTiming, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -237,15 +238,151 @@ pub fn find_first_target_filter_in_chain(ability: &ResolvedAbility) -> Option<&T
         .and_then(find_first_target_filter_in_chain)
 }
 
+/// CR 700.2 / CR 601.2b: Accumulates target slots alongside their per-slot mode
+/// display labels while walking an ability chain. The single `push` entry point
+/// enforces the `labels[i]` ↔ `slots[i]` invariant: every slot pushed during a
+/// given mode's collection inherits that mode's `current_label`. Non-modal
+/// collection leaves `current_label` `None`, so `labels` ends up all-`None`
+/// (callers that don't need labels read `slots` and discard `labels`).
+#[derive(Default)]
+struct SlotAccumulator {
+    slots: Vec<TargetSelectionSlot>,
+    labels: Vec<Option<String>>,
+    /// Mode label applied to every slot pushed until reset. Set by
+    /// `build_target_slots_labelled` before collecting each mode; `None` for
+    /// non-modal collection.
+    current_label: Option<String>,
+}
+
+impl SlotAccumulator {
+    /// Push a slot and its mode label together. The label is `current_label` at
+    /// push time, keeping `labels` and `slots` index-parallel by construction.
+    fn push(&mut self, slot: TargetSelectionSlot) {
+        self.slots.push(slot);
+        self.labels.push(self.current_label.clone());
+    }
+}
+
 /// CR 601.2c / CR 602.2b: Collect all target slots for an ability chain. Each targeting
 /// effect in the chain produces a slot whose legal targets are computed from the game state.
 pub fn build_target_slots(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Result<Vec<TargetSelectionSlot>, EngineError> {
-    let mut slots = Vec::new();
-    collect_target_slots(state, ability, &mut slots)?;
-    Ok(slots)
+    let mut acc = SlotAccumulator::default();
+    collect_target_slots(state, ability, &mut acc)?;
+    Ok(acc.slots)
+}
+
+/// CR 700.2 / CR 601.2b + CR 700.2c: Build target slots for a modal spell/ability
+/// along with a per-slot mode display label, so the targeting UI can show which
+/// mode the current target belongs to (CR 700.2). The label for `slots[i]` is
+/// `labels[i]`; both vectors are the same length by construction.
+///
+/// Each chosen mode's slots are collected from its OWN resolved ability built
+/// directly via `build_resolved_from_def` (rather than from the combined
+/// `build_chained_resolved` chain) so each mode can be tagged independently. A
+/// single shared accumulator is threaded across all modes so cross-slot
+/// `existing_slots` relative-controller binding (CR 109.4) still sees earlier
+/// modes' slots.
+///
+/// The resulting slots are slot-for-slot identical (order and count) to the
+/// whole-chain `build_target_slots(&build_chained_resolved(...))` pass for every
+/// current card, which the resolver relies on because it consumes the COMBINED
+/// chain and maps selected targets back by slot index. There are two
+/// unreachable-today divergences:
+///   1. `Effect::ExchangeControl` head modes: `collect_target_slots` returns
+///      unconditionally after an ExchangeControl effect without descending into
+///      the sub-chain, so the whole-chain pass silently truncates any later
+///      modes appended after such a mode. Collecting each mode from its own
+///      resolved ability is strictly more correct there — every chosen mode
+///      contributes its slots regardless of position. (0 cards.)
+///   2. A deferred-effect-head mode (Scry/Dig/Surveil/Choose/ChooseCard/
+///      SearchLibrary/RevealHand) immediately followed in sorted order by a
+///      targeting skip-stack mode (ChangeZone/Shuffle/PutAtLibraryPosition): the
+///      whole-chain pass routes the following mode through
+///      `collect_target_slots_after_deferred_effect` (applying
+///      `skips_stack_targets_after_deferred_effect`), but this per-mode build
+///      collects it via plain `collect_target_slots`, so it may surface one
+///      extra slot. (0 cards.)
+///
+/// A `debug_assert_eq!` below catches either case loudly should a future card
+/// ever reach it.
+///
+/// Indices are sorted (printed order, CR 608.2c) to match
+/// `build_chained_resolved`; duplicate indices (CR 700.2d) repeat the mode.
+// CR 700.2 + CR 601.2b/c: Each parameter encodes a distinct, irreducible piece
+// of the modal slot-build context (game state, ability definitions, chosen mode
+// indices, per-mode display text, source identity, controller, spell context,
+// announced X). Grouping any pair would either fabricate a transient struct
+// with no other use site or hide a real semantic axis (e.g. `chosen_x` is
+// timing-dependent — `None` before the X round-trip, `Some(x)` after — and
+// must remain visible at every call site).
+#[allow(clippy::too_many_arguments)]
+pub fn build_target_slots_labelled(
+    state: &GameState,
+    abilities: &[AbilityDefinition],
+    indices: &[usize],
+    mode_descriptions: &[String],
+    source_id: ObjectId,
+    controller: PlayerId,
+    context: &SpellContext,
+    // CR 107.1b + CR 700.2: When the slot build runs AFTER the X round-trip
+    // (deferred target selection — see `casting_costs::begin_deferred_target_selection`),
+    // each freshly-built per-mode resolved ability needs the chosen X value
+    // propagated so target legality filters referencing `X` (e.g. Kozilek's
+    // Command mode 2: "mana value X or less") resolve against the announced
+    // value rather than the default `0`. `None` for callers that build slots
+    // BEFORE X is chosen (the common non-deferred modal path).
+    chosen_x: Option<u32>,
+) -> Result<(Vec<TargetSelectionSlot>, Vec<Option<String>>), EngineError> {
+    let mut ordered: Vec<usize> = indices.to_vec();
+    ordered.sort();
+
+    let mut acc = SlotAccumulator::default();
+    for idx in ordered {
+        let def = abilities
+            .get(idx)
+            .ok_or_else(|| EngineError::InvalidAction(format!("Mode index {idx} out of range")))?;
+        let mut resolved = build_resolved_from_def(def, source_id, controller);
+        resolved.set_context_recursive(context.clone());
+        if let Some(x) = chosen_x {
+            resolved.set_chosen_x_recursive(x);
+        }
+        acc.current_label = mode_descriptions.get(idx).cloned();
+        collect_target_slots(state, &resolved, &mut acc)?;
+        acc.current_label = None;
+    }
+
+    // CR 700.2c: The resolver consumes the COMBINED chain and maps selected
+    // targets back by slot index, so this per-mode slot count MUST equal the
+    // whole-chain `build_target_slots(&build_chained_resolved(...))` count. The
+    // two documented divergences (ExchangeControl head; deferred-effect head
+    // followed by a skip-stack mode) are unreachable today; this detection-only
+    // assert makes any future card that reaches them fail loudly in test/debug
+    // builds rather than surfacing an extra slot at runtime. Confined to
+    // debug_assertions so release builds don't pay the double-build cost, and
+    // any Err from the comparison build is swallowed so it can never change
+    // release-observable behavior (the returned slots/labels are unaffected).
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(mut combined) = build_chained_resolved(abilities, indices, source_id, controller)
+        {
+            combined.set_context_recursive(context.clone());
+            if let Some(x) = chosen_x {
+                combined.set_chosen_x_recursive(x);
+            }
+            if let Ok(combined_slots) = build_target_slots(state, &combined) {
+                debug_assert_eq!(
+                    acc.slots.len(),
+                    combined_slots.len(),
+                    "build_target_slots_labelled slot count diverged from whole-chain build — a modal mode combination (ExchangeControl, or deferred-effect + skip-stack) is now reachable; see CR 700.2 slot-mapping invariant"
+                );
+            }
+        }
+    }
+
+    Ok((acc.slots, acc.labels))
 }
 
 /// CR 109.4 + CR 608.2c: Resolve the controller of an ability's first parent target.
@@ -994,7 +1131,7 @@ pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -
 fn collect_target_slots(
     state: &GameState,
     ability: &ResolvedAbility,
-    slots: &mut Vec<TargetSelectionSlot>,
+    acc: &mut SlotAccumulator,
 ) -> Result<(), EngineError> {
     if let Some(sub_ability) = ability.sub_ability.as_deref().filter(|sub| {
         matches!(
@@ -1003,7 +1140,7 @@ fn collect_target_slots(
         )
     }) {
         if ability.context.additional_cost_paid {
-            collect_target_slots(state, sub_ability, slots)?;
+            collect_target_slots(state, sub_ability, acc)?;
             return Ok(());
         }
     }
@@ -1017,13 +1154,14 @@ fn collect_target_slots(
             if matches!(filter, TargetFilter::SelfRef) {
                 continue;
             }
-            let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
+            let legal_targets =
+                legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets available".to_string(),
                 ));
             }
-            slots.push(TargetSelectionSlot {
+            acc.push(TargetSelectionSlot {
                 legal_targets,
                 optional: ability.optional_targeting,
             });
@@ -1042,13 +1180,14 @@ fn collect_target_slots(
             if filter.is_context_ref() {
                 continue;
             }
-            let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
+            let legal_targets =
+                legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets available".to_string(),
                 ));
             }
-            slots.push(TargetSelectionSlot {
+            acc.push(TargetSelectionSlot {
                 legal_targets,
                 optional: ability.optional_targeting,
             });
@@ -1058,13 +1197,14 @@ fn collect_target_slots(
             if !attach_filter_needs_target_slot(filter) {
                 continue;
             }
-            let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
+            let legal_targets =
+                legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets available".to_string(),
                 ));
             }
-            slots.push(TargetSelectionSlot {
+            acc.push(TargetSelectionSlot {
                 legal_targets,
                 optional: ability.optional_targeting,
             });
@@ -1090,23 +1230,24 @@ fn collect_target_slots(
             .into_iter()
             .flatten()
         {
-            let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
+            let legal_targets =
+                legal_targets_for_ability_filter(state, ability, filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets available".to_string(),
                 ));
             }
-            slots.push(TargetSelectionSlot {
+            acc.push(TargetSelectionSlot {
                 legal_targets,
                 optional: ability.optional_targeting,
             });
         }
     } else {
         if is_per_opponent_target_fanout(ability) {
-            collect_per_opponent_target_fanout_slots(state, ability, slots)?;
+            collect_per_opponent_target_fanout_slots(state, ability, acc)?;
             if let Some(sub_ability) = ability.sub_ability.as_deref() {
                 if !defers_conditional_target_selection(sub_ability) {
-                    collect_target_slots(state, sub_ability, slots)?;
+                    collect_target_slots(state, sub_ability, acc)?;
                 }
             }
             return Ok(());
@@ -1132,7 +1273,7 @@ fn collect_target_slots(
                     "No legal targets available".to_string(),
                 ));
             }
-            slots.push(TargetSelectionSlot {
+            acc.push(TargetSelectionSlot {
                 legal_targets: player_targets,
                 optional: ability.optional_targeting,
             });
@@ -1141,13 +1282,14 @@ fn collect_target_slots(
             && effect_needs_target_creature_quantity_slot(&ability.effect)
         {
             let filter = target_creature_quantity_slot_filter();
-            let legal_targets = legal_targets_for_ability_filter(state, ability, &filter, slots);
+            let legal_targets =
+                legal_targets_for_ability_filter(state, ability, &filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets available".to_string(),
                 ));
             }
-            slots.push(TargetSelectionSlot {
+            acc.push(TargetSelectionSlot {
                 legal_targets,
                 optional: ability.optional_targeting,
             });
@@ -1156,13 +1298,14 @@ fn collect_target_slots(
             && effect_needs_parent_target_combat_relation_slot(&ability.effect)
         {
             let filter = parent_target_combat_relation_slot_filter();
-            let legal_targets = legal_targets_for_ability_filter(state, ability, &filter, slots);
+            let legal_targets =
+                legal_targets_for_ability_filter(state, ability, &filter, &acc.slots);
             if legal_targets.is_empty() && !ability.optional_targeting {
                 return Err(EngineError::ActionNotAllowed(
                     "No legal targets available".to_string(),
                 ));
             }
-            slots.push(TargetSelectionSlot {
+            acc.push(TargetSelectionSlot {
                 legal_targets,
                 optional: ability.optional_targeting,
             });
@@ -1171,33 +1314,28 @@ fn collect_target_slots(
             && !effect_target_filter_references_chosen_player(&ability.effect)
         {
             if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
-                let legal_targets = legal_choices_for_ability_filter(state, ability, filter, slots);
+                let legal_targets =
+                    legal_choices_for_ability_filter(state, ability, filter, &acc.slots);
                 // CR 601.2c: An "up to N" ability (`multi_target.min == 0`) — or an
                 // ability-wide "up to one" (`optional_targeting`) — may legally
                 // choose zero targets, so an empty legal-target set is acceptable.
                 // Only abilities that require at least one target error out here.
-                if legal_targets.is_empty() && !ability.targeting_is_optional() {
-                    return Err(EngineError::ActionNotAllowed(
-                        "No legal targets available".to_string(),
-                    ));
-                }
                 if let Some(spec) = ability.multi_target.as_ref() {
-                    if multi_target_max_needs_quantity_choice(state, ability, spec) {
-                        return Err(EngineError::ActionNotAllowed(
-                            "Target count requires a resolved quantity before target selection"
-                                .to_string(),
-                        ));
-                    }
-                    let slot_count =
-                        multi_target_slot_count(state, ability, spec, legal_targets.len());
-                    for slot_index in 0..slot_count {
-                        slots.push(TargetSelectionSlot {
+                    let bounds =
+                        resolve_multi_target_bounds(state, ability, spec, legal_targets.len())?;
+                    for slot_index in 0..bounds.max {
+                        acc.push(TargetSelectionSlot {
                             legal_targets: legal_targets.clone(),
-                            optional: slot_index >= spec.min,
+                            optional: slot_index >= bounds.min,
                         });
                     }
                 } else {
-                    slots.push(TargetSelectionSlot {
+                    if legal_targets.is_empty() && !ability.optional_targeting {
+                        return Err(EngineError::ActionNotAllowed(
+                            "No legal targets available".to_string(),
+                        ));
+                    }
+                    acc.push(TargetSelectionSlot {
                         legal_targets,
                         optional: ability.optional_targeting,
                     });
@@ -1206,16 +1344,18 @@ fn collect_target_slots(
         }
     }
     if defers_sub_ability_target_selection(&ability.effect) {
-        collect_target_slots_after_deferred_effect(state, ability.sub_ability.as_deref(), slots)?;
+        collect_target_slots_after_deferred_effect(state, ability.sub_ability.as_deref(), acc)?;
         return Ok(());
     }
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
-        // Conditional ability targets are selected only if the condition is true at
-        // resolution time, not when the parent ability goes on the stack.
-        // Skip target pre-collection for these — they'll be handled during
-        // resolve_ability_chain when the condition is evaluated.
+        // CR 700.2c: Conditional sub-mode targets are chosen only if the
+        // condition holds at resolution time (CR 601.2c), not when the parent
+        // goes on the stack — so they are pre-collected later by
+        // `resolve_ability_chain`, not here. They are intentionally left
+        // UNLABELLED for the modal targeting banner: no slot is surfaced at
+        // mode-selection time, so there is no slot to attach a mode label to.
         if !defers_conditional_target_selection(sub_ability) {
-            collect_target_slots(state, sub_ability, slots)?;
+            collect_target_slots(state, sub_ability, acc)?;
         }
     }
     Ok(())
@@ -1244,21 +1384,74 @@ fn pair_with_legal_choices(
 fn resolve_multi_target_max(
     state: &GameState,
     ability: &ResolvedAbility,
-    spec: &crate::types::ability::MultiTargetSpec,
+    spec: &MultiTargetSpec,
 ) -> Option<usize> {
     spec.max
         .as_ref()
         .map(|expr| resolve_quantity_with_targets(state, expr, ability).max(0) as usize)
 }
 
-fn multi_target_max_needs_quantity_choice(
+/// CR 601.2c: A spell with a variable number of targets announces how many
+/// targets it will choose before choosing them.
+fn resolve_multi_target_min(
     state: &GameState,
     ability: &ResolvedAbility,
-    spec: &crate::types::ability::MultiTargetSpec,
+    spec: &MultiTargetSpec,
+) -> usize {
+    resolve_quantity_with_targets(state, &spec.min, ability).max(0) as usize
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MultiTargetBounds {
+    pub min: usize,
+    pub max: usize,
+}
+
+/// CR 115.1d: A triggered ability's targets are chosen as it is put on the stack.
+/// CR 601.2c: Resolve a multi-target count after any required quantity choices
+/// have been announced, then cap optional slots at the live legal-target set
+/// while preserving the required minimum.
+pub(crate) fn resolve_multi_target_bounds(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    spec: &MultiTargetSpec,
+    legal_target_count: usize,
+) -> Result<MultiTargetBounds, EngineError> {
+    if multi_target_needs_quantity_choice(state, ability, spec) {
+        return Err(EngineError::ActionNotAllowed(
+            "Target count requires a resolved quantity before target selection".to_string(),
+        ));
+    }
+
+    let min = resolve_multi_target_min(state, ability, spec);
+    let raw_max = resolve_multi_target_max(state, ability, spec).unwrap_or(legal_target_count);
+    if raw_max < min {
+        return Err(EngineError::ActionNotAllowed(
+            "Multi-target maximum is below its minimum".to_string(),
+        ));
+    }
+    if legal_target_count < min {
+        return Err(EngineError::ActionNotAllowed(
+            "Not enough legal targets available".to_string(),
+        ));
+    }
+
+    Ok(MultiTargetBounds {
+        min,
+        max: raw_max.min(legal_target_count),
+    })
+}
+
+fn multi_target_needs_quantity_choice(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    spec: &MultiTargetSpec,
 ) -> bool {
-    spec.max
-        .as_ref()
-        .is_some_and(|expr| quantity_expr_has_unresolved_variable(state, ability, expr))
+    quantity_expr_has_unresolved_variable(state, ability, &spec.min)
+        || spec
+            .max
+            .as_ref()
+            .is_some_and(|expr| quantity_expr_has_unresolved_variable(state, ability, expr))
 }
 
 fn quantity_expr_has_unresolved_variable(
@@ -1302,9 +1495,11 @@ fn ability_target_legality_needs_chosen_x_inner(ability: &ResolvedAbility) -> bo
     triggers::extract_target_filter_from_effect(&ability.effect)
         .is_some_and(|filter| target_filter_needs_chosen_x(ability, filter))
         || ability.multi_target.as_ref().is_some_and(|spec| {
-            spec.max
-                .as_ref()
-                .is_some_and(|expr| quantity_expr_has_unresolved_x(ability, expr))
+            quantity_expr_has_unresolved_x(ability, &spec.min)
+                || spec
+                    .max
+                    .as_ref()
+                    .is_some_and(|expr| quantity_expr_has_unresolved_x(ability, expr))
         })
         || ability
             .sub_ability
@@ -1361,18 +1556,6 @@ fn quantity_expr_contains_x(expr: &QuantityExpr) -> bool {
         }
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
     }
-}
-
-fn multi_target_slot_count(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    spec: &crate::types::ability::MultiTargetSpec,
-    legal_target_count: usize,
-) -> usize {
-    resolve_multi_target_max(state, ability, spec)
-        .map(|max_targets| max_targets.max(spec.min))
-        .unwrap_or(legal_target_count)
-        .min(legal_target_count)
 }
 
 /// CR 109.4 + CR 115.1: Returns true if `effect` needs a companion
@@ -1721,6 +1904,7 @@ fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
         }
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::EnteredThisTurn { filter }
@@ -1753,8 +1937,14 @@ fn quantity_ref_references_target_creature(qty: &QuantityRef) -> bool {
             CastManaSpentMetric::Total | CastManaSpentMetric::DistinctColors => false,
         },
         QuantityRef::PlayerCount {
-            filter: crate::types::ability::PlayerFilter::ControlsPermanent { filter, .. },
+            filter: crate::types::ability::PlayerFilter::ControlsCount { filter, .. },
         } => filter_references_target_creature_quantity(filter),
+        // CR 402.1 / 119.1 / 122.1f / 404.1: a player-scalar predicate is read
+        // off each candidate player, never off a target creature, so it cannot
+        // reference the resolving ability's target-creature slot.
+        QuantityRef::PlayerCount {
+            filter: crate::types::ability::PlayerFilter::PlayerAttribute { .. },
+        } => false,
         _ => false,
     }
 }
@@ -1876,13 +2066,15 @@ fn collect_target_slot_specs(
                 if let Some(spec) = ability.multi_target.as_ref() {
                     let legal_targets =
                         legal_targets_for_ability_filter(state, ability, filter, &[]);
-                    let slot_count =
-                        multi_target_slot_count(state, ability, spec, legal_targets.len());
-                    for slot_index in 0..slot_count {
-                        specs.push(TargetSlotSpec {
-                            filter: filter.clone(),
-                            optional: slot_index >= spec.min,
-                        });
+                    if let Ok(bounds) =
+                        resolve_multi_target_bounds(state, ability, spec, legal_targets.len())
+                    {
+                        for slot_index in 0..bounds.max {
+                            specs.push(TargetSlotSpec {
+                                filter: filter.clone(),
+                                optional: slot_index >= bounds.min,
+                            });
+                        }
                     }
                 } else {
                     specs.push(TargetSlotSpec {
@@ -2061,28 +2253,34 @@ fn per_opponent_fanout_object_filter(ability: &ResolvedAbility) -> Option<Target
 fn collect_per_opponent_target_fanout_slots(
     state: &GameState,
     ability: &ResolvedAbility,
-    slots: &mut Vec<TargetSelectionSlot>,
+    acc: &mut SlotAccumulator,
 ) -> Result<(), EngineError> {
     let Some(object_filter) = per_opponent_fanout_object_filter(ability) else {
         return Ok(());
     };
 
     for opponent in per_opponent_fanout_players(state, ability.controller) {
-        let player_targets =
-            per_opponent_fanout_constraint_targets(state, ability.controller, opponent);
-        slots.push(TargetSelectionSlot {
-            legal_targets: player_targets,
-            optional: false,
-        });
-
         let legal_targets =
             targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id);
-        if legal_targets.is_empty() && !ability.targeting_is_optional() {
+        if legal_targets.is_empty() {
+            if ability.targeting_is_optional() {
+                // CR 115.1 + CR 603.3d: "Up to one" per-opponent fanout — an
+                // opponent with no legal targets contributes no slots. Omitting
+                // both the player slot and the creature slot avoids presenting
+                // the player with an empty selection step they cannot act on.
+                continue;
+            }
             return Err(EngineError::ActionNotAllowed(
                 "No legal targets available".to_string(),
             ));
         }
-        slots.push(TargetSelectionSlot {
+        let player_targets =
+            per_opponent_fanout_constraint_targets(state, ability.controller, opponent);
+        acc.push(TargetSelectionSlot {
+            legal_targets: player_targets,
+            optional: false,
+        });
+        acc.push(TargetSelectionSlot {
             legal_targets,
             optional: ability.targeting_is_optional(),
         });
@@ -2101,6 +2299,15 @@ fn collect_per_opponent_target_fanout_specs(
     };
 
     for opponent in per_opponent_fanout_players(state, ability.controller) {
+        // CR 115.1 + CR 603.3d: Mirror the slot-builder: skip opponents whose
+        // creature pool is empty when targeting is optional so specs and slots
+        // stay in lockstep.
+        if ability.targeting_is_optional()
+            && targeting::find_legal_targets(state, &object_filter, opponent, ability.source_id)
+                .is_empty()
+        {
+            continue;
+        }
         specs.push(TargetSlotSpec {
             filter: TargetFilter::SpecificPlayer { id: opponent },
             optional: false,
@@ -2336,7 +2543,7 @@ fn skips_stack_targets_after_deferred_effect(effect: &Effect) -> bool {
 fn collect_target_slots_after_deferred_effect(
     state: &GameState,
     sub_ability: Option<&ResolvedAbility>,
-    slots: &mut Vec<TargetSelectionSlot>,
+    acc: &mut SlotAccumulator,
 ) -> Result<(), EngineError> {
     let Some(sub_ability) = sub_ability else {
         return Ok(());
@@ -2348,10 +2555,10 @@ fn collect_target_slots_after_deferred_effect(
         return collect_target_slots_after_deferred_effect(
             state,
             sub_ability.sub_ability.as_deref(),
-            slots,
+            acc,
         );
     }
-    collect_target_slots(state, sub_ability, slots)
+    collect_target_slots(state, sub_ability, acc)
 }
 
 fn collect_target_slot_specs_after_deferred_effect(
@@ -3052,27 +3259,21 @@ fn assign_targets_recursive(
         && triggers::extract_target_filter_from_effect(&ability.effect).is_some()
     {
         if let Some(spec) = ability.multi_target.as_ref() {
-            if multi_target_max_needs_quantity_choice(state, ability, spec) {
-                return Err(EngineError::InvalidAction(
-                    "Target count requires a resolved quantity before target selection".to_string(),
-                ));
-            }
             let remaining_minimum = ability
                 .sub_ability
                 .as_deref()
-                .map(minimum_targets_in_chain)
+                .map(|sub| minimum_targets_in_chain(state, sub))
                 .unwrap_or(0);
             let remaining_after_current = targets.len().saturating_sub(*next_target);
             // Issue #321: cap at this node's own resolved `multi_target` max so a
             // node does not claim a downstream `up to N` effect's optional
             // targets. Mirrors the cap in `assign_selected_slots_recursive`.
-            let node_max = resolve_multi_target_max(state, ability, spec)
-                .map(|max_targets| max_targets.max(spec.min))
-                .unwrap_or(remaining_after_current);
+            let bounds = resolve_multi_target_bounds(state, ability, spec, remaining_after_current)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
             let current_count = remaining_after_current
                 .saturating_sub(remaining_minimum)
-                .min(node_max);
-            if current_count < spec.min {
+                .min(bounds.max);
+            if current_count < bounds.min {
                 return Err(EngineError::InvalidAction(
                     "Incorrect number of multi-target selections".to_string(),
                 ));
@@ -3279,7 +3480,7 @@ fn assign_selected_slots_recursive(
             let remaining_minimum = ability
                 .sub_ability
                 .as_deref()
-                .map(minimum_targets_in_chain)
+                .map(|sub| minimum_targets_in_chain(state, sub))
                 .unwrap_or(0);
             let remaining_after_current = selected_slots.len().saturating_sub(*next_slot);
             // Issue #321: A multi-target node must consume only as many slots as
@@ -3291,19 +3492,18 @@ fn assign_selected_slots_recursive(
             // Betor's "+1/+1 counters" PutCounter) to the graveyard-return
             // target as well. Cap at this node's max so each effect resolves
             // against exactly its own chosen targets (CR 601.2c).
-            let node_max = resolve_multi_target_max(state, ability, spec)
-                .map(|max_targets| max_targets.max(spec.min))
-                .unwrap_or(remaining_after_current);
+            let bounds = resolve_multi_target_bounds(state, ability, spec, remaining_after_current)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
             let current_slots = remaining_after_current
                 .saturating_sub(remaining_minimum)
-                .min(node_max);
+                .min(bounds.max);
             let end_slot = *next_slot + current_slots;
             let Some(window) = selected_slots.get(*next_slot..end_slot) else {
                 return Err(EngineError::InvalidAction(
                     "Missing required target".to_string(),
                 ));
             };
-            if window.len() < spec.min || window[..spec.min].iter().any(Option::is_none) {
+            if window.len() < bounds.min || window[..bounds.min].iter().any(Option::is_none) {
                 return Err(EngineError::InvalidAction(
                     "Missing required target".to_string(),
                 ));
@@ -3505,7 +3705,7 @@ fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbil
     chain_has_target_sink(sub_ability)
 }
 
-fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
+fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usize {
     let attach_targets = if let Effect::Attach { attachment, target } = &ability.effect {
         if ability.optional_targeting {
             0
@@ -3578,7 +3778,7 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
             .as_ref()
             .filter(|spec| spec.max.is_some())
         {
-            spec.min
+            resolve_multi_target_min(state, ability, spec)
         } else if ability.optional_targeting {
             0
         } else {
@@ -3595,19 +3795,22 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
         + current;
 
     let rest = if defers_sub_ability_target_selection(&ability.effect) {
-        minimum_targets_after_deferred_effect(ability.sub_ability.as_deref())
+        minimum_targets_after_deferred_effect(state, ability.sub_ability.as_deref())
     } else {
         ability
             .sub_ability
             .as_deref()
-            .map(minimum_targets_in_chain)
+            .map(|sub| minimum_targets_in_chain(state, sub))
             .unwrap_or(0)
     };
 
     current + rest
 }
 
-fn minimum_targets_after_deferred_effect(sub_ability: Option<&ResolvedAbility>) -> usize {
+fn minimum_targets_after_deferred_effect(
+    state: &GameState,
+    sub_ability: Option<&ResolvedAbility>,
+) -> usize {
     let Some(sub_ability) = sub_ability else {
         return 0;
     };
@@ -3615,9 +3818,9 @@ fn minimum_targets_after_deferred_effect(sub_ability: Option<&ResolvedAbility>) 
         return 0;
     }
     if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
-        return minimum_targets_after_deferred_effect(sub_ability.sub_ability.as_deref());
+        return minimum_targets_after_deferred_effect(state, sub_ability.sub_ability.as_deref());
     }
-    minimum_targets_in_chain(sub_ability)
+    minimum_targets_in_chain(state, sub_ability)
 }
 
 /// CR 700.2a: The controller of a modal spell or activated ability chooses the mode(s)
@@ -3732,7 +3935,8 @@ mod tests {
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
-        GameState, StackEntryKind, TargetSelectionConstraint, TargetSelectionSlot, WaitingFor,
+        GameState, PayCostKind, StackEntryKind, TargetSelectionConstraint, TargetSelectionSlot,
+        WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -3825,6 +4029,7 @@ mod tests {
                         target_player: None,
                         selection_constraint: SearchSelectionConstraint::None,
                         split: None,
+                        source_zones: vec![crate::types::zones::Zone::Library],
                     },
                 )
                 .cost(AbilityCost::Composite {
@@ -3863,7 +4068,13 @@ mod tests {
         )
         .expect("Maze's End activation should begin");
         assert!(
-            matches!(waiting, WaitingFor::ReturnToHandForCost { .. }),
+            matches!(
+                waiting,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::ReturnToHand,
+                    ..
+                }
+            ),
             "self-bounce cost should request a return-to-hand selection"
         );
         state.waiting_for = waiting;
@@ -4426,6 +4637,7 @@ mod tests {
                 target_player: Some(TargetFilter::Player),
                 selection_constraint: SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![crate::types::zones::Zone::Library],
             },
             vec![],
             source,
@@ -5520,9 +5732,14 @@ mod tests {
     }
 
     #[test]
-    fn per_opponent_gain_control_auto_select_defers_when_optional_skip_needs_slot_position() {
+    fn per_opponent_fanout_optional_skips_opponent_with_no_legal_targets() {
+        // Regression: Haytham Kenway crash — "for each opponent, exile up to
+        // one target creature that player controls." When one opponent has no
+        // creatures the slot-builder must skip that opponent entirely so the
+        // player is never shown an empty selection step.
         let mut state = GameState::new(FormatConfig::standard(), 3, 42);
-        create_creature(&mut state, PlayerId(2), CardId(1), "Opp Two");
+        // Player 1 has no creatures. Player 2 has one.
+        let opp_two_creature = create_creature(&mut state, PlayerId(2), CardId(1), "Opp Two");
         let mut ability = per_opponent_gain_control_ability();
         ability.multi_target = Some(MultiTargetSpec::bounded(
             0,
@@ -5534,16 +5751,51 @@ mod tests {
         ));
         let slots = build_target_slots(&state, &ability).expect("target slots should build");
 
-        assert_eq!(slots.len(), 4);
-        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
-        assert!(slots[1].legal_targets.is_empty());
+        // Player 1's slots are omitted — only Player 2's pair is present.
+        assert_eq!(slots.len(), 2, "Player 1 (no creatures) must be skipped");
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(2))]);
+        assert!(!slots[0].optional);
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(opp_two_creature)]
+        );
         assert!(slots[1].optional);
-        assert_eq!(slots[2].legal_targets, vec![TargetRef::Player(PlayerId(2))]);
 
+        // Multiple valid assignments (skip or take opp-two creature) — no
+        // single forced choice, so auto_select defers to the player.
         assert_eq!(
             auto_select_targets_for_ability(&state, &ability, &slots, &[])
-                .expect("legal skip-plus-target assignment should not be rejected"),
+                .expect("legal assignment exists"),
             None
+        );
+        assert!(has_legal_target_assignment_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn per_opponent_fanout_optional_all_opponents_no_creatures_yields_empty_slots() {
+        // Regression: 2-player game, Haytham Kenway enters, opponent has no
+        // creatures. Slot list must be empty so the trigger auto-pushes with
+        // no targets and resolves doing nothing — no UI crash, no spurious
+        // cost_payment_failed_flag.
+        let state = GameState::new_two_player(42);
+        let mut ability = per_opponent_gain_control_ability();
+        ability.multi_target = Some(MultiTargetSpec::bounded(
+            0,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ));
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert!(
+            slots.is_empty(),
+            "no legal creature targets for any opponent → slots must be empty"
         );
         assert!(has_legal_target_assignment_for_ability(
             &state,
@@ -6672,6 +6924,52 @@ mod tests {
     }
 
     #[test]
+    fn build_target_slots_resolves_exact_dynamic_multi_target_min() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        for index in 0..3 {
+            let creature = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(index + 1),
+                PlayerId(0),
+                format!("Creature {index}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::exact(x));
+
+        assert!(build_target_slots(&state, &ability).is_err());
+        ability.chosen_x = Some(2);
+
+        let slots = build_target_slots(&state, &ability).expect("chosen X should resolve bounds");
+        assert_eq!(slots.len(), 2);
+        assert!(slots.iter().all(|slot| !slot.optional));
+
+        ability.chosen_x = Some(4);
+        assert!(build_target_slots(&state, &ability).is_err());
+    }
+
+    #[test]
     fn has_legal_target_assignment_short_circuits_multi_target_existence() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         for index in 0..16 {
@@ -7185,6 +7483,178 @@ mod tests {
             slots.len(),
             2,
             "recipient + redirect slots must both surface when both filters are set"
+        );
+    }
+
+    /// Spawn `count` creatures on the battlefield controlled by `controller`.
+    fn spawn_creatures(
+        state: &mut crate::types::game_state::GameState,
+        controller: PlayerId,
+        count: usize,
+    ) {
+        for index in 0..count {
+            let creature = crate::game::zones::create_object(
+                state,
+                crate::types::identifiers::CardId(index as u64 + 1),
+                controller,
+                format!("Creature {index}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+        }
+    }
+
+    fn single_target_mode(effect: Effect) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Spell, effect)
+    }
+
+    /// CR 700.2: A two-mode modal where both chosen modes target — each slot's
+    /// label must name the mode it belongs to, in sorted printed order, and the
+    /// labels vector must be the same length as the slots vector.
+    #[test]
+    fn build_target_slots_labelled_aligns_labels_with_chosen_modes() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        spawn_creatures(&mut state, PlayerId(0), 2);
+
+        let abilities = vec![
+            single_target_mode(Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            }),
+            single_target_mode(Effect::Tap {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            }),
+        ];
+        let descriptions = vec![
+            "Destroy target creature.".to_string(),
+            "Tap target creature.".to_string(),
+        ];
+
+        let (slots, labels) = build_target_slots_labelled(
+            &state,
+            &abilities,
+            &[1, 0],
+            &descriptions,
+            ObjectId(10),
+            PlayerId(0),
+            &SpellContext::default(),
+            None,
+        )
+        .expect("labelled modal slots build");
+
+        assert_eq!(slots.len(), 2);
+        assert_eq!(labels.len(), slots.len(), "labels parallel slots");
+        // Indices sorted to printed order [0, 1] regardless of chosen order.
+        assert_eq!(labels[0].as_deref(), Some("Destroy target creature."));
+        assert_eq!(labels[1].as_deref(), Some("Tap target creature."));
+    }
+
+    /// A single chosen mode that contributes two slots (effect + sub-ability)
+    /// must have both slots share that mode's head label.
+    #[test]
+    fn build_target_slots_labelled_multi_clause_single_mode_shares_label() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        spawn_creatures(&mut state, PlayerId(0), 2);
+
+        let mut mode = single_target_mode(Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        });
+        mode.sub_ability = Some(Box::new(single_target_mode(Effect::Tap {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        })));
+        let abilities = vec![mode];
+        let descriptions = vec!["Destroy then tap.".to_string()];
+
+        let (slots, labels) = build_target_slots_labelled(
+            &state,
+            &abilities,
+            &[0],
+            &descriptions,
+            ObjectId(10),
+            PlayerId(0),
+            &SpellContext::default(),
+            None,
+        )
+        .expect("multi-clause single mode builds");
+
+        assert_eq!(slots.len(), 2, "effect + sub-ability each surface a slot");
+        assert_eq!(labels.len(), slots.len());
+        assert!(
+            labels
+                .iter()
+                .all(|l| l.as_deref() == Some("Destroy then tap.")),
+            "both clause slots share the mode head label"
+        );
+    }
+
+    /// A per-opponent fan-out mode must propagate its mode label to every
+    /// surfaced slot (player slot + object slot per opponent).
+    #[test]
+    fn build_target_slots_labelled_per_opponent_fanout_inherits_label() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        spawn_creatures(&mut state, PlayerId(1), 1);
+
+        let mode = single_target_mode(Effect::Tap {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        });
+        let abilities = vec![mode];
+        let descriptions = vec!["Tap a creature.".to_string()];
+
+        let (slots, labels) = build_target_slots_labelled(
+            &state,
+            &abilities,
+            &[0],
+            &descriptions,
+            ObjectId(10),
+            PlayerId(0),
+            &SpellContext::default(),
+            None,
+        )
+        .expect("fan-out modal slots build");
+
+        assert_eq!(labels.len(), slots.len());
+        assert!(
+            labels
+                .iter()
+                .all(|l| l.as_deref() == Some("Tap a creature.")),
+            "every fanned-out slot inherits the mode label"
+        );
+    }
+
+    /// A single chosen index with no matching `mode_descriptions` entry yields a
+    /// `None` label per slot (graceful degradation — no panic on missing text).
+    #[test]
+    fn build_target_slots_labelled_missing_description_yields_none() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        spawn_creatures(&mut state, PlayerId(0), 1);
+
+        let abilities = vec![single_target_mode(Effect::Tap {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+        })];
+
+        let (slots, labels) = build_target_slots_labelled(
+            &state,
+            &abilities,
+            &[0],
+            &[],
+            ObjectId(10),
+            PlayerId(0),
+            &SpellContext::default(),
+            None,
+        )
+        .expect("missing-description modal slots build");
+
+        assert_eq!(labels.len(), slots.len());
+        assert!(
+            labels.iter().all(|l| l.is_none()),
+            "no description -> None labels"
         );
     }
 }

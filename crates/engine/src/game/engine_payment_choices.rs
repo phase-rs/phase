@@ -14,8 +14,8 @@ use crate::types::zones::Zone;
 use super::casting;
 use super::effects;
 use super::engine::{
-    handle_tap_land_for_mana, handle_untap_land_for_mana, resume_pending_continuation_if_priority,
-    EngineError,
+    check_exile_returns, handle_tap_land_for_mana, handle_untap_land_for_mana,
+    resume_pending_continuation_if_priority, EngineError,
 };
 use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::mana_abilities;
@@ -716,6 +716,15 @@ pub(super) fn handle_unless_payment(
         let result = effects::resolve_ability_chain(state, &ability, events, 0);
         state.current_trigger_event = previous_trigger_event;
         result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+        // CR 610.3 + #783: The unless-payment resume bypasses
+        // `run_post_action_pipeline` (see the inline-scan note in
+        // engine.rs), so the standard exile-return scan never runs. When the
+        // resolved effect makes a source leave the battlefield — e.g. Static
+        // Prison sacrificing itself via "sacrifice unless you pay {E}" — the
+        // permanent it exiled "until it leaves the battlefield" must return.
+        // Idempotent and event-scoped: a no-op when no source left this way.
+        check_exile_returns(state, events);
     }
 
     if matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }) {
@@ -931,6 +940,13 @@ pub(super) fn handle_ward_sacrifice_choice(
         ));
     }
 
+    // CR 603.10a + CR 118.8: NOTE — sequential Ward multi-sacrifice is a separate
+    // co-departed gap. Each Ward sacrifice is taken in its own action's `events`
+    // (one permanent per round-trip, re-prompting for `remaining - 1`), so the
+    // permanents paying one Ward cost are never stamped as a simultaneous departure
+    // group; the `handle_sacrifice_for_cost` co-departed stamp does not apply here.
+    // A co-departing observer therefore under-observes. Closing this would batch all
+    // Ward sacrifices into one action (like `handle_sacrifice_for_cost`) — out of scope.
     crate::game::sacrifice::sacrifice_permanent(state, chosen[0], player, events)?;
 
     // If more sacrifices remain, re-prompt with updated eligible permanents

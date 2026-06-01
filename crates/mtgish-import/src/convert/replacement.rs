@@ -7,9 +7,9 @@
 
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef,
-    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, ManaReplacementScope,
-    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, RestrictionExpiry, TargetFilter,
+    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp,
+    ManaReplacementScope, QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, TargetFilter, TypedFilter,
 };
 use engine::types::card_type::Supertype;
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
@@ -17,8 +17,9 @@ use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 use crate::convert::filter::{
-    artifact_type_name, choice_type_for_choosable_color, convert as convert_permanents,
-    convert_permanent, damage_sources_to_filter, land_type_name,
+    artifact_type_name, cards_to_filter, choice_type_for_choosable_color,
+    convert as convert_permanents, convert_permanent, damage_sources_to_filter, land_type_name,
+    player_to_controller, players_to_controller,
 };
 use crate::convert::mana;
 use crate::convert::quantity;
@@ -849,6 +850,32 @@ fn graveyard_event_to_valid_card(
     match event {
         E::APermanentWouldDie(perms) | E::APermanentWouldBePutIntoAGraveyard(perms) => {
             Ok(Some(convert_permanents(perms)?))
+        }
+        // CR 614.6: "If a card [predicate] would be put into [player]'s graveyard from anywhere".
+        // Combines the card predicate with an ownership filter derived from the player scope.
+        // CR 400.3: Cards go to their owner's graveyard, so owner == destination player.
+        E::WouldPutACardInAPlayersGraveyardFromAnywhere(cards, players)
+        | E::WouldPutACardInAPlayersGraveyardFromAnywhereOtherThanBattlefield(cards, players)
+        | E::WouldPutACardOrTokenInAPlayersGraveyardFromAnywhere(cards, players) => {
+            let card_filter = cards_to_filter(cards)?;
+            let ctrl = players_to_controller(players)?;
+            let owner_filter = TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Owned { controller: ctrl }]),
+            );
+            Ok(Some(TargetFilter::And {
+                filters: vec![card_filter, owner_filter],
+            }))
+        }
+        E::WouldPutACardInPlayersGraveyardFromAnywhere(cards, player)
+        | E::WouldPutACardInPlayersGraveyardFromAnywhereNotCycled(cards, player) => {
+            let card_filter = cards_to_filter(cards)?;
+            let ctrl = player_to_controller(player)?;
+            let owner_filter = TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Owned { controller: ctrl }]),
+            );
+            Ok(Some(TargetFilter::And {
+                filters: vec![card_filter, owner_filter],
+            }))
         }
         other => Err(ConversionGap::UnknownVariant {
             path: String::new(),
@@ -3181,5 +3208,45 @@ mod tests {
             },
             other => panic!("expected AddCounter, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn graveyard_would_put_card_in_players_graveyard_from_anywhere_lowers_to_moved_exile() {
+        use crate::schema::types::{Cards, Players, ReplacableEventWouldPutIntoGraveyard as E};
+
+        let event = E::WouldPutACardInAPlayersGraveyardFromAnywhere(
+            Box::new(Cards::ControlledByAPlayer(Box::new(Players::Other(
+                Box::new(crate::schema::types::Player::You),
+            )))),
+            Box::new(Players::Opponent),
+        );
+        let defs = convert_replace_would_put_into_graveyard(
+            &event,
+            &[ReplacementActionWouldPutIntoGraveyard::ExileItInstead],
+        )
+        .unwrap();
+        assert_eq!(defs.len(), 1);
+        let def = &defs[0];
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.destination_zone, Some(Zone::Graveyard));
+        let execute = def.execute.as_ref().expect("execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+        let TargetFilter::And { filters } = def.valid_card.as_ref().expect("valid card filter")
+        else {
+            panic!("expected And valid-card filter, got {:?}", def.valid_card);
+        };
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { properties, .. })
+                if properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                })
+        )));
     }
 }

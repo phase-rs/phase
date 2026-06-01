@@ -113,6 +113,7 @@ fn parse_remaining_state_presence_conditions(input: &str) -> OracleResult<'_, St
     alt((
         parse_opponent_poison_conditions,
         parse_defending_player_comparison_conditions,
+        parse_that_player_controls_more_comparison,
         parse_no_opponent_comparison_conditions,
         parse_opponent_comparison_conditions,
         parse_life_conditions,
@@ -2490,7 +2491,19 @@ fn parse_zone_phrase(input: &str) -> OracleResult<'_, Zone> {
 /// etc.) without enumerating each (zone × zone) permutation.
 fn parse_source_in_zone_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_source_self_token(input)?;
-    let (rest, _) = tag(" is").parse(rest)?;
+    // CR 113.6b vs CR 113.6c: the copula polarity decides which zone-function
+    // rule applies. Affirmative ("~ is on the battlefield") names the zones the
+    // ability functions IN (CR 113.6b). Negated ("~ isn't on the battlefield" /
+    // "~ is not on the battlefield") names the zones it does NOT function in,
+    // i.e. it functions everywhere except those zones (CR 113.6c) — modeled by
+    // wrapping the affirmative reading in `Not`. Negated copulae are tried first
+    // so " is not " is not greedily split into " is " + "not …" (mirrors the
+    // polarity alternation in `parse_recipient_is_filter_condition`).
+    let (rest, negated) = alt((
+        value(true, alt((tag(" isn't"), tag(" is not")))),
+        value(false, tag(" is")),
+    ))
+    .parse(rest)?;
     let (rest, first) = parse_zone_phrase(rest)?;
     // CR 113.6b: a single ability that names multiple zones functions in each
     // of them — the "or"-separated zone list composes disjunctively across the
@@ -2498,15 +2511,26 @@ fn parse_source_in_zone_condition(input: &str) -> OracleResult<'_, StaticConditi
     // authority for the disjunction is the same CR 113.6b that authorizes the
     // zone clause itself.)
     let (rest, more) = many0(preceded(parse_zone_list_separator, parse_zone_phrase)).parse(rest)?;
-    if more.is_empty() {
-        return Ok((rest, StaticCondition::SourceInZone { zone: first }));
-    }
-    let mut conditions = Vec::with_capacity(more.len() + 1);
-    conditions.push(StaticCondition::SourceInZone { zone: first });
-    for zone in more {
-        conditions.push(StaticCondition::SourceInZone { zone });
-    }
-    Ok((rest, StaticCondition::Or { conditions }))
+    let condition = if more.is_empty() {
+        StaticCondition::SourceInZone { zone: first }
+    } else {
+        let mut conditions = Vec::with_capacity(more.len() + 1);
+        conditions.push(StaticCondition::SourceInZone { zone: first });
+        for zone in more {
+            conditions.push(StaticCondition::SourceInZone { zone });
+        }
+        StaticCondition::Or { conditions }
+    };
+    let condition = if negated {
+        // CR 113.6c: an ability that states which zones it doesn't function in
+        // functions everywhere except those zones.
+        StaticCondition::Not {
+            condition: Box::new(condition),
+        }
+    } else {
+        condition
+    };
+    Ok((rest, condition))
 }
 
 fn parse_zone_list_separator(input: &str) -> OracleResult<'_, ()> {
@@ -4492,6 +4516,44 @@ fn parse_there_exists_condition(input: &str) -> OracleResult<'_, StaticCondition
     ))
 }
 
+/// Parse "that player controls more [type] than you" → QuantityComparison.
+///
+/// CR 603.2b + CR 603.4 + CR 102.1: Phase triggers such as Keeper of the Accord
+/// ("At the beginning of each opponent's end step, if that player controls more
+/// creatures than you, ...") compare the active player's battlefield to the
+/// source controller's. `ControllerRef::ScopedPlayer` binds to the event player
+/// at both detection and resolution (`resolve_quantity_for_trigger_check`).
+fn parse_that_player_controls_more_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("that player controls more ").parse(input)?;
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" than you").parse(rest)?;
+    let (rest, _) = tag(" than you").parse(rest)?;
+
+    let (filter, _) = parse_type_phrase(type_text.trim());
+    let scoped_filter = match filter {
+        TargetFilter::Typed(tf) => TargetFilter::Typed(tf.controller(ControllerRef::ScopedPlayer)),
+        other => other,
+    };
+    let you_filter = match parse_type_phrase(type_text.trim()) {
+        (TargetFilter::Typed(tf), _) => TargetFilter::Typed(tf.controller(ControllerRef::You)),
+        (other, _) => other,
+    };
+
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: scoped_filter,
+                },
+            },
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter: you_filter },
+            },
+        },
+    ))
+}
+
 /// Parse "defending player controls more [type] than you" → QuantityComparison.
 ///
 /// CR 508.1b + CR 603.4: Attack triggers can carry intervening-if clauses
@@ -4987,6 +5049,55 @@ mod tests {
                         scope: CountScope::Controller,
                     },
                 },
+            },
+        );
+    }
+
+    /// CR 113.6c: "as long as ~ isn't on the battlefield" (Grist, the Hunger
+    /// Tide's command-zone-as-creature static) — the negated copula must wrap
+    /// the affirmative `SourceInZone { Battlefield }` reading in `Not`, marking
+    /// that the ability functions everywhere EXCEPT the battlefield.
+    #[test]
+    fn parse_source_isnt_on_battlefield_wraps_in_not() {
+        let (rest, c) = parse_condition("as long as ~ isn't on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceInZone {
+                    zone: crate::types::zones::Zone::Battlefield,
+                }),
+            },
+        );
+    }
+
+    /// CR 113.6b: the affirmative copula still produces the bare
+    /// `SourceInZone { Battlefield }` (no `Not` wrapper) — guards against the
+    /// polarity alternation regressing the existing affirmative path.
+    #[test]
+    fn parse_source_is_on_battlefield_stays_affirmative() {
+        let (rest, c) = parse_condition("as long as ~ is on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::SourceInZone {
+                zone: crate::types::zones::Zone::Battlefield,
+            },
+        );
+    }
+
+    /// CR 113.6c: the "is not" spelling variant must also wrap in `Not` and must
+    /// not be greedily split into " is " + "not on the battlefield".
+    #[test]
+    fn parse_source_is_not_on_battlefield_wraps_in_not() {
+        let (rest, c) = parse_condition("as long as ~ is not on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::Not {
+                condition: Box::new(StaticCondition::SourceInZone {
+                    zone: crate::types::zones::Zone::Battlefield,
+                }),
             },
         );
     }
@@ -7457,6 +7568,38 @@ mod tests {
                         qty: QuantityRef::ObjectCount { .. },
                     },
             } => {}
+            other => panic!("expected ObjectCount GT ObjectCount, got {other:?}"),
+        }
+    }
+
+    /// CR 603.2b + CR 603.4: Keeper of the Accord — "that player" is the active
+    /// player whose phase is beginning, not a generic opponent aggregate.
+    #[test]
+    fn test_that_player_controls_more_creatures_than_you() {
+        let (rest, c) =
+            parse_inner_condition("that player controls more creatures than you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(lhs),
+                            },
+                    },
+                comparator: Comparator::GT,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(rhs),
+                            },
+                    },
+            } => {
+                assert_eq!(lhs.controller, Some(ControllerRef::ScopedPlayer));
+                assert_eq!(rhs.controller, Some(ControllerRef::You));
+            }
             other => panic!("expected ObjectCount GT ObjectCount, got {other:?}"),
         }
     }

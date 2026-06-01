@@ -49,6 +49,21 @@
     "showKeywords": "Mostrar palabras clave en las cartas del campo de batalla",
     "opponentHoverPreview": "Vista previa al pasar el cursor sobre el oponente",
     "showOpponentBoard": "Mostrar el tablero del oponente al pasar el cursor sobre el HUD",
+    "cardPreviewDelay": "Retardo al pasar el cursor",
+    "cardPreviewDelayInstant": "Instantáneo",
+    "cardPreviewDelayValue": "{{ms}} ms",
+    "cardPreviewDelayHint": "Espera este tiempo tras pasar el cursor sobre una carta antes de mostrar la vista previa.",
+    "cardPreview": "Vista previa de la carta al pasar el cursor",
+    "cardPreviewOptions": {
+      "follow": "Seguir el cursor",
+      "side": "Anclar al lateral",
+      "shift": "Mantén Shift"
+    },
+    "cardPreviewHint": {
+      "follow": "La vista previa ampliada sigue al cursor mientras pasas sobre una carta.",
+      "side": "La vista previa se ancla al borde de la pantalla para que nunca tape el tablero.",
+      "shift": "La vista previa solo aparece mientras mantienes pulsada la tecla Shift, como en Tabletop Simulator."
+    },
     "cardArtPreferences": "Preferencias de ilustración de cartas",
     "clearArtOverrides_one": "Borrar todas las anulaciones de ilustración ({{count}})",
     "clearArtOverrides_other": "Borrar todas las anulaciones de ilustración ({{count}})",
@@ -86,7 +101,7 @@
   },
   "sync": {
     "title": "Sincronización en la nube",
-    "description": "Inicia sesión para sincronizar tus mazos, preferencias y suscripciones de feeds entre dispositivos. Tus datos viven en tu cuenta y se actualizan automáticamente cuando cambian.",
+    "description": "Inicia sesión para sincronizar tus mazos, preferencias y suscripciones de feeds entre dispositivos. Tus datos se alojan en tu cuenta y se actualizan automáticamente cuando cambian.",
     "signInWith": "Iniciar sesión con {{provider}}",
     "signOut": "Cerrar sesión",
     "signedInAs": "Sesión iniciada como {{name}}",

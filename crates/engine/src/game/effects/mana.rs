@@ -655,8 +655,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ChoiceValue, DevotionColors, QuantityExpr, QuantityRef, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ChoiceValue, DevotionColors, QuantityExpr,
+        QuantityRef, TargetFilter,
     };
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -1341,6 +1343,101 @@ mod tests {
         // Should produce red mana (from opponent's Mountain).
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
         assert_eq!(state.players[0].mana_pool.total(), 1);
+    }
+
+    /// CR 106.7 (issue #1556): Exotic Orchard — "Add one mana of any color that a
+    /// land an opponent controls could produce." When the opponent's lands could
+    /// produce more than one color, the activator must be prompted to choose,
+    /// not silently handed the first color. Mirrors `AnyTypeProduceableBy`
+    /// (Reflecting Pool) prompt behavior.
+    #[test]
+    fn opponent_land_colors_prompts_choice_when_multiple_colors_available() {
+        let mut state = GameState::new_two_player(42);
+
+        // Player 0 controls the Exotic Orchard — the prompt reads the source's controller.
+        let orchard = create_object(
+            &mut state,
+            CardId(401),
+            PlayerId(0),
+            "Exotic Orchard".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&orchard)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        // Opponent (PlayerId(1)) controls a Mountain (red) and a Forest (green).
+        for (cid, name, color, sub) in [
+            (402u64, "Mountain", ManaColor::Red, "Mountain"),
+            (403u64, "Forest", ManaColor::Green, "Forest"),
+        ] {
+            let land = create_object(
+                &mut state,
+                CardId(cid),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push(sub.to_string());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![color],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Mana {
+                produced: ManaProduction::OpponentLandColors {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+            vec![],
+            orchard,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The activator must be asked which color — not handed the first one.
+        match &state.waiting_for {
+            crate::types::game_state::WaitingFor::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoicePrompt::SingleColor { options },
+                ..
+            } => {
+                assert!(options.contains(&ManaType::Red), "red should be offered");
+                assert!(
+                    options.contains(&ManaType::Green),
+                    "green should be offered"
+                );
+                assert_eq!(options.len(), 2);
+            }
+            other => panic!("expected a ChooseManaColor SingleColor prompt, got {other:?}"),
+        }
+        // No mana enters the pool until the choice is made.
+        assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 
     #[test]
