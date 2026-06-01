@@ -748,9 +748,7 @@ mod tests {
     // ---------------------------------------------------------------------
 
     use crate::game::effects::resolve_ability_chain;
-    use crate::types::ability::{
-        GainLifePlayer, QuantityExpr, QuantityRef, TypeFilter, TypedFilter,
-    };
+    use crate::types::ability::{QuantityExpr, QuantityRef, TypeFilter, TypedFilter};
 
     /// Builds the Fumigate-shape chain: `DestroyAll(creatures)` followed by
     /// `GainLife(amount = TrackedSetSize, player = Controller)`.
@@ -760,7 +758,7 @@ mod tests {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::TrackedSetSize,
                 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             source_id,
@@ -922,7 +920,7 @@ mod tests {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::TrackedSetSize,
                 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(200),

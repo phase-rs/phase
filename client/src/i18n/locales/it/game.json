@@ -29,6 +29,7 @@
     "fromSource": "(da {{source}})",
     "basePT": "(base {{power}}/{{toughness}})",
     "damage": "Danno: {{amount}}",
+    "activateCost": "Attiva — {{cost}}",
     "ptDeltaFrom": "{{delta}} da {{source}}",
     "colors": "Colori: {{colors}}",
     "colorless": "Incolore",
