@@ -9240,6 +9240,10 @@ pub enum AbilityCondition {
     /// the parent effect when the additional cost was paid.
     /// The resolver swaps the override sub's effect in place of the parent before resolution.
     AdditionalCostPaidInstead,
+    /// CR 118.9 + CR 608.2c: "If the {COST} cost was paid" on spells with an
+    /// alternative *mana* cost (e.g. Baleful Mastery). Evaluates against
+    /// `SpellContext.alternative_mana_cost_paid`, not `additional_cost_paid`.
+    AlternativeManaCostPaid,
     /// CR 608.2c / CR 608.2d / CR 101.3: Gates a sub-ability on the outcome of
     /// a previous instruction in the same resolution. Parameterized so
     /// optional-decline and mandatory-impossible branches share one condition
@@ -9576,6 +9580,11 @@ pub struct SpellContext {
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,
+    /// CR 118.9: Whether the controller paid an alternative mana cost from
+    /// `casting_options` (not an optional/additional cost such as kicker or
+    /// pay-life alternatives).
+    #[serde(default)]
+    pub alternative_mana_cost_paid: bool,
     /// CR 601.2b/f/h: Number of non-kicker additional-cost payments declared
     /// while casting this spell. Used by keyword abilities such as Squad
     /// (CR 702.157a), whose repeatable payment count is not a kicker count.

@@ -1092,6 +1092,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
         | Some(
             AbilityCondition::AdditionalCostPaid { .. }
             | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
             | AbilityCondition::EventOutcomeWon
             | AbilityCondition::WhenYouDo
             | AbilityCondition::CastFromZone { .. }
@@ -2314,10 +2315,35 @@ fn filter_uses_relative_controller_you(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 503.1a + CR 608.2d (issue #1535): True when the filter is scoped to the
+/// resolution's scoped player — e.g. "that player ... a card they control"
+/// bound by an "at the beginning of each player's upkeep, that player may ..."
+/// trigger (Braids, Conjurer Adept). Such a filter must resolve its acting
+/// player and candidate pool against the per-iteration scoped player, not the
+/// ability's controller.
+fn filter_uses_relative_controller_scoped(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller == Some(ControllerRef::ScopedPlayer),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_uses_relative_controller_scoped)
+        }
+        TargetFilter::Not { filter } => filter_uses_relative_controller_scoped(filter),
+        _ => false,
+    }
+}
+
 pub(crate) fn controller_for_relative_filter(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> PlayerId {
+    // CR 503.1a + CR 608.2d (issue #1535): a filter scoped to the per-iteration
+    // scoped player ("that player ... from their hand" under "each player's
+    // upkeep") resolves to that scoped player, not the ability's controller.
+    if let Some(scoped) = ability.scoped_player {
+        if filter_uses_relative_controller_scoped(target_filter) {
+            return scoped;
+        }
+    }
     if filter_uses_relative_controller_you(target_filter)
         && ability.scoped_player.is_none()
         && ability
@@ -4374,6 +4400,7 @@ pub(crate) fn evaluate_condition(
             kicker_cost.as_ref(),
             *min_count,
         ),
+        AbilityCondition::AlternativeManaCostPaid => ability.context.alternative_mana_cost_paid,
         AbilityCondition::EffectOutcome {
             signal: EffectOutcomeSignal::OptionalEffectPerformed,
         } => ability.context.optional_effect_performed && !state.cost_payment_failed_flag,

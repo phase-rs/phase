@@ -84,14 +84,31 @@ impl GameDb {
         Ok(())
     }
 
-    /// Delete sessions older than `max_age_secs` seconds.
+    /// Delete persisted sessions older than `max_age_secs` seconds across every
+    /// session table — `game_sessions`, `draft_sessions`, and
+    /// `p2p_draft_backups` — and return the total number of rows removed.
+    ///
+    /// Previously only `game_sessions` was pruned, so stale `draft_sessions`
+    /// and `p2p_draft_backups` rows (abandoned drafts, hosts that never cleanly
+    /// tore down a P2P pod) accumulated indefinitely and leaked database
+    /// storage on long-running servers.
     pub fn delete_stale(&self, max_age_secs: u64) -> rusqlite::Result<usize> {
         let cutoff = now_epoch().saturating_sub(max_age_secs);
-        let conn = self.conn.lock().unwrap();
-        let deleted = conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut deleted = tx.execute(
             "DELETE FROM game_sessions WHERE updated_at < ?1",
             params![cutoff],
         )?;
+        deleted += tx.execute(
+            "DELETE FROM draft_sessions WHERE updated_at < ?1",
+            params![cutoff],
+        )?;
+        deleted += tx.execute(
+            "DELETE FROM p2p_draft_backups WHERE updated_at < ?1",
+            params![cutoff],
+        )?;
+        tx.commit()?;
         Ok(deleted)
     }
 
@@ -324,5 +341,84 @@ mod tests {
         let all = db.load_all().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].0, "NEW001");
+    }
+
+    #[test]
+    fn delete_stale_removes_old_draft_sessions() {
+        let db = test_db();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO draft_sessions (draft_code, session_json, updated_at) VALUES (?1, ?2, ?3)",
+                params!["OLDDRAFT", "old", 1000u64],
+            )
+            .unwrap();
+        db.save_draft_session("NEWDRAFT", "new").unwrap();
+
+        let deleted = db.delete_stale(86400).unwrap();
+        assert_eq!(deleted, 1);
+
+        let all = db.load_all_drafts().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "NEWDRAFT");
+    }
+
+    #[test]
+    fn delete_stale_removes_old_p2p_backups() {
+        let db = test_db();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO p2p_draft_backups (draft_code, host_peer_id, snapshot_json, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params!["OLDBACK", "peer", "old", 1000u64],
+            )
+            .unwrap();
+        db.save_p2p_backup("NEWBACK", "peer", "new").unwrap();
+
+        let deleted = db.delete_stale(86400).unwrap();
+        assert_eq!(deleted, 1);
+
+        assert!(db.load_p2p_backup("OLDBACK").unwrap().is_none());
+        assert!(db.load_p2p_backup("NEWBACK").unwrap().is_some());
+    }
+
+    #[test]
+    fn delete_stale_prunes_every_session_table_and_counts_all() {
+        let db = test_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO game_sessions (game_code, session_json, updated_at) VALUES (?1, ?2, ?3)",
+                params!["G", "old", 1000u64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO draft_sessions (draft_code, session_json, updated_at) VALUES (?1, ?2, ?3)",
+                params!["D", "old", 1000u64],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO p2p_draft_backups (draft_code, host_peer_id, snapshot_json, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params!["B", "peer", "old", 1000u64],
+            )
+            .unwrap();
+        }
+
+        // Fresh rows in each table must survive.
+        db.save_session("GNEW", "new").unwrap();
+        db.save_draft_session("DNEW", "new").unwrap();
+        db.save_p2p_backup("BNEW", "peer", "new").unwrap();
+
+        let deleted = db.delete_stale(86400).unwrap();
+        assert_eq!(deleted, 3);
+
+        assert_eq!(db.load_all().unwrap().len(), 1);
+        assert_eq!(db.load_all_drafts().unwrap().len(), 1);
+        assert!(db.load_p2p_backup("B").unwrap().is_none());
+        assert!(db.load_p2p_backup("BNEW").unwrap().is_some());
     }
 }
