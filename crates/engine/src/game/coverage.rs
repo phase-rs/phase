@@ -5045,11 +5045,15 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ZoneChangeObjectMatchesFilter { .. } => {
             ("ZoneChangeObjectMatchesFilter", Handled)
         }
-        // Variants below are parsed but have no runtime resolver today.
-        AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Unhandled),
-        AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
-        AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Unhandled),
-        AbilityCondition::SourceIsTapped => ("SourceIsTapped", Unhandled),
+        // CR 400.7 + CR 608.2c: Target/source filter conditions — resolved by
+        // `evaluate_condition` (effects/mod.rs) with LKI and current-state paths.
+        AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Handled),
+        AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
+        // CR 608.2c: Zone-change-this-way — resolved by `evaluate_condition`
+        // against `state.last_zone_changed_ids`.
+        AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Handled),
+        // CR 611.2b: Source tapped check — resolved by `evaluate_condition`.
+        AbilityCondition::SourceIsTapped => ("SourceIsTapped", Handled),
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
