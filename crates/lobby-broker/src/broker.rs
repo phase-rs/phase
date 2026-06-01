@@ -573,6 +573,9 @@ impl Broker {
 
         // --- optional reservation ---
         if reserve {
+            if conn.reservations.iter().any(|(code, _)| code == &game_code) {
+                return vec![error("You already hold a reservation for this game")];
+            }
             match self.lobby.reserve_seat(
                 &game_code,
                 display_name.unwrap_or_else(|| "Player".to_string()),
@@ -860,6 +863,53 @@ mod tests {
         assert_eq!(out[2], Outbound::SendPlayerCountToSelf);
         assert_eq!(out.len(), 3);
         assert!(conn.subscribed);
+    }
+
+    #[test]
+    fn second_reserve_on_same_game_from_same_conn_is_rejected() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+
+        let mut host = ConnState::default();
+        hello(&mut host, &mut broker, &env);
+        let created = create(&mut host, &mut broker, &env);
+        let code = game_code_of(&created);
+
+        let mut guest = ConnState::default();
+        hello(&mut guest, &mut broker, &env);
+
+        let first = broker.handle(
+            &mut guest,
+            LobbyClientMessage::LookupJoinTarget {
+                game_code: code.clone(),
+                password: None,
+                reserve: true,
+                display_name: Some("Squatter".into()),
+                release_reservation_token: None,
+            },
+            &env,
+        );
+        assert!(matches!(
+            first.last(),
+            Some(Outbound::ToSelf(LobbyServerMessage::JoinTargetInfo { .. }))
+        ));
+
+        let second = broker.handle(
+            &mut guest,
+            LobbyClientMessage::LookupJoinTarget {
+                game_code: code.clone(),
+                password: None,
+                reserve: true,
+                display_name: Some("Squatter".into()),
+                release_reservation_token: None,
+            },
+            &env,
+        );
+        assert!(matches!(
+            second.as_slice(),
+            [Outbound::ToSelf(LobbyServerMessage::Error { .. })]
+        ));
+        assert_eq!(guest.reservations.len(), 1);
     }
 
     #[test]
