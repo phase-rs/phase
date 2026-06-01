@@ -289,6 +289,24 @@ describe("abilityChoiceLabel", () => {
     ).toBe("Tap for {1}");
   });
 
+  it("labels TapLandForMana as Tap for Mana", () => {
+    const object = makeGameObject({
+      name: "Emergence Zone",
+      card_types: {
+        supertypes: [],
+        core_types: ["Land"],
+        subtypes: [],
+      },
+    });
+
+    expect(
+      abilityChoiceLabel(
+        { type: "TapLandForMana", data: { object_id: 1 } },
+        object,
+      ).label,
+    ).toBe("Tap for Mana");
+  });
+
   it("labels the spell face cast action with the front-face name", () => {
     const object = makeGameObject();
 
