@@ -9653,8 +9653,8 @@ mod tests {
         AbilityCost, AbilityTag, ActivationRestriction, AdditionalCost, AggregateFunction,
         BasicLandType, CastPermissionConstraint, CastVariantPaid, CastingPermission,
         ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef,
-        CostCategory, FilterProp, GainLifePlayer, GameRestriction, KickerVariant, ManaContribution,
-        ManaProduction, ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
+        CostCategory, FilterProp, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
+        ManaSpendPermission, ManaSpendRestriction, ModalSelectionCondition,
         ModalSelectionConstraint, MultiTargetSpec, ObjectProperty, ProhibitedActivity, PtValue,
         QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
         SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
@@ -12097,7 +12097,7 @@ mod tests {
                         amount: QuantityExpr::Ref {
                             qty: QuantityRef::PreviousEffectAmount,
                         },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 )),
             );
@@ -14423,7 +14423,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 3 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 )
                 .cost(AbilityCost::Composite {
@@ -14573,7 +14573,7 @@ mod tests {
                     AbilityKind::Activated,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
-                        player: GainLifePlayer::Controller,
+                        player: TargetFilter::Controller,
                     },
                 )
                 .cost(AbilityCost::Mana {
@@ -17791,6 +17791,84 @@ mod tests {
         assert_eq!(obj.colors_spent_to_cast.distinct_colors(), 0);
     }
 
+    /// Issue #1589 — "cannot activate the convoke ability." The frontend
+    /// dispatches convoke taps from the engine's per-object legal-action surface
+    /// (`legal_actions_full`'s `legal_actions_by_object`, NOT the flat list,
+    /// which omits mana actions). After casting a Convoke spell the engine is in
+    /// `ManaPayment { convoke_mode: Some(Convoke) }`, and every convoke-eligible
+    /// creature you control MUST appear there with a `TapForConvoke` action —
+    /// otherwise the player has no UI affordance to activate convoke.
+    #[test]
+    fn convoke_creature_exposed_in_legal_actions_during_payment() {
+        let mut state = setup_game_at_main_phase();
+
+        let helper = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(0),
+            "Helper".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&helper).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(62),
+            PlayerId(0),
+            "Convoke Creature".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Convoke);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Creature".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(62),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(ConvokeMode::Convoke),
+                ..
+            }
+        ));
+
+        // The per-object legal-action surface the frontend renders against must
+        // offer the convoke creature a TapForConvoke action.
+        let (_flat, _costs, grouped) = crate::ai_support::legal_actions_full(&state);
+        let helper_actions = grouped.get(&helper).cloned().unwrap_or_default();
+        assert!(
+            helper_actions.iter().any(|action| matches!(
+                action,
+                GameAction::TapForConvoke { object_id, .. } if *object_id == helper
+            )),
+            "legal_actions_full must expose TapForConvoke for the convoke-eligible \
+             creature during ManaPayment, got {helper_actions:?}"
+        );
+    }
+
     #[test]
     fn cancel_cast_after_convoke_removes_payment_marker_and_untaps_creature() {
         use crate::game::engine::apply_as_current;
@@ -18693,7 +18771,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -20574,7 +20652,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 3 },
-                    player: crate::types::ability::GainLifePlayer::Controller,
+                    player: crate::types::ability::TargetFilter::Controller,
                 },
             )],
             trigger_definitions: Default::default(),
