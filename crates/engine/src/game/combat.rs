@@ -306,11 +306,7 @@ pub fn place_attacking_alongside(
 /// the battlefield blocking does NOT cause "whenever ~ blocks" abilities to
 /// trigger, so no `BlockersDeclared` event is emitted; combat damage reads the
 /// recorded assignments directly. Returns `true` when the block was established.
-pub fn place_blocking(
-    state: &mut GameState,
-    blocker_id: ObjectId,
-    attacker_id: ObjectId,
-) -> bool {
+pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: ObjectId) -> bool {
     let Some(blocker_controller) = state.objects.get(&blocker_id).map(|o| o.controller) else {
         return false;
     };
@@ -344,7 +340,7 @@ pub fn place_blocking(
         .or_default()
         .push(blocker_id);
     // CR 509.1a tracking: record the blocker for per-turn "blocked this turn" queries.
-    state.creatures_blocked_this_turn.push(blocker_id);
+    state.creatures_blocked_this_turn.insert(blocker_id);
     // CR 506.4 + CR 613.1f: a new blocking creature can satisfy Layer 6
     // `FilterProp::Blocking` grants; re-evaluate continuous effects.
     state.layers_dirty.mark_full();

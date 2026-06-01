@@ -115,7 +115,13 @@ mod tests {
 
         // Two creatures controlled by the aggressor, attacking the defender.
         let make_attacker = |state: &mut GameState, name: &str| {
-            let id = create_object(state, CardId(1), aggressor, name.to_string(), Zone::Battlefield);
+            let id = create_object(
+                state,
+                CardId(1),
+                aggressor,
+                name.to_string(),
+                Zone::Battlefield,
+            );
             let obj = state.objects.get_mut(&id).unwrap();
             obj.base_power = Some(2);
             obj.base_toughness = Some(2);
@@ -133,12 +139,16 @@ mod tests {
         let atk_b = make_attacker(&mut state, "Hill Giant");
 
         let mut combat = CombatState::default();
-        combat
-            .attackers
-            .push(AttackerInfo::new(atk_a, AttackTarget::Player(defender), defender));
-        combat
-            .attackers
-            .push(AttackerInfo::new(atk_b, AttackTarget::Player(defender), defender));
+        combat.attackers.push(AttackerInfo::new(
+            atk_a,
+            AttackTarget::Player(defender),
+            defender,
+        ));
+        combat.attackers.push(AttackerInfo::new(
+            atk_b,
+            AttackTarget::Player(defender),
+            defender,
+        ));
         state.combat = Some(combat);
 
         // Mirror Match: copy + block each creature attacking the controller.
@@ -151,7 +161,13 @@ mod tests {
                 owner: TargetFilter::Controller,
             },
             vec![],
-            create_object(&mut state, CardId(2), defender, "Mirror Match".to_string(), Zone::Stack),
+            create_object(
+                &mut state,
+                CardId(2),
+                defender,
+                "Mirror Match".to_string(),
+                Zone::Stack,
+            ),
             defender,
         );
 
@@ -163,16 +179,27 @@ mod tests {
         for token_id in &state.last_created_token_ids {
             let token = &state.objects[token_id];
             assert!(token.is_token, "created object is a token");
-            assert_eq!(token.controller, defender, "copy is controlled by Mirror Match's controller");
+            assert_eq!(
+                token.controller, defender,
+                "copy is controlled by Mirror Match's controller"
+            );
             assert!(!token.tapped, "blocking copy is not tapped");
         }
 
         // Both attackers are now blocked, each by exactly one created copy.
         let combat = state.combat.as_ref().unwrap();
         for atk in [atk_a, atk_b] {
-            let info = combat.attackers.iter().find(|a| a.object_id == atk).unwrap();
+            let info = combat
+                .attackers
+                .iter()
+                .find(|a| a.object_id == atk)
+                .unwrap();
             assert!(info.blocked, "attacker {atk:?} became blocked");
-            assert_eq!(combat.blocker_assignments[&atk].len(), 1, "one blocker per attacker");
+            assert_eq!(
+                combat.blocker_assignments[&atk].len(),
+                1,
+                "one blocker per attacker"
+            );
         }
         // The two blockers are the two created tokens.
         let blockers: std::collections::HashSet<_> =

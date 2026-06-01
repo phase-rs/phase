@@ -12826,30 +12826,26 @@ fn try_parse_for_each_attacker_copy_blocker(
     let (i, _) = tag::<_, _, OracleError<'_>>("for each creature attacking you")
         .parse(i)
         .ok()?;
-    let (i, _) = opt(tag::<_, _, OracleError<'_>>(" or a planeswalker you control"))
-        .parse(i)
-        .ok()?;
+    let (i, _) = opt(tag::<_, _, OracleError<'_>>(
+        " or a planeswalker you control",
+    ))
+    .parse(i)
+    .ok()?;
     let (i, _) = tag::<_, _, OracleError<'_>>(", ").parse(i).ok()?;
 
     // "create a token that's a copy of <anaphor> and that's blocking <anaphor>"
     let (i, _) = tag::<_, _, OracleError<'_>>("create a token that's a copy of ")
         .parse(i)
         .ok()?;
-    let (i, _) = alt((
-        tag::<_, _, OracleError<'_>>("that creature"),
-        tag("it"),
-    ))
-    .parse(i)
-    .ok()?;
+    let (i, _) = alt((tag::<_, _, OracleError<'_>>("that creature"), tag("it")))
+        .parse(i)
+        .ok()?;
     let (i, _) = tag::<_, _, OracleError<'_>>(" and that's blocking ")
         .parse(i)
         .ok()?;
-    let (i, _) = alt((
-        tag::<_, _, OracleError<'_>>("that creature"),
-        tag("it"),
-    ))
-    .parse(i)
-    .ok()?;
+    let (i, _) = alt((tag::<_, _, OracleError<'_>>("that creature"), tag("it")))
+        .parse(i)
+        .ok()?;
     let (i, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(i).ok()?;
     let i = i.trim_start();
 
