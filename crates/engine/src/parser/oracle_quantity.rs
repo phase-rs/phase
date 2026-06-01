@@ -1533,6 +1533,29 @@ fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
 /// The counter-type word, when present, is intentionally NOT extracted —
 /// the resolved quantity is whatever the parent `Effect::RemoveCounter`
 /// removed, and the parent already restricts by counter type.
+/// Returns true when the filter carries information that restricts the tracked
+/// set beyond the default (all objects moved by the preceding effect). A filter
+/// with a `NonToken` property, a specific controller, or specific subtypes is
+/// "nontrivial" and warrants `FilteredTrackedSetSize` instead of plain
+/// `TrackedSetSize`.
+fn filter_is_nontrivial_for_tracked_set(filter: &crate::types::ability::TargetFilter) -> bool {
+    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+    match filter {
+        TargetFilter::Any => false,
+        TargetFilter::Typed(TypedFilter {
+            controller,
+            properties,
+            ..
+        }) => {
+            controller.is_some()
+                || properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::NonToken | FilterProp::Token))
+        }
+        _ => true,
+    }
+}
+
 fn try_parse_counters_removed_this_way(lower: &str) -> bool {
     crate::parser::oracle_nom::primitives::scan_at_word_boundaries(lower, |input| {
         let (rest, _) = alt((
@@ -1826,6 +1849,32 @@ fn parse_for_each_clause_with_they_controller(
         // way" quantities, this is the right place to extend.
         if try_parse_counters_removed_this_way(&lower) {
             return Some(QuantityRef::PreviousEffectAmount);
+        }
+        // CR 608.2c + CR 400.7: "nontoken creature you controlled that was
+        // destroyed this way" — tracked set members matching the filter prefix.
+        // Strip "that was [verb] this way" / "[verb]ed this way" suffixes, then
+        // parse the remaining noun phrase as a filter. Only emit
+        // `FilteredTrackedSetSize` when the filter is non-trivial (e.g. NonToken,
+        // specific controller); plain "creature destroyed this way" falls through
+        // to the unfiltered `TrackedSetSize`.
+        for suffix in &[
+            " that was destroyed this way",
+            " that were destroyed this way",
+            " destroyed this way",
+            " that was sacrificed this way",
+            " that were sacrificed this way",
+            " sacrificed this way",
+        ] {
+            if let Some(filter_phrase) = lower.strip_suffix(suffix) {
+                let (filter, remainder) =
+                    crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
+                if remainder.trim().is_empty() && filter_is_nontrivial_for_tracked_set(&filter) {
+                    return Some(QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(filter),
+                    });
+                }
+                break;
+            }
         }
         return Some(QuantityRef::TrackedSetSize);
     }
@@ -4906,6 +4955,39 @@ mod tests {
 
     /// Same composite shape with "you controlled" — verifies the controller
     /// axis is parameterized correctly across "you / they / an opponent".
+    /// CR 608.2c + CR 400.7: "nontoken creature you controlled that was
+    /// destroyed this way" must emit FilteredTrackedSetSize, not the plain
+    /// TrackedSetSize that the fallback returns for unfiltered "this way"
+    /// clauses. Covers Ceaseless Conflict (issue #1503).
+    #[test]
+    fn nontoken_creature_you_controlled_destroyed_this_way_uses_filtered_tracked_set() {
+        let qty =
+            parse_for_each_clause("nontoken creature you controlled that was destroyed this way")
+                .expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter } => {
+                // Filter must include NonToken and ControlledByYou (controller=You).
+                match *filter {
+                    TargetFilter::Typed(ref tf) => {
+                        assert!(
+                            tf.properties
+                                .contains(&crate::types::ability::FilterProp::NonToken),
+                            "filter must include NonToken"
+                        );
+                        assert!(
+                            tf.controller
+                                .as_ref()
+                                .is_some_and(|c| matches!(c, ControllerRef::You)),
+                            "filter must require controller=You"
+                        );
+                    }
+                    other => panic!("expected Typed filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
     #[test]
     fn total_toughness_of_creatures_you_controlled_exiled_this_way() {
         let qty = parse_quantity_ref(

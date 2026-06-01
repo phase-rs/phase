@@ -2988,6 +2988,11 @@ pub enum QuantityRef {
     /// Only valid during sub-ability chain resolution; returns 0 outside that context.
     /// The caller (token resolver) is responsible for consuming the tracked set after use.
     TrackedSetSize,
+    /// CR 608.2c + CR 400.7: Count of members of the most recent tracked set that
+    /// additionally satisfy the inner filter. Used for "for each nontoken creature
+    /// you controlled that was destroyed this way" patterns where the tracked set
+    /// holds all affected objects but only a filtered subset is relevant.
+    FilteredTrackedSetSize { filter: Box<TargetFilter> },
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the immediately
     /// preceding `Effect::ChangeZoneAll` resolution. Read by Deadly Cover-Up's
     /// "draws a card for each card exiled from their hand this way." The counter

@@ -880,16 +880,29 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             }
         },
 
-        // CR 609.3: Sub-ability chain anaphors — "the number of [counter
-        // type] counters removed this way" / "the number of permanents
-        // destroyed this way" route through the EventContextAmount channel,
-        // mirroring the existing "...this way" handlers above (the engine
-        // doesn't distinguish counter-type or filter shape on the chain
-        // counter — the preceding effect's amount is what's read).
-        GameNumber::NumberOfCountersOfTypeRemovedThisWay(_)
-        | GameNumber::NumPermanentsDestroyedThisWay(_) => QuantityExpr::Ref {
+        // CR 608.2c + CR 122.1: "the number of [counter type] counters removed
+        // this way" — reads the preceding effect's amount from the chain counter.
+        GameNumber::NumberOfCountersOfTypeRemovedThisWay(_) => QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
         },
+
+        // CR 608.2c + CR 609.3: "the number of [filter] permanents destroyed
+        // this way" — routes through the tracked set populated by the preceding
+        // DestroyAll effect. When the filter is non-trivial (e.g. nontoken
+        // creatures you controlled), emit FilteredTrackedSetSize so only matching
+        // members are counted. Otherwise plain TrackedSetSize covers the unfiltered
+        // case ("the number of permanents destroyed this way").
+        GameNumber::NumPermanentsDestroyedThisWay(perms_filter) => {
+            let filter = convert_permanents(perms_filter).unwrap_or(TargetFilter::Any);
+            let qty = if filter_is_nontrivial(&filter) {
+                QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(filter),
+                }
+            } else {
+                QuantityRef::TrackedSetSize
+            };
+            QuantityExpr::Ref { qty }
+        }
 
         // CR 122.1 + CR 603.7c: "the number of [counter type] counters on
         // the dead permanent" — the dead-permanent referent is the trigger-
@@ -1410,6 +1423,29 @@ fn unsupported(g: &GameNumber) -> ConversionGap {
         // tag itself. `MalformedIdiom[...]` sub-binning relies on this
         // convention.
         detail: format!("{tag}: unsupported variant"),
+    }
+}
+
+/// Returns true when the filter carries information that can exclude members
+/// of the tracked set — e.g. a controller restriction or NonToken/Token
+/// property. Plain type filters alone are treated as trivial because the
+/// preceding DestroyAll already scoped destruction to that type, so every
+/// tracked-set member already satisfies it.
+fn filter_is_nontrivial(filter: &TargetFilter) -> bool {
+    use engine::types::ability::{FilterProp, TypedFilter};
+    match filter {
+        TargetFilter::Any => false,
+        TargetFilter::Typed(TypedFilter {
+            controller,
+            properties,
+            ..
+        }) => {
+            controller.is_some()
+                || properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::NonToken | FilterProp::Token))
+        }
+        _ => true,
     }
 }
 
