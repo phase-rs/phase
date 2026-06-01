@@ -65,6 +65,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
@@ -243,6 +244,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::Neighbor { .. }
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
@@ -1121,6 +1123,9 @@ fn filter_inner_for_object(
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
         // SpecificPlayer scopes to players, not objects — no object matches.
         TargetFilter::SpecificPlayer { .. } => false,
+        // CR 102.1 + CR 103.1: Neighbor scopes to a seating-relative player,
+        // not an object — no object matches.
+        TargetFilter::Neighbor { .. } => false,
         TargetFilter::AttachedTo => state
             .objects
             .get(&source_id)
@@ -1377,6 +1382,9 @@ fn zone_change_filter_inner(
         // SpecificPlayer scopes to players, not objects — a zone-change record
         // is always an object transition.
         TargetFilter::SpecificPlayer { .. } => false,
+        // CR 102.1 + CR 103.1: Neighbor scopes to a seating-relative player,
+        // not an object — a zone-change record is always an object transition.
+        TargetFilter::Neighbor { .. } => false,
         // CR 201.2: Zone-change record path mirrors the live-object path —
         // case-insensitive comparison matches the player UI prompt's input.
         TargetFilter::HasChosenName => {
@@ -1628,6 +1636,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::Neighbor { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::CostPaidObject
@@ -1861,6 +1870,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::Neighbor { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::CostPaidObject
@@ -3717,6 +3727,12 @@ pub fn player_matches_target_filter(
         TargetFilter::And { filters } => filters
             .iter()
             .all(|f| player_matches_target_filter(f, player_id, source_controller)),
+        // CR 102.1 + CR 103.1: seating-neighbor resolution requires
+        // `state.seat_order`, which is not available in this stateless matcher.
+        // The recipient is resolved upstream at the GainControl recipient path
+        // (`gain_control::unique_recipient_from_filter`). Fail closed here —
+        // mirrors the `TriggeringPlayer` / `TargetPlayer` fail-closed arms.
+        TargetFilter::Neighbor { .. } => false,
         _ => false,
     }
 }
