@@ -208,6 +208,7 @@ impl KeywordTriggerInstaller {
             )],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
             Keyword::Renown(n) => vec![build_renown_trigger(*n)],
+            Keyword::Mentor => vec![build_mentor_trigger()],
             // CR 702.58a + CR 604.1: granted Graft installs only the
             // "another creature enters" trigger. The ETB-with-N replacement
             // (CR 702.58a clause 1) is a static ability that functions only as
@@ -250,6 +251,7 @@ impl KeywordTriggerInstaller {
             }
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
             Keyword::Renown(_) => is_renown_trigger(trigger),
+            Keyword::Mentor => is_mentor_trigger(trigger),
             // CR 702.58a + CR 604.1: symmetric removal — `RemoveKeyword`
             // strips the Graft enters-trigger when the granted keyword is
             // removed.
@@ -454,62 +456,7 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
 /// multiple Mentor instances trigger separately, hence one synthesized trigger
 /// per `Keyword::Mentor` copy.
 pub fn synthesize_mentor(face: &mut CardFace) {
-    use crate::types::triggers::TriggerMode;
-
-    for kw in &face.keywords {
-        if !matches!(kw, Keyword::Mentor) {
-            continue;
-        }
-        // Idempotency: skip if a Mentor counter trigger was already synthesized.
-        let already = face.triggers.iter().any(|t| {
-            matches!(t.mode, TriggerMode::Attacks)
-                && matches!(
-                    t.execute.as_deref().map(|a| &*a.effect),
-                    Some(Effect::PutCounter { counter_type: CounterType::Plus1Plus1, target, .. })
-                        if matches!(target, TargetFilter::Typed(tf)
-                            if tf.properties.iter().any(|p| matches!(p, FilterProp::PtComparison { .. })))
-                )
-        });
-        if already {
-            continue;
-        }
-
-        let mut target_filter = TypedFilter::creature();
-        target_filter.properties = vec![
-            // CR 702.134a: only attacking creatures are legal targets.
-            FilterProp::Attacking,
-            // CR 702.134a + CR 208.1: power strictly less than this creature's.
-            FilterProp::PtComparison {
-                stat: PtStat::Power,
-                scope: PtValueScope::Current,
-                comparator: Comparator::LT,
-                value: QuantityExpr::Ref {
-                    qty: QuantityRef::Power {
-                        scope: ObjectScope::Source,
-                    },
-                },
-            },
-        ];
-
-        let put_counter = Effect::PutCounter {
-            counter_type: CounterType::Plus1Plus1,
-            count: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::Typed(target_filter),
-        };
-
-        face.triggers.push(
-            // CR 702.134a: "Whenever THIS creature attacks" — `valid_card:
-            // SelfRef` so the trigger fires only when the mentoring creature
-            // attacks, not when any other attacker is declared.
-            TriggerDefinition::new(TriggerMode::Attacks)
-                .valid_card(TargetFilter::SelfRef)
-                .execute(AbilityDefinition::new(AbilityKind::Spell, put_counter))
-                .description(
-                    "Mentor — put a +1/+1 counter on target attacking creature with lesser power"
-                        .to_string(),
-                ),
-        );
-    }
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Mentor));
 }
 
 /// CR 603.6a + CR 205.3 + CR 105.2: Synthesize a "keyword ETB → create
@@ -2795,6 +2742,74 @@ fn build_exalted_trigger() -> TriggerDefinition {
         .description(
             "CR 702.83a: Exalted — whenever a creature you control attacks alone, \
              that creature gets +1/+1 until end of turn."
+                .to_string(),
+        )
+}
+
+fn is_mentor_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Attacks)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && t.execute.as_deref().is_some_and(|ability| {
+            matches!(
+                ability.effect.as_ref(),
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(tf),
+                } if tf.properties.contains(&FilterProp::Attacking)
+                    && tf.properties.iter().any(|prop| matches!(
+                        prop,
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::LT,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::Power {
+                                    scope: ObjectScope::Source
+                                }
+                            },
+                        }
+                    ))
+            )
+        })
+}
+
+fn build_mentor_trigger() -> TriggerDefinition {
+    let mut target_filter = TypedFilter::creature();
+    target_filter.properties = vec![
+        // CR 702.134a: only attacking creatures are legal Mentor targets.
+        FilterProp::Attacking,
+        // CR 702.134a + CR 208.1: Mentor targets a creature with power
+        // strictly less than the source creature's current power.
+        FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::LT,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+        },
+    ];
+
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Typed(target_filter),
+        },
+    )
+    .description("Mentor — put a +1/+1 counter on a lesser-power attacker".to_string());
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(
+            "CR 702.134a: Mentor — whenever this creature attacks, put a \
+             +1/+1 counter on target attacking creature with power less than \
+             this creature's power."
                 .to_string(),
         )
 }
@@ -7000,8 +7015,6 @@ mod mentor_synthesis_tests {
     //! CR 702.134a: Mentor synthesizes an `Attacks` trigger (source = this
     //! creature) that puts a +1/+1 counter on a lesser-power attacking creature.
     use super::*;
-    use crate::types::ability::{Comparator, FilterProp, ObjectScope, PtStat, PtValueScope};
-    use crate::types::counter::CounterType;
 
     fn mentor_face() -> CardFace {
         let mut face = CardFace::default();
@@ -7066,17 +7079,21 @@ mod mentor_synthesis_tests {
     }
 
     #[test]
-    fn synthesize_mentor_is_idempotent() {
-        let mut face = mentor_face();
+    fn synthesize_mentor_preserves_duplicate_instances_and_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Mentor);
+        face.keywords.push(Keyword::Mentor);
+
         synthesize_mentor(&mut face);
         synthesize_mentor(&mut face);
+
         assert_eq!(
             face.triggers
                 .iter()
-                .filter(|t| matches!(t.mode, TriggerMode::Attacks))
+                .filter(|t| is_mentor_trigger(t))
                 .count(),
-            1,
-            "repeated synthesis must not duplicate the Mentor trigger"
+            2,
+            "CR 702.134b requires one trigger per Mentor instance, while repeated synthesis must remain idempotent"
         );
     }
 
@@ -7085,6 +7102,18 @@ mod mentor_synthesis_tests {
         let mut face = CardFace::default();
         synthesize_mentor(&mut face);
         assert!(face.triggers.is_empty());
+    }
+
+    #[test]
+    fn keyword_trigger_installer_exposes_runtime_granted_mentor_trigger() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Mentor);
+
+        assert_eq!(triggers.len(), 1);
+        assert!(is_mentor_trigger(&triggers[0]));
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Mentor
+        ));
     }
 }
 
