@@ -129,7 +129,11 @@ fn quirion_ranger_from_card_db_with_forest() {
 
     let forest = runner.state().objects.get(&_forest_id).expect("forest");
     assert!(
-        forest.card_types.subtypes.iter().any(|s| s.eq_ignore_ascii_case("Forest")),
+        forest
+            .card_types
+            .subtypes
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case("Forest")),
         "Forest card must carry the Forest land subtype for Quirion Ranger's cost",
     );
 }

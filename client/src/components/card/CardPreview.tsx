@@ -559,10 +559,10 @@ function CardImagePreview({
   const activateLabels = useMemo(() => {
     if (!obj || obj.zone !== "Battlefield") return [];
     return collectObjectActions(legalActionsByObject, obj.id)
-      .filter((action) => action.type === "ActivateAbility")
-      .map((action) => {
+      .flatMap((action) => {
+        if (action.type !== "ActivateAbility") return [];
         const ability = obj.abilities[action.data.ability_index];
-        return abilityLabel(ability);
+        return ability ? [abilityLabel(ability)] : [];
       })
       .filter((label, index, labels) => label && labels.indexOf(label) === index);
   }, [legalActionsByObject, obj]);
