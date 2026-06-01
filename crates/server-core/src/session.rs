@@ -716,7 +716,6 @@ impl SessionManager {
         &mut self,
         game_code: &str,
         display_name: String,
-        _password_protected: bool,
     ) -> Result<SeatReservation, String> {
         let session = self
             .sessions
