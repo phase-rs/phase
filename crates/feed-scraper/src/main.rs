@@ -1,7 +1,10 @@
 mod feed;
 mod scrape;
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use clap::Parser;
 use reqwest::blocking::Client;
@@ -119,18 +122,55 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// Simple ISO 8601 timestamp without pulling in chrono
+/// Simple ISO 8601 timestamp (UTC date) without pulling in chrono.
 fn chrono_lite_now() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now()
+    let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("time went backwards");
-    let secs = duration.as_secs();
-    // Approximate: good enough for a feed timestamp
-    let days = secs / 86400;
-    let years = 1970 + days / 365;
-    let remaining_days = days % 365;
-    let months = remaining_days / 30 + 1;
-    let day = remaining_days % 30 + 1;
-    format!("{years:04}-{months:02}-{day:02}T00:00:00Z")
+        .expect("time went backwards")
+        .as_secs();
+    let (year, month, day) = civil_from_days((secs / 86_400) as i64);
+    format!("{year:04}-{month:02}-{day:02}T00:00:00Z")
+}
+
+/// Convert days since 1970-01-01 to a `(year, month, day)` Gregorian date.
+///
+/// Uses Howard Hinnant's `civil_from_days` algorithm, which is leap-year
+/// correct. The previous `days / 30` approximation drifted every year and
+/// produced invalid months (e.g. `2025-13-..`) for the last days of a 365-day
+/// cycle.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    let year = yoe as i64 + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::civil_from_days;
+
+    #[test]
+    fn converts_known_days_to_dates() {
+        // days since 1970-01-01
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_782), (2024, 2, 29)); // leap day
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29)); // century leap year
+        assert_eq!(civil_from_days(20_605), (2026, 6, 1));
+    }
+
+    #[test]
+    fn never_produces_invalid_month_or_day() {
+        // The previous `days / 30` formula produced months > 12 near year end.
+        for days in 0i64..(365 * 80) {
+            let (_y, m, d) = civil_from_days(days);
+            assert!((1..=12).contains(&m), "invalid month {m} for day {days}");
+            assert!((1..=31).contains(&d), "invalid day {d} for day {days}");
+        }
+    }
 }

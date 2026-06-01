@@ -1580,7 +1580,7 @@ pub(crate) fn deterministic_choice(
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
         );
-        return Some(GameAction::DeclareAttackers { attacks });
+        return Some(validated_declare_attackers(state, attacks));
     }
 
     if let WaitingFor::DeclareBlockers {
@@ -1639,7 +1639,7 @@ fn deterministic_combat_choice(
             Some(valid_attacker_ids),
             Some(valid_attack_targets),
         );
-        return Some(GameAction::DeclareAttackers { attacks });
+        return Some(validated_declare_attackers(state, attacks));
     }
 
     if let WaitingFor::DeclareBlockers {
@@ -1670,6 +1670,42 @@ fn deterministic_combat_choice(
     }
 
     None
+}
+
+/// CR 508.1 (issue #1523): Guard the combat AI's attacker declaration so the
+/// engine never rejects it. The combat AI draws attackers from the
+/// engine-provided `valid_attacker_ids`, but the chosen *subset* + *target
+/// assignment* can still be illegal as a whole — e.g. a "can't attack alone"
+/// creature swinging solo, a split must-attack-together pair, or a target an
+/// attacker may not legally be assigned. The action driver re-requests the AI's
+/// (deterministic) decision after a rejection, so an illegal declaration loops
+/// forever and softlocks the game ("repeated attempts to attack").
+///
+/// Dry-run the declaration on a cloned state; if the engine would reject it,
+/// fall back to an engine-validated legal `DeclareAttackers` (the first such
+/// candidate from `legal_actions`, which prefers declining combat but still
+/// satisfies any mandatory must-attack requirement, since illegal candidates
+/// are filtered out by the simulation pipeline). This costs one state clone per
+/// attacker declaration — infrequent and far cheaper than the combat AI's own
+/// lookahead — and the fallback path only runs on the rare illegal choice.
+fn validated_declare_attackers(
+    state: &GameState,
+    attacks: Vec<(
+        engine::types::identifiers::ObjectId,
+        engine::game::combat::AttackTarget,
+    )>,
+) -> GameAction {
+    let candidate = GameAction::DeclareAttackers { attacks };
+    let mut sim = state.clone();
+    if engine::game::engine::apply_as_current(&mut sim, candidate.clone()).is_ok() {
+        return candidate;
+    }
+    engine::ai_support::legal_actions(state)
+        .into_iter()
+        .find(|action| matches!(action, GameAction::DeclareAttackers { .. }))
+        .unwrap_or(GameAction::DeclareAttackers {
+            attacks: Vec::new(),
+        })
 }
 
 fn prefer_land_drop(
@@ -2424,6 +2460,39 @@ mod tests {
             "Should return DeclareAttackers, got {:?}",
             action
         );
+    }
+
+    /// Issue #1523 (p0 softlock): `validated_declare_attackers` must never
+    /// return an attacker declaration the engine would reject — otherwise the
+    /// deterministic action driver re-submits it forever ("repeated attempts to
+    /// attack"). Given an illegal declaration (here a tapped creature, which
+    /// can't be declared as an attacker, CR 508.1a), the guard dry-runs it,
+    /// sees the rejection, and falls back to a legal declaration that does NOT
+    /// contain the illegal attacker.
+    #[test]
+    fn validated_declare_attackers_drops_illegal_attacker() {
+        let mut state = make_state();
+        state.phase = Phase::DeclareAttackers;
+        let creature = add_creature(&mut state, PlayerId(0), 3, 3);
+        // Tap it: a tapped creature can't be a legal attacker.
+        state.objects.get_mut(&creature).unwrap().tapped = true;
+        let target = engine::game::combat::AttackTarget::Player(PlayerId(1));
+
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![creature],
+            valid_attack_targets: vec![target],
+        };
+
+        let action = validated_declare_attackers(&state, vec![(creature, target)]);
+
+        match action {
+            GameAction::DeclareAttackers { attacks } => assert!(
+                !attacks.iter().any(|(id, _)| *id == creature),
+                "guard must drop the illegal (tapped) attacker, got {attacks:?}"
+            ),
+            other => panic!("expected DeclareAttackers, got {other:?}"),
+        }
     }
 
     /// CR 608.2c + CR 701.23: Gifts Ungiven scaling regression — with a

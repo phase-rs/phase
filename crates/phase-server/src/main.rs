@@ -3053,7 +3053,6 @@ async fn handle_client_message(
                         mgr.reserve_seat(
                             &game_code,
                             display_name.unwrap_or_else(|| "Player".to_string()),
-                            password.is_some(),
                         )
                     };
                     match reserve_result {
@@ -3622,8 +3621,13 @@ async fn handle_client_message(
                     .collect::<Vec<_>>();
 
                 session.apply_seat_delta(seat_state, &delta, db.as_ref());
+                // Match `seat_reducer::apply_start` — token occupancy alone can
+                // disagree with seat kinds (reservations, mid-mutation slots).
+                let seat_state_after = session.seat_state();
                 let mut started = delta.now_started
-                    || (session.is_full() && session.start_when_full && session.is_pregame());
+                    || (seat_state_after.is_full()
+                        && session.start_when_full
+                        && session.is_pregame());
                 // Collect a bracket-violation message to broadcast after releasing the state lock.
                 // start_game guarantees no mutation on Err, so session state is untouched.
                 let bracket_error: Option<String> = if started {
