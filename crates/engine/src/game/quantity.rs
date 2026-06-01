@@ -1610,7 +1610,7 @@ fn resolve_ref(
         //      "that many" for Ur-Dragon-style batched triggers; without it
         //      the `extract_amount_from_event` cascade below falls through to
         //      0 on `AttackersDeclared` and similar batched events.
-        //   2. CR 706.2 + CR 706.4: `die_result_this_resolution` — a die rolled
+        //   2. CR 706.4: `die_result_this_resolution` — a die rolled
         //      earlier in THIS resolution (no results table) outranks the
         //      triggering event's own amount, so "roll a d20. <effect> equal to
         //      the result" consumes the roll, not the combat damage / life
@@ -1627,7 +1627,7 @@ fn resolve_ref(
         QuantityRef::EventContextAmount => state
             .current_trigger_match_count
             .map(u32_to_i32_saturating)
-            // CR 706.2 + CR 706.4: A die rolled earlier in THIS resolution outranks the
+            // CR 706.4: A die rolled earlier in THIS resolution outranks the
             // triggering event's own amount, so "roll a d20. <effect> equal to the result"
             // consumes the roll, not the combat damage / life change that triggered it.
             .or_else(|| state.die_result_this_resolution.map(i32::from))
@@ -7680,7 +7680,7 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 7);
     }
 
-    /// CR 706.2 + CR 706.4: A die rolled earlier in the resolution outranks the
+    /// CR 706.4: A die rolled earlier in the resolution outranks the
     /// triggering event's intrinsic amount, so "roll a d20. <effect> equal to
     /// the result" consumes the roll (17), not the combat damage (6). This is
     /// the building-block guard for Ancient Copper/Gold/Silver Dragon and
@@ -7705,7 +7705,7 @@ mod tests {
         );
     }
 
-    /// CR 706.2 + CR 706.4: With no die rolled this resolution, the cascade
+    /// CR 706.4: With no die rolled this resolution, the cascade
     /// falls through to the triggering event's amount as before — the new slot
     /// must not regress event-extracted resolution.
     #[test]

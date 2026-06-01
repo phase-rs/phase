@@ -2801,9 +2801,9 @@ pub fn resolve_ability_chain(
         // impossible.
         state.last_vote_ballots = crate::im::Vector::new();
         state.last_effect_amount = None;
-        // CR 706.2 + CR 706.4: Clear the per-resolution die-roll result at depth-0
-        // chain entry so a roll consumed by an inline sub_ability cannot leak into
-        // a later, unrelated resolution's EventContextAmount.
+        // CR 706.4: Clear the per-resolution die-roll result at depth-0 chain
+        // entry so a roll consumed by an inline sub_ability cannot leak into a
+        // later, unrelated resolution's EventContextAmount.
         state.die_result_this_resolution = None;
         state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;

@@ -29,7 +29,7 @@ fn treasure_count(runner: &GameRunner, player: PlayerId) -> usize {
         .battlefield
         .iter()
         .filter_map(|id| runner.state().objects.get(id))
-        .filter(|obj| obj.owner == player)
+        .filter(|obj| obj.controller == player)
         .filter(|obj| obj.name.eq_ignore_ascii_case("Treasure"))
         .count()
 }

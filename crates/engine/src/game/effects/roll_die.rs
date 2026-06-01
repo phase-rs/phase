@@ -60,7 +60,8 @@ pub fn resolve(
         result: actual,
     });
 
-    // CR 706.2 + CR 706.4: Record the actual result so an inline "equal to the
+    // CR 706.2: The stored value is the actual die-roll result.
+    // CR 706.4: Record the actual result so an inline "equal to the
     // result" sub_ability (no results table) reads the roll via
     // QuantityRef::EventContextAmount instead of the triggering event's amount.
     // Deliberately NOT cleared at this function's exit: for `results: []` cards
@@ -572,8 +573,8 @@ mod tests {
         );
     }
 
-    /// CR 706.2 + CR 706.4: After a RollDie resolves, the actual result is
-    /// stamped into `state.die_result_this_resolution` so an inline "equal to
+    /// CR 706.2: After a RollDie resolves, the actual result is stamped into
+    /// `state.die_result_this_resolution` so an inline "equal to
     /// the result" sub_ability (no results table) reads the roll via
     /// `QuantityRef::EventContextAmount`. The stamped value must equal the
     /// `DieRolled` event's result.
@@ -606,8 +607,8 @@ mod tests {
         );
     }
 
-    /// CR 706.2 + CR 706.4 (issue #1602, building-block guard): "roll a d20.
-    /// You create a number of Treasure tokens equal to the result." With a
+    /// CR 706.4 (issue #1602, building-block guard): "roll a d20. You create a
+    /// number of Treasure tokens equal to the result." With a
     /// triggering combat-damage event of 6 already set, the inline sub_ability
     /// whose count is `EventContextAmount` must consume the ROLL, not the 6.
     /// Modeled with a Draw sub_ability (count == EventContextAmount) so we can

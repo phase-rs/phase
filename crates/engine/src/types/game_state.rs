@@ -4716,8 +4716,8 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_amount: Option<i32>,
 
-    /// CR 706.2 + CR 706.4: The actual result (natural + modifiers, clamped at 0)
-    /// of the most recent die roll within the current ability resolution. Set by
+    /// CR 706.2: The actual result (natural + modifiers, clamped at 0) of the
+    /// most recent die roll within the current ability resolution. Set by
     /// `roll_die::resolve` immediately after emitting `GameEvent::DieRolled`, read by
     /// `QuantityRef::EventContextAmount` so an inline "equal to the result" sub_ability
     /// (CR 706.4 — no results table) consumes the rolled value rather than the
