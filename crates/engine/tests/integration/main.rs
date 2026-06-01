@@ -5,6 +5,7 @@ mod advanced_reconstruction_regression;
 mod ajani_nacatl_pariah_transform;
 mod amphin_mutineer_regression;
 mod anaphoric_scope_allowlist_guard;
+mod ancient_copper_dragon_roll_d20;
 mod armored_kincaller_or_condition;
 mod ashaya_nontoken_lands;
 mod aura_on_player;

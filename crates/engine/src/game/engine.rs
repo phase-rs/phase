@@ -145,6 +145,7 @@ pub fn apply(
     state.last_effect_count = None;
     state.last_effect_counts_by_player.clear();
     state.exiled_from_hand_this_resolution = 0;
+    state.die_result_this_resolution = None;
     check_actor_authorization(state, actor, &action)?;
     let mut result = apply_action(state, actor, action)?;
     reconcile_terminal_result(state, &mut result);
