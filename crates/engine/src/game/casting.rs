@@ -3673,6 +3673,23 @@ fn modal_spell_face_choice_available(obj: &crate::game::game_object::GameObject)
     !front_is_land && !back_is_land
 }
 
+/// CR 712.11b + CR 903.8: A cast-time face choice (a spell//spell Modal DFC, or
+/// an Adventure/Omen alternative spell face) is offered both when casting from
+/// hand and when a player casts their commander from the command zone. A
+/// DFC/MDFC commander must let its owner choose which face to put on the stack —
+/// e.g. casting The Prismatic Bridge (the back face of Esika, God of the Tree)
+/// directly from the command zone (#1548). The downstream cast pipeline
+/// (`ChooseModalFace` re-entry, affordability via `can_cast_object_now`, and the
+/// commander-tax surcharge) is already zone-agnostic; only this prompt gate was
+/// restricted to the hand.
+fn cast_face_choice_offered_from_zone(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    obj.zone == Zone::Hand
+        || (state.format_config.command_zone && obj.zone == Zone::Command && obj.is_commander)
+}
+
 fn casting_variant_for_alternative_spell(layout: LayoutKind) -> CastingVariant {
     match layout {
         LayoutKind::Adventure => CastingVariant::Adventure,
@@ -4977,10 +4994,12 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 715.3 / CR 720.3: Adventure-family cards from hand require choosing
-    // the normal creature face or alternative spell face.
+    // CR 715.3 / CR 720.3: Adventure-family cards from hand (or a commander cast
+    // from the command zone) require choosing the normal creature face or
+    // alternative spell face.
     if let Some(obj) = state.objects.get(&object_id) {
-        if obj.zone == Zone::Hand && alternative_spell_layout(obj).is_some() {
+        if cast_face_choice_offered_from_zone(state, obj) && alternative_spell_layout(obj).is_some()
+        {
             return Ok(WaitingFor::CastOffer {
                 player,
                 kind: CastOfferKind::Adventure {
@@ -4992,13 +5011,15 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 712.11b: Spell//spell Modal DFCs from hand require choosing which face
-    // to cast (Esika, God of the Tree // The Prismatic Bridge, etc.). The
-    // `ChooseModalFace` handler swaps to the chosen face (if back) and re-enters
-    // this function; the swap clears the back face's Modal `layout_kind`, so the
-    // re-entry casts the chosen face without re-prompting.
+    // CR 712.11b + CR 903.8: Spell//spell Modal DFCs from hand — or from the
+    // command zone when the card is the player's commander — require choosing
+    // which face to cast (Esika, God of the Tree // The Prismatic Bridge, etc.).
+    // The `ChooseModalFace` handler swaps to the chosen face (if back) and
+    // re-enters this function; the swap clears the back face's Modal
+    // `layout_kind`, so the re-entry casts the chosen face without re-prompting.
     if let Some(obj) = state.objects.get(&object_id) {
-        if obj.zone == Zone::Hand && modal_spell_face_choice_available(obj) {
+        if cast_face_choice_offered_from_zone(state, obj) && modal_spell_face_choice_available(obj)
+        {
             return Ok(WaitingFor::ModalFaceChoice {
                 player,
                 object_id,
