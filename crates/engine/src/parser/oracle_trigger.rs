@@ -11599,6 +11599,53 @@ mod tests {
         }
     }
 
+    /// Issue #1585 — Pantlaza, Sun-Favored: "Whenever Pantlaza or another
+    /// Dinosaur you control enters, you may discover X, where X is that
+    /// creature's toughness. Do this only once each turn." The trigger must be
+    /// an ETB (`ChangesZone` → Battlefield), constrained to once per turn, and
+    /// its execute must be a `Discover` whose limit binds to the *entering*
+    /// creature's toughness — NOT a `Variable("X")` placeholder, which resolves
+    /// to 0 at runtime and makes discover a silent no-op ("did not discover").
+    #[test]
+    fn trigger_pantlaza_etb_discover_x_is_entering_creature_toughness() {
+        let def = parse_trigger_line(
+            "Whenever Pantlaza or another Dinosaur you control enters, you may \
+             discover X, where X is that creature's toughness. Do this only \
+             once each turn. (Exile cards from the top of your library until \
+             you exile a nonland card with that mana value or less. Cast it \
+             without paying its mana cost or put it into your hand. Put the \
+             rest on the bottom in a random order.)",
+            "Pantlaza, Sun-Favored",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.constraint,
+            Some(crate::types::ability::TriggerConstraint::OncePerTurn),
+            "\"Do this only once each turn\" must map to OncePerTurn",
+        );
+
+        let execute = def
+            .execute
+            .as_ref()
+            .expect("trigger should have execute step");
+        match execute.effect.as_ref() {
+            Effect::Discover { mana_value_limit } => {
+                assert!(
+                    matches!(
+                        mana_value_limit,
+                        QuantityExpr::Ref {
+                            qty: crate::types::ability::QuantityRef::Toughness { .. }
+                        }
+                    ),
+                    "discover X must bind to the entering creature's toughness, \
+                     not a Variable placeholder (got {mana_value_limit:?})",
+                );
+            }
+            other => panic!("Expected Discover, got {other:?}"),
+        }
+    }
+
     #[test]
     fn trigger_battalion() {
         let def = parse_trigger_line(
