@@ -17800,8 +17800,6 @@ mod tests {
     /// otherwise the player has no UI affordance to activate convoke.
     #[test]
     fn convoke_creature_exposed_in_legal_actions_during_payment() {
-        use crate::game::engine::apply_as_current;
-
         let mut state = setup_game_at_main_phase();
 
         let helper = create_object(
