@@ -647,11 +647,10 @@ impl Broker {
             return vec![error("Only the lobby host can update metadata")];
         }
 
-        let consumed_reservation = consumed_reservation_tokens
-            .iter()
-            .fold(false, |consumed, token| {
-                self.lobby.consume_reservation(&game_code, token) || consumed
-            });
+        let mut consumed_reservation = false;
+        for token in &consumed_reservation_tokens {
+            consumed_reservation |= self.lobby.consume_reservation(&game_code, token);
+        }
 
         let max_players = max_players.max(1);
         let floor = if consumed_reservation {
