@@ -386,6 +386,10 @@ impl GameScenario {
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.card_types.supertypes.push(Supertype::Basic);
+        // CR 205.4: Basic lands have a single land subtype matching their name
+        // (e.g. Forest). Filters like Quirion Ranger's "return a Forest" cost
+        // match on subtypes, not the card name.
+        obj.card_types.subtypes.push(name.to_string());
         obj.base_card_types = obj.card_types.clone();
         obj.entered_battlefield_turn = Some(self.state.turn_number.saturating_sub(1));
         // Pre-existing land — see `add_creature` for the parallel rationale.

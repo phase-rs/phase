@@ -92,6 +92,7 @@ mod plaguecrafter_etb_class;
 mod ponder_decline_shuffle_regression;
 mod power_fist_combat_damage_regression;
 mod primo_unbounded_fractal_counters;
+mod quirion_ranger_activation;
 mod refurbished_familiar;
 mod riot_control_regression;
 mod ripples_of_undeath_regression;

@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { ChosenAttribute, GameObject, ManaCost } from "../../adapter/types.ts";
+import type { ChosenAttribute, GameObject, ManaCost, Zone } from "../../adapter/types.ts";
+import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
+import { abilityLabel } from "../../viewmodel/costLabel.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
@@ -553,7 +555,25 @@ function CardImagePreview({
   // mana cost (e.g. The Prismatic Bridge's {W}{U}{B}{R}{G} instead of Esika's
   // {1}{G}{G}). See cardImageLookup / back_face wiring.
   const effectiveCost = useGameStore((s) => obj ? s.spellCosts[String(obj.id)] : undefined);
-  const displayCost = showOtherFace ? otherFaceCost : (effectiveCost ?? obj?.mana_cost);
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const activateLabels = useMemo(() => {
+    if (!obj || obj.zone !== "Battlefield") return [];
+    return collectObjectActions(legalActionsByObject, obj.id)
+      .flatMap((action) => {
+        if (action.type !== "ActivateAbility") return [];
+        const ability = obj.abilities[action.data.ability_index];
+        return ability ? [abilityLabel(ability)] : [];
+      })
+      .filter((label, index, labels) => label && labels.indexOf(label) === index);
+  }, [legalActionsByObject, obj]);
+  const castManaZones: Zone[] = ["Hand", "Command", "Exile", "Graveyard", "Library"];
+  const showCastManaCost =
+    !showOtherFace && obj != null && castManaZones.includes(obj.zone);
+  const displayCost = showOtherFace
+    ? otherFaceCost
+    : showCastManaCost
+      ? (effectiveCost ?? obj?.mana_cost)
+      : null;
 
   if (isLoading || !src) {
     return (
@@ -590,7 +610,13 @@ function CardImagePreview({
           </div>
         )}
       </div>
-      {showInfoPanel && obj && <CardInfoPanel obj={obj} altAvailable={altAvailable} />}
+      {showInfoPanel && obj && (
+        <CardInfoPanel
+          obj={obj}
+          altAvailable={altAvailable}
+          activateLabels={activateLabels}
+        />
+      )}
       {backFaceHint && (
         <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">{backFaceHint}</div>
       )}
@@ -737,7 +763,15 @@ function ParsedAbilitiesPanel({ name, cardTypes, localizedTypeLine, parseDetails
   );
 }
 
-function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: boolean }) {
+function CardInfoPanel({
+  obj,
+  altAvailable,
+  activateLabels,
+}: {
+  obj: GameObject;
+  altAvailable: boolean;
+  activateLabels: string[];
+}) {
   const { t } = useTranslation("game");
   const ptDisplay = computePTDisplay(obj);
   const counters = Object.entries(obj.counters).filter(([type]) => type !== "loyalty");
@@ -823,6 +857,14 @@ function CardInfoPanel({ obj, altAvailable }: { obj: GameObject; altAvailable: b
       <div className="font-semibold text-gray-300">
         {formatTypeLine(obj.card_types)}
       </div>
+
+      {activateLabels.length > 0 && (
+        <div className="mt-1 text-cyan-300/90">
+          {activateLabels.map((label) => (
+            <div key={label}>{t("preview.activateCost", { cost: label })}</div>
+          ))}
+        </div>
+      )}
 
       {/* Keywords */}
       {keywords.length > 0 && (
