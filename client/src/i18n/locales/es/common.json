@@ -202,6 +202,7 @@
   "diceRoll": {
     "rollingForFirst": "Tirada para ver quién empieza",
     "versus": "VS",
+    "skip": "Toca para omitir",
     "you": "Tú",
     "youPlayFirst": "Juegas primero",
     "playerPlaysFirst": "{{name}} juega primero",

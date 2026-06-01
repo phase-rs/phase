@@ -202,6 +202,7 @@
   "diceRoll": {
     "rollingForFirst": "Auswürfeln, wer beginnt",
     "versus": "VS",
+    "skip": "Zum Überspringen tippen",
     "you": "Du",
     "youPlayFirst": "Du beginnst",
     "playerPlaysFirst": "{{name}} beginnt",

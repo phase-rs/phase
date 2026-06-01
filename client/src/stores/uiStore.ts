@@ -158,6 +158,9 @@ interface UiStoreActions {
   /** Clear the active dice overlay, pending queue, and advance timer. Called on
    *  DiceRollOverlay unmount so rolls can't leak across games. */
   resetDiceRoll: () => void;
+  /** Dismiss the current dice/coin overlay immediately (user tap-to-skip),
+   *  advancing to the next queued roll if any. */
+  skipDiceRoll: () => void;
   setFocusedOpponent: (id: number | null) => void;
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
   setEnchantmentsDialogPlayer: (id: number | null) => void;
@@ -433,6 +436,17 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       diceAdvanceTimer = null;
     }
     set({ diceRoll: null, diceRollQueue: [] });
+  },
+  skipDiceRoll: () => {
+    // User tap-to-skip: cancel the pending auto-advance and advance now, so the
+    // next queued roll plays immediately or the overlay clears. Reuses the same
+    // FIFO drain as the timer, so a skipped roll hands off to the next exactly
+    // as a timed one would (and the GamePage mulligan gate releases on schedule).
+    if (diceAdvanceTimer) {
+      clearTimeout(diceAdvanceTimer);
+      diceAdvanceTimer = null;
+    }
+    advanceDiceQueue();
   },
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),

@@ -48,12 +48,29 @@ function hasWebGL(): boolean {
  */
 export function DiceRollOverlay() {
   const diceRoll = useUiStore((s) => s.diceRoll);
+  const skipDiceRoll = useUiStore((s) => s.skipDiceRoll);
   const shouldReduceMotion = useReducedMotion();
+  const { t } = useTranslation();
 
   // Clear any active/queued roll and its advance timer when leaving the game.
   // The store is a module singleton that outlives this mount, so without this an
   // in-flight roll could pop into the next game.
   useEffect(() => () => useUiStore.getState().resetDiceRoll(), []);
+
+  // Tap-to-skip via keyboard: Escape dismisses the current roll (advancing to
+  // the next queued one, or clearing the overlay). Bound only while a roll is
+  // showing so it never shadows Escape elsewhere.
+  useEffect(() => {
+    if (!diceRoll) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        skipDiceRoll();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [diceRoll, skipDiceRoll]);
 
   // Prefetch the code-split 3D chunk on mount. Every game opens with the
   // starting-player contest (CR 103.1), so `three` is needed within seconds —
@@ -77,8 +94,15 @@ export function DiceRollOverlay() {
           exit={{ opacity: 0 }}
           transition={{ duration: 0.25 }}
         >
-          {/* Vignette backdrop: darker at the edges, focusing the eye centrally. */}
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(2,6,23,0.55),rgba(2,6,23,0.86)_70%)] backdrop-blur-[2px]" />
+          {/* Vignette backdrop: darker at the edges, focusing the eye centrally.
+              Clickable (pointer-events re-enabled) to skip the roll — the overlay
+              itself stays pointer-events-none so it never traps board input. */}
+          <button
+            type="button"
+            aria-label={t("diceRoll.skip")}
+            onClick={skipDiceRoll}
+            className="absolute inset-0 cursor-pointer bg-[radial-gradient(circle_at_center,rgba(2,6,23,0.55),rgba(2,6,23,0.86)_70%)] backdrop-blur-[2px] pointer-events-auto"
+          />
           {/* Keyed by payload identity so each roll the FIFO advances to gets a
               fresh component instance (resets settle state, re-runs the 3D mount). */}
           <DiceRollContent
@@ -86,6 +110,14 @@ export function DiceRollOverlay() {
             payload={diceRoll}
             animate={!shouldReduceMotion && hasWebGL()}
           />
+          <motion.span
+            className="pointer-events-none absolute bottom-8 text-xs font-medium uppercase tracking-[0.2em] text-slate-400/70"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 1, duration: 0.5 }}
+          >
+            {t("diceRoll.skip")}
+          </motion.span>
         </motion.div>
       )}
     </AnimatePresence>
