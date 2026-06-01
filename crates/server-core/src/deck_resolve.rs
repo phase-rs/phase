@@ -117,7 +117,9 @@ mod tests {
 
         let c = err.find("commander:Mid").expect("commander entry present");
         let m = err.find("main:Zed").expect("main entry present");
-        let s = err.find("sideboard:Alpha").expect("sideboard entry present");
+        let s = err
+            .find("sideboard:Alpha")
+            .expect("sideboard entry present");
         // Sorted alphabetically: commander: < main: < sideboard:
         assert!(c < m && m < s, "missing names not sorted: {err}");
     }
