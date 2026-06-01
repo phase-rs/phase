@@ -7524,6 +7524,102 @@ mod tests {
         assert_eq!(treasures0, 0, "Empty chain must mint zero tokens");
     }
 
+    /// CR 608.2c + CR 400.7: a mass-destroy parent must publish the destroyed
+    /// set so a token-count follow-up can count only the filtered subset.
+    #[test]
+    fn destroy_all_chain_counts_filtered_tracked_set_for_token_followup() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Ceaseless Conflict".to_string(),
+            Zone::Graveyard,
+        );
+        let controller_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Controller Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let controller_token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Controller Token".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [controller_creature, controller_token, opponent_creature] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+        state.objects.get_mut(&controller_token).unwrap().is_token = true;
+
+        let token_sub = ResolvedAbility::new(
+            Effect::Token {
+                name: "Spirit".to_string(),
+                power: PtValue::Fixed(3),
+                toughness: PtValue::Fixed(2),
+                types: vec!["Creature".to_string(), "Spirit".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![FilterProp::NonToken]),
+                        )),
+                    },
+                },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(token_sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        for id in [controller_creature, controller_token, opponent_creature] {
+            assert_eq!(state.objects[&id].zone, Zone::Graveyard);
+        }
+        let spirits = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|object| object.name == "Spirit")
+            .count();
+        assert_eq!(
+            spirits, 1,
+            "only the controller's nontoken destroyed creature should be counted"
+        );
+    }
+
     #[test]
     fn put_counter_all_publishes_countered_objects_for_tracked_set_followup() {
         let mut state = GameState::new_two_player(42);

@@ -19,6 +19,8 @@ use crate::convert::filter::{
     convert_permanent, spells_to_filter,
 };
 use crate::convert::result::{ConvResult, ConversionGap};
+#[cfg(test)]
+use crate::schema::types::CreatureType;
 use crate::schema::types::{
     CardInExile, CardType, CardsInExile, CardsInGraveyard, CounterType, GameNumber, Permanent,
     Permanents, Player, Players, Spell,
@@ -888,10 +890,9 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
 
         // CR 608.2c + CR 609.3: "the number of [filter] permanents destroyed
         // this way" — routes through the tracked set populated by the preceding
-        // DestroyAll effect. When the filter is non-trivial (e.g. nontoken
-        // creatures you controlled), emit FilteredTrackedSetSize so only matching
-        // members are counted. Otherwise plain TrackedSetSize covers the unfiltered
-        // case ("the number of permanents destroyed this way").
+        // DestroyAll effect. When the filter restricts the tracked set, emit
+        // FilteredTrackedSetSize so only matching members are counted. Otherwise
+        // plain TrackedSetSize covers the unfiltered case.
         GameNumber::NumPermanentsDestroyedThisWay(perms_filter) => {
             let filter = convert_permanents(perms_filter).unwrap_or(TargetFilter::Any);
             let qty = if filter_is_nontrivial(&filter) {
@@ -1426,27 +1427,11 @@ fn unsupported(g: &GameNumber) -> ConversionGap {
     }
 }
 
-/// Returns true when the filter carries information that can exclude members
-/// of the tracked set — e.g. a controller restriction or NonToken/Token
-/// property. Plain type filters alone are treated as trivial because the
-/// preceding DestroyAll already scoped destruction to that type, so every
-/// tracked-set member already satisfies it.
+/// Returns true when the filter carries information that can exclude members of
+/// the tracked set. Only `Any` is trivial; even a plain type/subtype filter can
+/// matter when the parent effect destroyed a wider set.
 fn filter_is_nontrivial(filter: &TargetFilter) -> bool {
-    use engine::types::ability::{FilterProp, TypedFilter};
-    match filter {
-        TargetFilter::Any => false,
-        TargetFilter::Typed(TypedFilter {
-            controller,
-            properties,
-            ..
-        }) => {
-            controller.is_some()
-                || properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::NonToken | FilterProp::Token))
-        }
-        _ => true,
-    }
+    !matches!(filter, TargetFilter::Any)
 }
 
 #[cfg(test)]
@@ -1466,5 +1451,27 @@ mod tests {
                 qty: QuantityRef::CardsExiledBySource,
             }
         );
+    }
+
+    #[test]
+    fn num_permanents_destroyed_this_way_preserves_subtype_filter() {
+        let converted = convert(&GameNumber::NumPermanentsDestroyedThisWay(Box::new(
+            Permanents::IsCreatureType(CreatureType::Vampire),
+        )))
+        .unwrap();
+
+        match converted {
+            QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize { filter },
+            } => match *filter {
+                TargetFilter::Typed(ref tf) => assert!(
+                    tf.type_filters
+                        .contains(&TypeFilter::Subtype("Vampire".to_string())),
+                    "filter must preserve the Vampire subtype"
+                ),
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
     }
 }

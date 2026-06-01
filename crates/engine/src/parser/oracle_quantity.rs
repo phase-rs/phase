@@ -1533,33 +1533,18 @@ fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
 /// The counter-type word, when present, is intentionally NOT extracted —
 /// the resolved quantity is whatever the parent `Effect::RemoveCounter`
 /// removed, and the parent already restricts by counter type.
-/// Returns true when the filter carries information that restricts the tracked
-/// set beyond the default (all objects moved by the preceding effect). A filter
-/// with a `NonToken` property, a specific controller, or specific subtypes is
-/// "nontrivial" and warrants `FilteredTrackedSetSize` instead of plain
-/// `TrackedSetSize`.
+/// Returns true when the filter carries information that can restrict the
+/// tracked set beyond the default (all objects moved by the preceding effect).
+/// Only `Any` is trivial; even a plain type/subtype filter can matter when the
+/// parent effect moved a wider set.
 fn filter_is_nontrivial_for_tracked_set(filter: &crate::types::ability::TargetFilter) -> bool {
-    use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
-    match filter {
-        TargetFilter::Any => false,
-        TargetFilter::Typed(TypedFilter {
-            controller,
-            properties,
-            ..
-        }) => {
-            controller.is_some()
-                || properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::NonToken | FilterProp::Token))
-        }
-        _ => true,
-    }
+    !matches!(filter, crate::types::ability::TargetFilter::Any)
 }
 
 /// CR 608.2c + CR 400.7: Try to parse a "for each <filter> [that was/were]
 /// destroyed/sacrificed this way" clause. Returns `FilteredTrackedSetSize`
-/// when the type-phrase prefix is nontrivial (NonToken, controller-restricted,
-/// etc.); returns `None` to fall through to plain `TrackedSetSize` otherwise.
+/// when the type-phrase prefix restricts the tracked set; returns `None` to
+/// fall through to plain `TrackedSetSize` otherwise.
 ///
 /// Uses `terminated(take_until(suffix), tag(suffix))` to split at each
 /// recognized suffix, then delegates the prefix to `parse_type_phrase`.
@@ -1894,9 +1879,9 @@ fn parse_for_each_clause_with_they_controller(
         // destroyed this way" — tracked set members matching the filter prefix.
         // Use terminated(take_until(suffix), tag(suffix)) to split the clause
         // at each recognized suffix and parse the prefix as a type filter.
-        // Only emit `FilteredTrackedSetSize` when the filter is non-trivial
-        // (e.g. NonToken, specific controller); plain "creature destroyed this
-        // way" falls through to the unfiltered `TrackedSetSize`.
+        // Only emit `FilteredTrackedSetSize` when the filter restricts the
+        // tracked set. Bare "destroyed this way" still falls through to the
+        // unfiltered `TrackedSetSize`.
         if let Some(qty) = parse_filtered_destroyed_this_way(&lower) {
             return Some(qty);
         }
@@ -5008,6 +4993,24 @@ mod tests {
                     other => panic!("expected Typed filter, got {other:?}"),
                 }
             }
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
+    /// Subtype-only filters must not collapse to plain `TrackedSetSize`; the
+    /// parent destroy can move a wider set than the subtype named by the count.
+    #[test]
+    fn vampire_destroyed_this_way_uses_filtered_tracked_set() {
+        let qty = parse_for_each_clause("vampire that was destroyed this way").expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter } => match *filter {
+                TargetFilter::Typed(ref tf) => assert!(
+                    tf.type_filters
+                        .contains(&TypeFilter::Subtype("Vampire".to_string())),
+                    "filter must preserve the Vampire subtype"
+                ),
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
             other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
         }
     }
