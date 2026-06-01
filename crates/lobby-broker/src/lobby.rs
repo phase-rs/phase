@@ -196,6 +196,19 @@ impl LobbyManager {
             .is_some()
     }
 
+    pub fn has_active_reservation(
+        &mut self,
+        game_code: &str,
+        token: &str,
+        env: &impl BrokerEnv,
+    ) -> bool {
+        let Some(meta) = self.games.get_mut(game_code) else {
+            return false;
+        };
+        Self::cleanup_expired_for(meta, env.now_ms());
+        meta.reservations.contains_key(token)
+    }
+
     pub fn release_reservations(&mut self, reservations: &[(String, String)]) -> bool {
         let mut changed = false;
         for (game_code, token) in reservations {
