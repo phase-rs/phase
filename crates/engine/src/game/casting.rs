@@ -6181,6 +6181,69 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
             .is_empty()
 }
 
+/// CR 702.180a (issue #1550): Harmonize may tap up to one untapped creature
+/// its controller controls to reduce only the generic portion of the cost by
+/// that creature's power.
+fn reduce_harmonize_cost_for_creature_power(cost: &ManaCost, power: u32) -> ManaCost {
+    match cost {
+        ManaCost::Cost { shards, generic } => ManaCost::Cost {
+            shards: shards.clone(),
+            generic: generic.saturating_sub(power),
+        },
+        ManaCost::NoCost | ManaCost::SelfManaCost => cost.clone(),
+    }
+}
+
+/// CR 702.180a + CR 601.2h: Legal-action castability must mirror the real
+/// Harmonize payment path. A candidate creature is tapped before mana payment,
+/// so the affordability check runs against a simulated state with that
+/// creature already tapped rather than assuming the same creature can also pay
+/// the remaining mana cost.
+fn can_feasibly_pay_harmonize_mana_cost(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    variant: CastingVariant,
+    cost: &ManaCost,
+) -> bool {
+    if can_feasibly_pay_mana_cost(state, player, Some(source_id), cost) {
+        return true;
+    }
+    let ManaCost::Cost { generic, .. } = cost else {
+        return false;
+    };
+    if variant != CastingVariant::Harmonize || *generic == 0 {
+        return false;
+    }
+
+    state
+        .objects
+        .values()
+        .filter_map(|o| {
+            if o.controller == player
+                && o.zone == Zone::Battlefield
+                && !o.tapped
+                && o.card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Creature)
+                && o.power.is_some_and(|power| power > 0)
+            {
+                Some((o.id, o.power.unwrap_or(0) as u32))
+            } else {
+                None
+            }
+        })
+        .any(|(creature_id, power)| {
+            let reduced_cost = reduce_harmonize_cost_for_creature_power(cost, power);
+            let mut simulated = state.clone();
+            let Some(creature) = simulated.objects.get_mut(&creature_id) else {
+                return false;
+            };
+            creature.tapped = true;
+            can_feasibly_pay_mana_cost(&simulated, player, Some(source_id), &reduced_cost)
+        })
+}
+
 fn can_cast_prepared_now(
     state: &GameState,
     player: PlayerId,
@@ -6304,7 +6367,13 @@ fn can_cast_prepared_now(
     // payment (issue #562: KCI must expose Ichor Wellspring as castable).
     let creature_face_ok = (prepared.modal.is_some()
         || spell_has_legal_targets(state, obj, player))
-        && can_feasibly_pay_mana_cost(state, player, Some(prepared.object_id), &prepared.mana_cost);
+        && can_feasibly_pay_harmonize_mana_cost(
+            state,
+            player,
+            prepared.object_id,
+            prepared.casting_variant,
+            &prepared.mana_cost,
+        );
 
     if creature_face_ok {
         return true;
@@ -22450,6 +22519,130 @@ mod tests {
         assert!(
             available.contains(&obj_id),
             "Flashback card in graveyard should be castable"
+        );
+    }
+
+    fn add_harmonize_draw_spell_to_graveyard(
+        state: &mut GameState,
+        player: PlayerId,
+        card_id: CardId,
+        name: &str,
+    ) -> ObjectId {
+        let spell = create_object(state, card_id, player, name.to_string(), Zone::Graveyard);
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            };
+            obj.base_keywords.push(Keyword::Harmonize(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 4,
+            }));
+            obj.keywords = obj.base_keywords.clone();
+            let ability = crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                crate::types::ability::Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Controller,
+                },
+            );
+            Arc::make_mut(&mut obj.abilities).push(ability.clone());
+            Arc::make_mut(&mut obj.base_abilities).push(ability);
+        }
+        spell
+    }
+
+    /// CR 702.180a (issue #1550): Winternight Stories — Harmonize {4}{U}. With
+    /// only 4 mana but a 4-power creature to tap (reducing the {4} generic to
+    /// {0}), the spell must be legally castable from the graveyard. Before the
+    /// fix the castability check used the full {4}{U} cost and hid it.
+    #[test]
+    fn harmonize_card_castable_when_creature_tap_covers_generic() {
+        let mut state = setup_game_at_main_phase();
+
+        let spell = add_harmonize_draw_spell_to_graveyard(
+            &mut state,
+            PlayerId(0),
+            CardId(77_000),
+            "Winternight Stories",
+        );
+
+        // A 4-power untapped creature the player controls (the tap target).
+        let creature = create_object(
+            &mut state,
+            CardId(77_001),
+            PlayerId(0),
+            "Power Four".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let c = state.objects.get_mut(&creature).unwrap();
+            c.card_types.core_types.push(CoreType::Creature);
+            c.power = Some(4);
+            c.toughness = Some(4);
+        }
+
+        // Only 4 mana available — short of the full {4}{U} = 5.
+        add_mana(&mut state, PlayerId(0), ManaType::Blue, 4);
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), spell),
+            "Harmonize {{4}}{{U}} must be castable with 4 mana + a 4-power creature to tap"
+        );
+    }
+
+    /// CR 702.180a + CR 601.2h: A creature tapped for Harmonize's cost
+    /// reduction is already tapped before the remaining mana is paid. If that
+    /// same creature is the only available mana source for the remaining
+    /// colored shard, the cast must not be offered as legally payable.
+    #[test]
+    fn harmonize_castability_does_not_reuse_tapped_reduction_creature_for_mana() {
+        let mut state = setup_game_at_main_phase();
+
+        let spell = add_harmonize_draw_spell_to_graveyard(
+            &mut state,
+            PlayerId(0),
+            CardId(77_010),
+            "Winternight Stories",
+        );
+
+        let creature = create_object(
+            &mut state,
+            CardId(77_011),
+            PlayerId(0),
+            "Blue Dork".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.summoning_sick = false;
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Blue],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        assert!(
+            !can_cast_object_now(&state, PlayerId(0), spell),
+            "the Harmonize reduction creature cannot also tap for the remaining {{U}}"
         );
     }
 
