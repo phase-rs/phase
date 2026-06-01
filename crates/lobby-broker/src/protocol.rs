@@ -264,8 +264,10 @@ pub enum ParsedFrame {
     /// A recognized lobby message. Boxed because `LobbyClientMessage` is far
     /// larger than the string variants (clippy `large_enum_variant`).
     Message(Box<LobbyClientMessage>),
-    /// The frame was malformed JSON or a recognized tag whose `data` failed to
-    /// deserialize. Carries the serde error string for the `Error` reply.
+    /// The frame was malformed JSON, a recognized tag whose `data` failed to
+    /// deserialize, or a well-formed frame whose field values exceeded the
+    /// bounds in [`crate::validation`]. Carries a human-readable reason for the
+    /// `Error` reply.
     Malformed(String),
     /// The frame's `type` is not a known lobby tag. The shell routes this to
     /// the same reject path as a mode-disabled message.
@@ -314,7 +316,10 @@ pub fn parse_lobby_client_message(text: &str) -> ParsedFrame {
         data_json
     );
     match serde_json::from_str::<LobbyClientMessage>(&reconstructed) {
-        Ok(msg) => ParsedFrame::Message(Box::new(msg)),
+        Ok(msg) => match crate::validation::validate_lobby_message(&msg) {
+            Ok(()) => ParsedFrame::Message(Box::new(msg)),
+            Err(reason) => ParsedFrame::Malformed(reason),
+        },
         Err(e) => ParsedFrame::Malformed(e.to_string()),
     }
 }
@@ -375,6 +380,20 @@ mod tests {
         let frame = r#"{"type":"Ping","data":{"timestamp":"not a number"}}"#;
         assert!(matches!(
             parse_lobby_client_message(frame),
+            ParsedFrame::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn well_formed_frame_with_out_of_bounds_field_routes_to_malformed() {
+        // Valid JSON and a known tag, but the display name exceeds the bound,
+        // so validation rejects it at the parse boundary.
+        let long_name = "a".repeat(21);
+        let frame = format!(
+            r#"{{"type":"CreateGameWithSettings","data":{{"deck":{{"main_deck":[]}},"display_name":"{long_name}","public":true,"password":null,"timer_seconds":null}}}}"#
+        );
+        assert!(matches!(
+            parse_lobby_client_message(&frame),
             ParsedFrame::Malformed(_)
         ));
     }
