@@ -2476,14 +2476,14 @@ mod tests {
         let creature = add_creature(&mut state, PlayerId(0), 3, 3);
         // Tap it: a tapped creature can't be a legal attacker.
         state.objects.get_mut(&creature).unwrap().tapped = true;
+        let target = engine::game::combat::AttackTarget::Player(PlayerId(1));
 
         state.waiting_for = WaitingFor::DeclareAttackers {
             player: PlayerId(0),
-            valid_attacker_ids: vec![],
-            valid_attack_targets: vec![],
+            valid_attacker_ids: vec![creature],
+            valid_attack_targets: vec![target],
         };
 
-        let target = engine::game::combat::AttackTarget::Player(PlayerId(1));
         let action = validated_declare_attackers(&state, vec![(creature, target)]);
 
         match action {
