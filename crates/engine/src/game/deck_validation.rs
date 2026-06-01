@@ -1974,9 +1974,14 @@ fn partner_types_compatible(
     }
 }
 
-/// CR 903.3 + WHO release notes: a Doctor's Companion pairs with a legendary
-/// creature that is a Time Lord Doctor and has no other creature types.
+/// CR 702.124m: Doctor's companion pairs with a legendary Time Lord Doctor
+/// creature card that has no other creature types.
 fn is_time_lord_doctor_commander(face: &CardFace) -> bool {
+    if !face.card_type.supertypes.contains(&Supertype::Legendary)
+        || !face.card_type.core_types.contains(&CoreType::Creature)
+    {
+        return false;
+    }
     if !is_commander_eligible(face) {
         return false;
     }
@@ -1989,18 +1994,14 @@ fn is_time_lord_doctor_commander(face: &CardFace) -> bool {
         return subtypes.len() == 1;
     }
     subtypes.len() == 2
+        && subtypes.iter().any(|s| s.eq_ignore_ascii_case("Doctor"))
+        && subtypes.iter().any(|s| s.eq_ignore_ascii_case("Time Lord"))
         && subtypes
             .iter()
-            .any(|s| s.eq_ignore_ascii_case("Doctor"))
-        && subtypes
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case("Time Lord"))
-        && subtypes.iter().all(|s| {
-            s.eq_ignore_ascii_case("Doctor") || s.eq_ignore_ascii_case("Time Lord")
-        })
+            .all(|s| s.eq_ignore_ascii_case("Doctor") || s.eq_ignore_ascii_case("Time Lord"))
 }
 
-/// CR 702.124: Check if a partner type matches the other face by subtype.
+/// CR 702.124k + CR 702.124m: Check if a partner type matches the other face by subtype.
 /// Doctor's Companion pairs with a Time Lord Doctor commander; Choose a Background
 /// pairs with any Background.
 fn subtype_partner_match(
@@ -2023,6 +2024,11 @@ fn subtype_partner_match(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::database::mtgjson::load_atomic_cards;
+    use crate::database::synthesis::build_oracle_face;
+    use crate::types::keywords::PartnerType;
 
     fn test_db_json() -> String {
         serde_json::json!({
@@ -3565,11 +3571,7 @@ mod tests {
             vec![],
         );
         // Can pair with a Doctor
-        let doctor = partner_face(
-            "The Thirteenth Doctor",
-            vec![],
-            vec!["Time Lord", "Doctor"],
-        );
+        let doctor = partner_face("The Thirteenth Doctor", vec![], vec!["Time Lord", "Doctor"]);
         assert!(are_valid_partners(&amy, &doctor));
 
         // Can pair with Rory Williams
@@ -3628,12 +3630,6 @@ mod tests {
     /// synthesis and pair with a Time Lord Doctor commander.
     #[test]
     fn amy_pond_pairs_with_eleventh_doctor_from_mtgjson() {
-        use std::path::Path;
-
-        use crate::database::mtgjson::load_atomic_cards;
-        use crate::database::synthesis::build_oracle_face;
-        use crate::types::keywords::PartnerType;
-
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/AtomicCards.json");
         if !path.exists() {
@@ -3681,7 +3677,6 @@ mod tests {
 
     #[test]
     fn doctors_companion_rejects_non_doctor_subtypes() {
-        use crate::types::keywords::PartnerType;
         let companion = partner_face(
             "Amy Pond",
             vec![Keyword::Partner(PartnerType::DoctorsCompanion)],
@@ -3689,6 +3684,18 @@ mod tests {
         );
         let human_doctor = partner_face("Not A Real Doctor", vec![], vec!["Human", "Doctor"]);
         assert!(!are_valid_partners(&companion, &human_doctor));
+
+        let non_creature_doctor = CardFace {
+            name: "Noncreature Doctor".to_string(),
+            is_commander: true,
+            card_type: crate::types::card_type::CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Time Lord".to_string(), "Doctor".to_string()],
+            },
+            ..CardFace::default()
+        };
+        assert!(!are_valid_partners(&companion, &non_creature_doctor));
 
         let unified = partner_face("The Eleventh Doctor", vec![], vec!["Time Lord Doctor"]);
         assert!(are_valid_partners(&companion, &unified));

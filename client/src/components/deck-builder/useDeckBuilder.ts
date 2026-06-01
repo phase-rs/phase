@@ -32,7 +32,6 @@ import {
 } from "./commanderUtils";
 import {
   commanderPartnerCandidates,
-  ensureCardDatabase,
   isCardCommanderEligibleForFormat,
 } from "../../services/engineRuntime";
 
@@ -476,16 +475,16 @@ export function useDeckBuilder({
       // pairing decision is queried on demand (authoritative at click time) so a
       // stale precomputed value can never misclassify an add as a swap.
       void (async () => {
-        try {
-          await ensureCardDatabase();
-        } catch {
-          return;
+        let isPartnerAdd = false;
+        if (commanders.length === 1) {
+          try {
+            isPartnerAdd = (await commanderPartnerCandidates(commanders[0], [cardName])).includes(
+              cardName,
+            );
+          } catch {
+            return;
+          }
         }
-        const isPartnerAdd =
-          commanders.length === 1 &&
-          (await commanderPartnerCandidates(commanders[0], [cardName])).includes(
-            cardName,
-          );
         setDirty(true);
         const displaced =
           isPartnerAdd || commanders.length === 0 ? [] : commanders;

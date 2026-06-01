@@ -302,13 +302,6 @@ impl CardDatabase {
         if let Some(alias) = self.name_alias_index.get(&fold_card_name_key(name)) {
             return alias.clone();
         }
-        // Deck lists often omit the leading article ("Eleventh Doctor").
-        if !lower.starts_with("the ") {
-            let with_the = format!("the {lower}");
-            if self.face_index.contains_key(&with_the) || self.cards.contains_key(&with_the) {
-                return with_the;
-            }
-        }
         if let Some((front, _)) = lower.split_once("//") {
             let front = front.trim();
             if self.face_index.contains_key(front) || self.cards.contains_key(front) {
@@ -364,32 +357,26 @@ pub(crate) fn build_name_alias_index<'a>(
 ) -> HashMap<String, String> {
     let mut aliases: HashMap<String, Option<String>> = HashMap::new();
     for key in keys {
+        let mut register_alias = |alias: String| {
+            aliases
+                .entry(alias)
+                .and_modify(|existing| {
+                    if existing.as_deref() != Some(key.as_str()) {
+                        *existing = None;
+                    }
+                })
+                .or_insert_with(|| Some(key.clone()));
+        };
+
         let folded = fold_card_name_key(key);
-        if folded == *key {
-            continue;
+        if folded != *key {
+            register_alias(folded);
         }
-        aliases
-            .entry(folded)
-            .and_modify(|existing| {
-                if existing.as_deref() != Some(key.as_str()) {
-                    *existing = None;
-                }
-            })
-            .or_insert_with(|| Some(key.clone()));
 
         // Deck imports often drop the leading article ("Eleventh Doctor" vs
         // "The Eleventh Doctor"). Register the stripped form when unambiguous.
-        if let Some(stripped) = key.strip_prefix("the ") {
-            if !stripped.is_empty() {
-                aliases
-                    .entry(stripped.to_string())
-                    .and_modify(|existing| {
-                        if existing.as_deref() != Some(key.as_str()) {
-                            *existing = None;
-                        }
-                    })
-                    .or_insert_with(|| Some(key.clone()));
-            }
+        if let Some(stripped) = key.strip_prefix("the ").filter(|s| !s.is_empty()) {
+            register_alias(fold_card_name_key(stripped));
         }
     }
     aliases
@@ -728,6 +715,18 @@ mod tests {
                 "color_override": null, "scryfall_oracle_id": null, "legalities": {}
             }),
         );
+        map.insert(
+            "the séance doctor".to_string(),
+            serde_json::json!({
+                "name": "The Séance Doctor",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Legendary"], "core_types": ["Creature"], "subtypes": ["Time Lord", "Doctor"] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null, "legalities": {}
+            }),
+        );
         let json = serde_json::Value::Object(map).to_string();
         let db = CardDatabase::from_json_str(&json).unwrap();
 
@@ -735,6 +734,11 @@ mod tests {
             db.get_face_by_name("Eleventh Doctor")
                 .map(|face| face.name.as_str()),
             Some("The Eleventh Doctor")
+        );
+        assert_eq!(
+            db.get_face_by_name("Seance Doctor")
+                .map(|face| face.name.as_str()),
+            Some("The Séance Doctor")
         );
     }
 
