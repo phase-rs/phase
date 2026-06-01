@@ -704,6 +704,56 @@ pub fn synthesize_changeling_cda(face: &mut CardFace) {
     }
 }
 
+/// CR 702.161a: Living metal — "During your turn, this permanent is an artifact
+/// creature in addition to its other types." Synthesize a SelfRef static that
+/// adds the Creature type (Layer 4, CR 613.1d) while it is the controller's turn,
+/// gated by `StaticCondition::DuringYourTurn`. The Vehicle uses its printed P/T as
+/// a creature on its controller's turn and is a noncreature artifact otherwise.
+/// Mirrors `synthesize_station`'s creature-shift; the source is already an artifact
+/// (Vehicle), so only the Creature type is added. (Transformers — Flamewar,
+/// Streetwise Operative, etc.; #1547.)
+fn is_living_metal_static(static_ability: &StaticDefinition) -> bool {
+    static_ability.mode == StaticMode::Continuous
+        && static_ability.affected == Some(TargetFilter::SelfRef)
+        && matches!(
+            &static_ability.condition,
+            Some(crate::types::ability::StaticCondition::DuringYourTurn)
+        )
+        && static_ability.modifications.len() == 1
+        && static_ability.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature,
+                }
+            )
+        })
+}
+
+pub fn synthesize_living_metal(face: &mut CardFace) {
+    if !face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::LivingMetal))
+    {
+        return;
+    }
+    if face.static_abilities.iter().any(is_living_metal_static) {
+        return;
+    }
+    face.static_abilities.push(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .condition(crate::types::ability::StaticCondition::DuringYourTurn)
+            .modifications(vec![ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            }])
+            .description(
+                "CR 702.161a: Living metal — artifact creature during your turn".to_string(),
+            ),
+    );
+}
+
 /// Synthesize `additional_cost` from `Keyword::Kicker(ManaCost)`.
 ///
 /// If the card has Kicker and no additional_cost was already parsed from Oracle text
@@ -4473,6 +4523,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // threshold. Must run after Oracle parsing so `face.power`/`face.toughness`
     // are in place and `Keyword::Station` has been normalized.
     synthesize_station(face);
+    // CR 702.161a: Living metal — Vehicle is an artifact creature during its
+    // controller's turn. Must run after Oracle parsing so `Keyword::LivingMetal`
+    // is present on the (Vehicle) face.
+    synthesize_living_metal(face);
     // CR 702.165: Backup — ETB trigger placing +1/+1 counters and granting
     // non-Backup abilities printed below Backup until end of turn.
     synthesize_backup(face);
@@ -8734,6 +8788,72 @@ mod station_synthesis_tests {
             .modifications
             .iter()
             .any(|m| matches!(m, ContinuousModification::SetToughness { value: 8 })));
+    }
+
+    #[test]
+    fn synthesize_living_metal_adds_during_your_turn_creature_static() {
+        // CR 702.161a: Living metal makes the Vehicle an artifact creature during
+        // its controller's turn (Flamewar, Streetwise Operative; #1547).
+        let mut face = CardFace {
+            keywords: vec![Keyword::LivingMetal],
+            ..CardFace::default()
+        };
+        synthesize_living_metal(&mut face);
+        let sd = face
+            .static_abilities
+            .iter()
+            .find(|s| {
+                s.mode == StaticMode::Continuous
+                    && s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AddType {
+                                core_type: CoreType::Creature,
+                            }
+                        )
+                    })
+            })
+            .expect("Living metal must synthesize an AddType(Creature) static");
+        assert_eq!(sd.affected, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            sd.condition,
+            Some(StaticCondition::DuringYourTurn)
+        ));
+        // Only the type is added — the Vehicle's printed P/T flows through; no
+        // P/T override (unlike Station, whose P/T lives in a striation).
+        assert_eq!(sd.modifications.len(), 1);
+    }
+
+    #[test]
+    fn synthesize_living_metal_noop_without_keyword() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Menace],
+            ..CardFace::default()
+        };
+        let before = face.static_abilities.len();
+        synthesize_living_metal(&mut face);
+        assert_eq!(
+            face.static_abilities.len(),
+            before,
+            "no Living Metal keyword → no synthesized static"
+        );
+    }
+
+    #[test]
+    fn synthesize_living_metal_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::LivingMetal],
+            ..CardFace::default()
+        };
+        synthesize_living_metal(&mut face);
+        synthesize_living_metal(&mut face);
+
+        let count = face
+            .static_abilities
+            .iter()
+            .filter(|s| is_living_metal_static(s))
+            .count();
+        assert_eq!(count, 1);
     }
 
     /// CR 721.2b: Reminder text "It's an artifact creature at N+" has no
