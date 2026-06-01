@@ -655,8 +655,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ChoiceValue, DevotionColors, QuantityExpr, QuantityRef, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ChoiceValue, DevotionColors, QuantityExpr,
+        QuantityRef, TargetFilter,
     };
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -1350,12 +1352,6 @@ mod tests {
     /// (Reflecting Pool) prompt behavior.
     #[test]
     fn opponent_land_colors_prompts_choice_when_multiple_colors_available() {
-        use crate::game::zones::create_object;
-        use crate::types::ability::{AbilityCost, AbilityDefinition, AbilityKind};
-        use crate::types::card_type::CoreType;
-        use crate::types::identifiers::CardId;
-        use crate::types::zones::Zone;
-
         let mut state = GameState::new_two_player(42);
 
         // Player 0 controls the Exotic Orchard — the prompt reads the source's controller.
