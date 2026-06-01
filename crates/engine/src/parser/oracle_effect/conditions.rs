@@ -267,6 +267,8 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         }
     }
 
+    let mut alternative_mana_cost_conditional = false;
+
     let body = if let Some(((), rest)) = nom_on_lower(text, &lower, |input| {
         value(
             (),
@@ -286,6 +288,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         let (input, _) = take_until::<_, _, OracleError<'_>>(" cost was paid, ").parse(input)?;
         value((), tag(" cost was paid, ")).parse(input)
     }) {
+        alternative_mana_cost_conditional = true;
         Some(rest.to_string())
     } else if tag::<_, _, OracleError<'_>>("if ")
         .parse(lower.as_str())
@@ -367,6 +370,8 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
                 let stripped = strip_leading_instead(&body);
                 if stripped.len() < body.len() {
                     (stripped, AbilityCondition::AdditionalCostPaidInstead)
+                } else if alternative_mana_cost_conditional {
+                    (body, AbilityCondition::AlternativeManaCostPaid)
                 } else {
                     (body, AbilityCondition::additional_cost_paid_any())
                 }

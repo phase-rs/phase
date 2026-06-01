@@ -40176,9 +40176,9 @@ mod snapshot_tests {
         assert!(
             matches!(
                 def.condition,
-                Some(AbilityCondition::AdditionalCostPaid { .. })
+                Some(AbilityCondition::AlternativeManaCostPaid)
             ),
-            "draw must be gated on alternative cost payment, got {:?}",
+            "draw must be gated on alternative mana cost payment, got {:?}",
             def.condition
         );
         let draw_effect = def

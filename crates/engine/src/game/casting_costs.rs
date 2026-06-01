@@ -174,15 +174,20 @@ pub(crate) fn handle_decide_additional_cost(
         }
         AdditionalCost::Choice(preferred, fallback) => {
             if pay {
-                // CR 118.9 + CR 608.2c: Paying the preferred branch of a
-                // `Choice` cost marks `additional_cost_paid` for resolution
-                // clauses such as "if the {cost} was paid" (Baleful Mastery).
-                // Applies both to card-level `additional_cost::Choice` and to
-                // the casting-options alternative-cost prompt, which reuses
-                // this shape with `preferred` = alt cost and `fallback` =
-                // printed mana cost.
-                ability.context.additional_cost_paid = true;
-                ability.context.additional_cost_payment_count = 1;
+                let is_card_additional_cost_choice = state
+                    .objects
+                    .get(&pending.object_id)
+                    .and_then(|obj| obj.additional_cost.as_ref())
+                    .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)));
+                if is_card_additional_cost_choice {
+                    // CR 601.2b: Optional/additional `Choice` costs (e.g. casualty).
+                    ability.context.additional_cost_paid = true;
+                    ability.context.additional_cost_payment_count = 1;
+                } else if matches!(preferred, AbilityCost::Mana { .. }) {
+                    // CR 118.9: Spellcasting-option alternative mana costs are not
+                    // additional costs; gate riders via `alternative_mana_cost_paid`.
+                    ability.context.alternative_mana_cost_paid = true;
+                }
                 Some(preferred.clone())
             } else {
                 Some(fallback.clone())
