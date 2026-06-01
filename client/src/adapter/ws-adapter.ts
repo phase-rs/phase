@@ -303,7 +303,16 @@ export class WebSocketAdapter implements EngineAdapter {
       }
     };
 
-    socket.ws.send(JSON.stringify(setupFrame));
+    if (!this.send(setupFrame)) {
+      socket.close();
+      if (this.initReject) {
+        this.initReject(
+          new AdapterError("WS_CLOSED", "Failed to send setup frame", true),
+        );
+        this.initResolve = null;
+        this.initReject = null;
+      }
+    }
   }
 
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {

@@ -236,6 +236,27 @@ describe("WebSocketAdapter", () => {
   });
 
   describe("send() error handling", () => {
+    it("rejects initialize when the post-handshake setup frame cannot be sent", async () => {
+      MockWebSocket.last = null;
+      const setupFailingAdapter = new WebSocketAdapter(
+        "ws://localhost:9374/ws",
+        "host",
+        { main_deck: [], sideboard: [] },
+      );
+      const initPromise = setupFailingAdapter.initialize();
+      await Promise.resolve();
+      const setupWs = MockWebSocket.last!;
+      setupWs.send
+        .mockImplementationOnce(() => undefined)
+        .mockImplementationOnce(() => {
+          throw new Error("InvalidStateError");
+        });
+
+      setupWs.dispatchSynthetic("message", SERVER_HELLO);
+
+      await expect(initPromise).rejects.toThrow("Failed to send setup frame");
+    });
+
     it("sends the action frame and keeps the promise pending on a healthy socket", () => {
       ws.send.mockClear();
       void adapter.submitAction({ type: "PassPriority" }, 0);
