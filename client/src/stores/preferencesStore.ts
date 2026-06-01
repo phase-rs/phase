@@ -56,6 +56,15 @@ export type CardSizePreference = "small" | "medium" | "large";
  *  "shift"  = the preview only appears while the Shift key is held (Tabletop
  *             Simulator style), letting the player read the board uninterrupted. */
 export type CardPreviewMode = "follow" | "side" | "shift";
+/** Card-preview hover latency bounds (milliseconds). `0` = instant (the
+ *  default — the preview appears the moment the cursor lands on a card). The
+ *  upper bound keeps the slider meaningful; a delay longer than ~1s defeats the
+ *  purpose of an at-a-glance preview. Only applies to the hover-driven preview
+ *  modes ("follow"/"side"); the "shift" bind-key mode shows immediately on
+ *  keypress, so the latency is mutually exclusive with it. */
+export const CARD_PREVIEW_HOVER_DELAY_MIN = 0;
+export const CARD_PREVIEW_HOVER_DELAY_MAX = 1000;
+export const CARD_PREVIEW_HOVER_DELAY_STEP = 50;
 export type HudLayout = "inline" | "floating";
 export type LogDefaultState = "open" | "closed";
 export type BattlefieldCardDisplay = "art_crop" | "full_card";
@@ -135,6 +144,7 @@ function buildDefaultPreferences(): PreferencesState {
     showKeywordStrip: true,
     battlefieldPeekOnHover: true,
     cardPreviewMode: "follow",
+    cardPreviewHoverDelayMs: 0,
     stackDockSide: "right",
     opponentHudDensity: "comfortable",
     aiSeats: [defaultAiSeat()],
@@ -192,6 +202,10 @@ interface PreferencesState {
   /** Desktop hover card-preview behavior — follow cursor, dock to the side, or
    *  only show while Shift is held. See {@link CardPreviewMode}. */
   cardPreviewMode: CardPreviewMode;
+  /** Latency (ms) before the hover preview appears in the "follow"/"side"
+   *  modes. `0` = instant (default). Ignored in "shift" mode, which is
+   *  keypress-triggered. See {@link CARD_PREVIEW_HOVER_DELAY_MAX}. */
+  cardPreviewHoverDelayMs: number;
   /** Screen edge the stack panel docks to and collapses toward. */
   stackDockSide: StackDockSide;
   /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
@@ -249,6 +263,7 @@ interface PreferencesActions {
   setShowKeywordStrip: (show: boolean) => void;
   setBattlefieldPeekOnHover: (enabled: boolean) => void;
   setCardPreviewMode: (mode: CardPreviewMode) => void;
+  setCardPreviewHoverDelayMs: (ms: number) => void;
   setAiSeatDifficulty: (index: number, difficulty: AIDifficulty) => void;
   setAiSeatDeckId: (index: number, id: AiDeckSelection) => void;
   /** Grow or shrink `aiSeats` to `count` slots. New slots inherit defaults;
@@ -361,6 +376,14 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setShowKeywordStrip: (show) => set({ showKeywordStrip: show }),
       setBattlefieldPeekOnHover: (enabled) => set({ battlefieldPeekOnHover: enabled }),
       setCardPreviewMode: (mode) => set({ cardPreviewMode: mode }),
+      setCardPreviewHoverDelayMs: (ms) =>
+        set({
+          cardPreviewHoverDelayMs: clamp(
+            ms,
+            CARD_PREVIEW_HOVER_DELAY_MIN,
+            CARD_PREVIEW_HOVER_DELAY_MAX,
+          ),
+        }),
       setAiSeatDifficulty: (index, difficulty) =>
         set((state) => {
           if (index < 0 || index >= state.aiSeats.length) return state;
@@ -444,7 +467,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 13,
+      version: 14,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -465,6 +488,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          fixed behavior).
       // v12 → v13: Add cardPreviewMode; legacy stores default to "follow" (the
       //          prior fixed cursor-following behavior) via the shallow merge.
+      // v13 → v14: Add cardPreviewHoverDelayMs; legacy stores default to 0
+      //          (instant — the prior behavior) via the shallow merge.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

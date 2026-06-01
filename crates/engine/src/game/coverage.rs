@@ -24,7 +24,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 use nom::bytes::complete::tag;
@@ -41,9 +41,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
         StaticMode::ReduceAbilityCost { .. }
             | StaticMode::ModifyActivationLimit { .. }
             | StaticMode::AdditionalLandDrop { .. }
-            | StaticMode::ReduceCost { .. }
-            | StaticMode::RaiseCost { .. }
-            | StaticMode::MinimumCost { .. }
+            | StaticMode::ModifyCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantPayCost { .. }
             | StaticMode::CantBeCast { .. }
@@ -6510,19 +6508,21 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("play with the top card")
                     || effective_lower.contains("play with the top")
             }
-            StaticMode::ReduceCost { .. } => {
-                effective_lower.contains("cost") && effective_lower.contains("less")
-            }
-            StaticMode::RaiseCost { .. } => {
-                effective_lower.contains("cost") && effective_lower.contains("more")
-            }
-            // CR 601.2f: Trinisphere class — "each spell that would cost less than N
-            // mana to cast costs N mana to cast." Coverage marker: "would cost less than"
-            // is the discriminator from RaiseCost ("more"), ReduceCost ("less to cast").
-            StaticMode::MinimumCost { .. } => {
-                effective_lower.contains("would cost less than")
-                    && effective_lower.contains("mana to cast")
-            }
+            // CR 601.2f: ReduceCost / RaiseCost / MinimumCost coverage markers,
+            // discriminated by the `mode` axis. Trinisphere's "would cost less than"
+            // distinguishes Minimum from Reduce ("less to cast") and Raise ("more").
+            StaticMode::ModifyCost { mode, .. } => match mode {
+                CostModifyMode::Reduce => {
+                    effective_lower.contains("cost") && effective_lower.contains("less")
+                }
+                CostModifyMode::Raise => {
+                    effective_lower.contains("cost") && effective_lower.contains("more")
+                }
+                CostModifyMode::Minimum => {
+                    effective_lower.contains("would cost less than")
+                        && effective_lower.contains("mana to cast")
+                }
+            },
             StaticMode::CantBeCountered => effective_lower.contains("can't be countered"),
             StaticMode::CantBeCopied => effective_lower.contains("can't be copied"),
             // CR 119.7: "can't gain life" or its compound form "life total can't change"

@@ -49,6 +49,10 @@
     "showKeywords": "Schlüsselwörter auf Schlachtfeldkarten anzeigen",
     "opponentHoverPreview": "Gegner-Hover-Vorschau",
     "showOpponentBoard": "Spielfeld des Gegners beim Hovern über das HUD anzeigen",
+    "cardPreviewDelay": "Hover-Verzögerung",
+    "cardPreviewDelayInstant": "Sofort",
+    "cardPreviewDelayValue": "{{ms}} ms",
+    "cardPreviewDelayHint": "So lange nach dem Überfahren einer Karte warten, bevor die Vorschau erscheint.",
     "cardPreview": "Karten-Hover-Vorschau",
     "cardPreviewOptions": {
       "follow": "Dem Cursor folgen",

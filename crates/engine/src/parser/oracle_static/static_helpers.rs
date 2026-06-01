@@ -313,18 +313,15 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
         amount
     };
 
-    let mode = if is_raise {
-        StaticMode::RaiseCost {
-            amount,
-            spell_filter: spell_filter.clone(),
-            dynamic_count: dynamic_count.clone(),
-        }
-    } else {
-        StaticMode::ReduceCost {
-            amount,
-            spell_filter: spell_filter.clone(),
-            dynamic_count: dynamic_count.clone(),
-        }
+    let mode = StaticMode::ModifyCost {
+        mode: if is_raise {
+            CostModifyMode::Raise
+        } else {
+            CostModifyMode::Reduce
+        },
+        amount,
+        spell_filter: spell_filter.clone(),
+        dynamic_count: dynamic_count.clone(),
     };
 
     // Build the affected filter for the static definition.

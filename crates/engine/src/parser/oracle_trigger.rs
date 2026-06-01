@@ -101,6 +101,45 @@ fn with_owner_scope(filter: TargetFilter, controller: ControllerRef) -> TargetFi
     }
 }
 
+/// CR 115.1: A "becomes the target of a spell or ability you control / an
+/// opponent controls" trigger (e.g. Valiant — Heartfire Hero, Emberheart
+/// Challenger) restricts the targeting source's controller. Parse that optional
+/// controller off the front of the post-event remainder; `None` leaves the
+/// source unrestricted (bare "a spell or ability").
+fn parse_target_source_controller(rest: &str) -> Option<ControllerRef> {
+    alt((
+        value(
+            ControllerRef::You,
+            tag::<_, _, OracleError<'_>>("you control"),
+        ),
+        value(ControllerRef::Opponent, tag("an opponent controls")),
+    ))
+    .parse(rest.trim_start())
+    .ok()
+    .map(|(_, controller)| controller)
+}
+
+/// CR 115.1: The targeting source of such a trigger is a stack spell OR a stack
+/// ability controlled by `controller`. Mirrors the spell/ability split the
+/// stack-entry matcher (`stack_entry_matches_filter`) enforces at runtime: the
+/// spell branch pairs `StackSpell` with a controller-scoped `Typed`, the ability
+/// branch uses `StackAbility`'s own controller dimension.
+fn becomes_target_source_filter(controller: ControllerRef) -> TargetFilter {
+    TargetFilter::Or {
+        filters: vec![
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Typed(TypedFilter::default().controller(controller.clone())),
+                ],
+            },
+            TargetFilter::StackAbility {
+                controller: Some(controller),
+            },
+        ],
+    }
+}
+
 fn parse_self_return_origin_zone(lower: &str) -> Option<Zone> {
     nom_primitives::scan_preceded(lower, |input| {
         let (rest, _) = (
@@ -5784,6 +5823,13 @@ fn try_parse_event(
             SimpleEvent::BecomesTargetSpellOrAbility => {
                 def.mode = TriggerMode::BecomesTarget;
                 set_trigger_subject(&mut def, subject);
+                // CR 115.1: "a spell or ability you control" / "an opponent
+                // controls" restricts the targeting source's controller. Without
+                // it the trigger fires for any source — including the opponent's
+                // (Valiant bug #1378).
+                if let Some(controller) = parse_target_source_controller(remaining) {
+                    def.valid_source = Some(becomes_target_source_filter(controller));
+                }
             }
             // CR 115.1a + CR 115.1b: "target" spell text defines targeted spells,
             // and Aura spells are always targeted via enchant.
@@ -16840,6 +16886,36 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::BecomesTarget);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert_eq!(def.valid_source, Some(TargetFilter::StackSpell));
+    }
+
+    #[test]
+    fn trigger_becomes_target_you_control_sets_controller_source() {
+        // Valiant (#1378): "a spell or ability you control" must restrict the
+        // targeting source's controller, not fire for any source.
+        let def = parse_trigger_line(
+            "Whenever this creature becomes the target of a spell or ability you control for the first time each turn, put a +1/+1 counter on it.",
+            "Heartfire Hero",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(
+            def.valid_source,
+            Some(becomes_target_source_filter(ControllerRef::You))
+        );
+    }
+
+    #[test]
+    fn trigger_becomes_target_opponent_controls_sets_controller_source() {
+        // CR 115.1: the same spell-or-ability controller grammar supports
+        // opponent-scoped source restrictions.
+        let def = parse_trigger_line(
+            "Whenever this creature becomes the target of a spell or ability an opponent controls, draw a card.",
+            "Opponent-Scoped Observer",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(
+            def.valid_source,
+            Some(becomes_target_source_filter(ControllerRef::Opponent))
+        );
     }
 
     #[test]
