@@ -1160,6 +1160,10 @@
     "battleFallback": "Battle",
     "subtitle": "{{name}} needs a new protector. Choose which opponent will defend it."
   },
+  "clashOpponent": {
+    "title": "Choose Clash Opponent",
+    "subtitle": "Choose which opponent will clash with you."
+  },
   "cardDataMissing": {
     "title": "Card Data Missing",
     "body": "<code>card-data.json</code> was not found. The game needs card definitions to play with real cards.",

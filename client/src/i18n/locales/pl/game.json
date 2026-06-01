@@ -1160,6 +1160,10 @@
     "battleFallback": "Bitwa",
     "subtitle": "{{name}} potrzebuje nowego obrońcy. Wybierz, który przeciwnik będzie jej bronił."
   },
+  "clashOpponent": {
+    "title": "Wybierz przeciwnika do starcia",
+    "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."
+  },
   "cardDataMissing": {
     "title": "Brak danych kart",
     "body": "Nie znaleziono <code>card-data.json</code>. Gra potrzebuje definicji kart, aby grać prawdziwymi kartami.",

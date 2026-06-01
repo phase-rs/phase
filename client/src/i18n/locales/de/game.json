@@ -1160,6 +1160,10 @@
     "battleFallback": "Schlacht",
     "subtitle": "{{name}} benötigt einen neuen Beschützer. Wähle, welcher Gegner sie verteidigt."
   },
+  "clashOpponent": {
+    "title": "Kampf-Gegner wählen",
+    "subtitle": "Wähle, welcher Gegner mit dir kämpft."
+  },
   "cardDataMissing": {
     "title": "Kartendaten fehlen",
     "body": "<code>card-data.json</code> wurde nicht gefunden. Das Spiel benötigt Kartendefinitionen, um mit echten Karten zu spielen.",

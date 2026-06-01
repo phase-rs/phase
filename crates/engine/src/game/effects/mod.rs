@@ -51,6 +51,7 @@ pub mod conjure;
 pub mod connive;
 pub mod control_next_turn;
 pub mod copy_spell;
+pub mod copy_token_blocking;
 pub mod counter;
 pub mod counters;
 pub mod create_damage_replacement;
@@ -1684,6 +1685,9 @@ pub fn resolve_effect(
         Effect::CastCopyOfCard { .. } => cast_copy_of_card::resolve(state, ability, events),
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
         Effect::Myriad => myriad::resolve(state, ability, events),
+        Effect::CopyTokenBlockingAttacker { .. } => {
+            copy_token_blocking::resolve(state, ability, events)
+        }
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
         Effect::PutCounter { .. } => counters::resolve_add(state, ability, events),
@@ -11236,6 +11240,84 @@ mod tests {
         state.current_trigger_event = None;
         ability.context.optional_effect_performed = true;
         assert!(evaluate_condition(&cond, &state, &ability));
+    }
+
+    /// CR 701.30b: "Clash with an opponent" lets the clashing player CHOOSE the
+    /// opponent. With two or more opponents the engine must pause on
+    /// `ClashChooseOpponent` (offering every opponent) instead of silently
+    /// clashing with the first opponent in seat order.
+    #[test]
+    fn clash_with_multiple_opponents_prompts_for_opponent_choice() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let ability = ResolvedAbility::new(Effect::Clash, vec![], ObjectId(1), PlayerId(0));
+
+        let mut events = Vec::new();
+        clash::resolve(&mut state, &ability, &mut events).expect("clash resolves");
+
+        match &state.waiting_for {
+            WaitingFor::ClashChooseOpponent {
+                player, candidates, ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert!(
+                    candidates.contains(&PlayerId(1)) && candidates.contains(&PlayerId(2)),
+                    "both opponents must be offered, got {candidates:?}"
+                );
+            }
+            other => panic!("expected ClashChooseOpponent, got {other:?}"),
+        }
+
+        // CR 701.30b: the controller's chosen opponent — not the first in seat
+        // order — is the one that clashes.
+        let mut clash_events = Vec::new();
+        clash::perform_clash(&mut state, &ability, PlayerId(2), &mut clash_events)
+            .expect("clash performs against the chosen opponent");
+        assert!(
+            clash_events.iter().any(|e| matches!(
+                e,
+                GameEvent::Clash {
+                    opponent: PlayerId(2),
+                    ..
+                }
+            )),
+            "clash must be against the chosen opponent PlayerId(2)"
+        );
+    }
+
+    /// CR 701.30b: With a single opponent there is no decision to make, so a
+    /// two-player clash proceeds without a `ClashChooseOpponent` prompt.
+    #[test]
+    fn clash_with_single_opponent_needs_no_choice() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(Effect::Clash, vec![], ObjectId(1), PlayerId(0));
+
+        let mut events = Vec::new();
+        clash::resolve(&mut state, &ability, &mut events).expect("clash resolves");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ClashChooseOpponent { .. }),
+            "two-player clash must not prompt for an opponent choice"
+        );
+    }
+
+    /// CR 701.30b: If no opponent exists, there is no legal player to choose
+    /// for "clash with an opponent"; the effect is a no-op rather than
+    /// manufacturing `PlayerId(1)`.
+    #[test]
+    fn clash_with_no_opponents_does_not_default_to_invalid_player() {
+        let mut state = GameState::new(FormatConfig::standard(), 1, 42);
+        let ability = ResolvedAbility::new(Effect::Clash, vec![], ObjectId(1), PlayerId(0));
+
+        let mut events = Vec::new();
+        clash::resolve(&mut state, &ability, &mut events).expect("clash no-op succeeds");
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ClashChooseOpponent { .. }),
+            "no-op clash must not prompt when there are no candidates"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, GameEvent::Clash { .. })),
+            "no-op clash must not emit a Clash event with a fabricated opponent"
+        );
     }
 
     /// CR 702.33f: variant gating reads `kickers_paid` membership. Mirrors

@@ -2669,6 +2669,16 @@ pub enum WaitingFor {
         source_id: ObjectId,
         valid_tokens: Vec<ObjectId>,
     },
+    /// CR 701.30b: "Clash with an opponent" lets the clashing player choose
+    /// which opponent to clash with. Only entered when two or more opponents
+    /// are available (with one opponent there is no decision). `candidates`
+    /// is the set of legal opponents; `ability` is the resolving clash ability,
+    /// carried so the clash can be performed against the chosen opponent.
+    ClashChooseOpponent {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+        ability: Box<crate::types::ability::ResolvedAbility>,
+    },
     /// CR 701.30c: After a clash, each player puts their revealed card on top or
     /// bottom of their library. Choices are made in APNAP order. `remaining` holds
     /// the next player/card pairs still awaiting a choice.
@@ -3166,6 +3176,7 @@ impl WaitingFor {
             | WaitingFor::RepeatDecision { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }
             | WaitingFor::PopulateChoice { player, .. }
+            | WaitingFor::ClashChooseOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }

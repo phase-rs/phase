@@ -12812,6 +12812,9 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
     if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
+        return def;
+    }
     let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
@@ -12835,10 +12838,131 @@ pub(crate) fn parse_effect_chain_with_context(
     if let Some(def) = try_parse_return_target_and_same_name_from_your_graveyard(text, kind) {
         return def;
     }
+    if let Some(def) = try_parse_for_each_attacker_copy_blocker(text, kind) {
+        return def;
+    }
     let ir = parse_effect_chain_ir(text, kind, ctx);
     let mut def = lower_effect_chain_ir(&ir);
     fold_speed_floor_sentences(&mut def);
     def
+}
+
+/// CR 509.1g + CR 506.3e + CR 707.2 + CR 603.7: Mirror Match's whole-card idiom
+/// — "For each creature attacking you[ or a planeswalker you control], create a
+/// token that's a copy of that creature and that's blocking that creature.
+/// Exile those tokens at end of combat."
+///
+/// Lowers to `Effect::CopyTokenBlockingAttacker` (the copy-and-block half, whose
+/// resolver copies each matched attacker and puts the copy onto the battlefield
+/// blocking it, CR 506.3e) chained via `sub_ability` to a delayed end-of-combat
+/// exile of "those tokens" (`TargetFilter::LastCreated`, snapshotted at
+/// creation by the delayed-trigger resolver, CR 603.7c). The casting
+/// restriction ("only during the declare blockers step") is handled separately
+/// by the casting-line parser; an optional leading copy of that sentence is
+/// stripped here defensively in case it reaches this entry inline.
+///
+/// `FilterProp::AttackingController` matches every attacker whose defending
+/// player is the controller — which the engine records as the controller of an
+/// attacked planeswalker/battle too, so "attacking you" and "or a planeswalker
+/// you control" collapse onto the one predicate.
+fn try_parse_for_each_attacker_copy_blocker(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let lower = text.to_ascii_lowercase();
+    // Optional leading casting-restriction sentence, if not pre-stripped.
+    let i = opt(tag::<_, _, OracleError<'_>>(
+        "cast this spell only during the declare blockers step.",
+    ))
+    .parse(lower.as_str())
+    .map(|(rest, _)| rest.trim_start())
+    .unwrap_or(lower.as_str());
+
+    // "for each creature attacking you[ or a planeswalker you control], "
+    let (i, _) = tag::<_, _, OracleError<'_>>("for each creature attacking you")
+        .parse(i)
+        .ok()?;
+    let (i, _) = opt(tag::<_, _, OracleError<'_>>(
+        " or a planeswalker you control",
+    ))
+    .parse(i)
+    .ok()?;
+    let (i, _) = tag::<_, _, OracleError<'_>>(", ").parse(i).ok()?;
+
+    // "create a token that's a copy of <anaphor> and that's blocking <anaphor>"
+    let (i, _) = tag::<_, _, OracleError<'_>>("create a token that's a copy of ")
+        .parse(i)
+        .ok()?;
+    let (i, _) = alt((tag::<_, _, OracleError<'_>>("that creature"), tag("it")))
+        .parse(i)
+        .ok()?;
+    let (i, _) = tag::<_, _, OracleError<'_>>(" and that's blocking ")
+        .parse(i)
+        .ok()?;
+    let (i, _) = alt((tag::<_, _, OracleError<'_>>("that creature"), tag("it")))
+        .parse(i)
+        .ok()?;
+    let (i, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(i).ok()?;
+    let i = i.trim_start();
+
+    // Optional trailing "exile those tokens at end of combat." sentence. When
+    // present, it chains a delayed end-of-combat exile of the created tokens;
+    // when the body ends after the copy clause, the recognizer still matches
+    // (the copy-and-block half alone). Any other trailing text disqualifies the
+    // whole-card match so the generic pipeline can attempt it instead.
+    let exiles_tokens = if i.is_empty() {
+        false
+    } else {
+        let (rest, _) = tag::<_, _, OracleError<'_>>("exile those tokens at end of combat")
+            .parse(i)
+            .ok()?;
+        let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        true
+    };
+
+    let source_filter = TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
+    );
+    let mut def = AbilityDefinition::new(
+        kind,
+        Effect::CopyTokenBlockingAttacker {
+            source_filter,
+            owner: TargetFilter::Controller,
+        },
+    );
+    if exiles_tokens {
+        // CR 603.7c + CR 701.36a: "those tokens" → the tokens created above,
+        // snapshotted at delayed-trigger creation via `TargetFilter::LastCreated`.
+        let exile = AbilityDefinition::new(
+            kind,
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::LastCreated,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        );
+        def.sub_ability = Some(Box::new(AbilityDefinition::new(
+            kind,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::EndCombat,
+                },
+                effect: Box::new(exile),
+                uses_tracked_set: false,
+            },
+        )));
+    }
+    Some(def)
 }
 
 fn try_parse_return_target_and_same_name_from_your_graveyard(
@@ -20981,6 +21105,52 @@ mod tests {
                     .any(|p| matches!(p, FilterProp::EnteredThisTurn)));
             }
             other => panic!("expected CopyTokenOf with typed source_filter, got {other:?}"),
+        }
+    }
+
+    /// CR 509.1g + CR 506.3e + CR 603.7: Mirror Match lowers to
+    /// `CopyTokenBlockingAttacker` over attackers-against-you plus a delayed
+    /// end-of-combat exile of the created tokens.
+    #[test]
+    fn effect_mirror_match_copy_blockers_and_delayed_exile() {
+        let def = parse_effect_chain(
+            "For each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::CopyTokenBlockingAttacker {
+                source_filter: TargetFilter::Typed(tf),
+                owner,
+            } => {
+                assert_eq!(*owner, TargetFilter::Controller);
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::AttackingController)));
+            }
+            other => panic!("expected CopyTokenBlockingAttacker, got {other:?}"),
+        }
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("delayed end-of-combat exile sub_ability present");
+        match &*sub.effect {
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase },
+                effect,
+                ..
+            } => {
+                assert_eq!(*phase, Phase::EndCombat);
+                assert!(matches!(
+                    &*effect.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        target: TargetFilter::LastCreated,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected delayed exile trigger, got {other:?}"),
         }
     }
 

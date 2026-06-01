@@ -95,6 +95,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "DrawnThisTurnTopdeckChoice",
     "LearnChoice",
     "ManifestDreadChoice",
+    "ClashChooseOpponent",
     "ClashCardPlacement",
     "TopOrBottomChoice",
     "ProliferateChoice",
