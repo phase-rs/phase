@@ -192398,6 +192398,526 @@ scryfall_oracle_id = "e85bfbbc-7269-486b-992c-776ab45d5840"
 preset_id = "e167b906-df66-5cce-962b-1086f473e884"
 
 [[token]]
+id = "e1712205-f6a6-5ffa-befc-9becced0337f"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Alchemist's Talent",
+    "An Offer You Can't Refuse",
+    "Ancestors' Aid",
+    "Ancient Adamantoise",
+    "Ancient Copper Dragon",
+    "Ashling's Command",
+    "Atsushi, the Blazing Sky",
+    "Axgard Artisan",
+    "Baeloth Barrityl, Entertainer",
+    "Bank Job",
+    "Battle Angels of Tyr",
+    "Beamtown Beatstick",
+    "Beza, the Bounding Spring",
+    "Big Score",
+    "Big Spender",
+    "Bilbo, Retired Burglar",
+    "Bill Ferny, Bree Swindler",
+    "Black Market Connections",
+    "Black Market Tycoon",
+    "Blood Money",
+    "Bloodroot Apothecary",
+    "Blooming Blast",
+    "Bonehoard Dracosaur",
+    "Boneyard Desecrator",
+    "Bootleggers' Stash",
+    "Bottle-Cap Blast",
+    "Boxing Ring",
+    "Brass's Bounty",
+    "Brazen Freebooter",
+    "Breeches, Eager Pillager",
+    "Bucknard's Everfull Purse",
+    "Burakos, Party Leader",
+    "Burdened Aerialist",
+    "Buy Your Silence",
+    "Captain Lannery Storm",
+    "Careening Mine Cart",
+    "Casey & Raph, Hotheads",
+    "Cataclysmic Prospecting",
+    "Cavern-Hoard Dragon",
+    "Centrifuge",
+    "Charming Scoundrel",
+    "City of Death",
+    "Cloud, Ex-SOLDIER",
+    "Coin of Mastery",
+    "Collector's Vault",
+    "Common Crook",
+    "Contested Game Ball",
+    "Contract Killing",
+    "Corsair Captain",
+    "Covetous Elegy",
+    "Crack Open",
+    "Creative Outburst",
+    "Culmination of Studies",
+    "Currency Converter",
+    "Cutthroat Negotiator",
+    "Deadeye Plunderers",
+    "Deadly Derision",
+    "Deadly Dispute",
+    "Decadent Dragon // Expensive Taste",
+    "Depths of Desire",
+    "Descent into Avernus",
+    "Diamond Pick-Axe",
+    "Dihada, Binder of Wills",
+    "Dire Fleet Hoarder",
+    "Discerning Financier",
+    "Dockside Extortionist",
+    "Don Andres, the Renegade",
+    "Done for the Day",
+    "Dungeon of the Mad Mage",
+    "Dungeoneer's Pack",
+    "Edward Kenway",
+    "Elemental Masterpiece",
+    "Emissary Green",
+    "Enterprising Scallywag",
+    "Erestor of the Council",
+    "Evin, Waterdeep Opportunist",
+    "Excavation Technique",
+    "Exhibition Magician",
+    "Exit Through the Grift Shop",
+    "Fable of the Mirror-Breaker // Reflection of Kiki-Jiki",
+    "Fae Offering",
+    "Fain, the Broker",
+    "Fake Your Own Death",
+    "Flamekin Gildweaver",
+    "Flick a Coin",
+    "Forging the Tyrite Sword",
+    "Forsworn Paladin",
+    "Fountainport",
+    "Furnace Reins",
+    "Gadrak, the Crown-Scourge",
+    "Gala Greeters",
+    "Galadriel, Gift-Giver",
+    "Galazeth Prismari",
+    "Ganax, Astral Hunter",
+    "Gemcutter Buccaneer",
+    "Generous Plunderer",
+    "Gilded Ghoda",
+    "Gilded Pinions",
+    "Gimli of the Glittering Caves",
+    "Gleaming Barrier",
+    "Glittermonger",
+    "Gluntch, the Bestower",
+    "Glóin, Dwarf Emissary",
+    "Goblin Airbrusher",
+    "Goblin Glasswright // Craft with Pride",
+    "Goblin Shaman",
+    "Gold Pan",
+    "Gold Rush",
+    "Goldlust Triad",
+    "Goldspan Dragon",
+    "Goldvein Hydra",
+    "Goldvein Pick",
+    "Gonti, Night Minister",
+    "Gorbag of Minas Morgul",
+    "Grabby Giant // That's Mine",
+    "Great Train Heist",
+    "Greedy Freebooter",
+    "Grim Bounty",
+    "Grim Hireling",
+    "Guild Artisan",
+    "Halo Scarab",
+    "Heap Gate",
+    "Heartless Pillage",
+    "Hell to Pay",
+    "Henry Wu, InGen Geneticist",
+    "Herald of Hadar",
+    "Hit the Mother Lode",
+    "Hoard Hauler",
+    "Hoard Robber",
+    "Hoarding Ogre",
+    "Hornswoggle",
+    "Hullbreacher",
+    "Ignacio of Myra's Marvels",
+    "Impetuous Lootmonger",
+    "Improvised Weaponry",
+    "Impulsive Pilferer",
+    "Indulge // Excess",
+    "Ingenious Mastery",
+    "Inspired Tinkering",
+    "Instrument of the Bards",
+    "Invasion of Ergamon // Truga Cliffcharger",
+    "Involuntary Employment",
+    "Iron Man, Titan of Innovation",
+    "J. Jonah Jameson",
+    "Jan Jansen, Chaos Crafter",
+    "Jared Carthalion",
+    "Jewel Thief",
+    "Jewel-Eyed Cobra",
+    "Jolene, Plundering Pugilist",
+    "Jolene, the Plunder Queen",
+    "Kain, Traitorous Dragoon",
+    "Kalain, Reclusive Painter",
+    "Kamachal, Ship's Mascot",
+    "Kellogg, Dangerous Mind",
+    "Kerblam! Warehouse",
+    "Kheru Goldkeeper",
+    "Knuckles the Echidna",
+    "Korvold and the Noble Thief",
+    "Lara Croft, Tomb Raider",
+    "Life Insurance",
+    "Lobelia Sackville-Baggins",
+    "Locke, Treasure Hunter",
+    "Loot Dispute",
+    "Lost Mine of Phandelver",
+    "Lotho, Corrupt Shirriff",
+    "Luck Bobblehead",
+    "Luxurious Locomotive",
+    "Magda, Brazen Outlaw",
+    "Magda, the Hoardmaster",
+    "Magic Pot",
+    "Magma Opus",
+    "Magmatic Galleon",
+    "Mahadi, Emporium Master",
+    "Malcolm, Keen-Eyed Navigator",
+    "Malik, Grim Manipulator",
+    "Marching Duodrone",
+    "Mari, the Killing Quill",
+    "Marut",
+    "Mary Read and Anne Bonny",
+    "Master of Ceremonies",
+    "Mastermind Plum",
+    'Meet and Greet "Sisay"',
+    "Megaton's Fate",
+    "Meticulous Artisan",
+    "Mine Raider",
+    "Mines of Moria",
+    "Misfortune Teller",
+    "Monologue Tax",
+    "Monument to Endurance",
+    "Most Wanted",
+    "Mr. House, President and CEO",
+    "My Wealth Will Bury You",
+    "Namazu Trader",
+    "New New York",
+    "Noble's Purse",
+    "Noggle Robber",
+    "North Pole Research Base",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Ognis, the Dragon's Lash",
+    "Old Gnawbone",
+    "Old Rutstein",
+    "Olivia, Opulent Outlaw",
+    "Orochi Soul-Reaver",
+    "Pain Distributor",
+    "Patient Naturalist",
+    "Patron of the Arts",
+    "Petty Larceny",
+    "Pick-a-Beeble",
+    "Pictures of Spider-Man",
+    "Piggy Bank",
+    "Pinkie Pie",
+    "Pirate's Pillage",
+    "Pirate's Prize",
+    "Pitiless Plunderer",
+    "Plundering Barbarian",
+    "Plundering Pirate",
+    "Poetic Ingenuity",
+    "Prismari Command",
+    "Prized Statue",
+    "Prizefight",
+    "Professional Face-Breaker",
+    "Professional Wrestler",
+    "Prompto Argentum",
+    "Prosper, Tome-Bound",
+    "Prosperous Bandit",
+    "Prosperous Innkeeper",
+    "Prosperous Partnership",
+    "Prosperous Pirates",
+    "Prosperous Thief",
+    "Prying Blade",
+    "RMS Titanic",
+    "Racketeer Boss",
+    "Ragavan, Nimble Pilferer",
+    "Rain of Riches",
+    "Ramirez DePietro, Pillager",
+    "Rankle and Torbran",
+    "Rapacious Dragon",
+    "Rashmi and Ragavan",
+    "Reckless Endeavor",
+    "Reckless Lackey",
+    "Reckless Ransacking",
+    "Reckoner Bankbuster // Reckoner Bankbuster",
+    "Redcap Thief",
+    "Redrock Sentinel",
+    "Relic Retriever",
+    "Rev, Tithe Extractor",
+    "Revel in Riches",
+    "Riveteers Requisitioner",
+    "Rocketeer Boostbuggy",
+    "Rose Room Treasurer",
+    "Ruthless Knave",
+    "Ruthless Technomancer",
+    "Safana, Calimport Cutthroat",
+    "Sailor of Means",
+    "Sanar, Unfinished Genius // Wild Idea",
+    "Sarkhan, Dragon Ascendant",
+    "Scion of Opulence",
+    "Scuzzback Scrounger",
+    "Season of the Bold",
+    "Seize the Spoils",
+    "Seize the Spotlight",
+    "Setzer, Wandering Gambler",
+    "Shambling Ghast",
+    "Shiny Impetus",
+    "Sidequest: Hunt the Mark // Yiazmat, Ultimate Mark",
+    "Skullport Merchant",
+    "Smashing Success",
+    "Smaug",
+    "Smoke Blessing",
+    "Smoke Spirits' Aid",
+    "Smothering Tithe",
+    "Smuggler's Share",
+    "Song of Eärendil",
+    "Sonic the Hedgehog",
+    "Spectrox Mines",
+    "Spell Swindle",
+    "Spiked Pit Trap",
+    "Spiteful Banditry",
+    "Spiteful Repossession",
+    "Sticky Fingers",
+    "Stimulus Package",
+    "Storm the Vault // Vault of Catlacan",
+    "Storm-Kiln Artist",
+    "Strike It Rich",
+    "Sudden Breakthrough",
+    "Summon: Yojimbo",
+    "Surly Badgersaur",
+    "Swarming of Moria",
+    "Swashbuckler Extraordinaire",
+    "Sword of Wealth and Power",
+    "Tataru Taru",
+    "Tavern Scoundrel",
+    "Tempting Contract",
+    "Teval's Judgment",
+    "The Balrog of Moria",
+    "The Belligerent",
+    "The Ghoul, Gunslinger",
+    "The Gold Saucer",
+    "The Golden City of Orazca",
+    "The Matrix of Time",
+    "The Reaver Cleaver",
+    "The Third Doctor",
+    "The Western Cloud",
+    "There and Back Again",
+    "Thieves' Tools",
+    "Ticket Tortoise",
+    "Tireless Provisioner",
+    "Tivit, Seller of Secrets",
+    "Tokka & Rahzar, Unsupervised",
+    "Treasure Chest",
+    "Treasure Dredger",
+    "Treasure Map // Treasure Cove",
+    "Treasure Vault",
+    "Trove of Temptation",
+    "Ultimate Green Goblin",
+    "Undercity // The Initiative",
+    "Undercity Dire Rat",
+    "Undercity Scrounger",
+    "Unexpected Windfall",
+    "Urabrask // The Great Work",
+    "Vaan, Street Thief",
+    "Vault 21: House Gambit",
+    "Vault Robber",
+    "Vazi, Keen Negotiator",
+    "Village Pillagers",
+    "Visions of Ruin",
+    "Volatile Fault",
+    "Vraska, Relic Seeker",
+    "Wanted Scoundrels",
+    "Warren Soultrader",
+    "Widespread Thieving",
+    "Wily Goblin",
+    "Wish Good Luck",
+    "Xorn",
+    "You Find a Cursed Idol",
+    "You've Been Caught Stealing",
+    "Young Red Dragon // Bathe in Gold",
+    "Zhentarim Bandit",
+    "Ziatora, the Incinerator",
+    "Zidane, Tantalus Thief",
+]
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "12"
+released_at = "2026-08-14"
+type_line = "Token Artifact — Treasure"
+rules_text = "{T}, Sacrifice this token: Add one mana of any color."
+
+[token.category.PredefinedArtifact]
+kind = "Treasure"
+
+[token.body]
+display_name = "Treasure"
+core_types = ["Artifact"]
+subtypes = ["Treasure"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Captain Lannery Storm"
+scryfall_oracle_id = "235bf0ba-658c-463f-b112-7478ba27bd7b"
+scryfall_id = "d33d910f-f378-4b55-9587-2101faefe0fa"
+
+[[token.source_card_refs]]
+card_name = "Rapacious Dragon"
+scryfall_oracle_id = "0944ec2e-1dd9-459f-8f1d-667242cf52fe"
+scryfall_id = "6d5d5f0b-7574-43d9-b9ab-b4d0fa419212"
+
+[[token.source_card_refs]]
+card_name = "Strike It Rich"
+scryfall_oracle_id = "c34c17c7-3827-49a2-be25-67f44fdfe150"
+scryfall_id = "d2e5d72a-5ef4-4578-8595-66eeef762c21"
+
+[[token.source_card_refs]]
+card_name = "Corsair Captain"
+scryfall_oracle_id = "a7ec13c6-7ade-433a-b5a2-047854eef486"
+scryfall_id = "a9b016d4-ddf6-47d6-b934-a0b979b60680"
+
+[[token.source_card_refs]]
+card_name = "Brazen Freebooter"
+scryfall_oracle_id = "13e8d063-eece-4f38-83f6-02403130defa"
+scryfall_id = "60a1e6e9-5e5f-4431-9732-fd313df843df"
+
+[[token.source_card_refs]]
+card_name = "Gadrak, the Crown-Scourge"
+scryfall_oracle_id = "42d7ec93-0943-43e2-9b65-b7edc3349410"
+scryfall_id = "cbb13721-e6f7-439c-8993-a896de5d6892"
+
+[[token.source_card_refs]]
+card_name = "Old Rutstein"
+scryfall_oracle_id = "8f5ffb0b-0585-4a37-8048-eda53990d1dd"
+scryfall_id = "2bda3765-c56f-4b27-83f8-d01e16265328"
+
+[[token.source_card_refs]]
+card_name = "Trove of Temptation"
+scryfall_oracle_id = "f624c0f1-1c09-4b7a-b140-11329f27e3c7"
+scryfall_id = "faf67f7a-00da-422b-b517-fb55990a1999"
+
+[[token.source_card_refs]]
+card_name = "Tireless Provisioner"
+scryfall_oracle_id = "ab8d5f5c-1976-4f77-8ed2-8d28ee666741"
+scryfall_id = "5590a3a5-e0bd-451a-b98e-00a492487c46"
+
+[[token.source_card_refs]]
+card_name = "Emissary Green"
+scryfall_oracle_id = "c43e7fa5-ff93-42d9-af79-ee417a8e41a7"
+scryfall_id = "323e9430-b87c-4b02-9ade-c4c65343147b"
+
+[[token.source_card_refs]]
+card_name = "Goldvein Pick"
+scryfall_oracle_id = "c1624d10-8838-4af8-aea1-a96c0fe6fd6b"
+scryfall_id = "bd33b5fc-9901-493b-8d7f-5e98223fdcad"
+
+[[token.source_card_refs]]
+card_name = "Sailor of Means"
+scryfall_oracle_id = "c4efae03-99de-4439-925b-504602623bfd"
+scryfall_id = "10c1e6ad-1227-4049-89bf-69ace48c3076"
+
+[[token.source_card_refs]]
+card_name = "Prosperous Pirates"
+scryfall_oracle_id = "9dc6281b-08e0-4c66-9aef-abc7184ca36a"
+scryfall_id = "f6db054e-8303-44c7-8c96-d031a8c85b34"
+
+[[token.source_card_refs]]
+card_name = "Big Score"
+scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
+scryfall_id = "5fbb7413-af44-4038-a56c-8cc3ca645a58"
+
+[[token.source_card_refs]]
+card_name = "Improvised Weaponry"
+scryfall_oracle_id = "fa5dad0b-8e23-4b88-b383-849f7318e01f"
+scryfall_id = "828a5005-0b19-49a2-bc9a-5b32c719c74c"
+
+[[token.source_card_refs]]
+card_name = "Professional Face-Breaker"
+scryfall_oracle_id = "04152e7a-969c-4858-841b-0a569a9fc1bf"
+scryfall_id = "9c2561e6-c5b6-4c88-896e-67b33b8cf6bc"
+
+[[token.source_card_refs]]
+card_name = "Jewel-Eyed Cobra"
+scryfall_oracle_id = "bbfee53c-30a6-4ed0-beef-5c254be75fc5"
+scryfall_id = "56607174-63aa-415b-8511-1abe17689e78"
+
+[[token.source_card_refs]]
+card_name = "Pitiless Plunderer"
+scryfall_oracle_id = "a784481f-eccb-4112-bb38-04a659319660"
+scryfall_id = "6a4b4679-6ca9-49e1-a7ee-2b7a30e3e06c"
+
+[[token.source_card_refs]]
+card_name = "Vault Robber"
+scryfall_oracle_id = "68c90a32-d6ee-4595-8517-5f4cb0e4062d"
+scryfall_id = "e1f67518-b5ea-4b9b-96b5-e01de054b348"
+
+[[token.source_card_refs]]
+card_name = "Goldspan Dragon"
+scryfall_oracle_id = "716b3ea2-45b7-4a8f-af72-de7f4e510eff"
+scryfall_id = "0c67a683-4e1d-4a64-952d-a1c27a34ed1d"
+
+[[token.source_card_refs]]
+card_name = "Mastermind Plum"
+scryfall_oracle_id = "4605d8b3-b714-4717-8ff3-155fabfc1999"
+scryfall_id = "df81568b-c66a-49c6-bd48-7df98ea00117"
+
+[[token.source_card_refs]]
+card_name = "Burdened Aerialist"
+scryfall_oracle_id = "dd39cccb-095c-4ef4-8423-f4d328849295"
+scryfall_id = "d8cc9f89-4758-4236-ac08-638cbd8c107a"
+
+[[token.source_card_refs]]
+card_name = "Hullbreacher"
+scryfall_oracle_id = "2f533667-e29b-4bec-897a-e7a9eee08314"
+scryfall_id = "c2a0530f-7b72-4a33-8eec-bcd75d9c3045"
+
+[[token.source_card_refs]]
+card_name = "Covetous Elegy"
+scryfall_oracle_id = "dd69ef80-d30c-4b15-aec8-4154dc20cb25"
+scryfall_id = "f8f1f5e8-c1bf-405f-b8e3-655d5558e18d"
+
+[[token.source_card_refs]]
+card_name = "Shiny Impetus"
+scryfall_oracle_id = "aae76e5c-f5e0-4d18-b465-e6a829be908a"
+scryfall_id = "d91896ea-e0fd-4113-a3c6-a7811e16be46"
+
+[[token.source_card_refs]]
+card_name = "Gleaming Barrier"
+scryfall_oracle_id = "1eb9e401-8975-447b-839d-f7cd23897465"
+scryfall_id = "bf4ba8a3-77b0-4da8-9bdd-0950d0fe8401"
+
+[[token.source_card_refs]]
+card_name = "Halo Scarab"
+scryfall_oracle_id = "1201c146-54af-4668-a544-cde3ece23f2e"
+scryfall_id = "573857cf-2afe-455e-a0e3-b67a465d4f4e"
+
+[[token.source_card_refs]]
+card_name = "Rapacious Dragon"
+scryfall_oracle_id = "0944ec2e-1dd9-459f-8f1d-667242cf52fe"
+scryfall_id = "495c0dbf-1671-40f9-809c-98ef6d588512"
+
+[[token.source_card_refs]]
+card_name = "Sudden Breakthrough"
+scryfall_oracle_id = "f5576cd4-6b21-4b29-902c-9c1fbdd7b2be"
+scryfall_id = "c78dd917-7748-41dd-b294-943302bdab34"
+
+[[token.source_card_refs]]
+card_name = "Deadly Dispute"
+scryfall_oracle_id = "457af74a-02b3-4659-846d-63e482667f34"
+scryfall_id = "1d3df7bd-b0ca-4f51-99e5-d259246196e8"
+
+[token.token_image_ref]
+scryfall_id = "c6e096bb-ad9e-4a8b-8b42-26852fa32c1d"
+scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
+preset_id = "e1712205-f6a6-5ffa-befc-9becced0337f"
+
+[[token]]
 id = "e1728060-2847-5553-8cbf-f343927cffbf"
 category = "Creature"
 fidelity = "PartialMissingAbilities"
@@ -202220,6 +202740,31 @@ scryfall_id = "ca09bb5f-feab-4754-ac6b-3f06327d3fe9"
 scryfall_id = "c990db6b-e1f2-4802-b8b1-80a8b768be0e"
 scryfall_oracle_id = "19d20151-ecb4-4627-aa80-3086ad77b4a5"
 preset_id = "eec8a4e3-2835-58b6-9057-8dd0b680ca12"
+
+[[token]]
+id = "eeddde5e-f1d5-5a4f-b53a-d6edab90d16b"
+category = "Creature"
+fidelity = "Full"
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "6"
+released_at = "2026-08-14"
+type_line = "Token Creature — Dwarf"
+
+[token.body]
+display_name = "Dwarf Token"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Dwarf"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "9fcb3a3f-c0d4-43d4-8549-826a38bfa27d"
+scryfall_oracle_id = "c92fc51f-5d4e-4e41-bcbc-4259d36f9f39"
+preset_id = "eeddde5e-f1d5-5a4f-b53a-d6edab90d16b"
 
 [[token]]
 id = "eeed4bdc-bea8-554a-9f62-c7271246d1eb"

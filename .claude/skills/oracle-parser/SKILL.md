@@ -72,7 +72,7 @@ Each rule below is defined in CLAUDE.md. One-sentence principle + codebase examp
 | Rule | Example Location |
 |------|-----------------|
 | **Never match verbatim Oracle text** — decompose every phrase into typed building blocks (grammar + helpers + enums). A verbatim string match handles exactly one card and poisons the architecture. | Contrast: typed `QuantityRef`/`Comparator` vs. literal string |
-| **Compose combinators by dimension** — N independent dimensions = N chained `alt()` calls, not N! branches. | `oracle_nom/condition.rs` multi-axis composition |
+| **Compose combinators by dimension** — N independent axes = a sum of per-axis `alt()`/`opt()` calls inside one sequence, never a flat `alt` of full-string `tag`s (the product). Variation in the *middle* or an *optional* segment still factors: `recognize((tag(..), alt(..), tag(..), opt(..), tag(..)))`. Smell: a flat `alt` whose arms share a long common prefix **and** suffix. | `oracle_nom/condition.rs` multi-axis composition; PATTERNS.md §8b |
 | **Nest by prefix dispatch** — shared prefixes use `preceded(tag(...), sub_combinator)` to eliminate redundant matching. | `oracle_trigger.rs` phase trigger nesting |
 | **Word-boundary scanning** — try a combinator at each word boundary via scanning loop, not `contains()` chains. | `oracle_casting.rs::scan_timing_restrictions`, `oracle_trigger.rs::scan_for_phase` |
 | **`parse_inner_condition` is the single authority** for all game-state conditions. Trigger/static parsers MUST delegate to it. | `oracle_nom/condition.rs::parse_inner_condition` |

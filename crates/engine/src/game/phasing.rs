@@ -48,13 +48,20 @@ pub fn phase_out_object(
         let Some(obj) = state.objects.get_mut(&id) else {
             continue;
         };
-        // Already phased out: CR 702.26h — direct-over-indirect preference
-        // handled by not downgrading an existing direct phase-out to indirect.
+        // CR 702.26h: if an object would phase out directly and indirectly at
+        // the same time, it phases out indirectly — never promote indirect to
+        // direct when a later pass reaches the same object.
         if obj.is_phased_out() {
-            if matches!(this_cause, PhaseOutCause::Directly) {
-                // Upgrade indirect → direct per CR 702.26h.
+            if matches!(this_cause, PhaseOutCause::Indirectly)
+                && matches!(
+                    obj.phase_status,
+                    PhaseStatus::PhasedOut {
+                        cause: PhaseOutCause::Directly
+                    }
+                )
+            {
                 obj.phase_status = PhaseStatus::PhasedOut {
-                    cause: PhaseOutCause::Directly,
+                    cause: PhaseOutCause::Indirectly,
                 };
             }
             continue;

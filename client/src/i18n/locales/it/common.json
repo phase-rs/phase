@@ -199,6 +199,16 @@
   "turnBanner": {
     "turn": "Turno {{number}}"
   },
+  "diceRoll": {
+    "rollingForFirst": "Tiro per stabilire chi inizia",
+    "versus": "VS",
+    "skip": "Tocca per saltare",
+    "you": "Tu",
+    "youPlayFirst": "Giochi per primo",
+    "playerPlaysFirst": "{{name}} gioca per primo",
+    "heads": "Testa",
+    "tails": "Croce"
+  },
   "chrome": {
     "back": "Indietro",
     "settings": "Impostazioni",

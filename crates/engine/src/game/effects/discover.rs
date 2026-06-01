@@ -66,6 +66,7 @@ pub fn resolve(
                 kind: CastOfferKind::Discover {
                     hit_card: hit,
                     exiled_misses,
+                    discover_value: limit,
                 },
             };
         }
@@ -174,6 +175,7 @@ mod tests {
                     CastOfferKind::Discover {
                         hit_card,
                         exiled_misses,
+                        ..
                     },
                 ..
             } => {
