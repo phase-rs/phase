@@ -122,6 +122,7 @@ mod twice_instead_repeat_for;
 mod tyvar_activate_as_though_haste;
 mod unstoppable_slasher_half_life;
 mod ureni_attack_trigger;
+mod urge_to_feed_regression;
 mod urzas_saga_chapter_two;
 mod urzas_tower_conditional_mana;
 mod vigor_regression;

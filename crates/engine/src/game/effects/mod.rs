@@ -2057,6 +2057,29 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
+        // CR 701.26a + CR 608.2c: Tap publishes the tapped set for downstream
+        // "each of those <type>" continuations (Urge to Feed class).
+        Effect::Tap { .. } | Effect::Untap { .. } => {
+            let from_events: Vec<ObjectId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::PermanentTapped { object_id, .. }
+                    | GameEvent::PermanentUntapped { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            if !from_events.is_empty() {
+                from_events
+            } else {
+                fallback_targets
+                    .iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            }
+        }
         _ => {
             let dest_zone = match effect {
                 Effect::ChangeZone { destination, .. }
