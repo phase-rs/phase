@@ -1727,6 +1727,30 @@ pub fn top_of_library_land_playable_by_permission(
     Some((top_id, src_id))
 }
 
+/// CR 118.9 + CR 401.5: When `object_id` is the current top of `player`'s library
+/// and a `TopOfLibraryCastPermission` static grants an alt-cost rider (Bolas's
+/// Citadel: pay life equal to mana value), return that cost for castability
+/// pre-checks and the `check_additional_cost_or_pay` payment path.
+pub(crate) fn top_of_library_alt_ability_cost_for_object(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<crate::types::ability::AbilityCost> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone != Zone::Library || obj.owner != player {
+        return None;
+    }
+    top_of_library_permission_source(state, player, Some(CardPlayMode::Cast)).and_then(
+        |(top_id, _src, alt)| {
+            if top_id == object_id {
+                alt
+            } else {
+                None
+            }
+        },
+    )
+}
+
 /// CR 604.2 + CR 305.1: Find lands in the player's graveyard that can be played
 /// via a GraveyardCastPermission static with `play_mode: Play`.
 pub fn graveyard_lands_playable_by_permission(
@@ -3649,6 +3673,23 @@ fn modal_spell_face_choice_available(obj: &crate::game::game_object::GameObject)
     !front_is_land && !back_is_land
 }
 
+/// CR 712.11b + CR 903.8: A cast-time face choice (a spell//spell Modal DFC, or
+/// an Adventure/Omen alternative spell face) is offered both when casting from
+/// hand and when a player casts their commander from the command zone. A
+/// DFC/MDFC commander must let its owner choose which face to put on the stack —
+/// e.g. casting The Prismatic Bridge (the back face of Esika, God of the Tree)
+/// directly from the command zone (#1548). The downstream cast pipeline
+/// (`ChooseModalFace` re-entry, affordability via `can_cast_object_now`, and the
+/// commander-tax surcharge) is already zone-agnostic; only this prompt gate was
+/// restricted to the hand.
+fn cast_face_choice_offered_from_zone(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    obj.zone == Zone::Hand
+        || (state.format_config.command_zone && obj.zone == Zone::Command && obj.is_commander)
+}
+
 fn casting_variant_for_alternative_spell(layout: LayoutKind) -> CastingVariant {
     match layout {
         LayoutKind::Adventure => CastingVariant::Adventure,
@@ -4953,10 +4994,12 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 715.3 / CR 720.3: Adventure-family cards from hand require choosing
-    // the normal creature face or alternative spell face.
+    // CR 715.3 / CR 720.3: Adventure-family cards from hand (or a commander cast
+    // from the command zone) require choosing the normal creature face or
+    // alternative spell face.
     if let Some(obj) = state.objects.get(&object_id) {
-        if obj.zone == Zone::Hand && alternative_spell_layout(obj).is_some() {
+        if cast_face_choice_offered_from_zone(state, obj) && alternative_spell_layout(obj).is_some()
+        {
             return Ok(WaitingFor::CastOffer {
                 player,
                 kind: CastOfferKind::Adventure {
@@ -4968,13 +5011,15 @@ pub fn handle_cast_spell_with_payment_mode(
         }
     }
 
-    // CR 712.11b: Spell//spell Modal DFCs from hand require choosing which face
-    // to cast (Esika, God of the Tree // The Prismatic Bridge, etc.). The
-    // `ChooseModalFace` handler swaps to the chosen face (if back) and re-enters
-    // this function; the swap clears the back face's Modal `layout_kind`, so the
-    // re-entry casts the chosen face without re-prompting.
+    // CR 712.11b + CR 903.8: Spell//spell Modal DFCs from hand — or from the
+    // command zone when the card is the player's commander — require choosing
+    // which face to cast (Esika, God of the Tree // The Prismatic Bridge, etc.).
+    // The `ChooseModalFace` handler swaps to the chosen face (if back) and
+    // re-enters this function; the swap clears the back face's Modal
+    // `layout_kind`, so the re-entry casts the chosen face without re-prompting.
     if let Some(obj) = state.objects.get(&object_id) {
-        if obj.zone == Zone::Hand && modal_spell_face_choice_available(obj) {
+        if cast_face_choice_offered_from_zone(state, obj) && modal_spell_face_choice_available(obj)
+        {
             return Ok(WaitingFor::ModalFaceChoice {
                 player,
                 object_id,
@@ -6205,6 +6250,20 @@ fn can_cast_prepared_now(
                 if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
                     return false;
                 }
+            }
+        }
+    }
+
+    // CR 401.5 + CR 118.9 + CR 119.8: Top-of-library alt-cost casts (Bolas's
+    // Citadel) replace the mana cost with a PayLife cost equal to the spell's
+    // mana value. Gate legal actions on life affordability so the UI never offers
+    // a cast the payment pipeline would reject after the player taps mana.
+    if let Some(alt_cost) =
+        top_of_library_alt_ability_cost_for_object(state, player, prepared.object_id)
+    {
+        if let Some(amount) = find_pay_life_cost(&alt_cost, state, player, prepared.object_id) {
+            if !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, amount) {
+                return false;
             }
         }
     }
@@ -27493,6 +27552,82 @@ mod tests {
 
     /// CR 702.29e + CR 601.2b: Generous Ent ({5}{G}) with only 2 Forests in play.
     ///
+    /// Issue #1579 — Complicate: "When you cycle this card, …" triggers fire on
+    /// cycling. CR 702.29c: activating a cycling ability now emits a dedicated
+    /// `GameEvent::Cycled` (alongside the `Discarded` cost event), so the
+    /// `TriggerMode::Cycled` trigger matches and goes on the stack.
+    #[test]
+    fn issue_1579_cycling_fires_when_you_cycle_trigger() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::game_state::StackEntryKind;
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let card = scenario
+            .add_creature_to_hand_from_oracle(
+                P0,
+                "Test Cycler",
+                2,
+                2,
+                "Cycling {2}\nWhen you cycle this card, draw a card.",
+            )
+            .id();
+        scenario.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); 2],
+        );
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let cyc_idx = state
+            .objects
+            .get(&card)
+            .unwrap()
+            .abilities
+            .iter()
+            .position(|a| matches!(a.kind, AbilityKind::Activated))
+            .expect("synthesized cycling activated ability");
+
+        let mut events = Vec::new();
+        handle_activate_ability(state, PlayerId(0), card, cyc_idx, &mut events).unwrap();
+
+        // Fix: cycling now emits a Cycled event for the cycled card …
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Cycled { object_id, .. } if *object_id == card)),
+            "cycling must emit a Cycled event"
+        );
+        // … and STILL emits Discarded (so discard / cycle-or-discard triggers
+        // continue to fire exactly once via the Discarded event).
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Discarded { object_id, .. } if *object_id == card)),
+            "cycling must still emit a Discarded event"
+        );
+
+        // The "When you cycle this card" trigger fires and is put on the stack.
+        let stack_before = state.stack.len();
+        crate::game::triggers::process_triggers(state, &events);
+        let trigger_on_stack = state.stack.iter().any(|entry| {
+            matches!(
+                entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if source_id == card
+            )
+        });
+        assert!(
+            trigger_on_stack,
+            "issue #1579: the cycling trigger must fire and go on the stack; stack={:?}",
+            state.stack
+        );
+        assert!(state.stack.len() > stack_before);
+    }
+
     /// The creature is uncastable (insufficient mana), but its Forestcycling {1}
     /// activated ability is payable (costs {1} + discard self). Verifies that:
     /// 1. `can_cast_object_now` returns false — the AI must not offer CastSpell.

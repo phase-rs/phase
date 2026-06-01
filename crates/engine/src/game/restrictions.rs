@@ -542,6 +542,10 @@ fn effective_activation_limit(
         AbilityTag::Evolve => "evolve",
         AbilityTag::Exhaust => "exhaust",
         AbilityTag::Outlast => "outlast",
+        // CR 702.29: Cycling has no per-turn activation limit. Unreachable here —
+        // this fn is only called for abilities carrying an `OnlyOnceEachTurn`
+        // restriction, which the synthesized cycling ability never has.
+        AbilityTag::Cycling => "cycling",
     };
     // Scan battlefield for ModifyActivationLimit statics that affect this keyword
     let mut limit: u32 = 1;

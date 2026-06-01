@@ -751,6 +751,56 @@ pub fn synthesize_changeling_cda(face: &mut CardFace) {
     }
 }
 
+/// CR 702.161a: Living metal — "During your turn, this permanent is an artifact
+/// creature in addition to its other types." Synthesize a SelfRef static that
+/// adds the Creature type (Layer 4, CR 613.1d) while it is the controller's turn,
+/// gated by `StaticCondition::DuringYourTurn`. The Vehicle uses its printed P/T as
+/// a creature on its controller's turn and is a noncreature artifact otherwise.
+/// Mirrors `synthesize_station`'s creature-shift; the source is already an artifact
+/// (Vehicle), so only the Creature type is added. (Transformers — Flamewar,
+/// Streetwise Operative, etc.; #1547.)
+fn is_living_metal_static(static_ability: &StaticDefinition) -> bool {
+    static_ability.mode == StaticMode::Continuous
+        && static_ability.affected == Some(TargetFilter::SelfRef)
+        && matches!(
+            &static_ability.condition,
+            Some(crate::types::ability::StaticCondition::DuringYourTurn)
+        )
+        && static_ability.modifications.len() == 1
+        && static_ability.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature,
+                }
+            )
+        })
+}
+
+pub fn synthesize_living_metal(face: &mut CardFace) {
+    if !face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::LivingMetal))
+    {
+        return;
+    }
+    if face.static_abilities.iter().any(is_living_metal_static) {
+        return;
+    }
+    face.static_abilities.push(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .condition(crate::types::ability::StaticCondition::DuringYourTurn)
+            .modifications(vec![ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            }])
+            .description(
+                "CR 702.161a: Living metal — artifact creature during your turn".to_string(),
+            ),
+    );
+}
+
 /// Synthesize `additional_cost` from `Keyword::Kicker(ManaCost)`.
 ///
 /// If the card has Kicker and no additional_cost was already parsed from Oracle text
@@ -1268,6 +1318,14 @@ pub fn synthesize_cycling(face: &mut CardFace) {
             _ => None,
         })
         .collect();
+
+    // CR 702.29a + CR 702.29c + CR 702.29e: Tag every synthesized cycling /
+    // typecycling ability with `AbilityTag::Cycling` so that activating it emits
+    // a `GameEvent::Cycled` ("When you cycle this card" triggers, CR 702.29c).
+    let mut cycling_abilities = cycling_abilities;
+    for def in &mut cycling_abilities {
+        def.ability_tag = Some(AbilityTag::Cycling);
+    }
 
     face.abilities.extend(cycling_abilities);
 }
@@ -2017,6 +2075,149 @@ pub fn synthesize_fabricate(face: &mut CardFace) {
             ));
         face.triggers.push(trigger);
     }
+}
+
+/// CR 702.136a: Riot — "You may have this permanent enter with an additional
+/// +1/+1 counter on it. If you don't, it gains haste."
+///
+/// Modeled as an optional `Moved` replacement, not an ETB trigger: accepting
+/// folds the counter into the battlefield-entry event, while declining runs the
+/// haste grant after the object enters. Static grants of Riot (Uncivil Unrest)
+/// synthesize the same replacement from the static's affected filter.
+pub fn synthesize_riot(face: &mut CardFace) {
+    let printed_count = face
+        .keywords
+        .iter()
+        .filter(|kw| matches!(kw, Keyword::Riot))
+        .count();
+    add_riot_replacements(face, TargetFilter::SelfRef, printed_count);
+
+    let static_grants: Vec<TargetFilter> = face
+        .static_abilities
+        .iter()
+        .filter(|static_def| static_grants_riot(static_def))
+        .map(|static_def| static_def.affected.clone().unwrap_or(TargetFilter::Any))
+        .collect();
+    for filter in static_grants {
+        add_riot_replacements(face, filter, 1);
+    }
+}
+
+fn static_grants_riot(static_def: &StaticDefinition) -> bool {
+    static_def.mode == StaticMode::Continuous
+        && static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Riot
+                }
+            )
+        })
+}
+
+fn add_riot_replacements(face: &mut CardFace, valid_card: TargetFilter, needed: usize) {
+    let existing = face
+        .replacements
+        .iter()
+        .filter(|replacement| is_riot_replacement(replacement, &valid_card))
+        .count();
+    for _ in existing..needed {
+        face.replacements
+            .push(build_riot_replacement(valid_card.clone()));
+    }
+}
+
+fn build_riot_replacement(valid_card: TargetFilter) -> ReplacementDefinition {
+    let counter_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("This permanent enters with an additional +1/+1 counter on it".to_string());
+
+    let haste_branch = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }])],
+            duration: Some(Duration::Permanent),
+            target: None,
+        },
+    )
+    .duration(Duration::Permanent)
+    .description("It gains haste".to_string());
+
+    ReplacementDefinition {
+        event: ReplacementEvent::Moved,
+        execute: Some(Box::new(counter_branch)),
+        mode: crate::types::ability::ReplacementMode::Optional {
+            decline: Some(Box::new(haste_branch)),
+        },
+        valid_card: Some(valid_card),
+        destination_zone: Some(Zone::Battlefield),
+        description: Some(
+            "CR 702.136a: Riot — this permanent may enter with an additional +1/+1 counter; otherwise it gains haste."
+                .to_string(),
+        ),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
+    }
+}
+
+fn is_riot_replacement(replacement: &ReplacementDefinition, valid_card: &TargetFilter) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || replacement.valid_card.as_ref() != Some(valid_card)
+        || replacement.destination_zone != Some(Zone::Battlefield)
+    {
+        return false;
+    }
+
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    let Effect::PutCounter {
+        counter_type,
+        count: QuantityExpr::Fixed { value },
+        target: TargetFilter::SelfRef,
+    } = &*execute.effect
+    else {
+        return false;
+    };
+    if *counter_type != CounterType::Plus1Plus1 || *value != 1 {
+        return false;
+    }
+
+    let crate::types::ability::ReplacementMode::Optional {
+        decline: Some(decline),
+    } = &replacement.mode
+    else {
+        return false;
+    };
+    matches!(
+        &*decline.effect,
+        Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::Permanent),
+            ..
+        } if static_abilities.iter().any(static_grants_haste_to_self)
+    )
+}
+
+fn static_grants_haste_to_self(static_def: &StaticDefinition) -> bool {
+    static_def.affected == Some(TargetFilter::SelfRef)
+        && static_def.modifications.iter().any(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste
+                }
+            )
+        })
 }
 
 /// CR 702.93a: Undying — "When this permanent is put into a graveyard from the
@@ -4299,6 +4500,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // between N +1/+1 counters or N 1/1 colorless Servo artifact creature
     // tokens. Modeled via `Effect::ChooseOneOf`.
     synthesize_fabricate(face);
+    // CR 702.136a: Riot — optional ETB replacement choosing +1/+1 counter or
+    // haste. Static grants of Riot synthesize matching ETB replacements from
+    // their affected filters.
+    synthesize_riot(face);
     // CR 702.93a: Undying — dies trigger that returns the permanent with a
     // +1/+1 counter, gated on having had no +1/+1 counter at death (LKI).
     synthesize_undying(face);
@@ -4375,6 +4580,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // threshold. Must run after Oracle parsing so `face.power`/`face.toughness`
     // are in place and `Keyword::Station` has been normalized.
     synthesize_station(face);
+    // CR 702.161a: Living metal — Vehicle is an artifact creature during its
+    // controller's turn. Must run after Oracle parsing so `Keyword::LivingMetal`
+    // is present on the (Vehicle) face.
+    synthesize_living_metal(face);
     // CR 702.165: Backup — ETB trigger placing +1/+1 counters and granting
     // non-Backup abilities printed below Backup until end of turn.
     synthesize_backup(face);
@@ -6991,6 +7200,66 @@ mod extort_synthesis_tests {
 }
 
 #[cfg(test)]
+mod riot_synthesis_tests {
+    use super::*;
+
+    #[test]
+    fn synthesize_riot_adds_optional_etb_replacement() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Riot);
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_riot(&mut face);
+        assert!(
+            face.replacements
+                .iter()
+                .any(|replacement| is_riot_replacement(replacement, &TargetFilter::SelfRef)),
+            "riot should add ETB optional replacement, got {:?}",
+            face.replacements
+        );
+    }
+
+    #[test]
+    fn synthesize_riot_is_idempotent() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Riot);
+        synthesize_riot(&mut face);
+        synthesize_riot(&mut face);
+        assert_eq!(
+            face.replacements
+                .iter()
+                .filter(|replacement| is_riot_replacement(replacement, &TargetFilter::SelfRef))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn synthesize_riot_static_grant_adds_replacement_for_affected_filter() {
+        let mut face = CardFace::default();
+        let affected = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::NonToken]),
+        );
+        face.static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Riot,
+                }]),
+        );
+        synthesize_riot(&mut face);
+        assert!(
+            face.replacements
+                .iter()
+                .any(|replacement| is_riot_replacement(replacement, &affected)),
+            "static Riot grant should add ETB replacement for affected filter, got {:?}",
+            face.replacements
+        );
+    }
+}
+
+#[cfg(test)]
 mod dethrone_tests {
     //! CR 702.105a: Dethrone synthesis tests. The synthesized trigger must be
     //! `TriggerMode::Attacks` with `valid_card = SelfRef`, an intervening-if
@@ -8576,6 +8845,72 @@ mod station_synthesis_tests {
             .modifications
             .iter()
             .any(|m| matches!(m, ContinuousModification::SetToughness { value: 8 })));
+    }
+
+    #[test]
+    fn synthesize_living_metal_adds_during_your_turn_creature_static() {
+        // CR 702.161a: Living metal makes the Vehicle an artifact creature during
+        // its controller's turn (Flamewar, Streetwise Operative; #1547).
+        let mut face = CardFace {
+            keywords: vec![Keyword::LivingMetal],
+            ..CardFace::default()
+        };
+        synthesize_living_metal(&mut face);
+        let sd = face
+            .static_abilities
+            .iter()
+            .find(|s| {
+                s.mode == StaticMode::Continuous
+                    && s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::AddType {
+                                core_type: CoreType::Creature,
+                            }
+                        )
+                    })
+            })
+            .expect("Living metal must synthesize an AddType(Creature) static");
+        assert_eq!(sd.affected, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            sd.condition,
+            Some(StaticCondition::DuringYourTurn)
+        ));
+        // Only the type is added — the Vehicle's printed P/T flows through; no
+        // P/T override (unlike Station, whose P/T lives in a striation).
+        assert_eq!(sd.modifications.len(), 1);
+    }
+
+    #[test]
+    fn synthesize_living_metal_noop_without_keyword() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Menace],
+            ..CardFace::default()
+        };
+        let before = face.static_abilities.len();
+        synthesize_living_metal(&mut face);
+        assert_eq!(
+            face.static_abilities.len(),
+            before,
+            "no Living Metal keyword → no synthesized static"
+        );
+    }
+
+    #[test]
+    fn synthesize_living_metal_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::LivingMetal],
+            ..CardFace::default()
+        };
+        synthesize_living_metal(&mut face);
+        synthesize_living_metal(&mut face);
+
+        let count = face
+            .static_abilities
+            .iter()
+            .filter(|s| is_living_metal_static(s))
+            .count();
+        assert_eq!(count, 1);
     }
 
     /// CR 721.2b: Reminder text "It's an artifact creature at N+" has no

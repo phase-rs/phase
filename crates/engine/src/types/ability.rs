@@ -8444,6 +8444,11 @@ pub enum AbilityTag {
     Exhaust,
     /// CR 702.107a: This ability originated from an Outlast keyword definition.
     Outlast,
+    /// CR 702.29a + CR 702.29e: This ability originated from a Cycling (or
+    /// Typecycling) keyword definition. Used so the activation pipeline can emit
+    /// a `GameEvent::Cycled` (CR 702.29c) that "When you cycle this card"
+    /// triggers match.
+    Cycling,
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.
