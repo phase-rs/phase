@@ -29,6 +29,7 @@
     "fromSource": "(od {{source}})",
     "basePT": "(bazowo {{power}}/{{toughness}})",
     "damage": "Obrażenia: {{amount}}",
+    "activateCost": "Aktywuj — {{cost}}",
     "ptDeltaFrom": "{{delta}} od {{source}}",
     "colors": "Kolory: {{colors}}",
     "colorless": "Bezbarwny",
@@ -1143,6 +1144,10 @@
     "cleaveNormalLabel": "Rzuć normalnie",
     "cleaveAltLabel": "Rzuć z Cleave",
     "cleaveSubtitle": "Rzuć {{name}} normalnie, lub zapłać jego koszt Cleave, aby usunąć tekst w nawiasach kwadratowych.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Wygnaj kartę",
     "additionalSacrifice": "+ Poświęć trwałego",
     "additionalPayLife": "+ Zapłać życie",
@@ -1154,6 +1159,10 @@
     "title": "Wybierz obrońcę",
     "battleFallback": "Bitwa",
     "subtitle": "{{name}} potrzebuje nowego obrońcy. Wybierz, który przeciwnik będzie jej bronił."
+  },
+  "clashOpponent": {
+    "title": "Wybierz przeciwnika do starcia",
+    "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."
   },
   "cardDataMissing": {
     "title": "Brak danych kart",

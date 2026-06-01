@@ -77,6 +77,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
+            | WaitingFor::ClashChooseOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
             | WaitingFor::VoteChoice { .. }
             | WaitingFor::SeparatePilesPartition { .. }
@@ -645,6 +646,33 @@ pub(super) fn handle_resolution_choice(
             );
             let _ = effects::populate::create_token_copy(state, token_id, &dummy_ability, events);
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
+            WaitingFor::ClashChooseOpponent {
+                player,
+                candidates,
+                ability,
+            },
+            GameAction::ChooseClashOpponent { opponent },
+        ) => {
+            // CR 701.30b: The chosen opponent must be one of the offered
+            // candidates (a non-eliminated opponent of the clashing player).
+            if !candidates.contains(&opponent) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Chosen clash opponent {opponent:?} is not a legal opponent"
+                )));
+            }
+            effects::clash::perform_clash(state, &ability, opponent, events)
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            // CR 701.30a: With at least one revealed card, `perform_clash` queued
+            // the APNAP placement (which drains the clash's sub_ability). With
+            // both libraries empty, no placement was queued, so drain the stashed
+            // sub_ability here and hand priority back to the clashing player.
+            if !matches!(state.waiting_for, WaitingFor::ClashCardPlacement { .. }) {
+                set_priority(state, player);
+                effects::drain_pending_continuation(state, events);
+            }
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
             WaitingFor::ClashCardPlacement {

@@ -294,6 +294,59 @@ pub fn place_attacking_alongside(
     }
 }
 
+/// CR 509.1g + CR 506.3e + CR 509.1h: Put a permanent onto the battlefield as a
+/// blocking creature for `attacker_id`. Used by effects that create or place a
+/// creature already "blocking that creature" (Mirror Match's copy tokens).
+///
+/// Per CR 506.3e, the creature only becomes a blocking creature if `attacker_id`
+/// is attacking the blocker's controller (or a planeswalker/battle they control,
+/// captured by `AttackerInfo.defending_player`); otherwise the creature is on
+/// the battlefield but is never considered a blocking creature, so this is a
+/// no-op for the combat bookkeeping. Per CR 509.3a/509.3b, a creature put onto
+/// the battlefield blocking does NOT cause "whenever ~ blocks" abilities to
+/// trigger, so no `BlockersDeclared` event is emitted; combat damage reads the
+/// recorded assignments directly. Returns `true` when the block was established.
+pub fn place_blocking(state: &mut GameState, blocker_id: ObjectId, attacker_id: ObjectId) -> bool {
+    let Some(blocker_controller) = state.objects.get(&blocker_id).map(|o| o.controller) else {
+        return false;
+    };
+    let Some(combat) = state.combat.as_mut() else {
+        return false;
+    };
+    // CR 506.3e: the entering creature only blocks an attacker that is attacking
+    // its controller, a planeswalker they control, or a battle they protect —
+    // exactly the side recorded as `AttackerInfo.defending_player`.
+    let Some(info) = combat
+        .attackers
+        .iter_mut()
+        .find(|a| a.object_id == attacker_id)
+    else {
+        return false;
+    };
+    if info.defending_player != blocker_controller {
+        return false;
+    }
+    // CR 509.1h: an attacking creature with one or more blockers becomes blocked.
+    info.blocked = true;
+    // CR 509.1g: the creature becomes a blocking creature for the chosen attacker.
+    combat
+        .blocker_to_attacker
+        .entry(blocker_id)
+        .or_default()
+        .push(attacker_id);
+    combat
+        .blocker_assignments
+        .entry(attacker_id)
+        .or_default()
+        .push(blocker_id);
+    // CR 509.1a tracking: record the blocker for per-turn "blocked this turn" queries.
+    state.creatures_blocked_this_turn.insert(blocker_id);
+    // CR 506.4 + CR 613.1f: a new blocking creature can satisfy Layer 6
+    // `FilterProp::Blocking` grants; re-evaluate continuous effects.
+    state.layers_dirty.mark_full();
+    true
+}
+
 /// Validate attacker declarations per CR 508.1.
 pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Result<(), String> {
     let active = state.active_player;
@@ -1542,6 +1595,11 @@ pub fn declare_attackers(
     // the grant is live for the whole combat, not just after damage.
     state.layers_dirty.mark_full();
     let attacker_count = combat.attackers.len();
+    let creature_attacked_defenders: Vec<(ObjectId, PlayerId)> = combat
+        .attackers
+        .iter()
+        .map(|attacker| (attacker.object_id, attacker.defending_player))
+        .collect();
 
     // Use the first attacker's defending player for the event
     let defending_player = combat
@@ -1560,6 +1618,13 @@ pub fn declare_attackers(
     state
         .creatures_attacked_this_turn
         .extend(attacker_ids.iter().copied());
+    for (attacker_id, defending_player) in creature_attacked_defenders {
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(attacker_id)
+            .or_default()
+            .insert(defending_player);
+    }
 
     super::restrictions::record_attackers_declared(state, attacker_count);
 
@@ -3153,6 +3218,31 @@ mod tests {
             e,
             GameEvent::AttackersDeclared { attacker_ids, .. } if attacker_ids == &[id]
         )));
+    }
+
+    #[test]
+    fn declare_attackers_records_defenders_per_attacking_creature() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.combat = Some(CombatState::default());
+        let angel = create_creature(&mut state, PlayerId(0), "Angel of Destiny", 2, 6);
+        let bear = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        let mut events = Vec::new();
+        declare_attackers(
+            &mut state,
+            &[
+                (angel, AttackTarget::Player(PlayerId(1))),
+                (bear, AttackTarget::Player(PlayerId(2))),
+            ],
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(state.creature_attacked_player_this_turn(angel, PlayerId(1)));
+        assert!(!state.creature_attacked_player_this_turn(angel, PlayerId(2)));
+        assert!(state.creature_attacked_player_this_turn(bear, PlayerId(2)));
     }
 
     #[test]

@@ -281,7 +281,7 @@ mod tests {
     #[test]
     fn optional_reveal_hand_choice_decline_skips_continuation() {
         use crate::game::engine_resolution_choices::handle_resolution_choice;
-        use crate::types::ability::{AbilityKind, GainLifePlayer, QuantityExpr};
+        use crate::types::ability::{AbilityKind, QuantityExpr};
         use crate::types::actions::GameAction;
         use crate::types::game_state::PendingContinuation;
 
@@ -304,7 +304,7 @@ mod tests {
         let mut continuation = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),

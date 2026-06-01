@@ -1523,6 +1523,10 @@ impl FromStr for Keyword {
                 "disguise" => return Ok(Keyword::Disguise(parse_keyword_mana_cost(p))),
                 "blitz" => return Ok(Keyword::Blitz(parse_keyword_mana_cost(p))),
                 "overload" => return Ok(Keyword::Overload(parse_keyword_mana_cost(p))),
+                // CR 702.162a: More Than Meets the Eye {cost} — alternative cost to cast converted.
+                "more than meets the eye" => {
+                    return Ok(Keyword::MoreThanMeetsTheEye(parse_keyword_mana_cost(p)))
+                }
                 "spectacle" => return Ok(Keyword::Spectacle(parse_keyword_mana_cost(p))),
                 // CR 702.173a: Freerunning alternative cost.
                 "freerunning" => return Ok(Keyword::Freerunning(parse_keyword_mana_cost(p))),
@@ -2181,6 +2185,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Disguise" => Ok(Keyword::Disguise(mana(data)?)),
         "Blitz" => Ok(Keyword::Blitz(mana(data)?)),
         "Overload" => Ok(Keyword::Overload(mana(data)?)),
+        // CR 702.162a: More Than Meets the Eye {cost} — alternative cost to cast converted.
+        "MoreThanMeetsTheEye" => Ok(Keyword::MoreThanMeetsTheEye(mana(data)?)),
         "Spectacle" => Ok(Keyword::Spectacle(mana(data)?)),
         // CR 702.173a: Freerunning alternative cost.
         "Freerunning" => Ok(Keyword::Freerunning(mana(data)?)),

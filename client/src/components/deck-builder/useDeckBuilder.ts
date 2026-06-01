@@ -475,11 +475,16 @@ export function useDeckBuilder({
       // pairing decision is queried on demand (authoritative at click time) so a
       // stale precomputed value can never misclassify an add as a swap.
       void (async () => {
-        const isPartnerAdd =
-          commanders.length === 1 &&
-          (
-            await commanderPartnerCandidates(commanders[0], [cardName])
-          ).includes(cardName);
+        let isPartnerAdd = false;
+        if (commanders.length === 1) {
+          try {
+            isPartnerAdd = (await commanderPartnerCandidates(commanders[0], [cardName])).includes(
+              cardName,
+            );
+          } catch {
+            return;
+          }
+        }
         setDirty(true);
         const displaced =
           isPartnerAdd || commanders.length === 0 ? [] : commanders;

@@ -1043,9 +1043,7 @@ fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> Action
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{
-        AbilityCondition, GainLifePlayer, QuantityExpr, ResolvedAbility, SubAbilityLink,
-    };
+    use crate::types::ability::{AbilityCondition, QuantityExpr, ResolvedAbility, SubAbilityLink};
     use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
@@ -1053,7 +1051,7 @@ mod tests {
     fn gain_life(value: i32) -> Effect {
         Effect::GainLife {
             amount: QuantityExpr::Fixed { value },
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         }
     }
 

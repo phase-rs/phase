@@ -8,6 +8,9 @@ import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
 import type { SourcePrinting } from "../../hooks/useCardImage";
 import type { ScryfallCard } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import type { GameFormat } from "../../adapter/types";
+import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
+import { formatMetadata } from "../../data/formatRegistry";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
 import { mouseHoverPreview } from "./hoverPreview";
@@ -22,9 +25,9 @@ interface DeckStackProps {
   onMoveCard: (name: string, from: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: (cardName: string | null, scryfallId?: string) => void;
-  /** Deck format string — resolves the sideboard policy so the second section
+  /** Deck format — resolves the sideboard policy so the second section
    *  is labelled "Sideboard" or "Maybeboard" consistently with the list view. */
-  format?: string;
+  format?: GameFormat;
 }
 
 type DeckStackSection = "commander" | "main" | "sideboard";
@@ -445,14 +448,22 @@ export function DeckStack({
     sections.commander.length > 0
     || sections.main.length > 0
     || sections.sideboard.length > 0;
+  const maxCopies =
+    format && formatMetadata(format)?.default_config.singleton ? 1 : 4;
   const canAddCard = useMemo(
     () => (item: DeckStackItem) => {
       if (item.section !== "main") return false;
-      const typeLine = cardDataCache.get(item.name)?.type_line.toLowerCase() ?? "";
-      const isBasicLand = typeLine.includes("basic") && typeLine.includes("land");
-      return isBasicLand || item.count < 4;
+      // CR 100.2a: basic lands and cards whose Oracle text declares "a deck can
+      // have any number of cards named ~" (e.g. Relentless Rats, Rat Colony)
+      // are exempt from the per-card copy limit. Mirrors the guard inside
+      // useDeckBuilder.handleAddCard so the stack tile's + button doesn't
+      // disagree with the hook's add path.
+      const card = cardDataCache.get(item.name);
+      if (BASIC_LAND_NAMES.has(item.name)) return true;
+      if (hasUnlimitedCopies(card?.oracle_text)) return true;
+      return item.count < maxCopies;
     },
-    [cardDataCache],
+    [cardDataCache, maxCopies],
   );
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);

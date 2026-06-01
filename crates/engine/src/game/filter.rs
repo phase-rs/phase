@@ -582,6 +582,16 @@ fn parent_target_controller_player(
     })
 }
 
+#[derive(Clone, Copy)]
+enum ControllerLookup {
+    /// Normal filter matching: off-stack/off-battlefield objects may need
+    /// at-departure controller information for look-back effects.
+    LiveOrLki,
+    /// Owner-zone matching has already substituted ownership for controller;
+    /// stale LKI must not override that owner-scoped value.
+    LiveOnly,
+}
+
 /// CR 608.2h + CR 400.7: The effective controller of `obj` for filter
 /// predicates that look back at non-battlefield objects.
 ///
@@ -594,11 +604,19 @@ fn parent_target_controller_player(
 /// read the at-exile controller, not the post-reset owner; the LKI cache holds
 /// exactly that value.
 ///
-/// Returns the LKI controller when the object is outside the stack/battlefield
-/// AND an LKI snapshot exists; otherwise the live `obj.controller`. Stack and
-/// battlefield objects always use the live value.
-fn effective_controller(state: &GameState, obj: &GameObject, object_id: ObjectId) -> PlayerId {
-    if !matches!(obj.zone, Zone::Battlefield | Zone::Stack) {
+/// Returns the LKI controller when the lookup mode permits it, the object is
+/// outside the stack/battlefield, and an LKI snapshot exists; otherwise the
+/// live `obj.controller`. Stack and battlefield objects always use the live
+/// value.
+fn effective_controller(
+    state: &GameState,
+    obj: &GameObject,
+    object_id: ObjectId,
+    controller_lookup: ControllerLookup,
+) -> PlayerId {
+    if matches!(controller_lookup, ControllerLookup::LiveOrLki)
+        && !matches!(obj.zone, Zone::Battlefield | Zone::Stack)
+    {
         if let Some(lki) = state.lki_cache.get(&object_id) {
             return lki.controller;
         }
@@ -677,6 +695,27 @@ pub fn matches_target_filter_in_owner_zone(
         return false;
     }
 
+    // Fast path: when the object is already controlled by its owner — the
+    // common case for objects in hand/library/graveyard, where control-change
+    // effects almost never apply — the owner-override is a no-op. Skip the
+    // `GameObject` clone entirely (it allocates `name`, `counters`, and several
+    // Vecs per call, which is hot on library scans for tutors/search effects).
+    // Behavior is identical: the override only changes the result when
+    // `controller != owner`.
+    if obj.controller == obj.owner {
+        return filter_inner_for_object(
+            state,
+            obj,
+            object_id,
+            filter,
+            ctx.source_id,
+            ctx.source_controller,
+            ctx.ability,
+            ctx.recipient_id,
+            ControllerLookup::LiveOnly,
+        );
+    }
+
     let mut owner_scoped = obj.clone();
     owner_scoped.controller = owner_scoped.owner;
     filter_inner_for_object(
@@ -688,6 +727,7 @@ pub fn matches_target_filter_in_owner_zone(
         ctx.source_controller,
         ctx.ability,
         ctx.recipient_id,
+        ControllerLookup::LiveOnly,
     )
 }
 
@@ -717,6 +757,7 @@ pub fn matches_target_filter_on_battlefield_entry(
                 ctx.source_controller,
                 ctx.ability,
                 ctx.recipient_id,
+                ControllerLookup::LiveOrLki,
             )
         }
         _ => false,
@@ -781,6 +822,7 @@ pub fn matches_target_filter_on_counter_added_record(
         ctx.source_controller,
         ctx.ability,
         ctx.recipient_id,
+        ControllerLookup::LiveOrLki,
     )
 }
 
@@ -827,6 +869,7 @@ pub fn matches_target_filter_on_damage_record_source(
         ctx.source_controller,
         ctx.ability,
         ctx.recipient_id,
+        ControllerLookup::LiveOrLki,
     )
 }
 
@@ -934,6 +977,7 @@ fn filter_inner(
         source_controller,
         ability,
         recipient_id,
+        ControllerLookup::LiveOrLki,
     )
 }
 
@@ -947,6 +991,7 @@ fn filter_inner_for_object(
     source_controller: Option<PlayerId>,
     ability: Option<&ResolvedAbility>,
     recipient_id: Option<ObjectId>,
+    controller_lookup: ControllerLookup,
 ) -> bool {
     match filter {
         TargetFilter::None => false,
@@ -988,7 +1033,7 @@ fn filter_inner_for_object(
             // `obj.controller` unchanged. See the helper for the LKI-fallback
             // rationale.
             if let Some(ctrl) = controller {
-                let obj_ctrl = effective_controller(state, obj, object_id);
+                let obj_ctrl = effective_controller(state, obj, object_id, controller_lookup);
                 match ctrl {
                     ControllerRef::You => {
                         if source_controller != Some(obj_ctrl) {
@@ -1093,6 +1138,7 @@ fn filter_inner_for_object(
             source_controller,
             ability,
             recipient_id,
+            controller_lookup,
         ),
         TargetFilter::Or { filters } => filters.iter().any(|f| {
             filter_inner_for_object(
@@ -1104,6 +1150,7 @@ fn filter_inner_for_object(
                 source_controller,
                 ability,
                 recipient_id,
+                controller_lookup,
             )
         }),
         TargetFilter::And { filters } => filters.iter().all(|f| {
@@ -1116,6 +1163,7 @@ fn filter_inner_for_object(
                 source_controller,
                 ability,
                 recipient_id,
+                controller_lookup,
             )
         }),
         // StackAbility/StackSpell targeting is handled directly at call sites, not via filter
@@ -1166,6 +1214,7 @@ fn filter_inner_for_object(
                     source_controller,
                     ability,
                     recipient_id,
+                    controller_lookup,
                 )
         }
         // CR 603.10a + CR 607.2a: "cards exiled with [this object]" on a
@@ -3824,6 +3873,75 @@ mod tests {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
         assert!(!matches_target_filter(&state, id, &TargetFilter::None, id));
+    }
+
+    /// Issue #1747 (perf): `matches_target_filter_in_owner_zone` skips the
+    /// `GameObject` clone when `controller == owner` (the fast path), and only
+    /// clones to override `controller := owner` when they differ (the slow
+    /// path). Both paths MUST yield the owner-scoped result — CR 109.5 / CR
+    /// 400.3: a card in an owner zone is evaluated with ownership standing in
+    /// for controller, so a control-changed card still counts as its owner's.
+    #[test]
+    fn owner_zone_filter_scopes_to_owner_on_fast_and_slow_paths() {
+        use crate::types::ability::TypedFilter;
+
+        let mut state = setup();
+        // A card in P0's library, owned AND controlled by P0 → fast path.
+        let cid = CardId(state.next_object_id);
+        let card = create_object(
+            &mut state,
+            cid,
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        let your_card = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+        let ctx_p0 = FilterContext::from_source_with_controller(card, PlayerId(0));
+        state.lki_cache.insert(
+            card,
+            LKISnapshot {
+                name: "Forest".to_string(),
+                power: None,
+                toughness: None,
+                base_power: None,
+                base_toughness: None,
+                mana_value: 0,
+                controller: PlayerId(1),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Land],
+                subtypes: vec![],
+                supertypes: vec![],
+                keywords: vec![],
+                colors: vec![],
+                chosen_attributes: vec![],
+                counters: Default::default(),
+            },
+        );
+
+        // Fast path: controller == owner == P0, no clone needed. The stale LKI
+        // controller differs, so owner-zone matching must force the live
+        // owner-scoped controller instead of reading `state.lki_cache`.
+        assert_eq!(
+            state.objects[&card].controller, state.objects[&card].owner,
+            "precondition: fast path requires controller == owner"
+        );
+        assert!(
+            super::matches_target_filter_in_owner_zone(&state, card, &your_card, &ctx_p0),
+            "owner-zone card owned+controlled by P0 is P0's card"
+        );
+
+        // Slow path: control-change the card to P1 (owner stays P0). Owner-
+        // scoping must still treat it as P0's card via the clone+override,
+        // even though the LKI controller also names P1.
+        state.objects.get_mut(&card).unwrap().controller = PlayerId(1);
+        assert_ne!(
+            state.objects[&card].controller, state.objects[&card].owner,
+            "precondition: slow path requires controller != owner"
+        );
+        assert!(
+            super::matches_target_filter_in_owner_zone(&state, card, &your_card, &ctx_p0),
+            "owner-scoping: a P1-controlled, P0-owned card in an owner zone is still P0's"
+        );
     }
 
     #[test]

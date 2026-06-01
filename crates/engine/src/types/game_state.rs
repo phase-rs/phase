@@ -1617,6 +1617,8 @@ pub enum AlternativeCastKeyword {
     /// CR 702.148a-b + CR 612: Paying the cleave cost removes every
     /// square-bracketed span from the spell's text (a text-changing effect).
     Cleave,
+    /// CR 702.162a: Cast converted (back face up, CR 712.14a) for the MTMTE cost.
+    MoreThanMeetsTheEye,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -2667,6 +2669,16 @@ pub enum WaitingFor {
         source_id: ObjectId,
         valid_tokens: Vec<ObjectId>,
     },
+    /// CR 701.30b: "Clash with an opponent" lets the clashing player choose
+    /// which opponent to clash with. Only entered when two or more opponents
+    /// are available (with one opponent there is no decision). `candidates`
+    /// is the set of legal opponents; `ability` is the resolving clash ability,
+    /// carried so the clash can be performed against the chosen opponent.
+    ClashChooseOpponent {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+        ability: Box<crate::types::ability::ResolvedAbility>,
+    },
     /// CR 701.30c: After a clash, each player puts their revealed card on top or
     /// bottom of their library. Choices are made in APNAP order. `remaining` holds
     /// the next player/card pairs still awaiting a choice.
@@ -3164,6 +3176,7 @@ impl WaitingFor {
             | WaitingFor::RepeatDecision { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }
             | WaitingFor::PopulateChoice { player, .. }
+            | WaitingFor::ClashChooseOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
@@ -3633,6 +3646,13 @@ pub enum CastingVariant {
     /// spell — there is no on-resolve special behavior, so the spell goes to its
     /// owner's graveyard like any instant/sorcery.
     Cleave,
+    /// CR 702.162a + CR 712.14a: Cast from any castable zone via the More Than
+    /// Meets the Eye alternative cost. The printed mana cost is replaced by the
+    /// `Keyword::MoreThanMeetsTheEye(cost)` payload at cast preparation (mirrors
+    /// Overload). On resolution the spell is cast CONVERTED — the resulting
+    /// permanent enters the battlefield transformed (back face up) via the
+    /// existing `enter_transformed` ZoneChange seed. CR 701.28 (Convert).
+    MoreThanMeetsTheEye,
 }
 
 impl CastingVariant {
@@ -3663,6 +3683,16 @@ impl CastingVariant {
 
     pub fn replaces_stack_to_graveyard_with_exile(self) -> bool {
         matches!(self.stack_to_graveyard_replacement(), Some(Zone::Exile))
+    }
+
+    /// CR 400.7 + CR 712.11a: these variants put a non-front face on the
+    /// stack. If the spell leaves the stack without becoming that face on the
+    /// battlefield, restore the object's normal front-face characteristics.
+    pub fn restores_front_face_after_stack_exit(self) -> bool {
+        matches!(
+            self,
+            CastingVariant::Adventure | CastingVariant::Omen | CastingVariant::MoreThanMeetsTheEye
+        )
     }
 }
 
@@ -4468,6 +4498,12 @@ pub struct GameState {
     /// turn" (Militant Angel).
     #[serde(default)]
     pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
+    /// CR 508.6 + CR 508.1b: For each creature declared as an attacker this
+    /// turn, the defending players it attacked. This is the source-specific
+    /// counterpart to `attacked_defenders_this_turn` for text like "each player
+    /// this creature attacked this turn" (Angel of Destiny).
+    #[serde(default)]
+    pub creature_attacked_defenders_this_turn: HashMap<ObjectId, HashSet<PlayerId>>,
     /// CR 500.8 + CR 506.1: Number of combat phases that have begun this turn.
     /// Used by intervening-if triggers that only fire during the first combat phase.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -4715,6 +4751,19 @@ pub struct GameState {
     /// damage, counter removal). Read by QuantityRef::PreviousEffectAmount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_amount: Option<i32>,
+
+    /// CR 706.2: The actual result (natural + modifiers, clamped at 0) of the
+    /// most recent die roll within the current ability resolution. Set by
+    /// `roll_die::resolve` immediately after emitting `GameEvent::DieRolled`, read by
+    /// `QuantityRef::EventContextAmount` so an inline "equal to the result" sub_ability
+    /// (CR 706.4 — no results table) consumes the rolled value rather than the
+    /// numeric amount of the triggering event (e.g. combat damage). Resolution-scoped:
+    /// cleared at `apply()` entry and at every depth-0 chain entry, so it is `Some`
+    /// only between the roll and the sub_ability that reads it. Follows the
+    /// `last_effect_amount` PartialEq-OMISSION pattern: NOT compared in the
+    /// hand-written `PartialEq` (safe — always cleared at comparison boundaries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_result_this_resolution: Option<u8>,
 
     /// Count from the most recent interactive effect resolution (e.g., number of cards
     /// actually discarded in a DiscardChoice). Used as fallback for EventContextAmount
@@ -5031,6 +5080,17 @@ impl GameState {
             .is_some_and(|defenders| defenders.contains(&defender))
     }
 
+    /// CR 508.6: True if `attacker` was declared attacking `defender` this turn.
+    pub fn creature_attacked_player_this_turn(
+        &self,
+        attacker: ObjectId,
+        defender: PlayerId,
+    ) -> bool {
+        self.creature_attacked_defenders_this_turn
+            .get(&attacker)
+            .is_some_and(|defenders| defenders.contains(&defender))
+    }
+
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
         let players: Vec<Player> = (0..player_count)
@@ -5155,6 +5215,7 @@ impl GameState {
             players_attacked_this_turn: HashSet::new(),
             attacking_creatures_this_turn: HashMap::new(),
             attacked_defenders_this_turn: HashMap::new(),
+            creature_attacked_defenders_this_turn: HashMap::new(),
             combat_phases_started_this_turn: 0,
             creatures_attacked_this_turn: HashSet::new(),
             creatures_blocked_this_turn: HashSet::new(),
@@ -5200,6 +5261,7 @@ impl GameState {
             last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
+            die_result_this_resolution: None,
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
             clause_minimum_snapshot: None,
@@ -5447,6 +5509,8 @@ impl PartialEq for GameState {
             && self.players_attacked_this_turn == other.players_attacked_this_turn
             && self.attacking_creatures_this_turn == other.attacking_creatures_this_turn
             && self.attacked_defenders_this_turn == other.attacked_defenders_this_turn
+            && self.creature_attacked_defenders_this_turn
+                == other.creature_attacked_defenders_this_turn
             && self.combat_phases_started_this_turn == other.combat_phases_started_this_turn
             && self.creatures_attacked_this_turn == other.creatures_attacked_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn

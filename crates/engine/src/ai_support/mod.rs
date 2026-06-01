@@ -270,6 +270,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { .. })
         | (WaitingFor::BetweenGamesChoosePlayDraw { .. }, GameAction::ChoosePlayDraw { .. })
         | (WaitingFor::TopOrBottomChoice { .. }, GameAction::ChooseTopOrBottom { .. })
+        | (WaitingFor::ClashChooseOpponent { .. }, GameAction::ChooseClashOpponent { .. })
         | (WaitingFor::ClashCardPlacement { .. }, GameAction::ChooseTopOrBottom { .. })
         | (WaitingFor::OptionalCostChoice { .. }, GameAction::DecideOptionalCost { .. })
         | (WaitingFor::DefilerPayment { .. }, GameAction::DecideOptionalCost { .. })
