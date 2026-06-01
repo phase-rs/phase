@@ -4543,10 +4543,31 @@ pub(crate) fn evaluate_condition(
             .is_some_and(|obj| obj.has_keyword(keyword)),
         // CR 400.7 + CR 608.2c: "if that creature was a [type]" — check target or its LKI.
         AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
-            let target_id = ability.targets.iter().find_map(|t| match t {
-                TargetRef::Object(id) => Some(*id),
-                _ => None,
-            });
+            // CR 109.4 + CR 603.2: "that creature" / "it" is the ability's first
+            // object target, OR — for subject-based triggers that carry no chosen
+            // target (e.g. "Whenever one or more -1/-1 counters are put on a
+            // creature, draw a card if you control that creature.") — the
+            // triggering event's subject object. Mirror the `ParentTargetController`
+            // fallback (targeting.rs): when `targets` has no object, resolve the
+            // anaphor against `TriggeringSource` from the current trigger event.
+            let target_id = ability
+                .targets
+                .iter()
+                .find_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+                .or_else(|| {
+                    crate::game::targeting::resolve_event_context_target(
+                        state,
+                        &TargetFilter::TriggeringSource,
+                        ability.source_id,
+                    )
+                    .and_then(|t| match t {
+                        TargetRef::Object(id) => Some(id),
+                        TargetRef::Player(_) => None,
+                    })
+                });
             let matched = if let Some(id) = target_id {
                 if *use_lki {
                     if let Some(GameEvent::ZoneChanged { record, .. }) =

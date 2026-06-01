@@ -13093,6 +13093,23 @@ pub(crate) fn fold_speed_floor_sentences(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 109.4 + CR 608.2c: True when a clause's leading/suffix condition is an
+/// anaphoric-control check on the subject — `TargetMatchesFilter` over a
+/// controlled-by-`You` typed filter (the positive antecedent of an inverse
+/// "if you don't control it, …" else-connector). Used to gate the inverse-
+/// control "otherwise" routing so it only engages with a matching positive
+/// antecedent. Accepts both `use_lki` tenses (present "control" / past
+/// "controlled").
+fn clause_has_anaphoric_control_condition(clause: &ClauseIr) -> bool {
+    matches!(
+        clause.condition.as_ref(),
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(tf),
+            ..
+        }) if tf.controller == Some(ControllerRef::You)
+    )
+}
+
 /// Produce an intermediate representation of an effect chain from Oracle text.
 ///
 /// This is the IR-production half of the parse/lower split (Phase 48).
@@ -13319,6 +13336,49 @@ pub(crate) fn parse_effect_chain_ir(
                     is_otherwise: false,
                     unless_pay: None,
                     special: Some(SpecialClause::ManaRetention(expiry)),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                });
+                continue;
+            }
+        }
+
+        // CR 109.4 + CR 608.2c: Inverse anaphoric-control "otherwise" connector —
+        // "If you don't control it, [effect]" following a positively-control-gated
+        // clause ("draw a card if you control that creature."). The negated second
+        // sentence is the `else_ability` of the first over the SAME subject, not an
+        // independent sibling instruction — without this routing the runtime would
+        // either fire both branches or neither (issue #1510, Auntie Ool). Requires a
+        // prior clause to carry an anaphoric-control condition so this only engages
+        // as a genuine else over a matching positive antecedent.
+        if clauses.iter().any(clause_has_anaphoric_control_condition) {
+            if let Some(else_text) = strip_inverse_control_otherwise_connector(normalized_text) {
+                let else_def = {
+                    let ir = parse_effect_chain_ir(&else_text, kind, ctx);
+                    lower_effect_chain_ir(&ir)
+                };
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "otherwise_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: true,
+                    unless_pay: None,
+                    special: Some(SpecialClause::Otherwise(Box::new(else_def))),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
                 });

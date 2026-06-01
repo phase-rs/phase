@@ -8,6 +8,7 @@ mod anaphoric_scope_allowlist_guard;
 mod ancient_copper_dragon_roll_d20;
 mod armored_kincaller_or_condition;
 mod ashaya_nontoken_lands;
+mod auntie_ool_minus_one_counter_trigger;
 mod aura_on_player;
 mod awaken_runtime;
 mod balance_equalization;
