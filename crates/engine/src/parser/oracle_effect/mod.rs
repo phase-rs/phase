@@ -17357,6 +17357,46 @@ mod tests {
         );
     }
 
+    /// CR 121.1 + CR 119.3 + CR 608.2c: Rankle class — the elided second
+    /// player-action sibling may use an article count ("draws a card"), not
+    /// only digits or X. The split predicate must still carry the prior player
+    /// subject so each player both loses life and draws.
+    #[test]
+    fn article_count_draws_card_splits_after_loses_life_sibling() {
+        let chain = parse_effect_chain(
+            "each player loses 1 life and draws a card",
+            AbilityKind::Spell,
+        );
+        assert_eq!(chain.player_scope, Some(PlayerFilter::All));
+        assert!(
+            matches!(
+                &*chain.effect,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
+            "expected first sibling to be LoseLife(1), got {:?}",
+            chain.effect,
+        );
+
+        let sub = chain
+            .sub_ability
+            .as_ref()
+            .expect("expected Draw sub_ability after LoseLife");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
+            "expected second sibling to be Draw(1), got {:?}",
+            sub.effect,
+        );
+    }
+
     #[test]
     fn effect_lightning_bolt() {
         let e = parse_effect("Lightning Bolt deals 3 damage to any target");
