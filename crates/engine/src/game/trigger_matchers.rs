@@ -7095,6 +7095,24 @@ mod tests {
         }
     }
 
+    /// CR 115.1: "a spell or ability you control / an opponent controls" source
+    /// filter — the shape the trigger parser emits for Valiant-style triggers.
+    fn stack_source_filter(controller: ControllerRef) -> TargetFilter {
+        TargetFilter::Or {
+            filters: vec![
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::StackSpell,
+                        TargetFilter::Typed(TypedFilter::default().controller(controller.clone())),
+                    ],
+                },
+                TargetFilter::StackAbility {
+                    controller: Some(controller),
+                },
+            ],
+        }
+    }
+
     fn setup_with_ability_on_stack() -> (GameState, ObjectId) {
         let mut state = setup();
         let ability_id = ObjectId(60);
@@ -7199,6 +7217,159 @@ mod tests {
             source_id: ability_id,
         };
         assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_opponent_controls_matches_opponent_spell() {
+        // CR 115.1: "an opponent controls" must accept a spell controlled by an
+        // opponent of the permanent's controller.
+        let (mut state, spell_id) = setup_with_spell_on_stack(false); // spell controlled by PlayerId(0)
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Opponent-Scoped Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(stack_source_filter(ControllerRef::Opponent));
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: spell_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_opponent_controls_rejects_own_spell() {
+        // CR 115.1: "an opponent controls" must reject a spell controlled by the
+        // permanent's own controller.
+        let (mut state, spell_id) = setup_with_spell_on_stack(false); // spell controlled by PlayerId(0)
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Opponent-Scoped Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(stack_source_filter(ControllerRef::Opponent));
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: spell_id,
+        };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_you_control_matches_own_spell() {
+        // Valiant (#1378): "you control" must accept a spell you control.
+        let (mut state, spell_id) = setup_with_spell_on_stack(false); // spell controlled by PlayerId(0)
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Heartfire Hero".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(stack_source_filter(ControllerRef::You));
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: spell_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_you_control_rejects_opponent_spell() {
+        // Valiant (#1378): "you control" must reject an opponent's spell — the
+        // exact reported bug (trigger fired when the opponent targeted it).
+        let (mut state, spell_id) = setup_with_spell_on_stack(false); // spell controlled by PlayerId(0)
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Heartfire Hero".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(stack_source_filter(ControllerRef::You));
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: spell_id,
+        };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_you_control_matches_own_ability() {
+        // CR 115.1: "a spell or ability you control" also covers abilities.
+        let (mut state, ability_id) = setup_with_ability_on_stack(); // ability controlled by PlayerId(1)
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Heartfire Hero".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(stack_source_filter(ControllerRef::You));
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_you_control_rejects_opponent_ability() {
+        // CR 115.1: an opponent's ability must not fire the "you control" trigger.
+        let (mut state, ability_id) = setup_with_ability_on_stack(); // ability controlled by PlayerId(1)
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Heartfire Hero".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_source = Some(stack_source_filter(ControllerRef::You));
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        assert!(!match_becomes_target(
             &event,
             &trigger,
             trigger_owner,

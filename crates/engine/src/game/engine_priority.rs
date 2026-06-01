@@ -34,7 +34,19 @@ pub(super) fn run_post_action_pipeline(
             .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
             .cloned()
             .collect();
-        triggers::process_triggers(state, &filtered_events);
+        // CR 603.3b: If the resolution step that just ran paused for a player
+        // resolution-choice (Scry/Surveil/Dig/Search/...), the triggered
+        // abilities it generated (e.g. "whenever you scry, ...") must NOT be
+        // collected and ordered now — doing so overwrites the pending choice's
+        // WaitingFor (the `OrderTriggers` PromptForChoice arm clobbers
+        // `ScryChoice` when 2+ same-controller triggers fire). Park them in
+        // `deferred_triggers`; they are drained below once the action settles
+        // back to Priority. Mirrors `batch_or_drain_observer_triggers`' B2 branch.
+        if super::engine_resolution_choices::handles(&state.waiting_for) {
+            triggers::collect_triggers_into_deferred(state, &filtered_events);
+        } else {
+            triggers::process_triggers(state, &filtered_events);
+        }
     }
 
     // CR 704.3: SBA/trigger loop. SBAs may generate events (e.g., ZoneChanged for
@@ -48,6 +60,22 @@ pub(super) fn run_post_action_pipeline(
             triggers::process_triggers(state, &sba_events);
         } else {
             break;
+        }
+    }
+
+    // CR 603.3b: Triggered abilities parked while a resolution choice was open
+    // (e.g. "whenever you scry, ..." deferred above so it couldn't clobber the
+    // choice's WaitingFor) go on the stack now that the action has settled and a
+    // player is about to receive priority. Gated on `Priority` so it never fires
+    // mid-trigger-pause (where `dispatch_collected_triggers` parks remaining
+    // contexts under a non-Priority WaitingFor and a dedicated site drains them
+    // after the active trigger resolves). A drained trigger that itself needs
+    // input returns its own WaitingFor, handled by the check below.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !state.deferred_triggers.is_empty()
+    {
+        if let Some(wf) = triggers::drain_deferred_trigger_queue(state, events) {
+            state.waiting_for = wf;
         }
     }
 
