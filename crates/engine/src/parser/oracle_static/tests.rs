@@ -561,6 +561,24 @@ fn static_cant_be_blocked_by_greater_power() {
 }
 
 #[test]
+fn static_cant_be_blocked_by_more_than_one_creature() {
+    // CR 509.1b: Stalking Tiger — per-creature blocker maximum. Must NOT collapse
+    // to CantBeBlocked (unblockable) or CantBeBlockedBy (quality filter).
+    let def =
+        parse_static_line("Stalking Tiger can't be blocked by more than one creature.").unwrap();
+    assert_eq!(def.mode, StaticMode::CantBeBlockedByMoreThan { max: 1 });
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_cant_be_blocked_by_more_than_two_creatures() {
+    // The count is parameterized, not hard-coded to one.
+    let def = parse_static_line("~ can't be blocked by more than two creatures.").unwrap();
+    assert_eq!(def.mode, StaticMode::CantBeBlockedByMoreThan { max: 2 });
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
 fn static_source_power_cant_block_creatures_you_control() {
     let def = parse_static_line(
         "Creatures with power less than ~'s power can't block creatures you control.",

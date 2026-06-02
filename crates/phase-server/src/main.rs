@@ -32,6 +32,7 @@ use lobby_broker::{
 };
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
+use server_core::client_hello_guard::guard_client_hello;
 use server_core::draft_action_payload_guard::guard_draft_action_payload;
 use server_core::draft_session::DraftSessionManager;
 use server_core::draft_wire_guard::{
@@ -394,6 +395,8 @@ enum HelloGateOutcome {
     /// ClientHello arrived but declares an incompatible protocol version.
     /// Send Error with this (client, server) pair and drop the frame.
     RejectProtocol { client: u32, server: u32 },
+    /// ClientHello fields failed wire validation. Send Error with this reason.
+    RejectInvalidHello(String),
     /// A non-hello frame arrived before the handshake completed. Send Error
     /// ("ClientHello required before any other message") and drop.
     RejectHandshakeRequired,
@@ -427,6 +430,8 @@ fn classify_hello_gate(
                     client: *protocol_version,
                     server: *server_protocol_range.end(),
                 }
+            } else if let Err(reason) = guard_client_hello(client_version, build_commit) {
+                HelloGateOutcome::RejectInvalidHello(reason)
             } else {
                 HelloGateOutcome::Accept(ClientHelloInfo {
                     client_version: client_version.clone(),
@@ -2201,6 +2206,14 @@ async fn handle_client_message(
             identity.client_hello = Some(info);
             return;
         }
+        HelloGateOutcome::RejectInvalidHello(reason) => {
+            warn!(%reason, "ClientHello rejected at wire guard");
+            let msg = ServerMessage::Error { message: reason };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+            return;
+        }
         HelloGateOutcome::RejectProtocol { client, server } => {
             warn!(
                 client_protocol = client,
@@ -2906,19 +2919,27 @@ async fn handle_client_message(
             // LobbyGameAdded fan-out (in order). Deck data, AI seats, and
             // format-legality are host-authoritative and irrelevant here.
             if matches!(mode, ServerMode::LobbyOnly) {
+                // Validate deck bounds before cloning to reject oversized decks early
+                if let Err(reason) = lobby_broker::validate_deck_payload("deck", &deck) {
+                    let msg = ServerMessage::Error { message: reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
                 dispatch_broker_msg(
                     lobby_broker::LobbyClientMessage::CreateGameWithSettings {
-                        deck: deck.clone(),
-                        display_name: display_name.clone(),
+                        deck,
+                        display_name,
                         public,
-                        password: password.clone(),
+                        password,
                         timer_seconds,
                         player_count: requested_player_count,
                         match_config,
-                        format_config: format_config.clone(),
-                        room_name: room_name.clone(),
-                        host_peer_id: host_peer_id.clone(),
-                        draft_metadata: draft_metadata.clone(),
+                        format_config,
+                        room_name,
+                        host_peer_id,
+                        draft_metadata,
                         start_when_full,
                         ranked,
                     },
@@ -3611,13 +3632,21 @@ async fn handle_client_message(
             // is created server-side. The deck is ignored — the host validates
             // guest decks over P2P once the connection is up.
             if matches!(mode, ServerMode::LobbyOnly) {
+                // Validate deck bounds before cloning to reject oversized decks early
+                if let Err(reason) = lobby_broker::validate_deck_payload("deck", &deck) {
+                    let msg = ServerMessage::Error { message: reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
                 dispatch_broker_msg(
                     lobby_broker::LobbyClientMessage::JoinGameWithPassword {
-                        game_code: game_code.clone(),
-                        deck: deck.clone(),
-                        display_name: display_name.clone(),
-                        password: password.clone(),
-                        reservation_token: reservation_token.clone(),
+                        game_code,
+                        deck,
+                        display_name,
+                        password,
+                        reservation_token,
                     },
                     lobby,
                     lobby_subscribers,
@@ -5001,6 +5030,7 @@ mod mode_gate_tests {
 mod handshake_tests {
     use super::*;
     use engine::types::actions::GameAction;
+    use lobby_broker::validation::MAX_TOKEN_LEN;
     use server_core::protocol::DeckData;
 
     fn empty_identity() -> SocketIdentity {
@@ -5127,6 +5157,20 @@ mod handshake_tests {
             MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert!(matches!(outcome, HelloGateOutcome::RejectProtocol { .. }));
+    }
+
+    #[test]
+    fn rejects_oversized_client_hello_fields() {
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "v".repeat(MAX_TOKEN_LEN + 1),
+                build_commit: "abc1234".into(),
+                protocol_version: PROTOCOL_VERSION,
+            },
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        );
+        assert!(matches!(outcome, HelloGateOutcome::RejectInvalidHello(_)));
     }
 
     #[test]

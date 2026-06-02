@@ -7912,6 +7912,7 @@ mod tests {
                         exiled_misses: vec![miss_a, miss_b],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                     }),
+                    duration: None,
                 });
 
             (state, hit, vec![miss_a, miss_b])
@@ -7998,6 +7999,7 @@ mod tests {
                     }),
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -8049,6 +8051,7 @@ mod tests {
                     }),
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             hit_obj
                 .casting_permissions
@@ -8058,6 +8061,7 @@ mod tests {
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -8101,6 +8105,7 @@ mod tests {
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
@@ -8163,6 +8168,7 @@ mod tests {
                     }),
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             hit_obj
                 .casting_permissions
@@ -8178,6 +8184,7 @@ mod tests {
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                     }),
+                    duration: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -8228,6 +8235,7 @@ mod tests {
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                     }),
+                    duration: None,
                 });
             hit_obj
                 .casting_permissions
@@ -8237,6 +8245,7 @@ mod tests {
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 

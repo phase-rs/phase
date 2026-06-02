@@ -819,6 +819,14 @@ pub enum StaticMode {
     CantBeBlockedBy {
         filter: TargetFilter,
     },
+    /// CR 509.1b: This creature can't be blocked by more than `max` creatures
+    /// (Stalking Tiger, Outland Colossus). A per-creature blocker *maximum* — the
+    /// inverse of menace (`CantBeBlockedExceptBy { MinBlockers }`, a minimum) and
+    /// distinct from `MaxBlockersEachCombat` (a global per-combat cap). Enforced
+    /// in `combat.rs` declare-blockers validation.
+    CantBeBlockedByMoreThan {
+        max: u32,
+    },
     /// CR 702.16: Protection prevents targeting, blocking, damage, and attachment.
     Protection,
     /// CR 702.12: Indestructible — prevents destruction by lethal damage and destroy effects.
@@ -1038,6 +1046,7 @@ impl Hash for StaticMode {
                 BlockExceptionKind::MinBlockers { min } => min.hash(state),
             },
             StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
+            StaticMode::CantBeBlockedByMoreThan { max } => max.hash(state),
             StaticMode::AdditionalLandDrop { count } => count.hash(state),
             StaticMode::StepEndUnspentMana { filter, action } => {
                 filter.hash(state);
@@ -1246,6 +1255,9 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeBlockedBy { filter } => {
                 write!(f, "CantBeBlockedBy({filter:?})")
             }
+            StaticMode::CantBeBlockedByMoreThan { max } => {
+                write!(f, "CantBeBlockedByMoreThan({max})")
+            }
             StaticMode::Protection => write!(f, "Protection"),
             StaticMode::Indestructible => write!(f, "Indestructible"),
             StaticMode::CantBeDestroyed => write!(f, "CantBeDestroyed"),
@@ -1336,6 +1348,11 @@ impl FromStr for StaticMode {
             s if parse_static_mode_u32_arg(s, "MaxBlockersEachCombat").is_some() => {
                 StaticMode::MaxBlockersEachCombat {
                     max: parse_static_mode_u32_arg(s, "MaxBlockersEachCombat").unwrap(),
+                }
+            }
+            s if parse_static_mode_u32_arg(s, "CantBeBlockedByMoreThan").is_some() => {
+                StaticMode::CantBeBlockedByMoreThan {
+                    max: parse_static_mode_u32_arg(s, "CantBeBlockedByMoreThan").unwrap(),
                 }
             }
             "CantBeTargeted" => StaticMode::CantBeTargeted,
@@ -1939,6 +1956,7 @@ mod tests {
             StaticMode::ExtraBlockers { count: Some(1) },
             StaticMode::MaxAttackersEachCombat { max: 2 },
             StaticMode::MaxBlockersEachCombat { max: 3 },
+            StaticMode::CantBeBlockedByMoreThan { max: 2 },
             StaticMode::RevealTopOfLibrary { all_players: false },
             StaticMode::RevealTopOfLibrary { all_players: true },
             // Tier 1: keyword/evasion statics
