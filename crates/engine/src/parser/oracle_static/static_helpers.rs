@@ -57,11 +57,15 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
             TargetFilter::Or { filters } if !filters.is_empty() && remainder.is_empty() => {
                 Some(filter)
             }
-            _ if remainder.is_empty() => parse_named_color(base_part).map(|color| {
-                TargetFilter::Typed(
-                    TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
-                )
-            }),
+            // Bare color words ("white", "red") are not consumed by parse_type_phrase
+            // because color prefixes require a trailing type word ("white creature").
+            _ if remainder.is_empty() || remainder.eq_ignore_ascii_case(base_part) => {
+                parse_named_color(base_part).map(|color| {
+                    TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
+                    )
+                })
+            }
             _ => None,
         }
     };
