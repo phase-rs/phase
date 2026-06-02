@@ -51,7 +51,7 @@ pub fn resolve(
         return Ok(());
     }
 
-    // CR 500.8 + CR 510.1: Resolve the count against the triggering combat
+    // CR 500.8 + CR 510.2: Resolve the count against the triggering combat
     // damage event so Obeka, Splitter of Seconds (and any future "for that
     // many additional <step>" wording) pushes N copies of the extra phase
     // bundle instead of one. Fixed quantities preserve legacy single-push.
@@ -325,7 +325,7 @@ mod tests {
         );
     }
 
-    /// CR 500.8 + CR 510.1: Obeka, Splitter of Seconds — "you get that many
+    /// CR 500.8 + CR 510.2: Obeka, Splitter of Seconds — "you get that many
     /// additional upkeep steps after this phase" must push one ExtraPhase per
     /// point of combat damage, not a single phase.
     #[test]

@@ -4978,7 +4978,7 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
     }
 }
 
-/// CR 500.8 + CR 510.1: Quantity for "<N> additional <step/phase>s". The
+/// CR 500.8 + CR 510.2: Quantity for "<N> additional <step/phase>s". The
 /// scanner advances along word boundaries and tries a single composed
 /// combinator at each position:
 ///   `quantifier ~ " additional"` where `quantifier` =
@@ -8985,7 +8985,7 @@ mod tests {
         assert!(result.is_some(), "Should parse 'after this phase' variant");
     }
 
-    /// CR 500.8 + CR 510.1: Obeka, Splitter of Seconds — "you get that many
+    /// CR 500.8 + CR 510.2: Obeka, Splitter of Seconds — "you get that many
     /// additional upkeep steps after this phase" must thread the triggering
     /// combat damage amount through `EventContextAmount`, not collapse it to
     /// the singular default.
@@ -9010,6 +9010,23 @@ mod tests {
             other => {
                 panic!("expected AdditionalPhase with EventContextAmount count, got {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn parse_fixed_count_additional_upkeep_steps_binds_literal_count() {
+        let text = "you get two additional upkeep steps after this phase";
+        let lower = text.to_lowercase();
+        let effect = lower_imperative_family_effect(
+            parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("fixed-count additional upkeep should parse"),
+        );
+        match effect {
+            Effect::AdditionalPhase {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            } => {}
+            other => panic!("expected count=Fixed(2) for fixed-count form, got {other:?}"),
         }
     }
 
