@@ -63,7 +63,9 @@ impl GameDb {
                 rating_after INTEGER NOT NULL,
                 rating_delta INTEGER NOT NULL,
                 created_at INTEGER NOT NULL
-            );",
+            );
+            CREATE INDEX IF NOT EXISTS idx_ranked_match_history_player_key
+                ON ranked_match_history (player_key);",
         )?;
         info!("Game database opened at {}", path.display());
         Ok(Self {
@@ -386,6 +388,24 @@ mod tests {
         db.save_p2p_backup("BACK01", "peer-1", "data").unwrap();
         db.delete_p2p_backup("BACK01").unwrap();
         assert!(db.load_p2p_backup("BACK01").unwrap().is_none());
+    }
+
+    #[test]
+    fn ranked_match_history_has_player_key_index() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("PRAGMA index_list('ranked_match_history')")
+            .unwrap();
+        let indexes = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(indexes
+            .iter()
+            .any(|name| name == "idx_ranked_match_history_player_key"));
     }
 
     #[test]

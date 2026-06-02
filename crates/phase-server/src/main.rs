@@ -1606,12 +1606,18 @@ fn delete_session_async(game_db: &SharedGameDb, game_code: &str) {
     });
 }
 
-fn normalize_player_key(name: &str) -> String {
+#[derive(Debug, Clone)]
+struct RankedDuelPlayers {
+    player_a_name: String,
+    player_b_name: String,
+}
+
+fn normalize_player_key(name: &str) -> Option<String> {
     let trimmed = name.trim().to_lowercase();
     if trimmed.is_empty() {
-        "anonymous".to_string()
+        None
     } else {
-        trimmed
+        Some(trimmed)
     }
 }
 
@@ -1627,11 +1633,34 @@ fn k_factor(rating: i32) -> i32 {
     }
 }
 
+fn ranked_duel_players_for_room(
+    ranked: bool,
+    player_count: u8,
+    has_ai_seats: bool,
+    display_names: &[String],
+) -> Option<RankedDuelPlayers> {
+    if !ranked || player_count != 2 || has_ai_seats {
+        return None;
+    }
+    Some(RankedDuelPlayers {
+        player_a_name: display_names.first()?.clone(),
+        player_b_name: display_names.get(1)?.clone(),
+    })
+}
+
+fn ranked_duel_players(session: &GameSession) -> Option<RankedDuelPlayers> {
+    ranked_duel_players_for_room(
+        session.ranked,
+        session.player_count,
+        !session.ai_seats.is_empty(),
+        &session.display_names,
+    )
+}
+
 fn ranked_result_for_duel(
     game_db: &SharedGameDb,
     game_code: &str,
-    player_a_name: &str,
-    player_b_name: &str,
+    players: &RankedDuelPlayers,
     winner: Option<PlayerId>,
 ) -> Option<Vec<RankedPlayerResult>> {
     let score_a = match winner {
@@ -1640,8 +1669,11 @@ fn ranked_result_for_duel(
         _ => 0.5,
     };
     let score_b = 1.0 - score_a;
-    let key_a = normalize_player_key(player_a_name);
-    let key_b = normalize_player_key(player_b_name);
+    let key_a = normalize_player_key(&players.player_a_name)?;
+    let key_b = normalize_player_key(&players.player_b_name)?;
+    if key_a == key_b {
+        return None;
+    }
 
     let ra = game_db.load_rating(&key_a).ok().flatten().unwrap_or(1200);
     let rb = game_db.load_rating(&key_b).ok().flatten().unwrap_or(1200);
@@ -1653,7 +1685,7 @@ fn ranked_result_for_duel(
     let rb_next = rb + db;
     let deltas = vec![
         persistence::RatingDelta {
-            player_key: key_a,
+            player_key: key_a.clone(),
             game_code: game_code.to_string(),
             opponent_key: key_b.clone(),
             won: score_a > score_b,
@@ -1664,14 +1696,15 @@ fn ranked_result_for_duel(
         persistence::RatingDelta {
             player_key: key_b,
             game_code: game_code.to_string(),
-            opponent_key: normalize_player_key(player_a_name),
+            opponent_key: key_a.clone(),
             won: score_b > score_a,
             rating_before: rb,
             rating_after: rb_next,
             rating_delta: db,
         },
     ];
-    if game_db.save_ranked_result(&deltas).is_err() {
+    if let Err(e) = game_db.save_ranked_result(&deltas) {
+        error!(game = %game_code, error = %e, "failed to save ranked result");
         return None;
     }
     Some(vec![
@@ -2332,6 +2365,11 @@ async fn handle_client_message(
                             }
                             _ => None,
                         };
+                        let ranked_players = if game_over_winner.is_some() {
+                            ranked_duel_players(session)
+                        } else {
+                            None
+                        };
 
                         // Persist or delete based on game-over state
                         if let Some(winner) = game_over_winner {
@@ -2358,7 +2396,14 @@ async fn handle_client_message(
                             "action processed (lock held)"
                         );
 
-                        Ok((human_result, ai_results, eliminated, player_count))
+                        Ok((
+                            human_result,
+                            ai_results,
+                            eliminated,
+                            player_count,
+                            game_over_winner,
+                            ranked_players,
+                        ))
                     }
                     Err(e) => Err(e),
                 }
@@ -2378,7 +2423,16 @@ async fn handle_client_message(
                     ai_results,
                     eliminated,
                     player_count,
+                    game_over_winner,
+                    ranked_players,
                 )) => {
+                    let ranked_result =
+                        game_over_winner
+                            .zip(ranked_players)
+                            .and_then(|(winner, players)| {
+                                ranked_result_for_duel(game_db, &game_code, &players, winner)
+                            });
+
                     // Filter state per-player outside the lock
                     let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
                         .map(|i| {
@@ -2427,6 +2481,18 @@ async fn handle_client_message(
                                         legal_actions_by_object: p_by_object,
                                         derived: derive_views(pstate, Some(*pid)),
                                     });
+                                }
+                            }
+                            if let (Some(winner), Some(ranked_result)) =
+                                (game_over_winner, ranked_result.clone())
+                            {
+                                let msg = ServerMessage::GameOver {
+                                    winner,
+                                    reason: "Game ended".to_string(),
+                                    ranked_result: Some(ranked_result),
+                                };
+                                for sender in players.values() {
+                                    let _ = sender.send(msg.clone());
                                 }
                             }
                         }
@@ -3756,7 +3822,7 @@ async fn handle_client_message(
             let conceded_msg = ServerMessage::Conceded { player: player_id };
             // In 2-player, the opponent wins. In multiplayer, game continues unless only 1 remains.
             let mgr_ref = state.lock().await;
-            let (winner, ranked_result) = if let Some(session) = mgr_ref.sessions.get(&game_code) {
+            let (winner, ranked_players) = if let Some(session) = mgr_ref.sessions.get(&game_code) {
                 let living: Vec<_> = session
                     .state
                     .players
@@ -3769,30 +3835,15 @@ async fn handle_client_message(
                 } else {
                     None
                 };
-                let ranked_result = if session.ranked && session.player_count == 2 {
-                    ranked_result_for_duel(
-                        game_db,
-                        &game_code,
-                        session
-                            .display_names
-                            .first()
-                            .map(String::as_str)
-                            .unwrap_or(""),
-                        session
-                            .display_names
-                            .get(1)
-                            .map(String::as_str)
-                            .unwrap_or(""),
-                        winner,
-                    )
-                } else {
-                    None
-                };
-                (winner, ranked_result)
+                let ranked_players = ranked_duel_players(session);
+                (winner, ranked_players)
             } else {
                 (None, None)
             };
             drop(mgr_ref);
+            let ranked_result = ranked_players
+                .as_ref()
+                .and_then(|players| ranked_result_for_duel(game_db, &game_code, players, winner));
 
             info!(game = %game_code, winner = ?winner, reason = "concession", "game over");
 
@@ -4549,6 +4600,63 @@ async fn handle_client_message(
             )
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod ranked_tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn test_db() -> SharedGameDb {
+        let file = NamedTempFile::new().unwrap();
+        Arc::new(persistence::GameDb::open(file.path()).unwrap())
+    }
+
+    #[test]
+    fn ranked_result_persists_distinct_human_duel_ratings() {
+        let db = test_db();
+        let players = RankedDuelPlayers {
+            player_a_name: "Alice".to_string(),
+            player_b_name: "Bob".to_string(),
+        };
+
+        let result = ranked_result_for_duel(&db, "RANK01", &players, Some(PlayerId(0))).unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].rating_before, 1200);
+        assert_eq!(result[0].rating_after, 1212);
+        assert_eq!(result[0].rating_delta, 12);
+        assert_eq!(result[1].rating_after, 1188);
+        assert_eq!(db.load_rating("alice").unwrap(), Some(1212));
+        assert_eq!(db.load_rating("bob").unwrap(), Some(1188));
+    }
+
+    #[test]
+    fn ranked_result_rejects_duplicate_or_blank_player_keys() {
+        let db = test_db();
+        let duplicate = RankedDuelPlayers {
+            player_a_name: "Alice".to_string(),
+            player_b_name: " alice ".to_string(),
+        };
+        let blank = RankedDuelPlayers {
+            player_a_name: "Alice".to_string(),
+            player_b_name: " ".to_string(),
+        };
+
+        assert!(ranked_result_for_duel(&db, "RANK02", &duplicate, Some(PlayerId(0))).is_none());
+        assert!(ranked_result_for_duel(&db, "RANK03", &blank, Some(PlayerId(0))).is_none());
+        assert_eq!(db.load_rating("alice").unwrap(), None);
+    }
+
+    #[test]
+    fn ranked_duel_players_require_ranked_two_human_seats() {
+        let display_names = vec!["Alice".to_string(), "Bob".to_string()];
+
+        assert!(ranked_duel_players_for_room(true, 2, false, &display_names).is_some());
+        assert!(ranked_duel_players_for_room(false, 2, false, &display_names).is_none());
+        assert!(ranked_duel_players_for_room(true, 3, false, &display_names).is_none());
+        assert!(ranked_duel_players_for_room(true, 2, true, &display_names).is_none());
     }
 }
 

@@ -546,7 +546,7 @@ export function HostSetup({
             onChange={(e) => setRanked(e.target.checked)}
             className={isP2P ? "accent-cyan-500" : "accent-emerald-500"}
           />
-          <span className="text-sm text-gray-300">Ranked</span>
+          <span className="text-sm text-gray-300">{t("hostSetup.ranked")}</span>
         </label>
 
         {/* List in lobby (server mode only) */}

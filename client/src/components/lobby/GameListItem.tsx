@@ -145,9 +145,9 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
       {game.is_ranked === true && (
         <span
           className="flex-shrink-0 rounded bg-rose-500/20 px-1.5 py-0.5 text-xs font-semibold text-rose-300"
-          title="Ranked room"
+          title={t("gameListItem.rankedBadgeTitle")}
         >
-          RANKED
+          {t("gameListItem.rankedBadge")}
         </span>
       )}
 
