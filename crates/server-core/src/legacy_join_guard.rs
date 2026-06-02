@@ -24,9 +24,7 @@ mod tests {
     fn deck(main: &[&str]) -> DeckData {
         DeckData {
             main_deck: main.iter().map(|s| s.to_string()).collect(),
-            sideboard: vec![],
-            commander: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         }
     }
 
