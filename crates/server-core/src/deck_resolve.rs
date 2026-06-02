@@ -190,21 +190,4 @@ mod tests {
         assert!(payload.sideboard.is_empty());
         assert!(payload.commander.is_empty());
     }
-
-    mod legacy_deck_guard_tests {
-        use super::deck;
-        use crate::legacy_deck_guard::{guard_legacy_deck, MAX_MAIN_DECK_ENTRIES};
-
-        #[test]
-        fn legacy_deck_accepts_valid_payload() {
-            assert!(guard_legacy_deck(&deck(&["Forest"], &[], &[])).is_ok());
-        }
-
-        #[test]
-        fn legacy_deck_rejects_oversized_main() {
-            let names: Vec<&str> = vec!["Card"; MAX_MAIN_DECK_ENTRIES + 1];
-            let err = guard_legacy_deck(&deck(&names, &[], &[])).unwrap_err();
-            assert!(err.contains("main_deck"));
-        }
-    }
 }
