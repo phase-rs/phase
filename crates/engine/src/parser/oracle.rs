@@ -29,6 +29,7 @@ use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::primitives::parse_number as nom_parse_number;
 use super::oracle_nom::primitives::scan_contains;
 
+use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
 };
@@ -62,7 +63,6 @@ use super::oracle_modal::{
     strip_ability_word_with_name,
 };
 use super::oracle_replacement::{lower_replacement_ir, parse_replacement_line};
-use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{

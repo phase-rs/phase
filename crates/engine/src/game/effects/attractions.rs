@@ -14,7 +14,9 @@ pub fn resolve(
         Effect::OpenAttractions { count } => {
             attractions::resolve_open_count(state, ability, *count, events)
         }
-        Effect::RollToVisitAttractions => attractions::resolve_roll_to_visit(state, ability, events),
+        Effect::RollToVisitAttractions => {
+            attractions::resolve_roll_to_visit(state, ability, events)
+        }
         _ => Err(EffectError::MissingParam("attraction effect".to_string())),
     }
 }

@@ -6,8 +6,8 @@ use engine::game::attractions::{open_attractions, roll_to_visit_attractions};
 use engine::game::deck_loading::create_attraction_deck_card;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::stack;
-use engine::parser::oracle::parse_oracle_text;
 use engine::game::zones;
+use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::Effect;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
@@ -65,11 +65,7 @@ fn open_attraction_moves_top_deck_card_to_battlefield() {
     scenario.at_phase(Phase::PreCombatMain);
     let mut runner = scenario.build();
 
-    let face = test_attraction_face(
-        "Test Ride",
-        "Visit — Draw a card.",
-        vec![1, 2, 3, 4, 5, 6],
-    );
+    let face = test_attraction_face("Test Ride", "Visit — Draw a card.", vec![1, 2, 3, 4, 5, 6]);
     create_attraction_deck_card(runner.state_mut(), &face, P0);
     assert_eq!(runner.state().players[0].attraction_deck.len(), 1);
 
@@ -138,12 +134,16 @@ fn roll_to_visit_fires_visit_trigger_when_roll_matches_lights() {
 fn parser_open_an_attraction_effect() {
     let parsed = parse_oracle_text("Open an Attraction.", "Opener", &[], &[], &[]);
     assert!(
-        parsed.abilities.iter().any(|a| matches!(
-            *a.effect,
-            Effect::OpenAttraction
-        )),
+        parsed
+            .abilities
+            .iter()
+            .any(|a| matches!(*a.effect, Effect::OpenAttraction)),
         "expected OpenAttraction effect, got {:?}",
-        parsed.abilities.iter().map(|a| &a.effect).collect::<Vec<_>>()
+        parsed
+            .abilities
+            .iter()
+            .map(|a| &a.effect)
+            .collect::<Vec<_>>()
     );
 }
 

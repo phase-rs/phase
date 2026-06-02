@@ -1,8 +1,6 @@
 //! CR 717.5 + CR 702.159a: Attraction visit abilities and numbered visit lines.
 
-use crate::types::ability::{
-    AbilityKind, TriggerCondition, TriggerDefinition,
-};
+use crate::types::ability::{AbilityKind, TriggerCondition, TriggerDefinition};
 use crate::types::triggers::TriggerMode;
 
 use super::oracle_effect::parse_effect_chain;
@@ -95,7 +93,9 @@ fn parse_numbered_visit_line(lower: &str, original: &str) -> Option<(u8, u8, Str
     if effect.is_empty() {
         return None;
     }
-    let (min, max) = if let Some((a, b)) = prefix.split_once('\u{2014}').or_else(|| prefix.split_once('-'))
+    let (min, max) = if let Some((a, b)) = prefix
+        .split_once('\u{2014}')
+        .or_else(|| prefix.split_once('-'))
     {
         let min: u8 = a.trim().parse().ok()?;
         let max: u8 = b.trim().parse().ok()?;
@@ -121,9 +121,10 @@ mod tests {
     fn parse_oracle_text_open_an_attraction() {
         let parsed = parse_oracle_text("Open an Attraction.", "Opener", &[], &[], &[]);
         assert!(
-            parsed.abilities.iter().any(|a| {
-                matches!(*a.effect, crate::types::ability::Effect::OpenAttraction)
-            }),
+            parsed
+                .abilities
+                .iter()
+                .any(|a| { matches!(*a.effect, crate::types::ability::Effect::OpenAttraction) }),
             "abilities: {:?}",
             parsed
                 .abilities

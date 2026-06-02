@@ -203,9 +203,7 @@ pub fn create_attraction_deck_card(
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     apply_card_face_to_object(obj, card_face);
     obj.in_attraction_deck = true;
-    state
-        .command_zone
-        .retain(|id| *id != obj_id);
+    state.command_zone.retain(|id| *id != obj_id);
     state
         .players
         .iter_mut()
@@ -216,11 +214,7 @@ pub fn create_attraction_deck_card(
     obj_id
 }
 
-fn load_player_attraction_deck(
-    state: &mut GameState,
-    entries: &[DeckEntry],
-    owner: PlayerId,
-) {
+fn load_player_attraction_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
     for entry in entries {
         for _ in 0..entry.count {
             create_attraction_deck_card(state, &entry.card, owner);
@@ -353,11 +347,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     load_player_attraction_deck(state, &payload.player.attraction_deck, PlayerId(0));
     load_player_attraction_deck(state, &payload.opponent.attraction_deck, PlayerId(1));
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
-        load_player_attraction_deck(
-            state,
-            &ai_deck.attraction_deck,
-            PlayerId((2 + i) as u8),
-        );
+        load_player_attraction_deck(state, &ai_deck.attraction_deck, PlayerId((2 + i) as u8));
     }
 
     // Collect all creature subtypes for Changeling CDA expansion.

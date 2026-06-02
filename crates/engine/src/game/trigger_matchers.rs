@@ -2942,8 +2942,7 @@ pub(super) fn match_visit_attraction(
         ..
     } = event
     {
-        *attraction_id == source_id
-            && valid_player_matches(trigger, state, *player_id, source_id)
+        *attraction_id == source_id && valid_player_matches(trigger, state, *player_id, source_id)
     } else {
         false
     }

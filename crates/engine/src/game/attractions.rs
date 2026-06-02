@@ -14,9 +14,9 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-use crate::types::ability::EffectError;
 use super::game_object::GameObject;
 use super::zones;
+use crate::types::ability::EffectError;
 
 /// CR 717.1: Default lit numbers when card data omits variant lights (1 and 6 are always lit).
 pub fn default_attraction_lights() -> Vec<u8> {
@@ -72,7 +72,10 @@ pub fn roll_to_visit_attractions(
         return;
     }
     let roll = state.rng.random_range(1..=6u8);
-    events.push(GameEvent::AttractionsRolledToVisit { player_id: player, roll });
+    events.push(GameEvent::AttractionsRolledToVisit {
+        player_id: player,
+        roll,
+    });
     let visited = visited_attraction_ids(state, player, roll);
     let any_visited = !visited.is_empty();
     for attraction_id in visited {
@@ -88,19 +91,18 @@ pub fn roll_to_visit_attractions(
 }
 
 /// CR 703.4g + CR 717.4: Turn-based action at the beginning of the precombat main phase.
-pub fn perform_roll_to_visit_turn_based_action(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) {
+pub fn perform_roll_to_visit_turn_based_action(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let player = state.active_player;
     roll_to_visit_attractions(state, player, events);
 }
 
 fn controls_attraction(state: &GameState, player: PlayerId) -> bool {
-    state
-        .battlefield
-        .iter()
-        .any(|id| state.objects.get(id).is_some_and(|o| o.controller == player && is_attraction_permanent(o)))
+    state.battlefield.iter().any(|id| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(|o| o.controller == player && is_attraction_permanent(o))
+    })
 }
 
 fn visited_attraction_ids(state: &GameState, player: PlayerId, roll: u8) -> Vec<ObjectId> {

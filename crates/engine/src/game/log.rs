@@ -975,9 +975,17 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![text("Opened Attraction "), card_seg(state, *object_id)]
         }
         GameEvent::AttractionsRolledToVisit { roll, .. } => {
-            vec![text("Rolled "), text(&roll.to_string()), text(" to visit Attractions")]
+            vec![
+                text("Rolled "),
+                text(&roll.to_string()),
+                text(" to visit Attractions"),
+            ]
         }
-        GameEvent::AttractionVisited { attraction_id, roll, .. } => {
+        GameEvent::AttractionVisited {
+            attraction_id,
+            roll,
+            ..
+        } => {
             vec![
                 text("Visited Attraction "),
                 card_seg(state, *attraction_id),
