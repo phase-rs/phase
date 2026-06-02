@@ -49,13 +49,7 @@ interface PendingLocalAction {
   kind: "local";
   action: GameAction;
   actor: number;
-  /** WaitingFor reference at the time this action was dispatched — used to
-   *  scope the de-dup to the specific engine state that prompted the action.
-   *  Two dispatches of the same {action, actor} against DIFFERENT WaitingFor
-   *  states (e.g. the two identical OptionalEffectChoice prompts produced by
-   *  Ancient Greenwarden's DoubleTriggers) are distinct decisions and must
-   *  NOT be collapsed, even though their payloads are structurally identical.
-   *  (issue #1513) */
+  /** WaitingFor object that prompted this local action. */
   waitingFor: WaitingFor | null;
   resolve: () => void;
   reject: (err: unknown) => void;
@@ -80,26 +74,18 @@ const pendingQueue: PendingWork[] = [];
 
 /**
  * The local action currently being processed (set while inside processAction),
- * paired with the seat that dispatched it and the WaitingFor state it was
- * issued against. Used alongside pendingQueue to deduplicate rapid
- * double-clicks: if the same action from the same actor against the same
- * engine state is already in flight, a second dispatch is a silent no-op
- * rather than a queued duplicate that would fail against a transitioned
- * engine state.
+ * paired with the seat and WaitingFor object it was issued against. Used with
+ * pendingQueue to deduplicate rapid double-clicks.
  *
- * The actor is part of the identity: a double-click is one seat firing the
- * same action twice. Two different seats firing the same action type (e.g.
- * the human and the AI both passing priority across an intervening priority
- * round — issue #459) are distinct game decisions and must NOT be collapsed.
- *
- * The WaitingFor reference is part of the identity: a legitimate repeat of the
- * same action payload after the engine state advanced (e.g. answering two
- * consecutive identical OptionalEffectChoice prompts produced by Ancient
- * Greenwarden's DoubleTriggers — issue #1513) must NOT be collapsed even
- * though the action payload and actor are structurally identical, because they
- * are responses to DIFFERENT engine states.
+ * Actor preserves the #459 cross-seat priority case. WaitingFor preserves the
+ * #1513 doubled-trigger case where two structurally identical choices are
+ * responses to different engine prompts.
  */
-let inFlightLocalAction: { action: GameAction; actor: number; waitingFor: WaitingFor | null } | null = null;
+let inFlightLocalAction: {
+  action: GameAction;
+  actor: number;
+  waitingFor: WaitingFor | null;
+} | null = null;
 
 /** Structural equality for GameAction — action objects are small plain JSON. */
 function actionsEqual(a: GameAction, b: GameAction): boolean {
@@ -415,24 +401,13 @@ export async function dispatchAction(
   actor: number = getPlayerId(),
 ): Promise<void> {
   const submittedAction = actor === getPlayerId() ? applySpellPaymentPreference(action) : action;
-  // Snapshot the current WaitingFor reference at dispatch time. This is the
-  // state token that scopes de-dup to a specific engine prompt: two dispatches
-  // of the same {action, actor} against DIFFERENT engine states (e.g. the
-  // two structurally-identical OptionalEffectChoice prompts from Ancient
-  // Greenwarden's DoubleTriggers — issue #1513) are distinct decisions and
-  // must NOT be suppressed even though their action payloads are identical.
+  // Snapshot the prompt object that caused this action. The same action from
+  // the same actor is a duplicate only while it answers the same prompt.
   const currentWaitingFor = useGameStore.getState().waitingFor;
 
   if (isAnimating) {
-    // Enqueue-time de-dup: if the exact same action from the same actor
-    // against the same engine state is already in flight or already queued,
-    // silently resolve. Covers rapid double-clicks (e.g. a planeswalker
-    // ability fired twice before the first transitions the engine into
-    // TargetSelection). The actor is part of the identity — two seats passing
-    // priority across an intervening priority round are distinct decisions and
-    // must both be delivered (issue #459). The WaitingFor reference is also
-    // part of the identity — the same action payload issued after the engine
-    // state has advanced is a new, legitimate decision (issue #1513).
+    // Same action + same actor + same prompt is a duplicate. A changed prompt
+    // is a new decision even when the payload is structurally identical.
     if (
       inFlightLocalAction &&
       inFlightLocalAction.actor === actor &&
@@ -453,7 +428,14 @@ export async function dispatchAction(
     }
     debugLog(`dispatch queued (mutex held): ${submittedAction.type}, queue=${pendingQueue.length}`, "warn");
     return new Promise<void>((resolve, reject) => {
-      pendingQueue.push({ kind: "local", action: submittedAction, actor, waitingFor: currentWaitingFor, resolve, reject });
+      pendingQueue.push({
+        kind: "local",
+        action: submittedAction,
+        actor,
+        waitingFor: currentWaitingFor,
+        resolve,
+        reject,
+      });
     });
   }
 

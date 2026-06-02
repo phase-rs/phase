@@ -743,12 +743,12 @@ const ANCIENT_GREENWARDEN_ORACLE: &str = "Reach\nYou may play lands from your gr
     If a land entering causes a triggered ability of a permanent you control to trigger, \
     that ability triggers an additional time.";
 
-/// Issue #1513: Ancient Greenwarden DOUBLES landfall triggers (CR 603.2d).
+/// Issue #1513: Ancient Greenwarden doubles landfall triggers (CR 603.2d).
 /// With Ob Nixilis (optional + targeted) + Scute Swarm (non-optional) on the
 /// battlefield alongside Greenwarden, playing one land produces FOUR trigger
 /// instances (each landfall ability triggers twice). The engine must drive the
 /// doubled multi-stage WaitingFor sequence to a clean empty-stack Priority for
-/// both accept and decline branches — the engine-innocence guard for the
+/// both accept and decline branches: the engine-innocence guard for the
 /// doubled-trigger softlock.
 fn run_doubled_optional_landfall_scenario(accept: bool) {
     let mut scenario = GameScenario::new();
@@ -798,7 +798,8 @@ fn run_doubled_optional_landfall_scenario(accept: bool) {
         .unwrap_or(0);
     let life_lost = start_life_p1 - runner.state().players[1].life;
     if accept {
-        // Both doubled Ob Nixilis triggers accepted: 2 × (lose 3 life, +3 counters).
+        // Both doubled Ob Nixilis triggers accepted: two lose-3-life effects and
+        // two +3-counter effects.
         assert_eq!(life_lost, 6, "two accepted optionals must drain 6 life");
         assert_eq!(
             counters, 6,
