@@ -20,9 +20,7 @@
 //! Krasis), and counters-X (Reinforce X) all share this shape and all want a
 //! non-zero X.
 
-use engine::types::ability::{
-    AbilityDefinition, Effect, QuantityExpr, QuantityRef, ResolvedAbility,
-};
+use engine::types::ability::{AbilityDefinition, Effect, ResolvedAbility};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -100,7 +98,7 @@ fn ability_references_x(ability: &ResolvedAbility) -> bool {
         return true;
     }
     if let Some(expr) = &ability.repeat_for {
-        if quantity_expr_contains_x(expr) {
+        if expr.contains_x() {
             return true;
         }
     }
@@ -162,7 +160,7 @@ fn ability_definition_references_x(ability: &AbilityDefinition) -> bool {
         return true;
     }
     if let Some(expr) = &ability.repeat_for {
-        if quantity_expr_contains_x(expr) {
+        if expr.contains_x() {
             return true;
         }
     }
@@ -180,16 +178,16 @@ fn ability_definition_references_x(ability: &AbilityDefinition) -> bool {
 }
 
 /// Walk every `QuantityExpr` reachable from `effect` and return true if any
-/// resolves through `QuantityRef::Variable { name: "X" }`. Mirrors
-/// `engine::game::casting_costs::quantity_expr_contains_x` (kept private
-/// there) so the AI layer can run the same predicate without an engine edit.
+/// resolves through `QuantityRef::Variable { name: "X" }`. Delegates the
+/// per-expression test to `QuantityExpr::contains_x`, the engine's single
+/// authority, so the AI scores X exactly as the engine evaluates it.
 fn effect_references_x(effect: &Effect) -> bool {
     match effect {
         Effect::DealDamage { amount, .. }
         | Effect::DamageAll { amount, .. }
         | Effect::DamageEachPlayer { amount, .. }
         | Effect::GainLife { amount, .. }
-        | Effect::LoseLife { amount, .. } => quantity_expr_contains_x(amount),
+        | Effect::LoseLife { amount, .. } => amount.contains_x(),
         Effect::Draw { count, .. }
         | Effect::Mill { count, .. }
         | Effect::Discard { count, .. }
@@ -203,38 +201,13 @@ fn effect_references_x(effect: &Effect) -> bool {
         | Effect::PutCounter { count, .. }
         | Effect::PutCounterAll { count, .. }
         | Effect::CopyTokenOf { count, .. }
-        | Effect::SearchLibrary { count, .. } => quantity_expr_contains_x(count),
+        | Effect::SearchLibrary { count, .. } => count.contains_x(),
         Effect::Token {
             count,
             enter_with_counters,
             ..
-        } => {
-            quantity_expr_contains_x(count)
-                || enter_with_counters
-                    .iter()
-                    .any(|(_, qty)| quantity_expr_contains_x(qty))
-        }
+        } => count.contains_x() || enter_with_counters.iter().any(|(_, qty)| qty.contains_x()),
         _ => false,
-    }
-}
-
-fn quantity_expr_contains_x(expr: &QuantityExpr) -> bool {
-    match expr {
-        QuantityExpr::Ref {
-            qty: QuantityRef::Variable { name },
-        } => name == "X",
-        QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::UpTo { max: inner }
-        | QuantityExpr::Power {
-            exponent: inner, ..
-        } => quantity_expr_contains_x(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_contains_x),
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_contains_x(left) || quantity_expr_contains_x(right)
-        }
-        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
     }
 }
 

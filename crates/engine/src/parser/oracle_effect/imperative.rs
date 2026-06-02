@@ -5674,8 +5674,9 @@ pub(super) fn parse_imperative_family_ast(
             } else if let Some(effect) =
                 try_parse_gain_keyword(text).or_else(|| try_parse_gain_quoted_ability(text))
             {
-                // CR 702.1b: keyword-ability grant (CR 113.3 + CR 604.1: or
-                // quoted-ability grant). Checked BEFORE the life-gain branch because the bare
+                // CR 113.3 + CR 604.1: grant a keyword ability (or, via
+                // try_parse_gain_quoted_ability, a quoted ability) to an object.
+                // Checked BEFORE the life-gain branch because the bare
                 // `scan_contains(lower, "life")` guard below also matches
                 // keywords whose name contains "life" — e.g. "gain lifelink",
                 // which otherwise misrouted to the numeric life-gain parser and

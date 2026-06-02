@@ -1550,7 +1550,7 @@ fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| match prop {
             FilterProp::Cmc { value, .. } | FilterProp::Counters { count: value, .. } => {
-                quantity_expr_contains_x(value)
+                value.contains_x()
             }
             FilterProp::CanEnchant { target } => target_filter_contains_chosen_x_ref(target),
             _ => false,
@@ -1566,27 +1566,7 @@ fn target_filter_contains_chosen_x_ref(filter: &TargetFilter) -> bool {
 }
 
 fn quantity_expr_has_unresolved_x(ability: &ResolvedAbility, expr: &QuantityExpr) -> bool {
-    ability.chosen_x.is_none() && quantity_expr_contains_x(expr)
-}
-
-fn quantity_expr_contains_x(expr: &QuantityExpr) -> bool {
-    match expr {
-        QuantityExpr::Ref {
-            qty: QuantityRef::Variable { name },
-        } => name == "X",
-        QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::UpTo { max: inner }
-        | QuantityExpr::Power {
-            exponent: inner, ..
-        } => quantity_expr_contains_x(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_contains_x),
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_contains_x(left) || quantity_expr_contains_x(right)
-        }
-        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
-    }
+    ability.chosen_x.is_none() && expr.contains_x()
 }
 
 /// CR 109.4 + CR 115.1: Returns true if `effect` needs a companion

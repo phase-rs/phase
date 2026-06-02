@@ -2756,7 +2756,7 @@ fn additional_cost_x_max(
     cost: &AbilityCost,
 ) -> Option<u32> {
     match cost {
-        AbilityCost::PayLife { amount } if quantity_expr_contains_x(amount) => {
+        AbilityCost::PayLife { amount } if amount.contains_x() => {
             Some(max_pay_life_x(state, player))
         }
         AbilityCost::Sacrifice { target, count } if *count == u32::MAX => {
@@ -2789,26 +2789,6 @@ fn max_pay_life_x(state: &GameState, player: PlayerId) -> u32 {
         .find(|p| p.id == player)
         .map(|p| u32::try_from(p.life.max(0)).unwrap_or(0))
         .unwrap_or(0)
-}
-
-fn quantity_expr_contains_x(expr: &QuantityExpr) -> bool {
-    match expr {
-        QuantityExpr::Ref {
-            qty: QuantityRef::Variable { name },
-        } => name == "X",
-        QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::UpTo { max: inner }
-        | QuantityExpr::Power {
-            exponent: inner, ..
-        } => quantity_expr_contains_x(inner),
-        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_contains_x),
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_contains_x(left) || quantity_expr_contains_x(right)
-        }
-        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
-    }
 }
 
 pub(super) fn effective_casualty_additional_cost(
