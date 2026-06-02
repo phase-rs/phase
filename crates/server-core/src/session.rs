@@ -1184,16 +1184,38 @@ impl SessionManager {
         self.token_to_game.get(token).map(|s| s.as_str())
     }
 
+    /// Drop the given tokens from the token-to-game index.
+    ///
+    /// A seat mutation (kick, replace-with-AI, remove) invalidates the affected
+    /// seats' player tokens. `GameSession::apply_seat_delta` clears the per-seat
+    /// token arrays, but it cannot reach this index (which lives on the
+    /// manager), so without this the invalidated tokens keep resolving to the
+    /// game via [`game_for_token`] — a stale mapping that lets a kicked client's
+    /// token still point at a game it is no longer part of, and that is never
+    /// reclaimed. Callers pass `SeatDelta::invalidated_tokens` here right after
+    /// applying the delta. Empty strings (vacant seats) are skipped, never a
+    /// real index key. Mirrors the index cleanup done when a whole game is
+    /// removed from the manager.
+    pub fn unindex_tokens(&mut self, tokens: &[String]) {
+        for token in tokens {
+            self.unindex_token(token);
+        }
+    }
+
     /// Remove a game session entirely, cleaning up the token-to-game index.
     /// Returns the removed session if it existed.
     pub fn remove_game(&mut self, game_code: &str) -> Option<GameSession> {
         let session = self.sessions.remove(game_code)?;
         for token in &session.player_tokens {
-            if !token.is_empty() {
-                self.token_to_game.remove(token);
-            }
+            self.unindex_token(token);
         }
         Some(session)
+    }
+
+    fn unindex_token(&mut self, token: &str) {
+        if !token.is_empty() {
+            self.token_to_game.remove(token);
+        }
     }
 
     /// Restore a pre-built session (e.g., from disk persistence).
@@ -1238,6 +1260,7 @@ mod tests {
     use engine::types::card_type::CardType;
     use engine::types::game_state::WaitingFor;
     use engine::types::mana::ManaCost;
+    use seat_reducer::types::SeatMutation;
 
     fn make_deck() -> PlayerDeckPayload {
         PlayerDeckPayload {
@@ -1275,6 +1298,7 @@ mod tests {
                     parse_warnings: vec![],
                     brawl_commander: false,
                     is_commander: false,
+                    deck_copy_limit: None,
                     metadata: Default::default(),
                     rarities: Default::default(),
                 },
@@ -1318,6 +1342,68 @@ mod tests {
         let _ = mgr.join_game(&code, make_deck());
         let result = mgr.join_game(&code, make_deck());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn unindex_tokens_removes_only_named_tokens() {
+        let mut mgr = SessionManager::new();
+        let (code, token1) = mgr.create_game(make_deck());
+        let (token2, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        assert_eq!(mgr.game_for_token(&token1), Some(code.as_str()));
+        assert_eq!(mgr.game_for_token(&token2), Some(code.as_str()));
+
+        // Simulate a seat mutation invalidating player 2's token (kick / replace
+        // / remove). An empty entry (vacant seat) in the list is ignored.
+        mgr.unindex_tokens(&[token2.clone(), String::new()]);
+
+        // The invalidated token no longer resolves; the surviving seat is intact.
+        assert_eq!(mgr.game_for_token(&token2), None);
+        assert_eq!(mgr.game_for_token(&token1), Some(code.as_str()));
+    }
+
+    #[test]
+    fn seat_mutation_unindexes_invalidated_human_token() {
+        struct UnusedResolver;
+
+        impl seat_reducer::types::DeckResolver for UnusedResolver {
+            fn resolve(
+                &self,
+                _choice: &DeckChoice,
+            ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
+                panic!("human seat removal must not resolve a deck")
+            }
+        }
+
+        let mut mgr = SessionManager::new();
+        let (code, token1) = mgr.create_game(make_deck());
+        let (token2, _) = mgr.join_game(&code, make_deck()).unwrap();
+        let db = engine::database::CardDatabase::default();
+        let resolver = UnusedResolver;
+        let ctx = seat_reducer::types::ReducerCtx {
+            platform: Platform::Native,
+            deck_resolver: &resolver,
+        };
+
+        let mut seat_state = mgr.sessions.get(&code).unwrap().seat_state();
+        let delta = seat_reducer::apply(
+            &mut seat_state,
+            SeatMutation::SetKind {
+                seat_index: 1,
+                kind: SeatKind::WaitingHuman,
+            },
+            &ctx,
+        )
+        .unwrap();
+        mgr.sessions
+            .get_mut(&code)
+            .unwrap()
+            .apply_seat_delta(seat_state, &delta, &db);
+        mgr.unindex_tokens(&delta.invalidated_tokens);
+
+        assert_eq!(delta.invalidated_tokens, vec![token2.clone()]);
+        assert_eq!(mgr.game_for_token(&token2), None);
+        assert_eq!(mgr.game_for_token(&token1), Some(code.as_str()));
     }
 
     #[test]

@@ -1588,6 +1588,17 @@ fn build_replacement_exec(
                 target: target.clone(),
             }
         }
+        // CR 722.3a: Prepare (Strixhaven preparation cards) — "As this enters,
+        // it's prepared." The engine prerequisite EXISTS: `Effect::BecomePrepared`
+        // resolved through this ETB ChangeZone replacement (engine
+        // `game/effects/prepare.rs::resolve_become_prepared`). The runtime
+        // `has_prepare_face` gate ensures only cards with a prepare-spell back
+        // face actually gain the designation, matching the CR 722.3a clause
+        // "A permanent can't gain this designation unless it has a prepare spell."
+        // `target` is the replacement's `valid_card` (SelfRef for ThisPermanent).
+        A::EntersPrepared => Effect::BecomePrepared {
+            target: target.clone(),
+        },
         // CR 614.12 + CR 110.2a: "Enters under [opponent / a player]'s
         // control." `Effect::ChangeZone` carries `enters_under`,
         // but the engine has no slot for "under SOME OTHER player's
@@ -1600,18 +1611,17 @@ fn build_replacement_exec(
                 needed_variant: "ETB action: enters under another player's control".into(),
             });
         }
-        // CR 122.1 (counter-of-choice / EntersPrepared / per-each /
-        // for-each-kind / different-counters / etc.) — these need new
-        // engine ETB action shapes (player picks counter type, "ready"
-        // counter primitive, dynamic per-each-quantity, etc.).
+        // CR 122.1 (counter-of-choice / per-each / for-each-kind /
+        // different-counters / etc.) — these need new engine ETB action
+        // shapes (player picks counter type, "ready" counter primitive,
+        // dynamic per-each-quantity, etc.).
         A::EntersWithACounterOfChoice(_)
         | A::EntersWithNumberDifferentCountersOfChoice(_, _)
         | A::EntersWithNumberCombinationCountersOfChoice(_, _)
         | A::EntersWithACounterOfTypeForEachKindOfCounterOnPermanent(_)
         | A::EntersWithAnAbilityCounterForEachAbilityOnACardDiscardedThisWay(_)
         | A::EntersWithNotedCounters
-        | A::EntersWithNumberCountersForEach(_, _, _)
-        | A::EntersPrepared => {
+        | A::EntersWithNumberCountersForEach(_, _, _) => {
             return Err(ConversionGap::EnginePrerequisiteMissing {
                 engine_type: "Effect",
                 needed_variant: format!("ETB counter-action shape ({})", variant_tag(act)),
@@ -3008,6 +3018,29 @@ mod tests {
             ConversionGap::EnginePrerequisiteMissing {
                 engine_type: "ReplacementDefinition",
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn as_enters_prepared_lowers_to_self_targeted_become_prepared() {
+        // CR 722.3a: "As this enters, it's prepared." (e.g. Jadzi, Steward of
+        // Fate) must lower to a self-targeted `BecomePrepared` ETB replacement,
+        // not strict-fail — the engine prerequisite exists.
+        let defs = convert_as_enters(
+            &Permanent::ThisPermanent,
+            &[ReplacementActionWouldEnter::EntersPrepared],
+        )
+        .unwrap();
+
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(defs[0].event, ReplacementEvent::ChangeZone);
+        let execute = defs[0].execute.as_ref().expect("prepared execute");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::BecomePrepared {
+                target: TargetFilter::SelfRef
             }
         ));
     }

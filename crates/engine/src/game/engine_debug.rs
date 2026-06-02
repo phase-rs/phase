@@ -189,6 +189,21 @@ pub fn apply_debug_action(
             validate_object_mut(state, object_id)?.tapped = tapped;
         }
 
+        DebugAction::SetPrepared {
+            object_id,
+            prepared,
+        } => {
+            // CR 722.3a/b: Route through the single authority so the
+            // prepare-face gate and Became(Un)Prepared events are honored
+            // instead of writing `obj.prepared` directly.
+            validate_object_mut(state, object_id)?;
+            if prepared {
+                super::effects::prepare::prepare_object(state, object_id, events);
+            } else {
+                super::effects::prepare::unprepare_object(state, object_id, events);
+            }
+        }
+
         DebugAction::SetController {
             object_id,
             controller,
@@ -600,12 +615,16 @@ fn validate_player(state: &GameState, player_id: PlayerId) -> Result<(), EngineE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::BackFaceData;
     use crate::game::zones::create_object;
+    use crate::types::ability::{AbilityDefinition, AbilityKind};
     use crate::types::actions::GameAction;
+    use crate::types::card::LayoutKind;
+    use crate::types::definitions::Definitions;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaColor;
+    use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::proposed_event::TokenCharacteristics;
     use crate::types::CoreType;
 
@@ -625,6 +644,39 @@ mod tests {
             supertypes: Vec::new(),
             colors: vec![ManaColor::Green],
             keywords: Vec::<Keyword>::new(),
+        }
+    }
+
+    fn prepare_back_face() -> BackFaceData {
+        let mut card_types = crate::types::card_type::CardType::default();
+        card_types.core_types.push(CoreType::Sorcery);
+        BackFaceData {
+            name: "Test Prepare Face".to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            card_types,
+            mana_cost: ManaCost::default(),
+            keywords: Vec::new(),
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )],
+            trigger_definitions: Definitions::default(),
+            replacement_definitions: Definitions::default(),
+            static_definitions: Definitions::default(),
+            color: Vec::new(),
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: Some(LayoutKind::Prepare),
         }
     }
 
@@ -750,6 +802,63 @@ mod tests {
         assert_eq!(token.name, "Copy Source");
         assert_eq!(token.power, Some(2));
         assert_eq!(token.toughness, Some(3));
+    }
+
+    #[test]
+    fn debug_set_prepared_routes_through_prepare_gate() {
+        let mut state = sandbox_state();
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Permanent".to_string(),
+            Zone::Battlefield,
+        );
+
+        let no_face_result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetPrepared {
+                object_id,
+                prepared: true,
+            }),
+        )
+        .expect("debug SetPrepared should be accepted");
+        assert!(state.objects[&object_id].prepared.is_none());
+        assert!(!no_face_result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::BecamePrepared { .. })));
+
+        state.objects.get_mut(&object_id).unwrap().back_face = Some(prepare_back_face());
+
+        let prepared_result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetPrepared {
+                object_id,
+                prepared: true,
+            }),
+        )
+        .expect("debug SetPrepared should prepare eligible object");
+        assert!(state.objects[&object_id].prepared.is_some());
+        assert!(prepared_result.events.iter().any(
+            |event| matches!(event, GameEvent::BecamePrepared { object_id: id } if *id == object_id)
+        ));
+
+        let unprepared_result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::Debug(DebugAction::SetPrepared {
+                object_id,
+                prepared: false,
+            }),
+        )
+        .expect("debug SetPrepared should unprepare object");
+        assert!(state.objects[&object_id].prepared.is_none());
+        assert!(unprepared_result.events.iter().any(
+            |event| matches!(event, GameEvent::BecameUnprepared { object_id: id } if *id == object_id)
+        ));
     }
 
     /// Issue #464 — CR 110.2 + CR 613.1b: `DebugAction::SetController` must
