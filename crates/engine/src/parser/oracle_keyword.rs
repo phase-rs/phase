@@ -1507,6 +1507,69 @@ mod tests {
         );
     }
 
+    /// CR 702.116b: a creature printing myriad as repeated bare words has one
+    /// instance per word; each triggers separately. MTGJSON dedupes the keywords
+    /// array to a single "Myriad", so the Oracle line is the sole source of printed
+    /// multiplicity — extract_keyword_line must recover every occurrence. Scurry of
+    /// Squirrels ("Myriad, myriad") is the real card this fixes.
+    #[test]
+    fn extract_keyword_line_recovers_repeated_myriad_instances() {
+        let mtgjson_kws = vec!["myriad".to_string()];
+        let two = extract_keyword_line("Myriad, myriad", &mtgjson_kws)
+            .expect("repeated myriad line is a keyword line");
+        assert_eq!(
+            two.iter().filter(|k| matches!(k, Keyword::Myriad)).count(),
+            2
+        );
+    }
+
+    /// CR 702.116b regression guard: a single printed myriad must net exactly one
+    /// instance — recovery must not over-count.
+    #[test]
+    fn extract_keyword_line_single_myriad_yields_one_instance() {
+        let mtgjson_kws = vec!["myriad".to_string()];
+        let one = extract_keyword_line("Myriad", &mtgjson_kws)
+            .expect("single myriad line is a keyword line");
+        assert_eq!(
+            one.iter().filter(|k| matches!(k, Keyword::Myriad)).count(),
+            1
+        );
+    }
+
+    /// BUILDING-BLOCK / forward-looking test (CR 702.83a: Exalted is a triggered
+    /// ability; CR 113.2c: multiple instances of an ability function independently).
+    /// Exercises the `instances_function_separately()` recovery path for Exalted at
+    /// the building-block level. This is NOT a claim that a specific printed card is
+    /// fixed: no clean real "Exalted, exalted" keyword-only line exists yet — the one
+    /// candidate (Urza's Dark Cannonball) prints "{cost} — Exalted, exalted", which
+    /// the `{cost} —` keyword-line parser does not yet strip (see the deferred-gap
+    /// pin below). When a clean printed instance lands, this test already covers it.
+    #[test]
+    fn extract_keyword_line_recovers_repeated_exalted_instances() {
+        let mtgjson_kws = vec!["exalted".to_string()];
+        let two = extract_keyword_line("Exalted, exalted", &mtgjson_kws)
+            .expect("repeated exalted line is a keyword line");
+        assert_eq!(
+            two.iter().filter(|k| matches!(k, Keyword::Exalted)).count(),
+            2
+        );
+    }
+
+    /// DEFERRED-GAP pin: the `{cost} —` activation-cost prefix on a keyword line is
+    /// not yet stripped by `extract_keyword_line`, so Urza's Dark Cannonball's
+    /// "{TK}{TK} — Exalted, exalted" is not recognized as a keyword line and recovers
+    /// zero Exalted instances. This documents the parser gap; flip the expectation to
+    /// two Exalted once `{cost} —` keyword-line-prefix stripping lands.
+    #[test]
+    fn extract_keyword_line_cost_prefixed_exalted_is_deferred_gap() {
+        let mtgjson_kws = vec!["exalted".to_string()];
+        let result = extract_keyword_line("{TK}{TK} — Exalted, exalted", &mtgjson_kws);
+        assert_eq!(
+            result, None,
+            "{{cost}} — keyword-line prefix is an unhandled parser gap (deferred)"
+        );
+    }
+
     /// CR 702.60a: Ripple N triggers when the spell is cast. The engine
     /// currently stores `Keyword::Ripple` as a unit variant, so supported
     /// numeric suffixes map to that variant while trailing text is rejected.
