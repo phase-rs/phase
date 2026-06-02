@@ -211,7 +211,7 @@ pub(crate) fn extract_keyword_line(
     mtgjson_keyword_names: &[String],
 ) -> Option<Vec<Keyword>> {
     let line_without_reminder = strip_reminder_text(line);
-    let line = line_without_reminder.trim();
+    let line = strip_keyword_activation_cost_prefix(line_without_reminder.trim());
 
     if mtgjson_keyword_names.is_empty() {
         return parse_mtgjson_missing_standalone_keyword_line(line);
@@ -328,6 +328,51 @@ pub(crate) fn extract_keyword_line(
     } else {
         None
     }
+}
+
+fn strip_keyword_activation_cost_prefix(line: &str) -> &str {
+    if let Some(keyword_text) = strip_mana_activation_cost_prefix(line) {
+        return keyword_text;
+    }
+    strip_ticket_activation_cost_prefix(line).unwrap_or(line)
+}
+
+fn strip_mana_activation_cost_prefix(line: &str) -> Option<&str> {
+    let Ok((rest, _cost)) = nom_primitives::parse_mana_cost.parse(line) else {
+        return None;
+    };
+    strip_activation_cost_dash(rest)
+}
+
+fn strip_ticket_activation_cost_prefix(line: &str) -> Option<&str> {
+    let lower = line.to_ascii_lowercase();
+    let mut rest = lower.as_str();
+    let mut consumed = 0;
+    let mut matched = false;
+
+    while let Ok((next, _)) = tag::<_, _, OracleError<'_>>("{tk}").parse(rest) {
+        matched = true;
+        consumed = lower.len() - next.len();
+        rest = next;
+    }
+
+    matched
+        .then(|| &line[consumed..])
+        .and_then(strip_activation_cost_dash)
+}
+
+fn strip_activation_cost_dash(rest: &str) -> Option<&str> {
+    preceded(
+        space0,
+        alt((
+            tag::<_, _, OracleError<'_>>("\u{2014}"),
+            tag("\u{2013}"),
+            tag("-"),
+        )),
+    )
+    .parse(rest)
+    .ok()
+    .map(|(keyword_text, _)| keyword_text.trim_start())
 }
 
 fn parse_mtgjson_missing_standalone_keyword_line(line: &str) -> Option<Vec<Keyword>> {
@@ -1555,18 +1600,20 @@ mod tests {
         );
     }
 
-    /// DEFERRED-GAP pin: the `{cost} —` activation-cost prefix on a keyword line is
-    /// not yet stripped by `extract_keyword_line`, so Urza's Dark Cannonball's
-    /// "{TK}{TK} — Exalted, exalted" is not recognized as a keyword line and recovers
-    /// zero Exalted instances. This documents the parser gap; flip the expectation to
-    /// two Exalted once `{cost} —` keyword-line-prefix stripping lands.
+    /// CR 113.2c / CR 702.83a: Urza's Dark Cannonball prints a keyword line behind
+    /// an activation-cost prefix. The prefix is not part of the keyword text, so
+    /// `extract_keyword_line` must still recover both Exalted instances.
     #[test]
-    fn extract_keyword_line_cost_prefixed_exalted_is_deferred_gap() {
+    fn extract_keyword_line_cost_prefixed_exalted_recovers_instances() {
         let mtgjson_kws = vec!["exalted".to_string()];
-        let result = extract_keyword_line("{TK}{TK} — Exalted, exalted", &mtgjson_kws);
+        let result = extract_keyword_line("{TK}{TK} — Exalted, exalted", &mtgjson_kws)
+            .expect("cost-prefixed repeated exalted line is a keyword line");
         assert_eq!(
-            result, None,
-            "{{cost}} — keyword-line prefix is an unhandled parser gap (deferred)"
+            result
+                .iter()
+                .filter(|k| matches!(k, Keyword::Exalted))
+                .count(),
+            2
         );
     }
 

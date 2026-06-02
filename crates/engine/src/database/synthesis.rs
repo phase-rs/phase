@@ -5102,7 +5102,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
 /// single MTGJSON copy is preserved.
 ///
 /// Bloodthirst is parameterized: replace any MTGJSON-derived default
-/// (`Bloodthirst(_)`) with the parser-extracted value, keeping equal copies.
+/// (`Bloodthirst(_)`) with the parser-extracted value.
 /// All other keywords: when the parser extracts a parameterized keyword (e.g.,
 /// `Morph({2}{B}{G}{U})`), remove any MTGJSON-derived default of the same `kind()`
 /// (e.g., `Morph(zero)`).
@@ -5111,12 +5111,10 @@ pub(crate) fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<K
         if extracted_kw.instances_function_separately() {
             base.retain(|existing| existing != extracted_kw);
         } else if matches!(extracted_kw, Keyword::Bloodthirst(_)) {
-            base.retain(|existing| {
-                !matches!(existing, Keyword::Bloodthirst(_)) || existing == extracted_kw
-            });
+            base.retain(|existing| !matches!(existing, Keyword::Bloodthirst(_)));
         } else {
             let kind = extracted_kw.kind();
-            base.retain(|existing| existing.kind() != kind || existing == extracted_kw);
+            base.retain(|existing| existing.kind() != kind);
         }
     }
     base.extend(extracted);
@@ -13064,6 +13062,21 @@ mod bloodthirst_synthesis_tests {
             vec![Keyword::Bloodthirst(BloodthirstValue::Fixed(3))],
             "parser-extracted Bloodthirst(3) must replace the MTGJSON default"
         );
+    }
+
+    /// Non-multiplicity parameterized keywords must be replaced, not duplicated,
+    /// when the scenario harness supplies the same keyword as both the base hint
+    /// and parser-extracted Oracle keyword.
+    #[test]
+    fn merge_extracted_keywords_does_not_duplicate_equal_parameterized_keyword() {
+        let squad_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        };
+        let mut base = vec![Keyword::Squad(squad_cost.clone())];
+        merge_extracted_keywords(&mut base, vec![Keyword::Squad(squad_cost.clone())]);
+
+        assert_eq!(base, vec![Keyword::Squad(squad_cost)]);
     }
 
     /// Re-running synthesis must not duplicate the replacement.
