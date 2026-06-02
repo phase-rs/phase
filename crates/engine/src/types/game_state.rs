@@ -773,6 +773,34 @@ pub struct PendingRepeatIteration {
     pub total_iterations: usize,
 }
 
+/// CR 705.1 + CR 614.1a: Discriminates which multi-flip resolver paused for a
+/// Krark's Thumb keep-1 choice, carrying the loop position needed to re-enter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PendingCoinFlipKind {
+    /// `Effect::FlipCoin` — a single logical flip.
+    Single,
+    /// `Effect::FlipCoins { count }` — `remaining` flips still to perform after
+    /// the one currently paused for a keep choice.
+    FlipN { remaining: u32 },
+    /// `Effect::FlipCoinUntilLose` — `wins_so_far` flips won before the one
+    /// currently paused for a keep choice.
+    UntilLose { wins_so_far: u32 },
+}
+
+/// CR 705.1 + CR 614.1a: Full resolution context + loop position for a
+/// multi-flip resolver paused mid-loop for a Krark's Thumb keep-1 choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCoinFlip {
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub targets: Vec<TargetRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub win_effect: Option<Box<AbilityDefinition>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lose_effect: Option<Box<AbilityDefinition>>,
+    pub kind: PendingCoinFlipKind,
+}
+
 /// CR 614.12b + CR 614.1c + CR 614.13: Resume state for a multi-target
 /// `ChangeZone` resolution loop paused when one of the moving objects
 /// triggered a per-permanent replacement choice (shock-land "pay 2 life?",
@@ -1947,6 +1975,14 @@ pub enum WaitingFor {
     ScryChoice {
         player: PlayerId,
         cards: Vec<ObjectId>,
+    },
+    /// CR 705.1 + CR 614.1a: Krark's Thumb — the controller flipped `results.len()`
+    /// coins for one logical flip and must ignore all but `keep_count`. `results[i]`
+    /// is true for heads/won (CR 705.2).
+    CoinFlipKeepChoice {
+        player: PlayerId,
+        results: Vec<bool>,
+        keep_count: usize,
     },
     /// CR 701.20e: Waiting for the player to choose which looked-at cards to keep.
     DigChoice {
@@ -3134,6 +3170,7 @@ impl WaitingFor {
             | WaitingFor::StationTarget { player, .. }
             | WaitingFor::SaddleMount { player, .. }
             | WaitingFor::ScryChoice { player, .. }
+            | WaitingFor::CoinFlipKeepChoice { player, .. }
             | WaitingFor::DigChoice { player, .. }
             | WaitingFor::SurveilChoice { player, .. }
             | WaitingFor::RevealChoice { player, .. }
@@ -4618,6 +4655,13 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_change_zone_iteration: Option<PendingChangeZoneIteration>,
 
+    /// CR 705.1 + CR 614.1a: Pending multi-flip coin resolver paused mid-loop
+    /// for a Krark's Thumb keep-1 choice. Stashes the full resolution context +
+    /// loop position so `resume_after_keep` can re-enter the flip loop after the
+    /// player's `CoinFlipKeepChoice`. See [`PendingCoinFlip`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_coin_flip: Option<PendingCoinFlip>,
+
     /// CR 608.2c + CR 107.1c: Pending "repeat this process" loop paused because
     /// an iteration's process entered an interactive `WaitingFor` state.
     /// Drained by `drain_pending_continuation` after `pending_continuation`,
@@ -5246,6 +5290,7 @@ impl GameState {
             pending_continuation: None,
             pending_repeat_iteration: None,
             pending_change_zone_iteration: None,
+            pending_coin_flip: None,
             pending_repeat_until: None,
             pending_choose_one_of: None,
             pending_counter_moves: None,
@@ -5542,6 +5587,7 @@ impl PartialEq for GameState {
             && self.pending_continuation == other.pending_continuation
             && self.pending_repeat_iteration == other.pending_repeat_iteration
             && self.pending_change_zone_iteration == other.pending_change_zone_iteration
+            && self.pending_coin_flip == other.pending_coin_flip
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
             && self.pending_counter_moves == other.pending_counter_moves

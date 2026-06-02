@@ -31,9 +31,11 @@ fn scry_with_two_watchers_still_prompts_and_fires_triggers() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // Two distinct "whenever you scry, draw a card" watchers (the user's board
-    // had Matoya draw + Elrond counters; two draw-watchers make the after-effect
-    // observable as +2 cards without a target-selection step).
+    // Two DISTINCT "whenever you scry" watchers (draw vs. gain life). They must
+    // differ so the two same-controller scry-watcher triggers still surface the
+    // CR 603.3b OrderTriggers prompt — the exact path that clobbered ScryChoice
+    // (identical no-input triggers now auto-order, which would bypass the
+    // clobber path this test guards).
     scenario.add_creature_from_oracle(
         P0,
         "Scry Watcher A",
@@ -46,7 +48,7 @@ fn scry_with_two_watchers_still_prompts_and_fires_triggers() {
         "Scry Watcher B",
         2,
         2,
-        "Whenever you scry, draw a card.",
+        "Whenever you scry, you gain 1 life.",
     );
 
     let spell = scenario
@@ -80,6 +82,7 @@ fn scry_with_two_watchers_still_prompts_and_fires_triggers() {
     assert_eq!(cards.len(), 2, "Scry 2 looks at the top two cards");
 
     let hand_after_cast = runner.state().players[0].hand.len();
+    let life_after_cast = runner.state().players[0].life;
 
     // Submit the scry (keep both on top), then let the now-unparked triggers
     // resolve through any ordering prompt.
@@ -103,7 +106,12 @@ fn scry_with_two_watchers_still_prompts_and_fires_triggers() {
     );
     assert_eq!(
         runner.state().players[0].hand.len(),
-        hand_after_cast + 2,
-        "both 'whenever you scry, draw' triggers must fire after the scry choice"
+        hand_after_cast + 1,
+        "the 'whenever you scry, draw' trigger must fire after the scry choice"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        life_after_cast + 1,
+        "the 'whenever you scry, gain 1 life' trigger must fire after the scry choice"
     );
 }
