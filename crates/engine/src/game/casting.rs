@@ -22405,9 +22405,6 @@ mod tests {
         let mut events = Vec::new();
         state.waiting_for =
             handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(71), &mut events).unwrap();
-        // CR 601.2h: the spell leaves the hand as it is cast, before resolving.
-        // Capture the baseline AFTER the cast so mode 1's draw is a clean +1.
-        let hand_before = state.players[0].hand.len();
         // Modes 1 (scry X, draw) and 3 (exile up to X target cards from graveyards).
         state.waiting_for =
             handle_select_modes(&mut state, PlayerId(0), vec![1, 3], &mut events).unwrap();
@@ -22476,6 +22473,11 @@ mod tests {
             apply_as_current(&mut state, GameAction::SelectTargets { targets: chosen })
                 .unwrap()
                 .waiting_for;
+
+        // Baseline captured immediately before resolution: the only hand change
+        // during the resolve loop is mode 1's draw (+1) — scry does not change
+        // hand size and the mode-3 exile moves graveyard->exile, never the hand.
+        let hand_before = state.players[0].hand.len();
 
         // Resolve the spell, submitting any scry ordering prompt that surfaces
         // mid-resolution (CR 701.22a). Keep the looked-at cards on top.
