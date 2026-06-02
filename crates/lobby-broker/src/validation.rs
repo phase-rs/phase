@@ -51,7 +51,7 @@ fn has_control_char(value: &str) -> bool {
 /// Validate a required visible label (e.g. the host display name): it must be
 /// non-empty after trimming, within `max` characters, and free of control
 /// characters. `field` names the field for the error message.
-fn validate_required_label(field: &str, value: &str, max: usize) -> Result<(), String> {
+pub fn validate_required_label(field: &str, value: &str, max: usize) -> Result<(), String> {
     if value.trim().is_empty() {
         return Err(format!("{field} must not be empty"));
     }
@@ -76,7 +76,7 @@ fn validate_optional_label(field: &str, value: &Option<String>, max: usize) -> R
 
 /// Validate an opaque token/identifier string: bounded byte length and no
 /// control characters. Empty is allowed (callers treat empty as absent).
-fn validate_token(field: &str, value: &str, max: usize) -> Result<(), String> {
+pub fn validate_token(field: &str, value: &str, max: usize) -> Result<(), String> {
     if value.len() > max {
         return Err(format!("{field} must be at most {max} bytes"));
     }
@@ -87,7 +87,11 @@ fn validate_token(field: &str, value: &str, max: usize) -> Result<(), String> {
 }
 
 /// Validate an optional opaque token/identifier string.
-fn validate_optional_token(field: &str, value: &Option<String>, max: usize) -> Result<(), String> {
+pub fn validate_optional_token(
+    field: &str,
+    value: &Option<String>,
+    max: usize,
+) -> Result<(), String> {
     match value {
         Some(v) => validate_token(field, v, max),
         None => Ok(()),

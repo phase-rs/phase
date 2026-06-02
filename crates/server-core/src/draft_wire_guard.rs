@@ -6,43 +6,10 @@
 //! codes, passwords, and tokens must be bounded before clone-heavy work.
 
 use lobby_broker::validation::{
-    MAX_DISPLAY_NAME_LEN, MAX_DRAFT_SET_CODE_LEN, MAX_GAME_CODE_LEN, MAX_PASSWORD_LEN,
-    MAX_PLAYER_COUNT, MAX_TIMER_SECONDS, MAX_TOKEN_LEN,
+    validate_optional_token, validate_required_label, validate_token, MAX_DISPLAY_NAME_LEN,
+    MAX_DRAFT_SET_CODE_LEN, MAX_GAME_CODE_LEN, MAX_PASSWORD_LEN, MAX_PLAYER_COUNT,
+    MAX_TIMER_SECONDS, MAX_TOKEN_LEN,
 };
-
-fn has_control_char(value: &str) -> bool {
-    value.chars().any(|c| c.is_control())
-}
-
-fn validate_required_label(field: &str, value: &str, max: usize) -> Result<(), String> {
-    if value.trim().is_empty() {
-        return Err(format!("{field} must not be empty"));
-    }
-    if value.chars().count() > max {
-        return Err(format!("{field} must be at most {max} characters"));
-    }
-    if has_control_char(value) {
-        return Err(format!("{field} must not contain control characters"));
-    }
-    Ok(())
-}
-
-fn validate_token(field: &str, value: &str, max: usize) -> Result<(), String> {
-    if value.len() > max {
-        return Err(format!("{field} must be at most {max} bytes"));
-    }
-    if has_control_char(value) {
-        return Err(format!("{field} must not contain control characters"));
-    }
-    Ok(())
-}
-
-fn validate_optional_token(field: &str, value: &Option<String>, max: usize) -> Result<(), String> {
-    match value {
-        Some(v) => validate_token(field, v, max),
-        None => Ok(()),
-    }
-}
 
 /// Validate `CreateDraftWithSettings` wire fields before pool lookup and lobby
 /// registration.
