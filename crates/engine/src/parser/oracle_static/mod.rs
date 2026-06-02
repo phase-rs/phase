@@ -127,6 +127,7 @@ pub(crate) use keyword_grant::{
     try_parse_graveyard_keyword_grant_clause,
 };
 pub(crate) use mana_transform::try_parse_retain_unspent_mana_static;
+pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
 pub use shared::parse_static_line_multi;
 pub(crate) use shared::GraveyardGrantedKeywordKind;
 pub(crate) use type_change::{
