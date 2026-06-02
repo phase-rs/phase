@@ -7,6 +7,7 @@ use super::ability::{
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use super::card_type::CardType;
+use super::format::DeckCopyLimit;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -167,6 +168,13 @@ pub struct CardFace {
     /// `brawl_commander` so we stay correct when MTGJSON is missing or stale.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_commander: bool,
+    /// CR 100.2a / CR 903.5b: Per-card override to the default constructed copy
+    /// limit, parsed from deck-construction Oracle text ("A deck can have any
+    /// number of cards named ~." / "A deck can have up to N cards named ~." /
+    /// the singleton override). `None` means the default four-of (or Commander
+    /// singleton) limit applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deck_copy_limit: Option<DeckCopyLimit>,
     /// Parser diagnostic warnings — silent fallbacks, ignored remainders, bare filters.
     /// Populated at build time by the Oracle parser warning accumulator.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

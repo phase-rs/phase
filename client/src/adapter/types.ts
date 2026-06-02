@@ -1364,6 +1364,7 @@ export type DebugAction =
   | { type: "SetBasePowerToughness"; data: { object_id: ObjectId; power: number | null; toughness: number | null } }
   | { type: "ModifyCounters"; data: { object_id: ObjectId; counter_type: CounterType; delta: number } }
   | { type: "SetTapped"; data: { object_id: ObjectId; tapped: boolean } }
+  | { type: "SetPrepared"; data: { object_id: ObjectId; prepared: boolean } }
   | { type: "SetController"; data: { object_id: ObjectId; controller: PlayerId } }
   | { type: "SetSummoningSickness"; data: { object_id: ObjectId; sick: boolean } }
   | { type: "SetFaceState"; data: { object_id: ObjectId; face_down?: boolean; transformed?: boolean; flipped?: boolean } }

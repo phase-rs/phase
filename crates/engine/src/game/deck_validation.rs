@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::legality::{LegalityFormat, LegalityStatus};
 use crate::database::CardDatabase;
-use crate::parser::oracle::oracle_text_allows_commander;
+use crate::parser::oracle::{compute_deck_copy_limit_from_text, oracle_text_allows_commander};
 use crate::types::card::{CardFace, CardRules, PrintedCardRef};
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::format::{GameFormat, SideboardPolicy};
+use crate::types::format::{DeckCopyLimit, GameFormat, SideboardPolicy};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::match_config::MatchType;
@@ -1744,14 +1744,10 @@ fn combined_copy_counts(
 
 /// CR 100.2a: Flag card names whose combined count exceeds `max_copies`,
 /// excluding basic lands and cards whose Oracle text grants a per-card deck-limit
-/// override (e.g. Relentless Rats, Shadowborn Apostle, Rat Colony, Persistent
-/// Petitioners — all printed with "A deck can have any number of cards named ...").
-///
-/// Seven Dwarves / Nazgûl have finite caps printed on the card (7 and 9
-/// respectively) via "A deck can have up to <N> cards named ..."; their phrasing
-/// does not match the "any number" override, so they currently fall through to
-/// the default 4-per-name limit. That's a known gap — supporting arbitrary N-caps
-/// requires parsing the printed number, which is out of scope for this pass.
+/// override (e.g. Relentless Rats — "any number"; Seven Dwarves → 7, Nazgûl → 9
+/// via "up to N"; Vazal singleton → 1). The typed override is resolved from
+/// `face.deck_copy_limit`, falling back to a live Oracle-text parse for faces
+/// loaded without synthesis (test fixtures, `from_json_str`).
 ///
 /// Input counts must be keyed by canonical (DFC-resolved, lowercased) names —
 /// use `combined_copy_counts`.
@@ -1762,21 +1758,25 @@ fn copy_limit_violations(
 ) -> BTreeSet<String> {
     let mut violations = BTreeSet::new();
     for (canonical_name, count) in counts {
-        if *count <= max_copies {
-            continue;
-        }
-        // CR 100.2a + CR 205.3i: Basic lands are exempt from copy limits.
-        // "Basic" is a supertype (covering Plains/Island/Swamp/Mountain/Forest,
-        // Snow-Covered variants, Wastes, and any future basic), not a fixed
-        // name allowlist — trust the MTGJSON-populated supertype field.
+        // CR 100.2a + CR 205.4c: Basic lands are exempt from copy limits
+        // regardless of any other override. "Basic" is a supertype (covering
+        // Plains/Island/Swamp/Mountain/Forest, Snow-Covered variants, Wastes,
+        // and any future basic), not a fixed name allowlist — trust the
+        // MTGJSON-populated supertype field. Checked FIRST so basics never flag.
         if db
             .get_face_by_name(canonical_name)
             .is_some_and(|face| face.card_type.supertypes.contains(&Supertype::Basic))
         {
             continue;
         }
-        if has_deck_limit_override(db, canonical_name) {
-            continue;
+        // CR 100.2a / CR 903.5b: apply the per-card override when present,
+        // otherwise the format-default `max_copies` (4 constructed, 1 singleton).
+        match deck_copy_limit_for(db, canonical_name) {
+            Some(DeckCopyLimit::Unlimited) => continue,
+            Some(DeckCopyLimit::UpTo(n)) if *count <= n => continue,
+            Some(DeckCopyLimit::UpTo(_)) => {} // override cap exceeded — flag
+            None if *count <= max_copies => continue,
+            None => {} // default limit exceeded — flag
         }
         // Prefer the database's canonical display casing for error messages;
         // fall back to the lowercased key if the face is missing (e.g. for
@@ -1797,6 +1797,10 @@ fn copy_limit_violations(
 /// `restricted_canonical` is the set of canonical (DFC-resolved, lowercased)
 /// names that the legality table marks as `Restricted` for the active format;
 /// `counts` is the combined main+sideboard map produced by `combined_copy_counts`.
+///
+/// Note: this hardcodes the `<= 1` Restricted ceiling and does NOT consult any
+/// per-card `DeckCopyLimit` override — no override card is currently
+/// Vintage-Restricted, so the interaction is out of scope.
 fn restricted_copy_violations(
     db: &CardDatabase,
     counts: &HashMap<String, u32>,
@@ -1819,19 +1823,17 @@ fn restricted_copy_violations(
     violations
 }
 
-/// CR 100.2a exception: a card's Oracle text may read
-/// "A deck can have any number of cards named <Name>." When present, the
-/// 4-per-name constructed limit and the 1-per-name singleton limit do not
-/// apply to that card. Class-level Oracle text detection — covers Relentless
-/// Rats, Shadowborn Apostle, Rat Colony, Persistent Petitioners, and any
-/// future card printed with the same phrasing.
-fn has_deck_limit_override(db: &CardDatabase, canonical_name: &str) -> bool {
-    db.get_face_by_name(canonical_name)
-        .and_then(|face| face.oracle_text.as_deref())
-        .is_some_and(|text| {
-            text.to_ascii_lowercase()
-                .contains("a deck can have any number of cards named")
-        })
+/// CR 100.2a / CR 903.5b: Resolve a card's deck-construction copy-limit override.
+/// Reads the precomputed `face.deck_copy_limit` field; falls back to a live
+/// Oracle-text parse for faces loaded without synthesis (test fixtures and
+/// `CardDatabase::from_json_str` / `from_export_entries`, which skip synthesis).
+/// Mirrors `is_commander_eligible`'s synthesized-field-with-live-fallback shape.
+pub fn deck_copy_limit_for(db: &CardDatabase, canonical_name: &str) -> Option<DeckCopyLimit> {
+    let face = db.get_face_by_name(canonical_name)?;
+    if let Some(limit) = face.deck_copy_limit {
+        return Some(limit);
+    }
+    compute_deck_copy_limit_from_text(face.oracle_text.as_deref()?)
 }
 
 /// Resolves a card name to the key used in the database. For DFC names like "Front // Back",
@@ -2326,6 +2328,49 @@ mod tests {
                     "standard": "legal",
                     "commander": "legal"
                 }
+            },
+            "mountain": {
+                "name": "Mountain",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": ["Basic"], "core_types": ["Land"], "subtypes": ["Mountain"] },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "color_identity": ["Red"], "scryfall_oracle_id": null,
+                "legalities": { "standard": "legal", "commander": "legal" }
+            },
+            "relentless rats": {
+                "name": "Relentless Rats",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": ["Rat"] },
+                "power": "2", "toughness": "2", "loyalty": null, "defense": null,
+                "oracle_text": "This creature gets +1/+1 for each other creature on the battlefield named Relentless Rats.\nA deck can have any number of cards named Relentless Rats.",
+                "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "color_identity": ["Black"], "scryfall_oracle_id": null,
+                "legalities": { "standard": "legal", "commander": "legal" }
+            },
+            "seven dwarves": {
+                "name": "Seven Dwarves",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": ["Dwarf"] },
+                "power": "3", "toughness": "3", "loyalty": null, "defense": null,
+                "oracle_text": "This creature gets +1/+1 for each other creature named Seven Dwarves you control.\nA deck can have up to seven cards named Seven Dwarves.",
+                "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "color_identity": ["Red"], "scryfall_oracle_id": null,
+                "legalities": { "standard": "legal", "commander": "legal" }
+            },
+            "nazgûl": {
+                "name": "Nazgûl",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": ["Wraith"] },
+                "power": "3", "toughness": "3", "loyalty": null, "defense": null,
+                "oracle_text": "Deathtouch\nA deck can have up to nine cards named Nazgûl.",
+                "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [], "static_abilities": [], "replacements": [],
+                "color_override": null, "color_identity": ["Black"], "scryfall_oracle_id": null,
+                "legalities": { "standard": "legal", "commander": "legal" }
             }
         })
         .to_string()
@@ -2497,6 +2542,51 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r.contains("Not Standard")));
+    }
+
+    // CR 100.2a / CR 903.5b: per-card copy-limit overrides drive
+    // `copy_limit_violations`. Faces loaded via `from_json_str` skip synthesis,
+    // so the limit is resolved through the live Oracle-text fallback in
+    // `deck_copy_limit_for`. Helpers below build the canonical count map the way
+    // the production callers do.
+    fn counts_of(pairs: &[(&str, u32)]) -> HashMap<String, u32> {
+        pairs
+            .iter()
+            .map(|(name, n)| (name.to_ascii_lowercase(), *n))
+            .collect()
+    }
+
+    #[test]
+    fn copy_limit_respects_typed_overrides_constructed() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+
+        // Seven Dwarves: UpTo(7) — 7 legal, 8 illegal.
+        assert!(copy_limit_violations(&db, &counts_of(&[("Seven Dwarves", 7)]), 4).is_empty());
+        assert!(!copy_limit_violations(&db, &counts_of(&[("Seven Dwarves", 8)]), 4).is_empty());
+
+        // Nazgûl: UpTo(9) — 8 legal, 10 illegal.
+        assert!(copy_limit_violations(&db, &counts_of(&[("Nazgûl", 8)]), 4).is_empty());
+        assert!(!copy_limit_violations(&db, &counts_of(&[("Nazgûl", 10)]), 4).is_empty());
+
+        // Relentless Rats: Unlimited — 5 legal.
+        assert!(copy_limit_violations(&db, &counts_of(&[("Relentless Rats", 5)]), 4).is_empty());
+
+        // Mountain: basic-land exemption — 30 legal.
+        assert!(copy_limit_violations(&db, &counts_of(&[("Mountain", 30)]), 4).is_empty());
+
+        // A normal card with no override is still flagged at 5.
+        let violations = copy_limit_violations(&db, &counts_of(&[("Red Card", 5)]), 4);
+        assert!(violations.iter().any(|v| v.contains("Red Card")));
+    }
+
+    #[test]
+    fn copy_limit_override_fires_before_commander_singleton() {
+        // CR 903.5b: in a singleton (Commander) context max_copies = 1, but
+        // Nazgûl's UpTo(9) override must raise the cap so 9 copies are legal.
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        assert!(copy_limit_violations(&db, &counts_of(&[("Nazgûl", 9)]), 1).is_empty());
+        // A normal card is still singleton-restricted to 1.
+        assert!(!copy_limit_violations(&db, &counts_of(&[("Red Card", 2)]), 1).is_empty());
     }
 
     #[test]
