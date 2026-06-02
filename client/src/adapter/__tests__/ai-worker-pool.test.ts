@@ -13,7 +13,7 @@ const mockWorkers = Array.from({ length: 2 }, () => ({
 let workerIndex = 0;
 
 vi.mock("../engine-worker-client", () => ({
-  EngineWorkerClient: vi.fn().mockImplementation(() => {
+  EngineWorkerClient: vi.fn().mockImplementation(function () {
     const worker = mockWorkers[workerIndex];
     workerIndex += 1;
     return worker;

@@ -2365,6 +2365,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Investigate
         | Effect::BecomeMonarch
         | Effect::Proliferate
+        | Effect::EndTheTurn
         | Effect::SolveCase
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }
@@ -5349,6 +5350,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // `layers::evaluate_condition_with_context` alongside `ChosenColorIs`.
         StaticCondition::ChosenLabelIs { .. } => ("ChosenLabelIs", Handled),
         StaticCondition::HasCounters { .. } => ("HasCounters", Handled),
+        StaticCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         StaticCondition::RecipientHasCounters { .. } => ("RecipientHasCounters", Handled),
         StaticCondition::RecipientMatchesFilter { .. } => ("RecipientMatchesFilter", Handled),
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
@@ -7883,7 +7885,6 @@ fn is_keyword_line(lower: &str) -> bool {
         "gravestorm",
         "conspire",
         "retrace",
-        "rebound",
         "miracle ",
         "cipher",
         "extort",

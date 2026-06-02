@@ -1647,6 +1647,10 @@ pub enum AlternativeCastKeyword {
     Cleave,
     /// CR 702.162a: Cast converted (back face up, CR 712.14a) for the MTMTE cost.
     MoreThanMeetsTheEye,
+    /// CR 702.176a: Impending alternative cost paid from hand. On resolution the
+    /// permanent enters with N time counters and isn't a creature until the last
+    /// is removed. An end-step trigger removes one counter per turn.
+    Impending,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -3696,6 +3700,12 @@ pub enum CastingVariant {
     /// permanent enters the battlefield transformed (back face up) via the
     /// existing `enter_transformed` ZoneChange seed. CR 701.28 (Convert).
     MoreThanMeetsTheEye,
+    /// CR 702.176a: Cast from hand via Impending's alternative cost. The printed
+    /// mana cost is replaced by `Keyword::Impending { cost, .. }` at cast
+    /// preparation (mirrors Overload/Evoke). On resolution the permanent enters
+    /// with N time counters (from the keyword) and is not a creature while any
+    /// remain. At the beginning of your end step one time counter is removed.
+    Impending,
 }
 
 impl CastingVariant {

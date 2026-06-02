@@ -23,7 +23,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target_filter, without_paying, cast_transformed, alt_ability_cost, constraint) =
+    let (target_filter, without_paying, cast_transformed, alt_ability_cost, constraint, duration) =
         match &ability.effect {
             Effect::CastFromZone {
                 target,
@@ -31,6 +31,7 @@ pub fn resolve(
                 cast_transformed,
                 alt_ability_cost,
                 constraint,
+                duration,
                 ..
             } => (
                 target,
@@ -38,6 +39,7 @@ pub fn resolve(
                 *cast_transformed,
                 alt_ability_cost.clone(),
                 constraint.clone(),
+                duration.clone(),
             ),
             _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
         };
@@ -125,6 +127,14 @@ pub fn resolve(
                     constraint: constraint.clone(),
                     granted_to,
                     resolution_cleanup: None,
+                    // CR 611.2a: continuous-effect duration plumbing.
+                    // CR 702.88a: Rebound's upkeep recast permission expires.
+                    // Forward `duration` from the `Effect::CastFromZone` so
+                    // durational grants (Rebound's `UntilEndOfTurn` upkeep
+                    // recast offer) are pruned at the correct boundary.
+                    // `None` (the common case) preserves the standing
+                    // semantics used by Discover, Suspend, Nashi, etc.
+                    duration: duration.clone(),
                 }
             };
             if !obj.casting_permissions.contains(&permission) {
@@ -183,6 +193,7 @@ mod tests {
                 cast_transformed: false,
                 alt_ability_cost: None,
                 constraint: None,
+                duration: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -217,6 +228,7 @@ mod tests {
                 cast_transformed: false,
                 alt_ability_cost: None,
                 constraint: None,
+                duration: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -248,6 +260,7 @@ mod tests {
                 cast_transformed: false,
                 alt_ability_cost: None,
                 constraint: None,
+                duration: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -315,6 +328,7 @@ mod tests {
                 cast_transformed: false,
                 alt_ability_cost: None,
                 constraint: None,
+                duration: None,
             },
             vec![],
             source,
@@ -349,6 +363,7 @@ mod tests {
                 cast_transformed: false,
                 alt_ability_cost: None,
                 constraint: None,
+                duration: None,
             },
             vec![],
             ObjectId(999),
@@ -385,6 +400,7 @@ mod tests {
                 cast_transformed: false,
                 alt_ability_cost: None,
                 constraint: Some(constraint.clone()),
+                duration: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),

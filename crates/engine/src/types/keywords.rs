@@ -598,10 +598,13 @@ pub enum Keyword {
     Plot(ManaCost),
     Craft(ManaCost),
     Offspring(ManaCost),
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler. CR 702.176a: Impending N—{cost} — alt-cast that
-    /// enters with N time counters and is not a creature until they're gone.
-    Impending(ManaCost),
+    /// CR 702.176a: Impending N—{cost} — alternative cast that enters with
+    /// `counters` time counters and is not a creature until the last is removed.
+    /// At the beginning of your end step the permanent loses one time counter.
+    Impending {
+        cost: ManaCost,
+        counters: u32,
+    },
     /// CR 702.87a: Level up is an activated ability that puts a level counter
     /// on this permanent. Activate only as a sorcery.
     LevelUp(ManaCost),
@@ -1055,7 +1058,7 @@ impl Keyword {
             | Keyword::Gravestorm
             | Keyword::Haunt
             | Keyword::Hideaway(_)
-            | Keyword::Impending(_)
+            | Keyword::Impending { .. }
             | Keyword::Improvise
             | Keyword::Ingest
             | Keyword::LevelUp(_)
@@ -1452,6 +1455,18 @@ impl FromStr for Keyword {
                         return Ok(Keyword::Affinity(tf));
                     }
                 }
+                // CR 702.176a: "Impending N—{cost}" — space-separated form from Oracle
+                // text and MTGJSON keyword arrays (no colon). Extract N before the em-dash.
+                if kw == "impending" {
+                    let (counters, cost_str) = rest
+                        .split_once('\u{2014}')
+                        .map(|(n, c)| (n.trim().parse().unwrap_or(0), c.trim()))
+                        .unwrap_or((0, rest));
+                    return Ok(Keyword::Impending {
+                        cost: parse_keyword_mana_cost(cost_str),
+                        counters,
+                    });
+                }
             }
         }
 
@@ -1596,7 +1611,18 @@ impl FromStr for Keyword {
                 "plot" => return Ok(Keyword::Plot(parse_keyword_mana_cost(p))),
                 "craft" => return Ok(Keyword::Craft(parse_keyword_mana_cost(p))),
                 "offspring" => return Ok(Keyword::Offspring(parse_keyword_mana_cost(p))),
-                "impending" => return Ok(Keyword::Impending(parse_keyword_mana_cost(p))),
+                "impending" => {
+                    // CR 702.176a: "Impending N—{cost}" — extract N before the em-dash,
+                    // then parse the mana cost from the remainder.
+                    let (counters, cost_str) = p
+                        .split_once('\u{2014}')
+                        .map(|(n, c)| (n.trim().parse().unwrap_or(0), c.trim()))
+                        .unwrap_or((0, p));
+                    return Ok(Keyword::Impending {
+                        cost: parse_keyword_mana_cost(cost_str),
+                        counters,
+                    });
+                }
                 "levelup" | "level up" => return Ok(Keyword::LevelUp(parse_keyword_mana_cost(p))),
                 "warp" => return Ok(Keyword::Warp(parse_keyword_mana_cost(p))),
                 "sneak" => return Ok(Keyword::Sneak(parse_keyword_mana_cost(p))),
@@ -2256,7 +2282,22 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Plot" => Ok(Keyword::Plot(mana(data)?)),
         "Craft" => Ok(Keyword::Craft(mana(data)?)),
         "Offspring" => Ok(Keyword::Offspring(mana(data)?)),
-        "Impending" => Ok(Keyword::Impending(mana(data)?)),
+        "Impending" => {
+            // New format: {"Impending": {"cost": {...}, "counters": N}}
+            // Legacy format: {"Impending": {mana_cost}} — treat as counters=0 fallback.
+            if let Some(cost_val) = data.get("cost") {
+                let counters = data.get("counters").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                Ok(Keyword::Impending {
+                    cost: mana(cost_val)?,
+                    counters,
+                })
+            } else {
+                Ok(Keyword::Impending {
+                    cost: mana(data)?,
+                    counters: 0,
+                })
+            }
+        }
         "LevelUp" => Ok(Keyword::LevelUp(mana(data)?)),
         // Parameterized: u32
         "Dredge" => Ok(Keyword::Dredge(uint(data))),
@@ -2904,6 +2945,27 @@ mod tests {
         // CR 702.157: Squad
         let squad = Keyword::from_str("Squad:{2}").unwrap();
         assert!(matches!(squad, Keyword::Squad(ManaCost::Cost { .. })));
+    }
+
+    #[test]
+    /// CR 702.176a: Impending N—{cost} parses N (counter count) and mana cost.
+    fn parse_impending_from_str() {
+        // Oracle keyword line: "Impending 5—{1}{B}"
+        let kw = Keyword::from_str("Impending 5\u{2014}{1}{B}").unwrap();
+        match kw {
+            Keyword::Impending { counters, cost } => {
+                assert_eq!(counters, 5);
+                assert!(matches!(cost, ManaCost::Cost { .. }));
+            }
+            other => panic!("expected Impending, got {other:?}"),
+        }
+
+        // "Impending 3—{2}{U}{U}"
+        let kw2 = Keyword::from_str("Impending 3\u{2014}{2}{U}{U}").unwrap();
+        match kw2 {
+            Keyword::Impending { counters, .. } => assert_eq!(counters, 3),
+            other => panic!("expected Impending, got {other:?}"),
+        }
     }
 
     #[test]

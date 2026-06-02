@@ -1302,6 +1302,11 @@ pub enum ManaSpendRestriction {
     /// `value` is the printed threshold N; `comparator` applies
     /// `spell_mana_value <cmp> value`.
     SpellWithManaValue { comparator: Comparator, value: u32 },
+    /// CR 106.6 + CR 400.7: "Spend this mana only to cast spells from your
+    /// graveyard" / "from exile". Gates spending on the spell's cast-from zone
+    /// alone — a distinct axis from [`ManaSpendRestriction::SpellWithKeywordKindFromZone`],
+    /// which additionally requires a keyword. Resolved against `SpellMeta.cast_from_zone`.
+    SpellFromZone(Zone),
 }
 
 /// Duration for temporary effects.
@@ -1479,6 +1484,21 @@ pub enum CastingPermission {
         /// `ManaValue`-constrained standing permission at finalize time.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolution_cleanup: Option<ResolutionCastCleanup>,
+        /// CR 611.2a: Optional durational scope. When `Some(...)`, this
+        /// permission is pruned by the corresponding `layers::prune_*` helpers
+        /// at the same timing points as `PlayFromExile { duration, .. }`.
+        /// `None` (the common case) preserves the standing behavior: the
+        /// permission persists until the object leaves exile (Airbending,
+        /// Suspend, Discover, Cascade, etc., handled by
+        /// `zones::apply_zone_exit_cleanup`).
+        ///
+        /// CR 702.88a (Rebound): used by the Rebound recast permission with
+        /// `Duration::UntilEndOfTurn` so the granted "cast this card from
+        /// exile without paying its mana cost" offer expires at the cleanup
+        /// step of the upkeep on which it was offered if the controller
+        /// declines or fails to cast.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<Duration>,
     },
     /// CR 400.7i: Play from exile until duration expires (impulse draw).
     /// Building block for "exile top N, choose one, you may play it this turn" patterns.
@@ -3890,6 +3910,13 @@ pub enum StaticCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         maximum: Option<u32>,
     },
+    /// CR 702.176a + CR 611.3a: True while the source permanent carries the
+    /// persistent marker that its named alternative cost was paid. This is not
+    /// turn-scoped; Impending's "not a creature" static must continue across
+    /// turns until its last time counter is removed.
+    CastVariantPaid {
+        variant: CastVariantPaid,
+    },
     /// CR 122.1 + CR 613.4c: True when the object currently receiving an
     /// attached-object static has at least `minimum` (and at most `maximum`, if
     /// specified) counters matching `counters`. Used for Aura/Equipment
@@ -4407,6 +4434,11 @@ pub enum CastVariantPaid {
     /// "if its bestow cost was paid" and by display layers that need to
     /// distinguish a bestow-cast permanent from a hard-cast creature.
     Bestow,
+    /// CR 702.176a: The spell was cast for its impending alternative cost.
+    /// The permanent entered with N time counters and is not a creature
+    /// while any remain. Read by the end-step counter-removal trigger and
+    /// the "not a creature" layer fixup.
+    Impending,
 }
 
 /// CR 601.3b + CR 702.8a: A timing permission actually used to cast a spell.
@@ -5669,6 +5701,11 @@ pub enum Effect {
     Populate,
     /// CR 701.30: Clash with an opponent — reveal top cards, compare mana values.
     Clash,
+    /// CR 724.1: End the turn. Exile every object on the stack, check
+    /// state-based actions, remove everything from combat, then skip straight
+    /// to the cleanup step. Time Stop, Sundial of the Infinite, Obeka,
+    /// Glorious End, Discontinuity, Day's Undoing.
+    EndTheTurn,
     /// CR 701.38: Vote — each player chooses one of the listed options, starting
     /// with a specified player and proceeding in turn order. After all votes are
     /// collected, the resolver runs `per_choice_effect[i]` once for each vote
@@ -6378,6 +6415,15 @@ pub enum Effect {
         /// to the spell being cast from the granted zone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<CastPermissionConstraint>,
+        /// CR 611.2a: Optional durational scope propagated onto the granted
+        /// `CastingPermission::ExileWithAltCost { duration, .. }` so the
+        /// permission is pruned by the standard layer prune helpers.
+        /// CR 702.88a (Rebound): set to `Some(Duration::UntilEndOfTurn)` by
+        /// the Rebound arming flow so the next-upkeep recast offer expires
+        /// at end of turn if not used. `None` for all standing cast-from-zone
+        /// grants (Discover, Suspend, Nashi, etc.).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<Duration>,
     },
     /// CR 615: Prevent damage to a target.
     PreventDamage {
@@ -7782,6 +7828,7 @@ impl Effect {
             | Effect::Proliferate
             | Effect::Populate
             | Effect::Clash
+            | Effect::EndTheTurn
             | Effect::Vote { .. }
             | Effect::Cleanup { .. }
             | Effect::RevealTop { .. }
@@ -7923,6 +7970,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TimeTravel => "TimeTravel",
         Effect::BecomeMonarch => "BecomeMonarch",
         Effect::Proliferate => "Proliferate",
+        Effect::EndTheTurn => "EndTheTurn",
         Effect::Populate => "Populate",
         Effect::Clash => "Clash",
         Effect::Vote { .. } => "Vote",
@@ -8105,6 +8153,7 @@ pub enum EffectKind {
     Proliferate,
     Populate,
     Clash,
+    EndTheTurn,
     /// CR 701.38: Vote — interactive APNAP-ordered choice with per-choice tally effects.
     Vote,
     /// CR 700.3: SeparateIntoPiles — partition objects into two piles, another player chooses one, sub-effect applies.
@@ -8285,6 +8334,7 @@ impl From<&Effect> for EffectKind {
             Effect::TimeTravel => EffectKind::TimeTravel,
             Effect::BecomeMonarch => EffectKind::BecomeMonarch,
             Effect::Proliferate => EffectKind::Proliferate,
+            Effect::EndTheTurn => EffectKind::EndTheTurn,
             Effect::Populate => EffectKind::Populate,
             Effect::Clash => EffectKind::Clash,
             Effect::Vote { .. } => EffectKind::Vote,
@@ -9862,6 +9912,11 @@ pub enum TriggerCondition {
     /// specified cast/activation variant this turn. Negation ("unless it escaped")
     /// is expressed via `Not { Box::new(CastVariantPaid { variant }) }`.
     CastVariantPaid { variant: CastVariantPaid },
+    /// CR 702.176a + CR 603.4: True while the source permanent carries the
+    /// persistent marker that its named alternative cost was paid. Used for
+    /// recurring battlefield triggers such as Impending's end-step time-counter
+    /// removal, which must continue across turns.
+    CastVariantPaidPersistent { variant: CastVariantPaid },
 
     /// CR 605.1a + CR 603.4: Event qualifier for "that isn't a mana ability"
     /// on activated-ability trigger events.

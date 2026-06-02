@@ -753,8 +753,17 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
-        // X value: pick 0.
-        WaitingFor::ChooseXValue { .. } => Some(GameAction::ChooseX { value: 0 }),
+        // X value: pick max (CR 107.1c + CR 601.2f). The engine has already
+        // capped `max` to the maximum legally-payable X for this cast (see
+        // `engine::game::casting_costs::max_x_value`), so picking max is always
+        // affordable. Issue #710: the previous default of X=0 caused every
+        // unsupervised X-cost spell to resolve for no effect (Fireball dealing
+        // 0 damage, Hydroid Krasis entering 0/0, Banefire whiffing). Picking
+        // max is the right safety net when no tactical policy scores; the
+        // XValuePolicy + CopyValuePolicy still override this for cases where a
+        // smaller X is strictly better (e.g. a copy spell whose only legal
+        // targets sit at a lower mana value).
+        WaitingFor::ChooseXValue { max, .. } => Some(GameAction::ChooseX { value: *max }),
 
         // Pay amount: pick minimum.
         WaitingFor::PayAmountChoice { min, .. } => {

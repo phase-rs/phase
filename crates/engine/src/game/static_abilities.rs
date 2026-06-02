@@ -116,6 +116,12 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // Runtime enforcement is in effects/copy_spell.rs via active_static_definitions.
     registry.insert(StaticMode::CantBeCopied, handle_cant_be_copied);
     registry.insert(StaticMode::CantBeDestroyed, handle_cant_be_destroyed);
+    // CR 701.19c: CantBeRegenerated — a marked permanent's regeneration shields
+    // are not applied the next time it would be destroyed. Passive rule
+    // modification; runtime enforcement is in replacement.rs::destroy_applier via
+    // object_has_active_cant_be_regenerated(). Registered as a rule-mod so coverage
+    // marks the standalone "can't be regenerated" effect as supported.
+    registry.insert(StaticMode::CantBeRegenerated, handle_rule_mod);
     // CR 702.34: FlashBack — allows casting from graveyard, exiled after resolution.
     registry.insert(StaticMode::FlashBack, handle_flashback);
     // CR 702.18: Shroud — permanent cannot be the target of spells or abilities.

@@ -1856,9 +1856,19 @@ pub(super) fn match_becomes_target(
     // CR 115.1a + CR 115.1b: Trigger text like "of a spell" and "of an Aura spell"
     // constrains the targeting source to matching stack spell characteristics.
     if let Some(source_filter) = &trigger.valid_source {
-        let Some(targeting_entry) = state.stack.iter().find(|entry| {
+        // First, try to find the entry on the stack (normal case)
+        let targeting_entry = state.stack.iter().find(|entry| {
             entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id
-        }) else {
+        });
+        // CR 608.2: A resolving spell or ability follows its resolution steps even
+        // after the local stack entry has been popped and saved in `resolving_stack_entry`.
+        // Triggered abilities can emit BecomesTarget events during that effect execution.
+        let targeting_entry = targeting_entry.or_else(|| {
+            state.resolving_stack_entry.as_ref().filter(|entry| {
+                entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id
+            })
+        });
+        let Some(targeting_entry) = targeting_entry else {
             return false;
         };
         let trigger_controller = state
@@ -7635,6 +7645,287 @@ mod tests {
             target: TargetRef::Object(trigger_owner),
             source_id: ability_id,
         };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_pawpatch_recruit_pattern_rejects_own_ability() {
+        // Pawpatch Recruit pattern: "whenever a creature you control becomes the target
+        // of a spell or ability an opponent controls"
+        // This test combines both valid_card (creature you control) and valid_source
+        // (opponent controls) filters — the exact pattern from bug #1569.
+        let (mut state, ability_id) = setup_with_ability_on_stack(); // ability controlled by PlayerId(1)
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Pawpatch Recruit".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&trigger_owner)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        // "a creature you control" → valid_card with ControllerRef::You
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        // "an opponent controls" → valid_source with ControllerRef::Opponent
+        trigger.valid_source = Some(stack_source_filter(ControllerRef::Opponent));
+
+        // Event: trigger_owner (controlled by PlayerId(1)) becomes target of ability_id (also controlled by PlayerId(1))
+        // This should NOT fire because the ability is controlled by the same player
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_pawpatch_recruit_pattern_matches_opponent_ability() {
+        // Pawpatch Recruit pattern: should fire when opponent controls the targeting ability
+        let (mut state, ability_id) = setup_with_ability_on_stack(); // ability controlled by PlayerId(1)
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Pawpatch Recruit".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&trigger_owner)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        // "a creature you control" → valid_card with ControllerRef::You
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        // "an opponent controls" → valid_source with ControllerRef::Opponent
+        trigger.valid_source = Some(stack_source_filter(ControllerRef::Opponent));
+
+        // Event: trigger_owner (controlled by PlayerId(0)) becomes target of ability_id (controlled by PlayerId(1))
+        // This SHOULD fire because the ability is controlled by an opponent
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        assert!(match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_stack_entry_lookup_uses_entry_id_not_source_id() {
+        // Test that the stack entry lookup in match_becomes_target uses entry.id
+        // not entry.source_id to find the targeting source. This is critical for
+        // planeswalker abilities where the source_id might match multiple entries.
+        let (mut state, ability_id) = setup_with_ability_on_stack(); // ability controlled by PlayerId(1)
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Pawpatch Recruit".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&trigger_owner)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Add a second stack entry with the same source_id but different controller
+        let other_entry_id = ObjectId(61);
+        state.stack.push_back(StackEntry {
+            id: other_entry_id,
+            source_id: ObjectId(10), // Same source_id as the ability
+            controller: PlayerId(0), // Different controller
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(10),
+                ability: ResolvedAbility::new(
+                    crate::types::ability::Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: crate::types::ability::TargetFilter::Controller,
+                    },
+                    vec![],
+                    ObjectId(10),
+                    PlayerId(0),
+                ),
+            },
+        });
+
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_source = Some(stack_source_filter(ControllerRef::Opponent));
+
+        // Event with source_id = ability_id (the entry.id)
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: ability_id,
+        };
+        // Should NOT fire because the ability (entry.id = ability_id) is controlled by PlayerId(1)
+        // The other entry with different controller should not be considered
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_event_uses_source_id_not_entry_id() {
+        // Test that when the BecomesTarget event uses source_id (not entry.id),
+        // the lookup correctly finds the entry via entry.source_id.
+        // This simulates the planeswalker ability flow where emit_targeting_events
+        // is called with pw_id (source_id) before the stack entry is pushed.
+        let mut state = setup();
+        let pw_id = ObjectId(10);
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Pawpatch Recruit".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&trigger_owner)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Simulate the stack entry that will be pushed after emit_targeting_events
+        let entry_id = ObjectId(60);
+        state.stack.push_back(StackEntry {
+            id: entry_id,
+            source_id: pw_id,        // The planeswalker object id
+            controller: PlayerId(0), // Same player as trigger owner
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: pw_id,
+                ability: ResolvedAbility::new(
+                    crate::types::ability::Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: crate::types::ability::TargetFilter::Controller,
+                    },
+                    vec![],
+                    pw_id,
+                    PlayerId(0),
+                ),
+            },
+        });
+
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_source = Some(stack_source_filter(ControllerRef::Opponent));
+
+        // Event with source_id = pw_id (the planeswalker object id, not the entry id)
+        // This is what happens in planeswalker.rs line 278
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: pw_id,
+        };
+        // Should NOT fire because the ability (entry.source_id = pw_id) is controlled by PlayerId(0)
+        // The trigger requires opponent control
+        assert!(!match_becomes_target(
+            &event,
+            &trigger,
+            trigger_owner,
+            &state
+        ));
+    }
+
+    #[test]
+    fn becomes_target_triggered_ability_same_controller_rejects() {
+        // Test that a triggered ability controlled by the same player as the trigger
+        // does NOT fire the Pawpatch Recruit trigger. This simulates the bug scenario:
+        // Innkeeper's Talent (triggered ability) targets Ouroboroid, both controlled by the same player.
+        let mut state = setup();
+        let innkeepers_talent_id = ObjectId(10);
+        let trigger_owner = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Pawpatch Recruit".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&trigger_owner)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Simulate a triggered ability currently resolving (like Innkeeper's Talent)
+        let entry_id = ObjectId(60);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: entry_id,
+            source_id: innkeepers_talent_id,
+            controller: PlayerId(0), // Same player as trigger owner
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: innkeepers_talent_id,
+                ability: Box::new(ResolvedAbility::new(
+                    crate::types::ability::Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: crate::types::ability::TargetFilter::Controller,
+                    },
+                    vec![],
+                    innkeepers_talent_id,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Innkeeper's Talent".to_string(),
+                subject_match_count: Some(0),
+            },
+        });
+
+        let mut trigger = make_trigger(TriggerMode::BecomesTarget);
+        trigger.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        trigger.valid_source = Some(stack_source_filter(ControllerRef::Opponent));
+
+        // Event with source_id = innkeepers_talent_id (the source object id, not the entry id)
+        // This is what happens when a triggered ability emits BecomesTarget events
+        let event = GameEvent::BecomesTarget {
+            target: TargetRef::Object(trigger_owner),
+            source_id: innkeepers_talent_id,
+        };
+        // Should NOT fire because the triggered ability is controlled by PlayerId(0)
+        // The trigger requires opponent control
         assert!(!match_becomes_target(
             &event,
             &trigger,

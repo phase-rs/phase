@@ -694,6 +694,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::TimeTravel
         | Effect::BecomeMonarch
         | Effect::Proliferate
+        | Effect::EndTheTurn
         | Effect::Populate
         | Effect::Clash
         | Effect::SwitchPT { .. }

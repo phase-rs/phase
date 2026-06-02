@@ -407,6 +407,43 @@ fn try_parse_subject_restriction_clause(
         });
     }
 
+    // CR 701.19c: "[subject] can't be regenerated [this turn]" — the standalone,
+    // until-end-of-turn form (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort).
+    // Marks the subject so regeneration shields are not applied the next time it
+    // would be destroyed. Splits the same way as the `must be blocked` /
+    // `activated abilities can't be activated` arms: `before` is the subject
+    // ("target creature", "that creature", "it", "~"). Bare pronoun/anaphor
+    // subjects bind to `ParentTarget` via `subject_application_for_cant_be_activated`
+    // (Lim-Dûl's Cohort: "Destroy target creature ... That creature can't be
+    // regenerated this turn." → "that creature" → ParentTarget), while
+    // "target creature" routes through the full subject grammar. The predicate
+    // itself is an anchored nom production that absorbs the optional "this turn"
+    // suffix; the duration is encoded directly as `UntilEndOfTurn`.
+    if let Some((before_lower, (), _)) =
+        nom_primitives::scan_preceded(&lower, parse_cant_be_regenerated_predicate)
+    {
+        let subject = text[..before_lower.len()].trim();
+        let application = subject_application_for_cant_be_activated(subject, ctx)?;
+        let affected = static_affected_for_application(&application);
+        let mode = StaticMode::CantBeRegenerated;
+        return Some(ParsedEffectClause {
+            effect: Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(mode.clone())
+                    .affected(affected)
+                    .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: application.target,
+            },
+            distribute: None,
+            multi_target: None,
+            duration: Some(Duration::UntilEndOfTurn),
+            sub_ability: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
     // CR 119.7 + CR 119.8: "[possessor] life total can't change" — bidirectional
     // life-lock for the named player (Teferi's Protection: "your life total can't
     // change"). Distinct from the generic " can't " split below because the
@@ -2422,6 +2459,11 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             | StaticMode::CantLoseLife
             | StaticMode::CantLoseTheGame
             | StaticMode::CantWinTheGame
+            // CR 701.19c: CantBeRegenerated is granted to a target/anaphor creature
+            // and must propagate onto its `static_definitions` so the regen-shield
+            // bypass in replacement.rs::destroy_applier observes it via
+            // active_static_definitions.
+            | StaticMode::CantBeRegenerated
     )
 }
 
@@ -2456,6 +2498,13 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // CR 701.27: "~ can't transform" — prohibition on transform (e.g., Immerwolf).
     if lower == "can't transform" || lower == "cannot transform" {
         return Some(vec![StaticMode::Other("CantTransform".to_string())]);
+    }
+    // CR 701.19c: "~ can't be regenerated" — marks the subject so regeneration
+    // shields are not applied. Backstop for the "cannot" phrasing and any caller
+    // that routes through the generic " can't " / " cannot " split before
+    // reaching the dedicated arm in `try_parse_subject_restriction_clause`.
+    if parse_cant_be_regenerated_predicate(lower.trim()).is_ok() {
+        return Some(vec![StaticMode::CantBeRegenerated]);
     }
     // CR 101.2: Spell/ability restriction predicate; the subject path owns
     // the "spells you control" / "green spells you control" grammar.
@@ -2638,6 +2687,22 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     }
 
     None
+}
+
+fn parse_cant_be_regenerated_predicate(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(value(
+        (),
+        (
+            alt((
+                tag::<_, _, OracleError<'_>>("can't"),
+                tag::<_, _, OracleError<'_>>("cannot"),
+            )),
+            tag(" be regenerated"),
+            opt(tag(" this turn")),
+            opt(tag(".")),
+        ),
+    ))
+    .parse(input)
 }
 
 fn extract_pump_modifiers(
@@ -3769,6 +3834,21 @@ mod tests {
         assert_eq!(
             parse_restriction_modes("can't transform"),
             Some(vec![StaticMode::Other("CantTransform".to_string())])
+        );
+    }
+
+    #[test]
+    fn parse_restriction_modes_cant_be_regenerated_variants() {
+        let expected = Some(vec![StaticMode::CantBeRegenerated]);
+        assert_eq!(parse_restriction_modes("can't be regenerated"), expected);
+        assert_eq!(parse_restriction_modes("cannot be regenerated"), expected);
+        assert_eq!(
+            parse_restriction_modes("can't be regenerated this turn"),
+            expected
+        );
+        assert_eq!(
+            parse_restriction_modes("cannot be regenerated this turn."),
+            expected
         );
     }
 

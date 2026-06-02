@@ -2137,6 +2137,10 @@ pub(crate) fn static_condition_to_ability_condition(
             Some(counter_threshold_to_condition(qty, *minimum, *maximum))
         }
         StaticCondition::DevotionGE { .. }
+        // CR 702.176a + CR 611.3a: Persistent alternative-cost markers are
+        // source-bound static predicates with no effect-resolution
+        // `AbilityCondition` equivalent.
+        | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::ChosenColorIs { .. }
         // CR 614.12c + CR 607.2d: Anchor-word linked statics are evaluated
         // by `layers::evaluate_condition_with_context`; no effect-resolution

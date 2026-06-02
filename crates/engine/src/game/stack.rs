@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    CastingPermission, ContinuousModification, Duration, EffectKind, KeywordAction,
+    CastingPermission, ContinuousModification, Duration, Effect, EffectKind, KeywordAction,
     ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
@@ -324,11 +324,50 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         false
     };
 
+    // CR 702.88a: Rebound — on-resolve hook. If the resolving spell is a
+    // non-permanent spell that carries `Keyword::Rebound`, was cast from
+    // its owner's hand, and is not a token, push the next-upkeep delayed
+    // triggered ability that offers an optional free recast and override
+    // the destination from graveyard to exile.
+    // CR 704.5d: tokens cease to exist off the battlefield (gate `!is_token`).
+    // CR 603.7a: delayed triggered abilities are created during resolution.
+    // CR 603.7d: source of the delayed trigger IS the resolving spell.
+    // CR 608.2n: default destination for a resolved instant/sorcery is graveyard.
+    // CR 702.88c: multiple instances of rebound on the same spell are
+    // redundant — `has_keyword` returns true even if duplicates exist, so
+    // arming runs at most once per resolution.
+    let rebound_armed = if is_spell && !is_permanent_spell(state, entry.id) {
+        let has_rebound = state.objects.get(&entry.id).is_some_and(|o| {
+            !o.is_token
+                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Rebound)
+        });
+        if has_rebound && super::casting::spell_cast_origin(state, entry.id) == Some(Zone::Hand) {
+            super::effects::rebound::arm_rebound(state, entry.id, entry.controller)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     // CR 608.3: Determine destination zone for spells.
     if is_spell {
-        let dest = if paradigm_armed {
+        let end_the_turn_resolving_object = ability
+            .as_ref()
+            .is_some_and(|ability| matches!(ability.effect, Effect::EndTheTurn));
+        let dest = if end_the_turn_resolving_object {
+            // CR 724.1b: The "end the turn" procedure exiles every object on
+            // the stack, including the resolving object that `resolve_top`
+            // already popped before executing its effect.
+            Zone::Exile
+        } else if paradigm_armed {
             // CR 702.xxx: Paradigm-armed spell exiles instead of going to
             // graveyard. The ExileLink is already created by arm_paradigm.
+            Zone::Exile
+        } else if rebound_armed {
+            // CR 702.88a: Rebound-armed non-permanent spell exiles instead
+            // of going to graveyard — the delayed trigger is already
+            // queued by `arm_rebound`.
             Zone::Exile
         } else if casting_variant == CastingVariant::Adventure {
             // CR 715.3d: Adventure spell resolves → exile with casting permission.
@@ -442,6 +481,34 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     } = &mut proposed
                     {
                         enter_with_counters.extend(intrinsic);
+                    }
+                }
+            }
+
+            // CR 702.176a: Impending — seed the N time counters into the ZoneChange
+            // ProposedEvent BEFORE the replacement pipeline so Doubling Season and
+            // similar counter-doubling replacements (CR 614.1a) can modify them.
+            // N is read from the `Keyword::Impending { counters, .. }` on the still-
+            // stack-resident object; `cast_variant_paid = Impending` is already stamped
+            // by `finalize_cast_to_stack` in `casting_costs.rs`.
+            if casting_variant == CastingVariant::Impending {
+                let impending_counters = state.objects.get(&entry.id).and_then(|obj| {
+                    obj.keywords.iter().find_map(|k| match k {
+                        crate::types::keywords::Keyword::Impending { counters, .. } => {
+                            Some(*counters)
+                        }
+                        _ => None,
+                    })
+                });
+                if let Some(n) = impending_counters {
+                    if n > 0 {
+                        if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                            enter_with_counters,
+                            ..
+                        } = &mut proposed
+                        {
+                            enter_with_counters.push((CounterType::Time, n));
+                        }
                     }
                 }
             }
@@ -898,6 +965,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 if let Some(obj) = state.objects.get_mut(&entry.id) {
                     obj.cast_variant_paid = Some((
                         crate::types::ability::CastVariantPaid::Escape,
+                        state.turn_number,
+                    ));
+                }
+            }
+
+            // CR 702.176a: Impending-cast permanent gets the `cast_variant_paid`
+            // tag re-applied after `reset_for_battlefield_entry` cleared it.
+            // The "not a creature" layer fixup and the end-step counter-removal
+            // trigger both gate on this marker being present.
+            if casting_variant == CastingVariant::Impending {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Impending,
                         state.turn_number,
                     ));
                 }
@@ -1925,6 +2005,41 @@ mod tests {
         );
     }
 
+    /// CR 724.1b: "end the turn" exiles every object on the stack, including
+    /// the resolving spell itself. Discriminating against routing the source
+    /// through the normal CR 608.2n instant/sorcery graveyard path.
+    #[test]
+    fn end_the_turn_spell_exiles_resolving_object() {
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(724),
+            PlayerId(0),
+            "Time Stop".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(Effect::EndTheTurn, vec![], spell_id, PlayerId(0));
+
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(724),
+                ability: Some(ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(state.objects[&spell_id].zone, Zone::Exile);
+        assert!(state.exile.contains(&spell_id));
+        assert!(!state.players[0].graveyard.contains(&spell_id));
+    }
+
     #[test]
     fn trigger_event_context_becomes_target_controller() {
         // Set up: triggered ability with BecomesTarget event in trigger_event.
@@ -2452,6 +2567,7 @@ mod tests {
                     constraint: None,
                     granted_to: None,
                     resolution_cleanup: None,
+                    duration: None,
                 });
         }
 

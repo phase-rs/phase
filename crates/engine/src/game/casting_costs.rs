@@ -3329,6 +3329,16 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             ));
         }
     }
+    // CR 702.176a: Tag the stack object so stack resolution can read the impending
+    // cost-paid marker and place time counters when the permanent enters.
+    if casting_variant == CastingVariant::Impending {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.cast_variant_paid = Some((
+                crate::types::ability::CastVariantPaid::Impending,
+                state.turn_number,
+            ));
+        }
+    }
 
     // CR 601.2i: Update the existing stack entry (pushed at announcement) with
     // the finalized ability and the actual mana spent. The entry must still be
@@ -7912,6 +7922,7 @@ mod tests {
                         exiled_misses: vec![miss_a, miss_b],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                     }),
+                    duration: None,
                 });
 
             (state, hit, vec![miss_a, miss_b])
@@ -7998,6 +8009,7 @@ mod tests {
                     }),
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -8049,6 +8061,7 @@ mod tests {
                     }),
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             hit_obj
                 .casting_permissions
@@ -8058,6 +8071,7 @@ mod tests {
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -8101,6 +8115,7 @@ mod tests {
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             state.players[0].mana_pool.add(ManaUnit {
                 color: ManaType::Colorless,
@@ -8163,6 +8178,7 @@ mod tests {
                     }),
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             hit_obj
                 .casting_permissions
@@ -8178,6 +8194,7 @@ mod tests {
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                     }),
+                    duration: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 
@@ -8228,6 +8245,7 @@ mod tests {
                         exiled_misses: vec![miss],
                         reject_action: ResolutionMvRejectAction::BottomWithMisses,
                     }),
+                    duration: None,
                 });
             hit_obj
                 .casting_permissions
@@ -8237,6 +8255,7 @@ mod tests {
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
             push_announcement_stack_entry(&mut state, hit);
 

@@ -1920,6 +1920,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         // the ability controller at grant time.
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -10835,6 +10836,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10868,6 +10870,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
     // CR 610.3 + CR 118.9 + CR 608.2c + CR 701.13a: "Cast [quantifier] [filter]
@@ -10888,6 +10891,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
     if scan_contains_phrase(rest, "from among them")
@@ -10902,6 +10906,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10953,6 +10958,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10978,6 +10984,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10989,6 +10996,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         cast_transformed: false,
         alt_ability_cost: None,
         constraint,
+        duration: None,
     })
 }
 
@@ -26633,6 +26641,91 @@ mod tests {
         );
     }
 
+    /// CR 701.19c: Standalone "target creature can't be regenerated this turn"
+    /// (Hurr Jackal, Furnace Brood) emits a GenericEffect granting
+    /// `StaticMode::CantBeRegenerated` to the chosen creature. The selection rides
+    /// on the outer `target` slot; the per-static `affected` is the runtime-bound
+    /// `ParentTarget` (per `static_affected_for_application`), and the mode is
+    /// propagated onto the granted creature via `AddStaticMode`.
+    #[test]
+    fn cant_be_regenerated_effect_standalone_targets_creature() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "target creature can't be regenerated this turn",
+            AbilityKind::Activated,
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            target,
+            duration,
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(static_abilities.len(), 1);
+        let sd = &static_abilities[0];
+        assert!(
+            matches!(&sd.mode, StaticMode::CantBeRegenerated),
+            "expected CantBeRegenerated, got {:?}",
+            sd.mode
+        );
+        assert!(
+            sd.modifications
+                .contains(&ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeRegenerated
+                }),
+            "expected AddStaticMode modification, got {:?}",
+            sd.modifications
+        );
+        assert_eq!(
+            sd.affected,
+            Some(TargetFilter::ParentTarget),
+            "affected must be the runtime-bound ParentTarget"
+        );
+        let outer = target.as_ref().expect("outer target slot must be set");
+        assert!(
+            matches!(
+                outer,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Creature))
+            ),
+            "outer target must be the creature selection filter, got {outer:?}"
+        );
+    }
+
+    /// CR 701.19c + CR 608.2c: Lim-Dûl's Cohort prints "Destroy target creature.
+    /// That creature can't be regenerated this turn." The "that creature" anaphor
+    /// binds the regeneration prohibition to the same destroyed creature
+    /// (`ParentTarget`) rather than introducing a fresh target.
+    #[test]
+    fn cant_be_regenerated_anaphor_binds_to_parent_target() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "that creature can't be regenerated this turn",
+            AbilityKind::Activated,
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        let sd = static_abilities
+            .first()
+            .expect("expected CantBeRegenerated static");
+        assert!(
+            matches!(&sd.mode, StaticMode::CantBeRegenerated),
+            "expected CantBeRegenerated, got {:?}",
+            sd.mode
+        );
+        assert_eq!(
+            sd.affected,
+            Some(TargetFilter::ParentTarget),
+            "the 'that creature' anaphor must resolve to ParentTarget"
+        );
+    }
+
     #[test]
     fn pump_compound_with_extra_blockers() {
         // Give No Ground: the trailing blocking permission is a second
@@ -27244,6 +27337,45 @@ mod tests {
             }
         );
         assert!(*tapped);
+    }
+
+    /// CR 105.2 + CR 205.1a + CR 613.1d-e: Rise from the Grave reanimation —
+    /// "Put target creature card from a graveyard onto the battlefield under your
+    /// control. It's a black Zombie in addition to its other colors and types."
+    /// The trailing contracted-subject clause must chain (via `sub_ability`) to a
+    /// continuous `GenericEffect` adding the black color (layer 5) and the Zombie
+    /// subtype (layer 4) — not an Unimplemented fallback.
+    #[test]
+    fn reanimate_becomes_black_zombie_in_addition_to_colors_and_types() {
+        let def = parse_effect_chain(
+            "Put target creature card from a graveyard onto the battlefield under your control. It's a black Zombie in addition to its other colors and types.",
+            AbilityKind::Spell,
+        );
+        let mut mods: Vec<ContinuousModification> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*d.effect
+            {
+                for sd in static_abilities {
+                    mods.extend(sd.modifications.iter().cloned());
+                }
+            }
+            node = d.sub_ability.as_deref();
+        }
+        assert!(
+            mods.contains(&ContinuousModification::AddColor {
+                color: ManaColor::Black
+            }),
+            "expected AddColor(Black); chain mods: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Zombie".to_string()
+            }),
+            "expected AddSubtype(Zombie); chain mods: {mods:?}"
+        );
     }
 
     /// CR 701.17a + CR 701.17c + CR 400.7j + CR 608.2c: "Mill a card, then draw

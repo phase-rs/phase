@@ -30,6 +30,7 @@ use super::sweeper_timing::SweeperTimingPolicy;
 use super::tokens_wide::TokensWidePolicy;
 use super::tribal_lord_priority::TribalLordPriorityPolicy;
 use super::tutor::TutorPolicy;
+use super::x_value::XValuePolicy;
 use crate::cast_facts::cast_facts_for_action;
 use crate::config::AiConfig;
 use crate::decision_kind::classify as classify_decision;
@@ -93,6 +94,7 @@ pub enum PolicyId {
     EquipmentPriority,
     LandSequencing,
     ConditionGatedActivation,
+    XValue,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -220,6 +222,7 @@ impl Default for PolicyRegistry {
             Box::new(super::equipment_priority::EquipmentPriorityPolicy),
             Box::new(super::land_sequencing::LandSequencingPolicy),
             Box::new(super::condition_gated_activation::ConditionGatedActivationPolicy),
+            Box::new(XValuePolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

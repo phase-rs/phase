@@ -186,10 +186,16 @@ pub(crate) fn parse_additive_type_clause_modifications(
             tag::<_, _, VE>(" in addition to "),
             alt((tag::<_, _, VE>("its"), tag::<_, _, VE>("their"))),
             tag::<_, _, VE>(" other "),
+            // CR 105.2 + CR 205.1a: "colors and types" forms add a color (CR
+            // 613.1e, layer 5) alongside the type/subtype additions. Longer
+            // phrases first so "colors and types" wins over bare "types".
             alt((
+                tag::<_, _, VE>("colors and creature types"),
+                tag::<_, _, VE>("colors and types"),
                 tag::<_, _, VE>("creature types"),
                 tag::<_, _, VE>("land types"),
                 tag::<_, _, VE>("types"),
+                tag::<_, _, VE>("colors"),
             )),
         ),
     )
@@ -233,6 +239,14 @@ pub(crate) fn parse_additive_type_clause_modifications(
             continue;
         }
         let lower_word = word.to_lowercase();
+        // CR 105.2 + CR 613.1e: a color word ("black", "white", …) adds that
+        // color (layer 5), e.g. Rise from the Grave's "black Zombie".
+        if let Ok((rest, color)) = nom_primitives::parse_color(lower_word.as_str()) {
+            if rest.is_empty() {
+                modifications.push(ContinuousModification::AddColor { color });
+                continue;
+            }
+        }
         if let Some(core_type) = core_type_from_additive_word(lower_word.as_str()) {
             modifications.push(ContinuousModification::AddType { core_type });
             continue;

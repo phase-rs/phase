@@ -289,6 +289,9 @@ pub(crate) fn resolve_restrictions(
                     value: *value,
                 })
             }
+            ManaSpendRestriction::SpellFromZone(zone) => {
+                Some(ManaRestriction::OnlyForSpellFromZone(*zone))
+            }
         })
         .collect()
 }

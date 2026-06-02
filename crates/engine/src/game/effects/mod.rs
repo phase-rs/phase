@@ -67,6 +67,7 @@ pub mod double;
 pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod effect;
+pub mod end_the_turn;
 pub mod endure;
 pub mod energy;
 pub mod exchange_control;
@@ -108,6 +109,7 @@ pub mod pump;
 pub mod put_on_top;
 pub mod put_on_top_or_bottom;
 pub mod rad_counters;
+pub mod rebound;
 pub mod regenerate;
 pub mod register_bending;
 pub mod remove_from_combat;
@@ -1677,6 +1679,7 @@ pub fn resolve_effect(
         Effect::TimeTravel => Ok(()),
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
         Effect::Proliferate => proliferate::resolve(state, ability, events),
+        Effect::EndTheTurn => end_the_turn::resolve(state, ability, events),
         Effect::Populate => populate::resolve(state, ability, events),
         Effect::Clash => clash::resolve(state, ability, events),
         // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
@@ -8135,6 +8138,7 @@ mod tests {
                         constraint: None,
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -8224,6 +8228,7 @@ mod tests {
                         constraint: None,
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -8287,6 +8292,7 @@ mod tests {
                     constraint: None,
                     granted_to: None,
                     resolution_cleanup: None,
+                    duration: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
