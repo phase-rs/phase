@@ -1619,7 +1619,11 @@ fn expected_score(a: i32, b: i32) -> f64 {
 }
 
 fn k_factor(rating: i32) -> i32 {
-    if rating < 1200 { 40 } else { 24 }
+    if rating < 1200 {
+        40
+    } else {
+        24
+    }
 }
 
 fn ranked_result_for_duel(
@@ -3768,8 +3772,16 @@ async fn handle_client_message(
                     ranked_result_for_duel(
                         game_db,
                         &game_code,
-                        session.display_names.first().map(String::as_str).unwrap_or(""),
-                        session.display_names.get(1).map(String::as_str).unwrap_or(""),
+                        session
+                            .display_names
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or(""),
+                        session
+                            .display_names
+                            .get(1)
+                            .map(String::as_str)
+                            .unwrap_or(""),
                         winner,
                     )
                 } else {
