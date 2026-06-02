@@ -63,6 +63,8 @@ pub enum ReplacementEvent {
     ProduceMana,
     /// CR 614.1a: Replaces a scry event.
     Scry,
+    /// CR 614.1a + CR 705.1: Replaces an individual coin flip.
+    CoinFlip,
     /// CR 614.1a: Replaces a transform event.
     Transform,
     /// CR 614.1a: Replaces an explore event.
@@ -123,6 +125,7 @@ impl fmt::Display for ReplacementEvent {
             ReplacementEvent::DrawCards => write!(f, "DrawCards"),
             ReplacementEvent::ProduceMana => write!(f, "ProduceMana"),
             ReplacementEvent::Scry => write!(f, "Scry"),
+            ReplacementEvent::CoinFlip => write!(f, "CoinFlip"),
             ReplacementEvent::Transform => write!(f, "Transform"),
             ReplacementEvent::Explore => write!(f, "Explore"),
             ReplacementEvent::AssembleContraption => write!(f, "AssembleContraption"),
@@ -171,6 +174,7 @@ impl FromStr for ReplacementEvent {
             "DrawCards" => ReplacementEvent::DrawCards,
             "ProduceMana" => ReplacementEvent::ProduceMana,
             "Scry" => ReplacementEvent::Scry,
+            "CoinFlip" => ReplacementEvent::CoinFlip,
             "Transform" => ReplacementEvent::Transform,
             "Explore" => ReplacementEvent::Explore,
             "AssembleContraption" => ReplacementEvent::AssembleContraption,
@@ -248,6 +252,7 @@ mod tests {
             ReplacementEvent::AddCounter,
             ReplacementEvent::CreateToken,
             ReplacementEvent::DealtDamage,
+            ReplacementEvent::CoinFlip,
             ReplacementEvent::Other("Custom".to_string()),
         ];
         for event in events {

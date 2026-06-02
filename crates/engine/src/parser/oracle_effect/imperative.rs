@@ -4978,6 +4978,47 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
     }
 }
 
+/// CR 500.8 + CR 510.2: Quantity for "<N> additional <step/phase>s". The
+/// scanner advances along word boundaries and tries a single composed
+/// combinator at each position:
+///   `quantifier ~ " additional"` where `quantifier` =
+///     `tag("that many")` → event-bound (`QuantityRef::EventContextAmount`)
+///   | `parse_number`        → literal N (e.g. "two additional combat phases")
+///
+/// Anything else — including the article forms "an"/"a"/"the" already parsed
+/// elsewhere as 1 — falls through to the singular default
+/// `QuantityExpr::Fixed { value: 1 }`. Anchoring on `" additional"` keeps the
+/// helper agnostic to surrounding sentence shapes ("you get that many
+/// additional upkeep steps after this phase", "after this phase, there is an
+/// additional combat phase").
+fn parse_additional_phase_count(lower: &str) -> QuantityExpr {
+    fn count_combinator(input: &str) -> OracleResult<'_, QuantityExpr> {
+        let event_bound = value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            tag("that many"),
+        );
+        let literal = map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
+            value: n as i32,
+        });
+        terminated(alt((event_bound, literal)), tag(" additional")).parse(input)
+    }
+
+    let mut remaining = lower;
+    while !remaining.is_empty() {
+        if let Ok((_rest, qty)) = count_combinator(remaining) {
+            return qty;
+        }
+        // Advance to the next word boundary so the combinator stays anchored
+        // to candidate quantifier positions.
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    QuantityExpr::Fixed { value: 1 }
+}
+
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
@@ -5000,6 +5041,7 @@ pub(super) fn parse_imperative_family_ast(
             } else {
                 vec![]
             },
+            count: parse_additional_phase_count(lower),
         }));
     }
     if nom_primitives::scan_contains(lower, "additional upkeep step") {
@@ -5008,6 +5050,7 @@ pub(super) fn parse_imperative_family_ast(
             phase: Phase::Upkeep,
             after: Phase::Upkeep,
             followed_by: vec![],
+            count: parse_additional_phase_count(lower),
         }));
     }
 
@@ -8940,6 +8983,71 @@ mod tests {
         let lower = text.to_lowercase();
         let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse 'after this phase' variant");
+    }
+
+    /// CR 500.8 + CR 510.2: Obeka, Splitter of Seconds — "you get that many
+    /// additional upkeep steps after this phase" must thread the triggering
+    /// combat damage amount through `EventContextAmount`, not collapse it to
+    /// the singular default.
+    #[test]
+    fn parse_obeka_that_many_additional_upkeep_steps_binds_event_amount() {
+        let text = "you get that many additional upkeep steps after this phase";
+        let lower = text.to_lowercase();
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let effect = lower_imperative_family_effect(
+            result.expect("Obeka consequent should parse as AdditionalPhase"),
+        );
+        match effect {
+            Effect::AdditionalPhase {
+                phase: Phase::Upkeep,
+                after: Phase::Upkeep,
+                count:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                ..
+            } => {}
+            other => {
+                panic!("expected AdditionalPhase with EventContextAmount count, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn parse_fixed_count_additional_upkeep_steps_binds_literal_count() {
+        let text = "you get two additional upkeep steps after this phase";
+        let lower = text.to_lowercase();
+        let effect = lower_imperative_family_effect(
+            parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("fixed-count additional upkeep should parse"),
+        );
+        match effect {
+            Effect::AdditionalPhase {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            } => {}
+            other => panic!("expected count=Fixed(2) for fixed-count form, got {other:?}"),
+        }
+    }
+
+    /// Singular "an additional upkeep step" must keep the legacy Fixed(1)
+    /// semantics so Paradox Haze and similar cards still push exactly one
+    /// extra step.
+    #[test]
+    fn parse_additional_upkeep_step_defaults_to_count_one() {
+        let text = "get an additional upkeep step after this step";
+        let lower = text.to_lowercase();
+        let effect = lower_imperative_family_effect(
+            parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("should parse singular additional upkeep"),
+        );
+        match effect {
+            Effect::AdditionalPhase {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            } => {}
+            other => panic!("expected count=Fixed(1) for singular form, got {other:?}"),
+        }
     }
 
     #[test]
