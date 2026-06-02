@@ -829,7 +829,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::CascadeMissed { .. }
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
-        | GameEvent::DebugPermissionRevoked { .. } => 0,
+        | GameEvent::DebugPermissionRevoked { .. }
+        | GameEvent::StartingPlayerContest { .. } => 0,
     }
 }
 

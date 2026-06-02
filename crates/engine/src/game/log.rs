@@ -89,6 +89,10 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::GameOver { .. }
         | GameEvent::PlayerLost { .. }
         | GameEvent::PlayerEliminated { .. }
+        // CR 103.1: grouped with the setup event MulliganStarted under `Game`
+        // (not `Special` like in-game DieRolled) — it is game setup, not a
+        // CR 706 die-roll log entry.
+        | GameEvent::StartingPlayerContest { .. }
         | GameEvent::MulliganStarted => LogCategory::Game,
 
         GameEvent::TurnStarted { .. }
@@ -750,6 +754,13 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::MulliganStarted => vec![text("Mulligan phase begins")],
 
+        // CR 103.1: concise one-line summary of the starting-player roll-off;
+        // round-by-round detail lives in the structured event for the UI.
+        GameEvent::StartingPlayerContest { winner, .. } => vec![
+            player_seg(state, *winner),
+            text(" wins the roll to take the first turn"),
+        ],
+
         GameEvent::GameOver { winner } => match winner {
             Some(pid) => vec![
                 text("Game over — "),
@@ -1239,6 +1250,12 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 20,
                 result: 17,
+            },
+            GameEvent::StartingPlayerContest {
+                rounds: vec![crate::types::events::ContestRound {
+                    rolls: vec![(PlayerId(0), 17), (PlayerId(1), 5)],
+                }],
+                winner: PlayerId(0),
             },
             GameEvent::CoinFlipped {
                 player_id: PlayerId(0),

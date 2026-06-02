@@ -141,10 +141,10 @@ async fn switch_game_spectator_slot(
 /// Build the `GameStarted` message for a single seat.
 ///
 /// `events` carries the engine's start-of-game events (the d20 first-player
-/// contest's `DieRolled` batch). Only the INITIAL post-start fan-out
-/// (`build_game_started_messages`) passes a non-empty batch; late joiners and
-/// reconnects pass an empty `Vec` so they never re-see the contest dice. The
-/// full batch goes to every seat unchanged — rolls are public (no
+/// contest's `StartingPlayerContest` event). Only the INITIAL post-start
+/// fan-out (`build_game_started_messages`) passes a non-empty batch; late
+/// joiners and reconnects pass an empty `Vec` so they never re-see the contest.
+/// The events go to every seat unchanged — the contest is public (no
 /// `visibility.rs` redaction), so this deliberately does NOT apply the
 /// `is_actor` gating used for `legal_actions`.
 fn build_game_started_message(
@@ -193,9 +193,9 @@ fn build_game_started_message(
 }
 
 /// Initial post-start fan-out. DRAINS `session.start_events` so the first-player
-/// contest dice are sent exactly once — every subsequent `GameStarted` build
-/// (late joiners, reconnects) sees an empty batch and never re-shows the dice.
-/// Every seat receives the full contest batch (public; not actor-gated).
+/// contest is sent exactly once — every subsequent `GameStarted` build
+/// (late joiners, reconnects) sees an empty batch and never re-shows the
+/// contest. Every seat receives the contest event (public; not actor-gated).
 fn build_game_started_messages(session: &mut GameSession) -> Vec<(PlayerId, ServerMessage)> {
     let start_events = std::mem::take(&mut session.start_events);
     (0..session.player_count)
