@@ -3510,10 +3510,13 @@ pub enum PlayerFilter {
     /// `count` is boxed to break the `QuantityExpr → QuantityRef::PlayerCount →
     /// PlayerFilter::ControlsCount → QuantityExpr` reference cycle that would
     /// otherwise give the enum infinite size.
+    #[serde(alias = "ControlsPermanent")]
     ControlsCount {
         relation: PlayerRelation,
         filter: TargetFilter,
+        #[serde(default = "default_comparator_ge")]
         comparator: Comparator,
+        #[serde(default = "default_controls_count_one")]
         count: Box<QuantityExpr>,
     },
     /// CR 402.1 (hand) / CR 119.1 (life) / CR 122.1f (poison) / CR 404.1
@@ -5322,7 +5325,8 @@ pub enum Effect {
         /// CR 119.3: Who gains the life. Defaults to Controller (omitted from JSON).
         #[serde(
             default = "default_target_filter_controller",
-            skip_serializing_if = "is_target_filter_controller"
+            skip_serializing_if = "is_target_filter_controller",
+            deserialize_with = "deserialize_gain_life_player"
         )]
         player: TargetFilter,
     },
@@ -7029,6 +7033,41 @@ fn default_player_filter_controller() -> PlayerFilter {
 
 fn default_quantity_one() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
+}
+
+fn default_comparator_ge() -> Comparator {
+    Comparator::GE
+}
+
+fn default_controls_count_one() -> Box<QuantityExpr> {
+    Box::new(QuantityExpr::Fixed { value: 1 })
+}
+
+/// Backward-compat deserializer for GainLife.player field.
+/// Legacy card-data.json used the GainLifePlayer enum with string variants
+/// ("controller", "targeted_controller", "target_player"). New code uses
+/// TargetFilter directly. This maps the legacy strings to the corresponding
+/// TargetFilter values.
+fn deserialize_gain_life_player<'de, D>(d: D) -> Result<TargetFilter, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
+    match raw {
+        // Legacy string format from GainLifePlayer enum
+        serde_json::Value::String(ref s) => {
+            match s.as_str() {
+                "controller" => Ok(TargetFilter::Controller),
+                "targeted_controller" => Ok(TargetFilter::ParentTargetController),
+                "target_player" => Ok(TargetFilter::Player),
+                // Forward-compat: unknown strings default to Controller to avoid hard errors
+                _ => Ok(TargetFilter::Controller),
+            }
+        }
+        // New TargetFilter object format — delegate to derived deserializer
+        other => serde_json::from_value::<TargetFilter>(other).map_err(serde::de::Error::custom),
+    }
 }
 
 fn default_quantity_four() -> QuantityExpr {
@@ -11383,6 +11422,7 @@ pub enum ContinuousModification {
     /// Grants a rule-modification static mode (e.g. MustBeBlocked, CantBeBlocked)
     /// to the affected object. Applied at layer 6 (ability-modifying).
     AddStaticMode {
+        #[serde(deserialize_with = "crate::types::statics::deserialize_static_mode_fwd")]
         mode: StaticMode,
     },
     /// CR 113.3d + CR 604.1 + CR 613.1f: Grant a full static ability to the
