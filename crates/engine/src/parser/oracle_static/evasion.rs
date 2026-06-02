@@ -862,6 +862,35 @@ pub(crate) fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> 
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let (affected, predicate_text) = strip_rule_static_subject(tp.original, tp.lower)?;
+
+    // CR 509.1b: Evasion ability — "<self/typed subject> can't be blocked except by
+    // <filter>" is a static ability restricting blockers; must land as a top-level
+    // continuous static (CR 604.1), not a spell-resolution GenericEffect. Reuses
+    // classify_block_exception for the count-vs-quality BlockExceptionKind. Handled
+    // here before the generic predicate parse so it cannot fall through to
+    // dispatch_line_nom. The dispatch.rs CantBeBlockedExceptBy arm is guarded
+    // `!except by`, so the two paths are disjoint.
+    let pred_lower = predicate_text.to_lowercase();
+    if let Some(rest) = nom_tag_lower(predicate_text, &pred_lower, "can't be blocked except by ")
+        .or_else(|| {
+            nom_tag_lower(
+                predicate_text,
+                &pred_lower,
+                "can\u{2019}t be blocked except by ",
+            )
+        })
+    {
+        let def = StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
+            kind: classify_block_exception(rest),
+        })
+        .affected(affected.clone())
+        .description(text.to_string());
+        // A "can't be blocked except by <filter>" predicate never carries a
+        // trailing granted-keyword companion (the " has "/" gains " needles
+        // can't appear in it), so the evasion static is complete on its own.
+        return Some(def);
+    }
+
     let predicate = parse_rule_static_predicate(predicate_text)?;
     // CR 502.3: Extract trailing condition for CantUntap statics (e.g., "as long as [condition]")
     if matches!(predicate, RuleStaticPredicate::CantUntap) {

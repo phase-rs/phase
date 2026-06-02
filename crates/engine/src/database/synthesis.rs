@@ -1267,6 +1267,19 @@ pub fn compute_oathbreaker(mtgjson: &super::mtgjson::AtomicCard, face: &CardFace
 /// Cycling: "[Cost], Discard this card: Draw a card." (activated from hand)
 /// Typecycling: "[Cost], Discard this card: Search library for a [type] card,
 ///   reveal it, put it into your hand. Then shuffle."
+///
+/// DEFERRED RUNTIME GAP (CR 702.29e + CR 113.6b) — Homing Sliver class:
+/// This build-time synthesis reads only the face's INTRINSIC printed keywords.
+/// A Typecycling/Cycling keyword GRANTED at runtime by a continuous effect
+/// (Homing Sliver: "Each Sliver card in each player's hand has slivercycling
+/// {3}.") lands on the recipient's runtime keyword set (CR 113.6b zone-of-
+/// function + `TargetFilter::extract_in_zone` resolves it in the Hand zone), but
+/// is NOT synthesized into a runtime-activatable ability — synthesis never runs
+/// over runtime-granted keywords. Closing this needs a general runtime
+/// granted-keyword -> activatable-ability primitive (not card-specific), which
+/// is deferred. The parser/grant half is correct and covered by
+/// `static_homing_sliver_grants_typecycling_to_slivers_in_hand` in
+/// `parser/oracle_static/tests.rs`.
 pub fn synthesize_cycling(face: &mut CardFace) {
     let cycling_abilities: Vec<AbilityDefinition> = face
         .keywords
