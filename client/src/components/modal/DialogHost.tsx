@@ -67,13 +67,13 @@ function isClickThroughDialog(waitingFor: WaitingFor | null | undefined): boolea
   // CR 702.51a (Convoke) / CR 701.67a (Waterbend) / CR 702.126a (Improvise):
   // these tap-payment modes let the caster tap creatures/artifacts on the
   // battlefield to pay generic/colored mana while the `ManaPaymentUI` panel
-  // (a self-anchored `fixed inset-x-0 bottom-0` strip) is open. The host must
-  // stay click-through for them so those board taps reach the cards —
-  // otherwise the `fixed inset-0 z-40` wrapper swallows the clicks and the
-  // player cannot tap creatures to pay (the creatures still get the mana-tap
-  // ring, but clicking them does nothing). Plain/hybrid/Phyrexian payment needs
-  // no board interaction (the panel's Pay button passes priority), so it stays
-  // wrapped — `convoke_mode` is the engine's signal that board taps are live.
+  // is open. The host still anchors the panel at `fixed inset-0 z-40` (so it
+  // can't be trapped beneath the board), but click-through marks it
+  // `pointer-events: none` so those board taps reach the cards — the panel's
+  // own controls re-enable events. Plain/hybrid/Phyrexian payment needs no
+  // board interaction (the panel's Pay button passes priority), so it keeps
+  // pointer events — `convoke_mode` is the engine's signal that board taps are
+  // live.
   return waitingFor.type === "ManaPayment" && waitingFor.data.convoke_mode != null;
 }
 
@@ -109,12 +109,22 @@ export function DialogHost({ children }: { children: ReactNode }) {
   const dialogVisible =
     (isDialogVisibleFor(waitingFor) && canActForWaitingState) || hasUiDialog;
   const clickThrough = isClickThroughDialog(waitingFor);
-  // Only wrap when there's a centered dialog that benefits from being
-  // anchored to the viewport. Click-through overlays (TargetingOverlay)
-  // must NOT be wrapped — the host would intercept board clicks at z-40
-  // and break target picking.
-  const wrapped = dialogVisible && !clickThrough;
-  const showPeekTab = peeked && wrapped;
+  // BASE INVARIANT: every visible prompt is anchored in this viewport-level
+  // `fixed inset-0 z-40` stacking context, so no prompt can ever be trapped
+  // beneath the board. The board grid is its own `relative z-10` stacking
+  // context; framer-motion leaves a `transform`/`will-change: transform` on
+  // this node, which would demote an un-anchored (className="") host to a
+  // `z-auto` context that paints BELOW the board — burying the dialog behind
+  // the HUD and hand. Anchoring at an explicit `z-40` keeps the context at
+  // level 40 (above the board) regardless of any transform framer applies.
+  // Click-through is achieved with `pointer-events: none` (below), NOT by
+  // un-anchoring, so board taps still reach the battlefield.
+  const anchored = dialogVisible;
+  // Only non-click-through dialogs participate in the peek/slide affordance;
+  // click-through overlays (convoke/improvise board taps, target picking) stay
+  // put and pass taps through to the board.
+  const peekable = anchored && !clickThrough;
+  const showPeekTab = peeked && peekable;
 
   const ctxValue = useMemo<DialogPeekContext>(
     () => ({
@@ -137,22 +147,22 @@ export function DialogHost({ children }: { children: ReactNode }) {
 
   return (
     <DialogPeekCtx.Provider value={ctxValue}>
-      {/* The host's motion.div must (a) NOT establish a transform-CB that
-          mis-anchors `fixed inset:0` dialog descendants when at rest, and
-          (b) NOT block board clicks/hovers when no dialog is up.
-          Both are achieved by gating `fixed inset-0` on `dialogVisible`:
-          when a dialog is visible the host fills the viewport (so the
-          transform CB IS the viewport, dialogs render correctly, slide
-          works); when none is up the host collapses to an in-flow 0-size
-          box that intercepts nothing. Pointer-events:none kicks in only
-          while peeked so clicks/hovers pass through to the battlefield —
-          otherwise the dialog itself handles events normally. */}
+      {/* When a dialog is visible the host fills the viewport as a `z-40`
+          stacking context so descendants render above the board; when none is
+          up it collapses to an in-flow 0-size box that intercepts nothing.
+          `pointer-events: none` lets taps/hovers pass through to the
+          battlefield while peeked OR for click-through prompts (convoke /
+          improvise / target picking); interactive children re-enable events
+          with `pointer-events-auto`. Otherwise the dialog handles events
+          normally. */}
       <motion.div
-        className={wrapped ? "fixed inset-0 z-40" : ""}
+        className={anchored ? "fixed inset-0 z-40" : ""}
         style={
-          wrapped ? { pointerEvents: peeked ? "none" : undefined } : undefined
+          anchored
+            ? { pointerEvents: clickThrough || peeked ? "none" : undefined }
+            : undefined
         }
-        animate={wrapped ? slideTransform : undefined}
+        animate={peekable ? slideTransform : undefined}
         transition={
           shouldReduceMotion
             ? { duration: 0 }
@@ -171,7 +181,7 @@ export function DialogHost({ children }: { children: ReactNode }) {
   );
 }
 
-function PeekRestoreTab({
+export function PeekRestoreTab({
   direction,
   onClick,
 }: {
@@ -228,7 +238,7 @@ function PeekRestoreTab({
   );
 }
 
-function useIsNarrowViewport(breakpoint = 640): boolean {
+export function useIsNarrowViewport(breakpoint = 640): boolean {
   const [isNarrow, setIsNarrow] = useState(() =>
     typeof window === "undefined" ? false : window.innerWidth < breakpoint,
   );

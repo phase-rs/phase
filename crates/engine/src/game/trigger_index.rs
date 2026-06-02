@@ -276,6 +276,9 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
             push(TriggerEventKey::MonarchOrInitiative);
         }
 
+        // CR 701.52a + CR 702.159a: Visit abilities on Attractions.
+        TriggerMode::VisitAttraction => push(TriggerEventKey::VisitAttraction),
+
         // --- Game state ---
         TriggerMode::LosesGame => push(TriggerEventKey::PlayerLost),
 
@@ -352,7 +355,6 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::Stationed
         | TriggerMode::Trains
         | TriggerMode::UnlockDoor
-        | TriggerMode::VisitAttraction
         | TriggerMode::BecomesCrewed
         | TriggerMode::BecomesPlotted
         | TriggerMode::BecomesSaddled
@@ -562,6 +564,8 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         }
         GameEvent::MonarchChanged { .. } => push(TriggerEventKey::MonarchOrInitiative),
         GameEvent::CityBlessingGained { .. } => {}
+        // CR 103.1: setup determination, not a CR 706 die-roll trigger source.
+        GameEvent::StartingPlayerContest { .. } => {}
         GameEvent::DieRolled { .. } | GameEvent::CoinFlipped { .. } => {
             push(TriggerEventKey::DieOrCoin);
         }
@@ -571,6 +575,8 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         }
         GameEvent::RoomDoorUnlocked { .. } | GameEvent::BecomesPlotted { .. } => {}
         GameEvent::InitiativeTaken { .. } => push(TriggerEventKey::MonarchOrInitiative),
+        GameEvent::AttractionOpened { .. } | GameEvent::AttractionsRolledToVisit { .. } => {}
+        GameEvent::AttractionVisited { .. } => push(TriggerEventKey::VisitAttraction),
         GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }
@@ -727,6 +733,8 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::VentureIntoDungeon
         | EffectKind::VentureInto
         | EffectKind::TakeTheInitiative
+        | EffectKind::OpenAttractions
+        | EffectKind::RollToVisitAttractions
         | EffectKind::ProcessRadCounters
         | EffectKind::GrantCastingPermission
         | EffectKind::ChooseFromZone

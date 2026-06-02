@@ -1248,11 +1248,38 @@ pub fn compute_brawl_commander(mtgjson: &super::mtgjson::AtomicCard, face: &Card
     mtgjson_says || type_line_says
 }
 
+/// Oathbreaker RC: determine if a card can be an Oathbreaker commander.
+/// Uses MTGJSON `leadershipSkills.oathbreaker` (authoritative for WotC-blessed
+/// Planeswalkers) unioned with type-line analysis (legendary Planeswalker) as a
+/// staleness guard. Mirrors the `compute_commander` / `compute_brawl_commander` pattern.
+pub fn compute_oathbreaker(mtgjson: &super::mtgjson::AtomicCard, face: &CardFace) -> bool {
+    let mtgjson_says = mtgjson
+        .leadership_skills
+        .as_ref()
+        .is_some_and(|ls| ls.oathbreaker);
+    let is_legendary = face.card_type.supertypes.contains(&Supertype::Legendary);
+    let is_planeswalker = face.card_type.core_types.contains(&CoreType::Planeswalker);
+    mtgjson_says || (is_legendary && is_planeswalker)
+}
+
 /// CR 702.29a/e: Synthesize Cycling and Typecycling keywords into activated abilities.
 ///
 /// Cycling: "[Cost], Discard this card: Draw a card." (activated from hand)
 /// Typecycling: "[Cost], Discard this card: Search library for a [type] card,
 ///   reveal it, put it into your hand. Then shuffle."
+///
+/// DEFERRED RUNTIME GAP (CR 702.29e + CR 113.6b) — Homing Sliver class:
+/// This build-time synthesis reads only the face's INTRINSIC printed keywords.
+/// A Typecycling/Cycling keyword GRANTED at runtime by a continuous effect
+/// (Homing Sliver: "Each Sliver card in each player's hand has slivercycling
+/// {3}.") lands on the recipient's runtime keyword set (CR 113.6b zone-of-
+/// function + `TargetFilter::extract_in_zone` resolves it in the Hand zone), but
+/// is NOT synthesized into a runtime-activatable ability — synthesis never runs
+/// over runtime-granted keywords. Closing this needs a general runtime
+/// granted-keyword -> activatable-ability primitive (not card-specific), which
+/// is deferred. The parser/grant half is correct and covered by
+/// `static_homing_sliver_grants_typecycling_to_slivers_in_hand` in
+/// `parser/oracle_static/tests.rs`.
 pub fn synthesize_cycling(face: &mut CardFace) {
     let cycling_abilities: Vec<AbilityDefinition> = face
         .keywords
@@ -5083,6 +5110,43 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
     face.replacements.push(replacement);
 }
 
+/// Merge parser-extracted keywords into a base (MTGJSON-derived) keyword list,
+/// reconciling parameterized and multi-instance keywords. Single authority shared
+/// by the production card-data pipeline (`build_oracle_face_inner`) and the
+/// scenario test harness (`game::scenario::build_face_from_oracle`) so the two
+/// cannot diverge.
+///
+/// CR 113.2c / CR 702.85c / CR 702.40b / CR 702.116b: keywords whose instances
+/// each function separately (`instances_function_separately()`) are printed as
+/// repeated bare words but deduped by MTGJSON; the parser recovered the true
+/// printed instance count from Oracle text, so drop every MTGJSON copy of THIS
+/// keyword (matched on the concrete variant, not `kind()`: Storm and Myriad share
+/// `KeywordKind::Unknown` with ~50 other keywords, so a `kind()`-based retain would
+/// wrongly strip unrelated Unknown keywords — concrete-variant equality is exact for
+/// all four predicate keywords regardless of kind, since they are unit variants) and
+/// let the parser-recovered occurrences be authoritative, then extend. Fallback: if the
+/// parser found zero occurrences, this branch never runs for the keyword, so the
+/// single MTGJSON copy is preserved.
+///
+/// Bloodthirst is parameterized: replace any MTGJSON-derived default
+/// (`Bloodthirst(_)`) with the parser-extracted value.
+/// All other keywords: when the parser extracts a parameterized keyword (e.g.,
+/// `Morph({2}{B}{G}{U})`), remove any MTGJSON-derived default of the same `kind()`
+/// (e.g., `Morph(zero)`).
+pub(crate) fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<Keyword>) {
+    for extracted_kw in &extracted {
+        if extracted_kw.instances_function_separately() {
+            base.retain(|existing| existing != extracted_kw);
+        } else if matches!(extracted_kw, Keyword::Bloodthirst(_)) {
+            base.retain(|existing| !matches!(existing, Keyword::Bloodthirst(_)));
+        } else {
+            let kind = extracted_kw.kind();
+            base.retain(|existing| existing.kind() != kind);
+        }
+    }
+    base.extend(extracted);
+}
+
 /// Build a `CardFace` from MTGJSON data, running the Oracle text parser and all synthesis.
 /// Both `oracle_loader.rs` and `oracle_gen.rs` call this to ensure identical processing.
 pub fn build_oracle_face(mtgjson: &AtomicCard, oracle_id: Option<String>) -> CardFace {
@@ -5151,20 +5215,12 @@ fn build_oracle_face_inner(
         &subtypes,
     );
 
-    // Merge keywords extracted from Oracle text with MTGJSON keywords.
-    // When the Oracle parser extracts a parameterized keyword (e.g., Morph({2}{B}{G}{U})),
-    // remove any MTGJSON-derived default of the same kind (e.g., Morph(zero)).
-    for extracted_kw in &parsed.extracted_keywords {
-        if matches!(extracted_kw, Keyword::Bloodthirst(_)) {
-            keywords.retain(|existing| {
-                !matches!(existing, Keyword::Bloodthirst(_)) || existing == extracted_kw
-            });
-        } else {
-            let kind = extracted_kw.kind();
-            keywords.retain(|existing| existing.kind() != kind || existing == extracted_kw);
-        }
-    }
-    keywords.extend(parsed.extracted_keywords);
+    // Merge keywords extracted from Oracle text with MTGJSON keywords via the
+    // shared `merge_extracted_keywords` authority (also used by the scenario test
+    // harness so the two pipelines cannot diverge). It reconciles parameterized
+    // keywords (e.g., Morph) and CR 113.2c multi-instance keywords (Cascade/Storm/
+    // Myriad/Exalted) — see the helper's doc comment for the per-class rules.
+    merge_extracted_keywords(&mut keywords, parsed.extracted_keywords);
 
     // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
@@ -5281,13 +5337,16 @@ fn build_oracle_face_inner(
         parse_warnings: parsed.parse_warnings,
         brawl_commander: false,
         is_commander: false,
+        is_oathbreaker: false,
         deck_copy_limit: None,
         metadata: Default::default(),
         rarities: Default::default(),
+        attraction_lights: vec![],
     };
 
     face.brawl_commander = compute_brawl_commander(mtgjson, &face);
     face.is_commander = compute_commander(mtgjson, &face);
+    face.is_oathbreaker = compute_oathbreaker(mtgjson, &face);
     // CR 100.2a / CR 903.5b: per-card deck-construction copy-limit override.
     // `face.oracle_text` retains reminder text + DCI prefix, so reminder-only
     // limits (Vazal, the Compleat's Megalegendary) are still discovered.
@@ -12804,6 +12863,249 @@ mod bloodthirst_synthesis_tests {
             1,
             "Bloodthirst X should synthesize exactly one dynamic replacement"
         );
+    }
+
+    /// Builds an MTGJSON-shaped `AtomicCard` for a card whose keyword line
+    /// prints cascade as repeated bare words, so the synthesis pipeline can be
+    /// exercised end-to-end. MTGJSON dedupes the keywords array to one "Cascade".
+    fn cascade_atomic(
+        name: &str,
+        type_line: &str,
+        subtypes: Vec<String>,
+        text: &str,
+    ) -> AtomicCard {
+        AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{8}{R}{G}".to_string()),
+            colors: vec!["G".to_string(), "R".to_string()],
+            color_identity: vec!["G".to_string(), "R".to_string(), "U".to_string()],
+            power: Some("7".to_string()),
+            toughness: Some("5".to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some(text.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some(type_line.to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes,
+            supertypes: Vec::new(),
+            keywords: Some(vec!["Cascade".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 10.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_id: None,
+                scryfall_oracle_id: None,
+            },
+            foreign_data: Vec::new(),
+        }
+    }
+
+    /// CR 702.85c / CR 702.40b: Maelstrom Wanderer prints "Cascade, cascade".
+    /// MTGJSON's deduped keywords array carries one "Cascade"; the synthesized
+    /// face must carry exactly two so the runtime fires two cascade triggers.
+    #[test]
+    fn synthesize_face_recovers_maelstrom_wanderer_two_cascades() {
+        let mtgjson = cascade_atomic(
+            "Maelstrom Wanderer",
+            "Creature — Elemental",
+            vec!["Elemental".to_string()],
+            "Creatures you control have haste.\nCascade, cascade (When you cast this spell, exile cards from the top of your library until you exile a nonland card that costs less. You may cast it without paying its mana cost. Put the exiled cards on the bottom of your library in a random order.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        let cascades: Vec<&Keyword> = face
+            .keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::Cascade))
+            .collect();
+        assert_eq!(
+            cascades.len(),
+            2,
+            "Maelstrom Wanderer must synthesize two Cascade instances"
+        );
+        // Pin ordering/leak behavior: filtering the face keywords to Cascade must
+        // yield exactly [Cascade, Cascade] — no foreign keyword masquerades as
+        // Cascade and both printed instances survive.
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|k| matches!(k, Keyword::Cascade))
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![Keyword::Cascade, Keyword::Cascade],
+        );
+    }
+
+    /// CR 702.85c: Apex Devastator prints cascade four times; the synthesized
+    /// face must carry exactly four instances.
+    #[test]
+    fn synthesize_face_recovers_apex_devastator_four_cascades() {
+        let mtgjson = cascade_atomic(
+            "Apex Devastator",
+            "Creature — Hydra",
+            vec!["Hydra".to_string()],
+            "Cascade, cascade, cascade, cascade (When you cast this spell, exile cards from the top of your library until you exile a nonland card that costs less. You may cast it without paying its mana cost. Put the exiled cards on the bottom of your library in a random order.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|k| matches!(k, Keyword::Cascade))
+                .count(),
+            4,
+            "Apex Devastator must synthesize four Cascade instances"
+        );
+    }
+
+    /// CR 702.85c regression guard: Bloodbraid Elf prints a single cascade and
+    /// must net exactly one instance after synthesis — recovery must not double.
+    #[test]
+    fn synthesize_face_single_cascade_yields_one_instance() {
+        let mtgjson = cascade_atomic(
+            "Bloodbraid Elf",
+            "Creature — Elf Berserker",
+            vec!["Elf".to_string(), "Berserker".to_string()],
+            "Haste\nCascade (When you cast this spell, exile cards from the top of your library until you exile a nonland card that costs less. You may cast it without paying its mana cost. Put the exiled cards on the bottom of your library in a random order.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|k| matches!(k, Keyword::Cascade))
+                .count(),
+            1,
+            "Bloodbraid Elf must synthesize exactly one Cascade instance"
+        );
+    }
+
+    /// Builds an MTGJSON-shaped `AtomicCard` for a creature whose keyword line
+    /// prints myriad as repeated bare words. MTGJSON dedupes the keywords array
+    /// to one "Myriad"; the synthesis pipeline must recover the printed count.
+    fn myriad_atomic(name: &str, subtypes: Vec<String>, text: &str) -> AtomicCard {
+        AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{4}{G}".to_string()),
+            colors: vec!["G".to_string()],
+            color_identity: vec!["G".to_string()],
+            power: Some("3".to_string()),
+            toughness: Some("3".to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some(text.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some("Creature — Squirrel".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes,
+            supertypes: Vec::new(),
+            keywords: Some(vec!["Myriad".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 5.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_id: None,
+                scryfall_oracle_id: None,
+            },
+            foreign_data: Vec::new(),
+        }
+    }
+
+    /// CR 702.116b: Scurry of Squirrels prints "Myriad, myriad". MTGJSON's
+    /// deduped keywords array carries one "Myriad"; the synthesized face must
+    /// carry exactly two so `synthesize_all` installs two separate Myriad attack
+    /// triggers (CR 702.116a), one per printed instance. Oracle text is verbatim
+    /// from `data/card-data.json`.
+    #[test]
+    fn synthesize_face_recovers_scurry_of_squirrels_two_myriads() {
+        let mtgjson = myriad_atomic(
+            "Scurry of Squirrels",
+            vec!["Squirrel".to_string()],
+            "Myriad, myriad (Whenever this creature attacks, for each opponent other than defending player, you may create a token that's a copy of this creature that's tapped and attacking that player or a planeswalker they control. Then do it again. Exile the tokens at end of combat.)\nWhenever this creature deals combat damage to a player, put a +1/+1 counter on target creature you control.",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        // CR 113.2c / CR 702.116b: both printed Myriad instances survive the
+        // card-data merge instead of collapsing to one.
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|k| matches!(k, Keyword::Myriad))
+                .count(),
+            2,
+            "Scurry of Squirrels must synthesize two Myriad instances"
+        );
+
+        // CR 702.116a/b: synthesize_all installs one Myriad attack trigger per
+        // surviving instance, so the face must carry exactly two.
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_myriad_attack_trigger(t))
+                .count(),
+            2,
+            "two Myriad instances must yield two separate Myriad attack triggers"
+        );
+    }
+
+    /// CR 113.2c: the shared merge authority must preserve the parser-recovered
+    /// multiplicity of an instances-function-separately keyword, dropping the
+    /// single MTGJSON copy in favor of the two parser-extracted occurrences.
+    #[test]
+    fn merge_extracted_keywords_preserves_multi_instance_count() {
+        let mut base = vec![Keyword::Myriad];
+        merge_extracted_keywords(&mut base, vec![Keyword::Myriad, Keyword::Myriad]);
+        assert_eq!(
+            base.iter().filter(|k| matches!(k, Keyword::Myriad)).count(),
+            2,
+            "two recovered Myriad occurrences must net exactly two after merge"
+        );
+    }
+
+    /// The shared merge authority replaces a parameterized MTGJSON default with
+    /// the parser-extracted value of the same `kind()` (Bloodthirst path).
+    #[test]
+    fn merge_extracted_keywords_replaces_parameterized_default() {
+        let mut base = vec![Keyword::Bloodthirst(BloodthirstValue::Fixed(0))];
+        merge_extracted_keywords(
+            &mut base,
+            vec![Keyword::Bloodthirst(BloodthirstValue::Fixed(3))],
+        );
+        assert_eq!(
+            base,
+            vec![Keyword::Bloodthirst(BloodthirstValue::Fixed(3))],
+            "parser-extracted Bloodthirst(3) must replace the MTGJSON default"
+        );
+    }
+
+    /// Non-multiplicity parameterized keywords must be replaced, not duplicated,
+    /// when the scenario harness supplies the same keyword as both the base hint
+    /// and parser-extracted Oracle keyword.
+    #[test]
+    fn merge_extracted_keywords_does_not_duplicate_equal_parameterized_keyword() {
+        let squad_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        };
+        let mut base = vec![Keyword::Squad(squad_cost.clone())];
+        merge_extracted_keywords(&mut base, vec![Keyword::Squad(squad_cost.clone())]);
+
+        assert_eq!(base, vec![Keyword::Squad(squad_cost)]);
     }
 
     /// Re-running synthesis must not duplicate the replacement.

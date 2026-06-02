@@ -168,6 +168,18 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     if card_face.card_type.subtypes.iter().any(|s| s == "Room") {
         obj.room_unlocks.get_or_insert_with(Default::default);
     }
+    if card_face
+        .card_type
+        .subtypes
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("Attraction"))
+    {
+        obj.attraction_lights = if card_face.attraction_lights.is_empty() {
+            super::attractions::default_attraction_lights()
+        } else {
+            card_face.attraction_lights.clone()
+        };
+    }
 }
 
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
@@ -749,6 +761,8 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
@@ -1216,9 +1230,11 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            is_oathbreaker: false,
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
+            attraction_lights: vec![],
         }
     }
 

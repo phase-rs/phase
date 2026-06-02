@@ -58,6 +58,30 @@ pub(crate) fn when_kind_to_condition(kind: WhenKind) -> CastingProhibitionCondit
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AloneCombatRestriction {
+    Attack,
+    Block,
+    AttackOrBlock,
+}
+
+pub(crate) fn parse_alone_combat_restriction(
+    input: &str,
+) -> OracleResult<'_, AloneCombatRestriction> {
+    terminated(
+        alt((
+            value(
+                AloneCombatRestriction::AttackOrBlock,
+                tag("can't attack or block alone"),
+            ),
+            value(AloneCombatRestriction::Attack, tag("can't attack alone")),
+            value(AloneCombatRestriction::Block, tag("can't block alone")),
+        )),
+        opt(tag(".")),
+    )
+    .parse(input)
+}
+
 /// Try matching a nom `tag()` against the lowercase text, returning the remaining original-case
 /// text on success. This bridges nom's exact-match combinators with the TextPair dual-string
 /// pattern used throughout the parser.
@@ -482,6 +506,23 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
                 .affected(TargetFilter::SelfRef)
                 .description(stripped.to_string()),
         ];
+    }
+
+    // CR 506.5 + CR 508.1a + CR 509.1b: "can't attack or block alone" (Mogg
+    // Flunkies) imposes both the attack-alone and block-alone restrictions.
+    if let Some((_, AloneCombatRestriction::AttackOrBlock, rest)) =
+        nom_primitives::scan_preceded(&lower, parse_alone_combat_restriction)
+    {
+        if rest.trim().is_empty() {
+            return vec![
+                StaticDefinition::new(StaticMode::CantAttackAlone)
+                    .affected(TargetFilter::SelfRef)
+                    .description(stripped.to_string()),
+                StaticDefinition::new(StaticMode::CantBlockAlone)
+                    .affected(TargetFilter::SelfRef)
+                    .description(stripped.to_string()),
+            ];
+        }
     }
 
     // CR 119.7 + CR 119.8: "[scope] life total can't change" — bidirectional
@@ -1791,6 +1832,9 @@ pub(crate) fn strip_rule_static_subject<'a>(
         " blocks each turn if able",
         " block each turn if able",
         " can block only creatures with flying",
+        // CR 509.1b: Evasion — "<subject> can't be blocked except by <filter>".
+        " can't be blocked except by ",
+        " can\u{2019}t be blocked except by ",
         " has shroud",
         " have shroud",
         " has hexproof",
@@ -1834,6 +1878,19 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
 
     if matches!(tp.lower, "players" | "each player") {
         return Some(TargetFilter::Player);
+    }
+
+    // CR 205.3 + CR 604.1: "All/Each <subtype>" universal-quantifier subject for a
+    // rule-static grant (e.g. "All Slivers have shroud"). Strip the quantifier and
+    // delegate to parse_type_phrase (mirroring parse_target), so the subtype filter
+    // is recognized and the line lands as a top-level continuous static (CR 604.1)
+    // instead of a spell-resolution GenericEffect. Runs AFTER the player-scope match
+    // above so it never shadows "all players"/"each player".
+    if let Some(rest_tp) = nom_tag_tp(&tp, "all ").or_else(|| nom_tag_tp(&tp, "each ")) {
+        let (filter, rest) = parse_type_phrase(rest_tp.original);
+        if rest.trim().is_empty() {
+            return Some(filter);
+        }
     }
 
     if tp.lower == "enchanted creature" {

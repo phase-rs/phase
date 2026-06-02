@@ -87,12 +87,15 @@ describe("DialogHost", () => {
     expect(wrapper?.className ?? "").not.toMatch(/fixed/);
   });
 
-  it("stays click-through (no viewport-blocking wrapper) during convoke mana payment (regression)", () => {
-    // CR 702.51a: a convoke spell enters `ManaPayment` with `convoke_mode` set,
-    // and the caster taps creatures on the battlefield to pay. If the host
-    // wrapped children in `fixed inset-0 z-40`, that overlay would swallow the
-    // board clicks and the player could not tap convoke creatures — the
-    // reported bug was "creatures are highlighted but clicking does nothing".
+  it("anchors convoke mana payment at z-40 but stays click-through via pointer-events (regression)", () => {
+    // CR 702.51a / CR 702.126a: a convoke/improvise spell enters `ManaPayment`
+    // with `convoke_mode` set, and the caster taps creatures/artifacts on the
+    // battlefield to pay. The host MUST anchor the panel in its `fixed inset-0
+    // z-40` stacking context (otherwise framer-motion's transform demotes an
+    // un-anchored host to a z-auto context that paints BELOW the board's z-10
+    // grid, burying the pay panel behind the HUD/hand). Click-through is
+    // achieved with `pointer-events: none` so board taps still reach the
+    // creatures/artifacts; the panel's own controls re-enable events.
     setWaitingFor({
       type: "ManaPayment",
       data: { player: 0, convoke_mode: "Convoke" },
@@ -103,7 +106,9 @@ describe("DialogHost", () => {
       </DialogHost>,
     );
     const wrapper = container.firstElementChild as HTMLElement | null;
-    expect(wrapper?.className ?? "").not.toMatch(/fixed/);
+    expect(wrapper?.className ?? "").toMatch(/fixed/);
+    expect(wrapper?.className ?? "").toMatch(/z-40/);
+    expect(wrapper?.style.pointerEvents).toBe("none");
   });
 
   it("keeps the viewport wrapper for plain mana payment without convoke", () => {

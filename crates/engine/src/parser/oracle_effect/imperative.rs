@@ -1,6 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::space1;
 use nom::combinator::{all_consuming, eof, map, not, opt, rest, value};
 use nom::error::ParseError;
 use nom::sequence::{preceded, terminated};
@@ -17,7 +18,7 @@ use super::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_nom::bridge::nom_on_lower;
+use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
@@ -5443,10 +5444,29 @@ pub(super) fn parse_imperative_family_ast(
             .ok()
             .map(|(_, ast)| ast)
         }
-        // CR 706 + CR 706.2: "roll a d20" with an optional "and add/subtract X"
-        // modifier suffix attached as a typed `DieRollModifier`.
-        "roll" | "rolls" => try_parse_roll_die_with_modifier(lower)
-            .map(|(sides, modifier)| ImperativeFamilyAst::RollDie { sides, modifier }),
+        // CR 701.52: "roll to visit your Attractions" (not a generic d20/d6 roll).
+        "roll" | "rolls" => {
+            if nom_parse_lower(lower, |input| {
+                value(
+                    ImperativeFamilyAst::RollToVisitAttractions,
+                    (
+                        alt((tag("roll"), tag("rolls"))),
+                        tag(" to visit your attractions"),
+                        eof,
+                    ),
+                )
+                .parse(input)
+            })
+            .is_some()
+            {
+                Some(ImperativeFamilyAst::RollToVisitAttractions)
+            } else {
+                try_parse_roll_die_with_modifier(lower)
+                    .map(|(sides, modifier)| ImperativeFamilyAst::RollDie { sides, modifier })
+            }
+        }
+        // CR 701.51b: "open an Attraction" / "open two Attractions"
+        "open" | "opens" => parse_open_attraction_imperative(lower),
         // CR 725.1: "become the monarch"
         "become" | "becomes" => {
             if lower == "become the monarch" || lower == "becomes the monarch" {
@@ -6101,6 +6121,42 @@ fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
     Some((sides, after_word))
 }
 
+/// CR 701.51b: "open N attraction(s)" after the open/opens prefix.
+fn parse_open_attractions_count_imperative(input: &str) -> OracleResult<'_, ImperativeFamilyAst> {
+    let (rest, count) = nom_primitives::parse_number(input)?;
+    let (rest, _) = space1(rest)?;
+    let (rest, _) = alt((tag("attractions"), tag("attraction"))).parse(rest)?;
+    Ok((rest, ImperativeFamilyAst::OpenAttractions { count }))
+}
+
+/// CR 701.51b: "open an Attraction" / "open two Attractions".
+fn parse_open_attraction_imperative(lower: &str) -> Option<ImperativeFamilyAst> {
+    nom_parse_lower(lower, |input| {
+        map(
+            (
+                alt((tag("open "), tag("opens "))),
+                alt((
+                    value(
+                        ImperativeFamilyAst::OpenAttractions { count: 1 },
+                        tag("an attraction"),
+                    ),
+                    value(
+                        ImperativeFamilyAst::OpenAttractions { count: 1 },
+                        tag("a attraction"),
+                    ),
+                    parse_open_attractions_count_imperative,
+                )),
+                opt(nom::bytes::complete::take_while(|c: char| {
+                    c == '.' || c == ','
+                })),
+                eof,
+            ),
+            |(_, ast, _, _)| ast,
+        )
+        .parse(input)
+    })
+}
+
 /// CR 706 + CR 706.2: Try to parse a full `"roll a d{N}"` clause, including
 /// an optional trailing `" and (add|subtract) {quantity}"` modifier that the
 /// resolver applies to the natural roll before result-table lookup.
@@ -6447,6 +6503,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             dungeon: crate::game::dungeon::DungeonId::Undercity,
         },
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
+        ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
+        ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
         // CR 701.56a: Time travel.
         ImperativeFamilyAst::TimeTravel => Effect::TimeTravel,

@@ -3753,6 +3753,12 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .and_then(|obj| obj.class_level)
             .is_some_and(|current| current >= *level),
+        TriggerCondition::AttractionVisitRoll { min, max } => trigger_event
+            .and_then(|e| match e {
+                GameEvent::AttractionVisited { roll, .. } => Some(*roll),
+                _ => None,
+            })
+            .is_some_and(|roll| roll >= *min && roll <= *max),
         // CR 601.2: "if you cast it" — true when the entering/affected object was
         // cast as a spell (regardless of origin zone). For ETB-based triggers like
         // Light-Paws, Emperor's Voice ("Whenever an Aura you control enters, if you
