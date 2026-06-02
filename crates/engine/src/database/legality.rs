@@ -24,6 +24,7 @@ pub enum LegalityFormat {
     Timeless,
     PauperCommander,
     DuelCommander,
+    Oathbreaker,
 }
 
 impl LegalityFormat {
@@ -60,6 +61,7 @@ impl LegalityFormat {
             Self::Timeless => "timeless",
             Self::PauperCommander => "paupercommander",
             Self::DuelCommander => "duel",
+            Self::Oathbreaker => "oathbreaker",
         }
     }
 
@@ -79,6 +81,7 @@ impl LegalityFormat {
             "timeless" => Some(Self::Timeless),
             "paupercommander" => Some(Self::PauperCommander),
             "duel" => Some(Self::DuelCommander),
+            "oathbreaker" => Some(Self::Oathbreaker),
             _ => None,
         }
     }
