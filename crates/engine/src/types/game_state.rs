@@ -2906,7 +2906,7 @@ pub enum WaitingFor {
         current_slot: usize,
     },
     /// CR 510.1c: Attacker with multiple blockers — controller divides damage as they choose.
-    /// CR 702.19b/c: Trample requires lethal to each blocker before excess to defending player.
+    /// CR 702.19b/c: Trample requires lethal to each blocker before assigning excess.
     AssignCombatDamage {
         player: PlayerId,
         attacker_id: ObjectId,
@@ -3037,12 +3037,12 @@ pub enum CombatDamageAssignmentMode {
 }
 
 /// CR 510.1c: A blocker with its lethal damage threshold for UI display.
-/// `lethal_minimum` is only enforced as a hard constraint for trample (CR 702.19b).
+/// `lethal_minimum` is only enforced as a hard constraint before trample excess (CR 702.19b).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageSlot {
     pub blocker_id: ObjectId,
     /// Lethal damage threshold. CR 702.2c: With deathtouch, lethal = 1.
-    /// Informational for non-trample; enforced for trample (CR 702.19b).
+    /// Informational for non-trample; enforced before trample excess (CR 702.19b).
     pub lethal_minimum: u32,
 }
 

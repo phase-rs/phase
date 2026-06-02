@@ -27,7 +27,7 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
   const total = blockerTotal + trampleDamage + controllerDamage;
   const remaining = data.total_damage - total;
   // CR 702.19b: Lethal-to-all-blockers is a precondition only for assigning
-  // excess to the defending player/planeswalker — not an unconditional constraint.
+  // excess to the defending player/planeswalker, not an unconditional constraint.
   // When trampleDamage and controllerDamage are both 0 the player is freely
   // dividing all damage among blockers, so any split is legal.
   const trampleLethalMet = data.trample == null ||

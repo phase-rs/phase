@@ -3059,7 +3059,7 @@ mod tests {
             resolve_combat_damage(&mut state, &mut events).expect("2 blockers must always prompt");
         state.waiting_for = waiting;
 
-        // Assign 2 to each blocker, 0 trample through — must succeed even though
+        // Assign 2 to each blocker, 0 trample through; this must succeed even though
         // neither blocker gets lethal (CR 702.19b: lethal gating only applies when
         // excess is being sent to the player/PW).
         crate::game::engine::apply_as_current(
