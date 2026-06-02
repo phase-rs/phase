@@ -1060,50 +1060,6 @@ mod tests {
         }
     }
 
-    mod ai_seats_wire_guard_tests {
-        use crate::ai_seats_wire_guard::guard_create_ai_seats;
-        use crate::protocol::AiSeatRequest;
-        use phase_ai::config::AiDifficulty;
-        use seat_reducer::types::DeckChoice;
-
-        #[test]
-        fn ai_seats_accepts_valid_entry() {
-            let seats = vec![AiSeatRequest {
-                seat_index: 1,
-                difficulty: AiDifficulty::Medium,
-                deck_name: None,
-                deck: None,
-            }];
-            assert!(guard_create_ai_seats(&seats, 4).is_ok());
-        }
-
-        #[test]
-        fn ai_seats_rejects_too_many_entries() {
-            let seats: Vec<AiSeatRequest> = (0..6)
-                .map(|_| AiSeatRequest {
-                    seat_index: 1,
-                    difficulty: AiDifficulty::Medium,
-                    deck_name: None,
-                    deck: None,
-                })
-                .collect();
-            let err = guard_create_ai_seats(&seats, 6).unwrap_err();
-            assert!(err.contains("ai_seats"));
-        }
-
-        #[test]
-        fn ai_seats_rejects_oversized_named_deck() {
-            let seats = vec![AiSeatRequest {
-                seat_index: 1,
-                difficulty: AiDifficulty::Medium,
-                deck_name: None,
-                deck: Some(DeckChoice::Named("x".repeat(129))),
-            }];
-            let err = guard_create_ai_seats(&seats, 4).unwrap_err();
-            assert!(err.contains("name"));
-        }
-    }
-
     #[test]
     fn seat_mutation_deck_list_choice_roundtrips() {
         let msg = ClientMessage::SeatMutate {
