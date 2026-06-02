@@ -10,8 +10,8 @@ use nom::Parser;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    Effect, LinkedExileScope, ManaContribution, ManaProduction, ManaSpendRestriction, QuantityExpr,
-    QuantityRef,
+    Comparator, Effect, LinkedExileScope, ManaContribution, ManaProduction, ManaSpendRestriction,
+    QuantityExpr, QuantityRef,
 };
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaRestriction, ManaSpellGrant};
@@ -1183,6 +1183,15 @@ pub(crate) fn parse_mana_spend_restriction(
         return Some((ManaSpendRestriction::SpellOnly, grants));
     }
 
+    // CR 106.6: "spells with mana value N or greater" / "a spell with mana
+    // value N or less" — parameterized over Comparator by the threshold suffix.
+    if let Some((comparator, value)) = parse_mana_value_threshold(rest) {
+        return Some((
+            ManaSpendRestriction::SpellWithManaValue { comparator, value },
+            grants,
+        ));
+    }
+
     if matches!(rest, "spells with flashback" | "a spell with flashback") {
         return Some((
             ManaSpendRestriction::SpellWithKeywordKind(KeywordKind::Flashback),
@@ -1240,6 +1249,57 @@ pub(crate) fn parse_mana_spend_restriction(
         Some(_) => None,
         None => Some((ManaSpendRestriction::SpellType(type_phrase), grants)),
     }
+}
+
+/// CR 106.6: Parse the "[spells|a spell] with mana value N [or greater|or
+/// more|or less]" tail of a spend restriction into a `(Comparator, value)`.
+/// Bare "mana value N" with no comparator suffix reads as exact (`EQ`).
+///
+/// This file's `nom_on_lower` returns `(value, remainder)`, so the consumed
+/// remainder is the second tuple element.
+fn parse_mana_value_threshold(rest: &str) -> Option<(Comparator, u32)> {
+    let rest_lower = rest.to_lowercase();
+    let (_, after_prefix) = nom_on_lower(rest, &rest_lower, |i| {
+        alt((
+            value((), tag("spells with mana value ")),
+            value((), tag("a spell with mana value ")),
+            value((), tag("spells with a mana value of ")),
+            value((), tag("a spell with a mana value of ")),
+        ))
+        .parse(i)
+    })?;
+    // parse_number consumes the leading integer N (returns u32).
+    let after_prefix_lower = after_prefix.to_lowercase();
+    let (value_n, after_num) = nom_on_lower(
+        after_prefix,
+        &after_prefix_lower,
+        nom_primitives::parse_number,
+    )?;
+    let after_num = after_num.trim();
+    let after_num_lower = after_num.to_lowercase();
+    // Threshold suffix → comparator. Empty/all-consumed remainder = exact (EQ).
+    let comparator = if after_num.is_empty() {
+        Comparator::EQ
+    } else if nom_on_lower(after_num, &after_num_lower, |i| {
+        all_consuming(alt((
+            value((), tag("or greater")),
+            value((), tag("or more")),
+        )))
+        .parse(i)
+    })
+    .is_some()
+    {
+        Comparator::GE
+    } else if nom_on_lower(after_num, &after_num_lower, |i| {
+        all_consuming(value((), tag("or less"))).parse(i)
+    })
+    .is_some()
+    {
+        Comparator::LE
+    } else {
+        return None;
+    };
+    Some((comparator, value_n))
 }
 
 /// CR 106.6: Parse a standalone "that spell can't be countered" clause.

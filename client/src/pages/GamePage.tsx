@@ -22,6 +22,8 @@ import { audioManager } from "../audio/AudioManager.ts";
 import { useAudioContext } from "../audio/useAudioContext.ts";
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
+import { DiceRollOverlay } from "../components/animation/DiceRollOverlay.tsx";
+import { flashStartingPlayerContest } from "../game/diceContest.ts";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
 import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
 import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
@@ -702,6 +704,30 @@ function GamePageContent({
   const isSandboxGame = useGameStore(
     (s) => s.gameState?.format_config?.allow_debug_actions === true,
   );
+
+  // CR 103.1: present the starting-player d20 contest once on game load. The
+  // store holds it as pure data; this presentation-layer effect drives the dice
+  // overlay with the engine's authoritative winner and clears the carrier. The
+  // identity-ref latch makes the consume idempotent under React StrictMode's
+  // double-invoke and after the clear (the re-run sees `null`).
+  const startingContest = useGameStore((s) => s.startingContest);
+  const consumedContestRef = useRef<typeof startingContest>(null);
+  useEffect(() => {
+    if (!startingContest || consumedContestRef.current === startingContest) return;
+    consumedContestRef.current = startingContest;
+    flashStartingPlayerContest(startingContest.events, startingContest.startingPlayer);
+    useGameStore.getState().clearStartingContest();
+  }, [startingContest]);
+  // CR 103.1 before CR 103.5: the starting-player contest must finish before the
+  // mulligan UI appears (the roll determines who's on the play, which precedes
+  // drawing opening hands). True from `initGame` setting the carrier through the
+  // dice overlay's full life — the store hands `startingContest` off to
+  // `uiStore.diceRoll` atomically, so there's no gap. Degrades to `false`
+  // immediately for instant speed and explicit play/draw (no contest).
+  const startingContestDiceActive = useUiStore(
+    (s) => s.diceRoll?.context === "startingPlayer",
+  );
+  const startingContestActive = startingContest !== null || startingContestDiceActive;
   const [showAiHand, setShowAiHand] = useState(false);
   const [showDebugBounds, setShowDebugBounds] = useState(false);
   const [viewingZone, setViewingZone] = useState<{
@@ -1322,6 +1348,7 @@ function GamePageContent({
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay containerRef={containerRef} />
       <TurnBanner />
+      <DiceRollOverlay />
 
       {/* Combat SVG overlays: blocker assignments + attack target arrows */}
       <BlockAssignmentLines />
@@ -1444,8 +1471,11 @@ function GamePageContent({
         )}
 
       {/* CR 103.5: Simultaneous mulligan — render this player's modal iff
-          they are in the pending set. Each player decides independently. */}
+          they are in the pending set. Each player decides independently.
+          Held back until the CR 103.1 starting-player contest finishes so the
+          dice aren't hidden behind this modal. */}
       {waitingFor?.type === "MulliganDecision" &&
+        !startingContestActive &&
         (() => {
           const entry = waitingFor.data.pending.find(
             (e) => e.player === playerId,
@@ -1462,6 +1492,7 @@ function GamePageContent({
         })()}
 
       {waitingFor?.type === "MulliganDecision" &&
+        !startingContestActive &&
         !waitingFor.data.pending.some((e) => e.player === playerId) && (
           <div className="fixed inset-0 z-50 flex items-center justify-center">
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />

@@ -199,6 +199,17 @@
   "turnBanner": {
     "turn": "Tura {{number}}"
   },
+  "diceRoll": {
+    "rollingForFirst": "Rzut o pierwszego gracza",
+    "versus": "VS",
+    "skip": "Dotknij, aby pominąć",
+    "continue": "Dotknij, aby kontynuować",
+    "you": "Ty",
+    "youPlayFirst": "Zaczynasz",
+    "playerPlaysFirst": "{{name}} zaczyna",
+    "heads": "Orzeł",
+    "tails": "Reszka"
+  },
   "chrome": {
     "back": "Wstecz",
     "settings": "Ustawienia",

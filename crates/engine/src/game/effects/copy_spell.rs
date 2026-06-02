@@ -79,6 +79,7 @@ pub fn resolve(
         {
             set_resolved_source_recursive(a, copy_id);
             a.context.additional_cost_paid = false;
+            a.context.alternative_mana_cost_paid = false;
             a.context.additional_cost_payment_count = 0;
             a.context.kickers_paid.clear();
         }

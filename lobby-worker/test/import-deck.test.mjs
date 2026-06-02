@@ -64,6 +64,14 @@ test("protocol-less URLs are accepted (https:// is auto-prepended)", async () =>
   assert.equal(resp.status, 200);
 });
 
+test("pasted URL wrappers/trailing punctuation are normalized before source parse", async () => {
+  mockUpstream({ name: "X", cards: [{ quantity: 1, card: { oracleCard: { name: "Foo" } } }] });
+  const resp = await call("<https://archidekt.com/decks/123456/my_deck.>");
+  assert.equal(resp.status, 200);
+  const resp2 = await call("<https://archidekt.com/decks/123456/my_deck>.");
+  assert.equal(resp2.status, 200);
+});
+
 test("Moxfield: upstream returns non-JSON body → 502 upstream_unavailable (not 504)", async () => {
   // Maintenance pages and HTML login walls are 2xx + non-JSON. Must be
   // distinct from a network timeout (504) so the user sees a useful error.

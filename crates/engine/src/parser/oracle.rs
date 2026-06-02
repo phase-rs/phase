@@ -10945,6 +10945,63 @@ mod tests {
     }
 
     #[test]
+    fn mana_spend_restriction_mana_value_ge() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with mana value 5 or greater",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithManaValue {
+                comparator: Comparator::GE,
+                value: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_mana_value_le() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with mana value 3 or less",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithManaValue {
+                comparator: Comparator::LE,
+                value: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_mana_value_singular_spell_ge() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast a spell with mana value 4 or greater",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithManaValue {
+                comparator: Comparator::GE,
+                value: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_mana_value_rejects_trailing_text() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with mana value 5 or greater nonsense",
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
     fn mana_spend_restriction_chosen_type_cant_be_countered() {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
         use crate::types::mana::ManaSpellGrant;

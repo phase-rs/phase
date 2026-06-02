@@ -2,9 +2,36 @@ import { create } from "zustand";
 import type {
   GameAction,
   ObjectId,
+  PlayerId,
 } from "../adapter/types";
-import { TURN_BANNER_DURATION_MS } from "../animation/types";
+import { DICE_ROLL_DURATION_MS, TURN_BANNER_DURATION_MS } from "../animation/types";
 import { usePreferencesStore } from "./preferencesStore";
+
+/**
+ * A dice-roll / coin-flip moment to animate, surfaced from engine-authored
+ * `DieRolled` / `CoinFlipped` events. `context` is supplied by the delivering
+ * code path (the starting-player contest hand-off vs. an in-game roll), never
+ * inferred from event ordering. The engine owns the result; this is display.
+ */
+export type DiceRollPayload =
+  | {
+      kind: "die";
+      /** d-sides (e.g. 20 for the first-player contest, dN for card rolls). */
+      sides: number;
+      /** One entry per physical die shown — one per player for the contest. */
+      rolls: { playerId: PlayerId; value: number }[];
+      context: "startingPlayer" | "ability";
+      /** Starting-player contest: the high roller who takes the first turn. */
+      winner?: PlayerId;
+    }
+  | {
+      kind: "coin";
+      playerId: PlayerId;
+      /** The engine `won` flag (relative to the flipping player); the overlay
+       *  maps it to a heads/tails face (presentation choice, not engine data). */
+      won: boolean;
+      context: "startingPlayer" | "ability";
+    };
 
 // Guard against spurious mouseleave events caused by Framer Motion layout
 // recalculations or pointer-events-auto overlays stealing focus from the card.
@@ -18,6 +45,51 @@ let pendingShowTimer: ReturnType<typeof setTimeout> | null = null;
 let lastPointer = { x: 0, y: 0 };
 if (typeof window !== "undefined") {
   window.addEventListener("pointermove", (e) => { lastPointer = { x: e.clientX, y: e.clientY }; }, { passive: true });
+}
+
+// Serial FIFO for dice/coin overlays. Full-screen "moment" overlays are mutually
+// exclusive (you can't show two rolls at once), so simultaneous/back-to-back
+// rolls play one after another rather than clobbering. `diceRoll` is the active
+// payload; `diceRollQueue` holds the pending ones. Distinct from the board-event
+// step queue (animationStore) — that coordinates spatial per-object effects.
+let diceAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
+
+// CR 103.1: the starting-player contest determines who's on the play — a moment
+// the player should acknowledge, not one that flashes by. It holds on screen
+// until the player dismisses it (backdrop tap / Escape, both via `skipDiceRoll`).
+// In-game ability rolls (planar die, "roll a dN") keep their timer so a run of
+// them advances hands-free. Keyed on the payload's own `context`, so a queue
+// that mixes kinds is handled correctly whatever the order.
+function autoAdvances(payload: DiceRollPayload): boolean {
+  return payload.context !== "startingPlayer";
+}
+
+// Arm (or deliberately withhold) the auto-advance timer for the now-active roll.
+// Single authority for the timer lifecycle: both the initial show (`flashDiceRoll`)
+// and each FIFO step (`advanceDiceQueue`) route through here so the
+// hold-for-input rule is applied in exactly one place.
+function scheduleDiceAdvance(payload: DiceRollPayload): void {
+  if (diceAdvanceTimer) {
+    clearTimeout(diceAdvanceTimer);
+    diceAdvanceTimer = null;
+  }
+  if (!autoAdvances(payload)) return;
+  // Re-read speed each step so a live Animation Speed change (incl. switching to
+  // instant) takes effect for the remaining queued rolls.
+  const speed = usePreferencesStore.getState().animationSpeedMultiplier;
+  diceAdvanceTimer = setTimeout(advanceDiceQueue, DICE_ROLL_DURATION_MS * Math.max(speed, 0));
+}
+
+function advanceDiceQueue(): void {
+  const queue = useUiStore.getState().diceRollQueue;
+  if (queue.length === 0) {
+    useUiStore.setState({ diceRoll: null });
+    diceAdvanceTimer = null;
+    return;
+  }
+  const next = queue[0];
+  useUiStore.setState({ diceRoll: next, diceRollQueue: queue.slice(1) });
+  scheduleDiceAdvance(next);
 }
 
 interface UiStoreState {
@@ -42,6 +114,12 @@ interface UiStoreState {
   showTurnBanner: boolean;
   turnBannerText: string;
   turnBannerNumber: number | null;
+  /** Active dice-roll / coin-flip overlay payload, or null when idle. Set by
+   *  `flashDiceRoll`, auto-advanced through `diceRollQueue`, then cleared. */
+  diceRoll: DiceRollPayload | null;
+  /** Pending dice/coin overlays behind the active one. Simultaneous or
+   *  back-to-back rolls play serially instead of clobbering. */
+  diceRollQueue: DiceRollPayload[];
   focusedOpponent: number | null;
   pendingAbilityChoice: { objectId: ObjectId; actions: GameAction[] } | null;
   /** When non-null, the AttachmentsDialog is open showing every Aura
@@ -99,6 +177,15 @@ interface UiStoreActions {
   setPreviewSticky: (sticky: boolean) => void;
   setDragging: (dragging: boolean) => void;
   flashTurnBanner: (text: string, turnNumber: number) => void;
+  /** Show the dice-roll / coin-flip overlay for the engine's already-known
+   *  result. No-ops when animation speed is "instant" (0). */
+  flashDiceRoll: (payload: DiceRollPayload) => void;
+  /** Clear the active dice overlay, pending queue, and advance timer. Called on
+   *  DiceRollOverlay unmount so rolls can't leak across games. */
+  resetDiceRoll: () => void;
+  /** Dismiss the current dice/coin overlay immediately (user tap-to-skip),
+   *  advancing to the next queued roll if any. */
+  skipDiceRoll: () => void;
   setFocusedOpponent: (id: number | null) => void;
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
   setEnchantmentsDialogPlayer: (id: number | null) => void;
@@ -141,6 +228,8 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   showTurnBanner: false,
   turnBannerText: "",
   turnBannerNumber: null,
+  diceRoll: null,
+  diceRollQueue: [],
   focusedOpponent: null,
   pendingAbilityChoice: null,
   enchantmentsDialogPlayer: null,
@@ -344,6 +433,44 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     const duration = TURN_BANNER_DURATION_MS * speed * banner;
     set({ showTurnBanner: true, turnBannerText: text, turnBannerNumber: turnNumber });
     setTimeout(() => set({ showTurnBanner: false }), duration);
+  },
+  flashDiceRoll: (payload) => {
+    // Instant speed (0) skips the overlay entirely. When a roll is already
+    // showing, queue this one so simultaneous/back-to-back rolls play serially
+    // instead of clobbering. `scheduleDiceAdvance` owns how long the active roll
+    // stays up: ability rolls auto-advance on the speed-scaled timer (the 3D
+    // die's tumble+settle scales by the same `speed`, so it settles before the
+    // overlay advances); the starting-player contest holds for player input.
+    const speed = usePreferencesStore.getState().animationSpeedMultiplier;
+    if (speed <= 0) return;
+    if (get().diceRoll === null) {
+      set({ diceRoll: payload });
+      scheduleDiceAdvance(payload);
+    } else {
+      set({ diceRollQueue: [...get().diceRollQueue, payload] });
+    }
+  },
+  resetDiceRoll: () => {
+    // Clears the active overlay, the pending queue, AND the module-level timer.
+    // Called from DiceRollOverlay's unmount cleanup so an in-flight roll can't
+    // leak across games (the store is a module singleton that outlives the
+    // GamePage mount).
+    if (diceAdvanceTimer) {
+      clearTimeout(diceAdvanceTimer);
+      diceAdvanceTimer = null;
+    }
+    set({ diceRoll: null, diceRollQueue: [] });
+  },
+  skipDiceRoll: () => {
+    // User tap-to-skip: cancel the pending auto-advance and advance now, so the
+    // next queued roll plays immediately or the overlay clears. Reuses the same
+    // FIFO drain as the timer, so a skipped roll hands off to the next exactly
+    // as a timed one would (and the GamePage mulligan gate releases on schedule).
+    if (diceAdvanceTimer) {
+      clearTimeout(diceAdvanceTimer);
+      diceAdvanceTimer = null;
+    }
+    advanceDiceQueue();
   },
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),

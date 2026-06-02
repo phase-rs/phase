@@ -1295,6 +1295,13 @@ pub enum ManaSpendRestriction {
     SpellWithKeywordKind(KeywordKind),
     /// "Spend this mana only to cast spells with flashback from a graveyard."
     SpellWithKeywordKindFromZone { kind: KeywordKind, zone: Zone },
+    /// CR 106.6: "Spend this mana only to cast spells with mana value N or
+    /// greater" (or "or less"). Parameterized over [`Comparator`] so a single
+    /// variant covers every mana-value threshold reading rather than
+    /// proliferating per-threshold siblings ("parameterize, don't proliferate").
+    /// `value` is the printed threshold N; `comparator` applies
+    /// `spell_mana_value <cmp> value`.
+    SpellWithManaValue { comparator: Comparator, value: u32 },
 }
 
 /// Duration for temporary effects.
@@ -1461,6 +1468,17 @@ pub enum CastingPermission {
         /// caster's own zones, so owner == grantee anyway).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         granted_to: Option<PlayerId>,
+        /// CR 608.2g: When `Some(...)`, this permission was granted to cast a
+        /// Cascade/Discover hit *during resolution* of the source spell. It
+        /// carries the rejection-cleanup state (exiled misses + where the hit
+        /// goes if the cast-time MV check fails). `None` for all standing
+        /// permissions (Airbending, Suspend, Maralen, Beseech, etc.) which are
+        /// cast later via a normal `CastSpell` and never need resolution-time
+        /// cleanup. `resolution_cleanup.is_some()` is the discriminator that
+        /// distinguishes a cast-during-resolution permission from a plain
+        /// `ManaValue`-constrained standing permission at finalize time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution_cleanup: Option<ResolutionCastCleanup>,
     },
     /// CR 400.7i: Play from exile until duration expires (impulse draw).
     /// Building block for "exile top N, choose one, you may play it this turn" patterns.
@@ -1591,26 +1609,38 @@ pub fn is_default_grantee(g: &PermissionGrantee) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum CastPermissionConstraint {
-    /// CR 702.85a: Cascade — "You may cast that card without paying its mana
-    /// cost if the resulting spell's mana value is less than this spell's
-    /// mana value." The resulting mana value is only determined after X,
-    /// Kicker, and similar choices, so this check must run at cast
-    /// finalization, not at offer time.
-    ///
-    /// `exiled_misses` is rejection-cleanup state: when the cast-time check
-    /// fails, the original `WaitingFor::CastOffer` (Cascade) has already been
-    /// cleared, so the misses ride inside the permission so the bottom-shuffle
-    /// step can still reach them.
-    CascadeResultingMvBelow {
-        source_mv: u32,
-        exiled_misses: Vec<super::identifiers::ObjectId>,
-    },
     /// CR 202.3 + CR 601.2e: The spell's resulting mana value must satisfy
     /// this predicate for the cast permission to apply.
     ManaValue {
         comparator: Comparator,
         value: QuantityExpr,
     },
+}
+
+/// CR 608.2g: Rejection-cleanup state carried by a cast-during-resolution
+/// `ExileWithAltCost` permission (Cascade / Discover). When the cast-time
+/// resulting-mana-value check fails at finalization, the source spell's
+/// `WaitingFor::CastOffer` has already been consumed, so the misses ride
+/// inside the permission and the engine still knows where the rejected hit
+/// goes (`reject_action`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolutionCastCleanup {
+    /// Cards exiled during the dig that were not the hit; they go to the
+    /// bottom of the library in a random order on resolution completion.
+    pub exiled_misses: Vec<super::identifiers::ObjectId>,
+    /// Where the hit goes if the player declines or the cast-time MV check
+    /// rejects the cast.
+    pub reject_action: ResolutionMvRejectAction,
+}
+
+/// CR 608.2g: Disposition of a Cascade/Discover hit that is not cast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ResolutionMvRejectAction {
+    /// CR 702.85a: cascade — hit joins misses on the bottom in random order.
+    BottomWithMisses,
+    /// CR 701.57a: discover — hit goes to its owner's hand; misses to bottom.
+    ToHand,
 }
 
 /// When a delayed triggered ability fires (CR 603.7).
@@ -2988,6 +3018,11 @@ pub enum QuantityRef {
     /// Only valid during sub-ability chain resolution; returns 0 outside that context.
     /// The caller (token resolver) is responsible for consuming the tracked set after use.
     TrackedSetSize,
+    /// CR 608.2c + CR 400.7: Count of members of the most recent tracked set that
+    /// additionally satisfy the inner filter. Used for "for each nontoken creature
+    /// you controlled that was destroyed this way" patterns where the tracked set
+    /// holds all affected objects but only a filtered subset is relevant.
+    FilteredTrackedSetSize { filter: Box<TargetFilter> },
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the immediately
     /// preceding `Effect::ChangeZoneAll` resolution. Read by Deadly Cover-Up's
     /// "draws a card for each card exiled from their hand this way." The counter
@@ -9240,6 +9275,10 @@ pub enum AbilityCondition {
     /// the parent effect when the additional cost was paid.
     /// The resolver swaps the override sub's effect in place of the parent before resolution.
     AdditionalCostPaidInstead,
+    /// CR 118.9 + CR 608.2c: "If the {COST} cost was paid" on spells with an
+    /// alternative *mana* cost (e.g. Baleful Mastery). Evaluates against
+    /// `SpellContext.alternative_mana_cost_paid`, not `additional_cost_paid`.
+    AlternativeManaCostPaid,
     /// CR 608.2c / CR 608.2d / CR 101.3: Gates a sub-ability on the outcome of
     /// a previous instruction in the same resolution. Parameterized so
     /// optional-decline and mandatory-impossible branches share one condition
@@ -9576,6 +9615,11 @@ pub struct SpellContext {
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,
+    /// CR 118.9: Whether the controller paid an alternative mana cost from
+    /// `casting_options` (not an optional/additional cost such as kicker or
+    /// pay-life alternatives).
+    #[serde(default)]
+    pub alternative_mana_cost_paid: bool,
     /// CR 601.2b/f/h: Number of non-kicker additional-cost payments declared
     /// while casting this spell. Used by keyword abilities such as Squad
     /// (CR 702.157a), whose repeatable payment count is not a kicker count.

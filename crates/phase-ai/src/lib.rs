@@ -7,6 +7,7 @@ pub mod combat_ai;
 pub mod combo;
 pub mod config;
 pub mod context;
+pub mod damage_reflection;
 pub mod decision_kind;
 pub mod deck_knowledge;
 pub mod deck_profile;
