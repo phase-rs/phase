@@ -3,6 +3,11 @@ set -euo pipefail
 
 WASM_OUT="client/src/wasm"
 PROFILE="${1:-wasm-dev}"
+# Honor CARGO_TARGET_DIR so callers (e.g. Tilt's dev loop) can relocate the
+# build tree off the shared target/ root. cargo build already respects the env
+# var; this mirrors it for the wasm-bindgen input path below. Defaults to
+# target/ for CI/deploy/setup callers that don't set it.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
 # Build a single WASM crate: compile, bind, optimize.
 build_wasm_crate() {
@@ -21,7 +26,7 @@ build_wasm_crate() {
     --target web \
     --out-dir "$WASM_OUT" \
     --out-name "$OUT_NAME" \
-    "target/wasm32-unknown-unknown/$PROFILE/${PACKAGE//-/_}.wasm"
+    "$TARGET_DIR/wasm32-unknown-unknown/$PROFILE/${PACKAGE//-/_}.wasm"
 
   if [ "$PROFILE" = "release" ] && command -v wasm-opt &> /dev/null; then
     echo "Optimizing $OUT_NAME..."

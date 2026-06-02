@@ -23,10 +23,16 @@ WASM_SRC = ['crates/engine-wasm/src/']
 DRAFT_CORE_SRC = ['crates/draft-core/src/']
 DRAFT_WASM_SRC = ['crates/draft-wasm/src/']
 
+# The wasm32 build gets its own target root too. Although it writes to a
+# distinct target/wasm32-unknown-unknown/ subdir, the cargo build lock is per
+# target ROOT, so without this it would still serialize behind native builds.
+# Its own root lets it compile in parallel — hence no resource_deps on clippy.
+# build-wasm.sh honors CARGO_TARGET_DIR (defaulting to target/ for CI/deploy
+# callers that don't set it), so only this dev-loop invocation is relocated.
 local_resource('wasm',
-    cmd = './scripts/build-wasm.sh',
+    cmd = 'CARGO_TARGET_DIR=target/wasm ./scripts/build-wasm.sh',
     deps = ENGINE_SRC + AI_SRC + WASM_SRC + DRAFT_CORE_SRC + DRAFT_WASM_SRC,
-    resource_deps = ['clippy'],
+    allow_parallel = True,
     labels = ['build'],
 )
 
@@ -94,9 +100,25 @@ local_resource('server',
 # Test
 # ---------------------------------------------------------------------------
 
+# Compile the native test harnesses once, then let the test runners fan out to
+# parallel execution. Without this, test-engine and test-ai each serialize on
+# the cargo build lock during their compile phase. `--no-run` builds the test
+# binaries without executing them; the downstream `cargo test -p ...` then finds
+# everything fingerprint-fresh and just runs (no recompile). Default features —
+# matching the test resources, which (unlike `cargo test-all`) do not enable
+# engine/proptest; a feature mismatch here would force a rebuild.
+local_resource('build-native',
+    cmd = 'cargo test -p engine -p phase-ai --no-run',
+    deps = ENGINE_SRC + AI_SRC,
+    allow_parallel = True,
+    auto_init = 'test' in enabled,
+    labels = ['test'],
+)
+
 local_resource('test-engine',
     cmd = 'cargo test -p engine',
     deps = ENGINE_SRC,
+    resource_deps = ['build-native'],
     allow_parallel = True,
     auto_init = 'test' in enabled,
     labels = ['test'],
@@ -105,6 +127,8 @@ local_resource('test-engine',
 local_resource('test-ai',
     cmd = 'cargo test -p phase-ai',
     deps = ENGINE_SRC + AI_SRC,
+    resource_deps = ['build-native'],
+    allow_parallel = True,
     auto_init = 'test' in enabled,
     labels = ['test'],
 )
@@ -123,8 +147,13 @@ local_resource('test-frontend',
 # Lint
 # ---------------------------------------------------------------------------
 
+# clippy builds into its own target root. The clippy driver writes different
+# fingerprints than `cargo build`/`cargo test` into the shared target/debug,
+# mutually invalidating artifacts (rebuild thrash). A separate CARGO_TARGET_DIR
+# also gives it its own build lock, so it never queues behind the native test
+# builds. Cost: a second debug tree on disk (reclaimed by cargo-sweep).
 local_resource('clippy',
-    cmd = 'cargo clippy --all-targets -- -D warnings',
+    cmd = 'CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets -- -D warnings',
     deps = ['crates/'],
     auto_init = 'lint' in enabled,
     allow_parallel = True,

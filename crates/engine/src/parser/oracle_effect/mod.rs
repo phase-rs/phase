@@ -9271,6 +9271,74 @@ fn has_typed_target(effect: &Effect) -> bool {
     )
 }
 
+/// CR 608.2c: An earlier clause whose target filter is a compound shape
+/// (`And` / `Or` wrapping a `Typed` branch) still introduces a typed object
+/// referent for a sibling bare-"it" anaphor.
+///
+/// The leaf `TargetFilter::Typed` check used by `has_typed_target` doesn't
+/// see compound shapes — so a chain whose originating clause selects a
+/// creature via `And[Typed(Creature), ExiledBySource]` (Emperor of Bones'
+/// "put a creature card exiled with this creature onto the battlefield")
+/// would fall back to `SelfRef` for the trailing "it gains haste. sacrifice
+/// it." This helper recognizes those compound filters.
+///
+/// Quantifier semantics: `And` uses `.any()` — one `Typed` branch suffices
+/// because every And-branch must hold during resolution, so a Typed branch
+/// pins the referent kind. `Or` uses `.all()` — every branch must be typed
+/// for a bare "it" to have a single referent kind across the player's
+/// choice. `Not` introduces no positive referent.
+fn filter_introduces_typed_object(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(_) => true,
+        TargetFilter::And { filters } => filters.iter().any(filter_introduces_typed_object),
+        TargetFilter::Or { filters } => filters.iter().all(filter_introduces_typed_object),
+        TargetFilter::Not { .. } => false,
+        _ => false,
+    }
+}
+
+/// CR 608.2c: Variant of `has_typed_target` that accepts compound filter
+/// shapes (`And` / `Or` wrapping a `Typed`). Effect-kind whitelist mirrors
+/// `has_typed_target` exactly — only the filter-shape recognition is
+/// widened. Used by the chain walk so a `ChangeZone` whose target is
+/// `And[Typed(Creature), ExiledBySource]` (Emperor of Bones) counts as
+/// introducing the moved card as the anaphor referent.
+///
+/// `has_typed_target` is kept as the leaf check; its other call sites
+/// (e.g., the immediate-prior-clause anaphor rewrite) depend on the
+/// leaf-only semantics.
+fn has_typed_target_widened(effect: &Effect) -> bool {
+    let target = match effect {
+        Effect::PutCounter { target, .. }
+        | Effect::Pump { target, .. }
+        | Effect::DealDamage { target, .. }
+        | Effect::Destroy { target, .. }
+        | Effect::Tap { target, .. }
+        | Effect::Untap { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::GainControl { target, .. }
+        | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
+        | Effect::ChangeZone { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::TargetOnly { target, .. }
+        | Effect::CastFromZone { target, .. }
+        | Effect::Counter { target, .. } => target,
+        Effect::GenericEffect {
+            target: Some(target),
+            ..
+        } => target,
+        // ExileFromTopUntil { NextMatches } has no compound-filter axis to
+        // widen — the referent is the just-exiled card, not a TargetFilter.
+        Effect::ExileFromTopUntil {
+            until: UntilCondition::NextMatches { .. },
+            ..
+        } => return true,
+        _ => return false,
+    };
+    filter_introduces_typed_object(target)
+}
+
 /// CR 608.2c: Does an earlier clause in the chain establish a typed (chosen)
 /// object referent that the current anaphor binds to — looking PAST intermediate
 /// clauses that merely carry that referent forward via `ParentTarget`?
@@ -9290,7 +9358,15 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr]) -> bool {
         if prev.condition.is_some() {
             return false;
         }
-        if has_typed_target(&prev.parsed.effect) {
+        // CR 608.2c: Chain clauses resolve in written order; an earlier typed referent is visible to a later anaphor.
+        // `has_typed_target_widened` mirrors `has_typed_target`'s effect-kind
+        // whitelist but also accepts a compound (`And` / `Or` over `Typed`)
+        // filter as a typed-referent introducer (Emperor of Bones'
+        // `And[Typed(Creature), ExiledBySource]`). The narrower
+        // `has_typed_target` is still used at its other call sites
+        // (immediate-prior-clause anaphor rewrite) because they depend on
+        // the leaf-only semantics.
+        if has_typed_target_widened(&prev.parsed.effect) {
             return true;
         }
         if matches!(
@@ -38674,6 +38750,123 @@ mod tests {
         assert!(
             !any_forward_result(&def),
             "ChangeZone-only (no Attach sub) must not be marked forward_result"
+        );
+    }
+
+    /// CR 608.2c: Emperor of Bones class — a ChangeZone-to-Battlefield
+    /// followed by sibling clauses that anaphorically reference the just-
+    /// moved card ("it gains haste. sacrifice it ...") must mark
+    /// `forward_result: true` on the ChangeZone parent so the runtime
+    /// rewrites the sub-chain's `source_id` to the moved card. Without
+    /// this, the trailing GenericEffect/Pump and CreateDelayedTrigger
+    /// subs target Emperor itself (via `SelfRef`) instead of the
+    /// returned creature.
+    ///
+    /// Building-block test: the same pattern covers any
+    /// "[move a card to the battlefield]. it gains [keyword].
+    /// sacrifice it at the beginning of the next end step." chain
+    /// (Emperor of Bones plus any future card with the same shape).
+    #[test]
+    fn change_zone_to_battlefield_anaphor_subchain_sets_forward_result() {
+        let def = parse_effect_chain(
+            "put a creature card exiled with this creature onto the battlefield under your control with a finality counter on it. it gains haste. sacrifice it at the beginning of the next end step.",
+            AbilityKind::Spell,
+        );
+
+        // Find the outer ChangeZone-to-Battlefield node (the post-pass
+        // recurses, so the rewire may sit on any descendant of the root).
+        fn find_change_zone_to_battlefield(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            if matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                } | Effect::Dig {
+                    destination: Some(Zone::Battlefield),
+                    ..
+                }
+            ) {
+                return Some(def);
+            }
+            if let Some(sub) = def.sub_ability.as_ref() {
+                if let Some(found) = find_change_zone_to_battlefield(sub) {
+                    return Some(found);
+                }
+            }
+            if let Some(else_branch) = def.else_ability.as_ref() {
+                if let Some(found) = find_change_zone_to_battlefield(else_branch) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        let parent = find_change_zone_to_battlefield(&def)
+            .expect("expected a ChangeZone|Dig to Battlefield parent in the parsed chain");
+
+        // CR 608.2c: the bare-"it" anaphor sub-chain must trigger the
+        // rewire, so the runtime rebinds the sub's source_id to the
+        // moved card.
+        assert!(
+            parent.forward_result,
+            "ChangeZone-to-Battlefield with bare-\"it\" sub-chain must mark forward_result"
+        );
+
+        // Discriminating sub-shape check: the sub-chain must contain a
+        // haste-granting clause (GenericEffect/Pump granting Haste, or
+        // GainKeyword) AND a deeper CreateDelayedTrigger whose inner
+        // effect is a Sacrifice. Both must be present so we know the
+        // rewire was set for the right reason (an anaphor sub-chain).
+        fn finds_haste_grant_and_delayed_sacrifice(def: &AbilityDefinition) -> (bool, bool) {
+            let mut found_haste = false;
+            let mut found_delayed_sacrifice = false;
+            fn walk(
+                def: &AbilityDefinition,
+                found_haste: &mut bool,
+                found_delayed_sacrifice: &mut bool,
+            ) {
+                match &*def.effect {
+                    Effect::GenericEffect {
+                        static_abilities, ..
+                    } if static_abilities.iter().any(|s| {
+                        s.modifications.iter().any(|m| {
+                            matches!(
+                                m,
+                                ContinuousModification::AddKeyword { keyword }
+                                    if matches!(keyword, Keyword::Haste)
+                            )
+                        })
+                    }) =>
+                    {
+                        *found_haste = true;
+                    }
+                    Effect::CreateDelayedTrigger { effect, .. } => {
+                        if matches!(&*effect.effect, Effect::Sacrifice { .. }) {
+                            *found_delayed_sacrifice = true;
+                        }
+                        walk(effect, found_haste, found_delayed_sacrifice);
+                    }
+                    _ => {}
+                }
+                if let Some(sub) = def.sub_ability.as_ref() {
+                    walk(sub, found_haste, found_delayed_sacrifice);
+                }
+                if let Some(else_branch) = def.else_ability.as_ref() {
+                    walk(else_branch, found_haste, found_delayed_sacrifice);
+                }
+            }
+            walk(def, &mut found_haste, &mut found_delayed_sacrifice);
+            (found_haste, found_delayed_sacrifice)
+        }
+
+        let (haste, delayed_sacrifice) = finds_haste_grant_and_delayed_sacrifice(&def);
+        assert!(
+            haste,
+            "expected a haste-granting sub-clause in the parsed chain"
+        );
+        assert!(
+            delayed_sacrifice,
+            "expected a CreateDelayedTrigger with Sacrifice inside in the parsed chain"
         );
     }
 

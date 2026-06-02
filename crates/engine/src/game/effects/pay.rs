@@ -1119,7 +1119,9 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            ResolutionChoiceOutcome::WaitingFor(_) | ResolutionChoiceOutcome::ActionResult(_)
+            ResolutionChoiceOutcome::WaitingFor(_)
+                | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_)
+                | ResolutionChoiceOutcome::ActionResult(_)
         ));
         assert_eq!(state.players[0].life, 23);
         assert_eq!(state.last_effect_count, Some(1));
@@ -1269,6 +1271,7 @@ mod tests {
         .unwrap();
         match outcome {
             ResolutionChoiceOutcome::WaitingFor(_) => {}
+            ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_) => {}
             ResolutionChoiceOutcome::ActionResult(_) => {}
         }
 
@@ -1375,7 +1378,9 @@ mod tests {
         .unwrap();
         assert!(matches!(
             outcome,
-            ResolutionChoiceOutcome::WaitingFor(_) | ResolutionChoiceOutcome::ActionResult(_)
+            ResolutionChoiceOutcome::WaitingFor(_)
+                | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_)
+                | ResolutionChoiceOutcome::ActionResult(_)
         ));
         assert_eq!(state.players[0].hand.len(), 2);
         assert_eq!(state.players[0].mana_pool.mana.len(), 1);

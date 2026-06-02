@@ -903,6 +903,55 @@ fn scry_applier(
     }
 }
 
+// --- 4c. CoinFlip (Krark's Thumb) ---
+
+// CR 705.1 + CR 614.1a: A coin flip is about to happen. Krark's Thumb replaces
+// each individual flip ("instead flip two coins and ignore one"), so the
+// matcher fires per flip while `count > 0`.
+fn coin_flip_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(event, ProposedEvent::CoinFlip { count, .. } if *count > 0)
+}
+
+fn coin_flip_applier(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    let ProposedEvent::CoinFlip {
+        player_id,
+        count,
+        applied,
+    } = event
+    else {
+        return ApplyResult::Modified(event);
+    };
+
+    // CR 614.1a: "instead flip two coins" — double the flip count via the
+    // replacement definition's `FlipCoins { count: Multiply { factor: 2, .. } }`.
+    let execute = state
+        .objects
+        .get(&rid.source)
+        .and_then(|source| source.replacement_definitions.get(rid.index))
+        .and_then(|def| def.execute.as_deref());
+
+    let new_count = match execute {
+        Some(ability) if ability.sub_ability.is_none() => match &*ability.effect {
+            Effect::FlipCoins { count: qty, .. } => resolve_event_replacement_quantity(qty, count)
+                .map(|resolved| resolved.max(0) as u32)
+                .unwrap_or(count),
+            _ => count,
+        },
+        _ => count,
+    };
+
+    ApplyResult::Modified(ProposedEvent::CoinFlip {
+        player_id,
+        count: new_count,
+        applied,
+    })
+}
+
 fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> Option<i32> {
     match expr {
         QuantityExpr::Ref {
@@ -1935,6 +1984,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
             applier: scry_applier,
         },
     );
+    registry.insert(
+        ReplacementEvent::CoinFlip,
+        ReplacementHandlerEntry {
+            matcher: coin_flip_matcher,
+            applier: coin_flip_applier,
+        },
+    );
     registry.insert(ReplacementEvent::DrawCards, stub()); // stays stub (alias for Draw)
     registry.insert(
         ReplacementEvent::GainLife,
@@ -2806,7 +2862,8 @@ pub fn find_applicable_replacements(
                     if let ProposedEvent::LifeGain { player_id, .. }
                     | ProposedEvent::Draw { player_id, .. }
                     | ProposedEvent::Scry { player_id, .. }
-                    | ProposedEvent::Mill { player_id, .. } = event
+                    | ProposedEvent::Mill { player_id, .. }
+                    | ProposedEvent::CoinFlip { player_id, .. } = event
                     {
                         let player_ok = match &repl_def.valid_player {
                             // CR 614.1a: opponent-scoped replacement (Tainted Remedy).

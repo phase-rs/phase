@@ -90,6 +90,7 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
+        getEffectiveCap={() => 4}
       />,
     );
 
@@ -141,6 +142,7 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
+        getEffectiveCap={() => 4}
       />,
     );
 
@@ -169,8 +171,8 @@ describe("DeckStack", () => {
 
   it("keeps the add button enabled past 4 copies for 'any number' cards (CR 100.2a)", () => {
     // Regression for #1494: Relentless Rats / Rat Colony override the 4-copy
-    // deck construction limit per CR 100.2a. The stack tile's + button must
-    // stay enabled even when the count is at or above the normal limit.
+    // deck construction limit per CR 100.2a. The engine resolves the override to
+    // an unbounded cap (Infinity); the tile's + button must stay enabled.
     render(
       <DeckStack
         deck={{
@@ -180,25 +182,56 @@ describe("DeckStack", () => {
         commanders={[]}
         cardDataCache={
           new Map([
-            [
-              "Relentless Rats",
-              makeCard(
-                "Relentless Rats",
-                "Creature — Rat",
-                3,
-                "Relentless Rats's power and toughness are each equal to the number of creatures named Relentless Rats you control.\nA deck can have any number of cards named Relentless Rats.",
-              ),
-            ],
+            ["Relentless Rats", makeCard("Relentless Rats", "Creature — Rat", 3)],
           ])
         }
         onAddCard={vi.fn()}
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
+        getEffectiveCap={(name) => (name === "Relentless Rats" ? Infinity : 4)}
       />,
     );
 
     expect(screen.getByTitle("Add one Relentless Rats")).toBeEnabled();
+  });
+
+  it("respects a bounded 'up to N' override cap (CR 100.2a)", () => {
+    // Seven Dwarves overrides to UpTo(7). At 6 copies the + button is enabled;
+    // at 7 it is disabled.
+    const { rerender } = render(
+      <DeckStack
+        deck={{ main: [{ name: "Seven Dwarves", count: 6 }], sideboard: [] }}
+        commanders={[]}
+        cardDataCache={
+          new Map([["Seven Dwarves", makeCard("Seven Dwarves", "Creature — Dwarf", 4)]])
+        }
+        onAddCard={vi.fn()}
+        onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        getEffectiveCap={(name) => (name === "Seven Dwarves" ? 7 : 4)}
+      />,
+    );
+    expect(screen.getByTitle("Add one Seven Dwarves")).toBeEnabled();
+
+    rerender(
+      <DeckStack
+        deck={{ main: [{ name: "Seven Dwarves", count: 7 }], sideboard: [] }}
+        commanders={[]}
+        cardDataCache={
+          new Map([["Seven Dwarves", makeCard("Seven Dwarves", "Creature — Dwarf", 4)]])
+        }
+        onAddCard={vi.fn()}
+        onRemoveCard={vi.fn()}
+        onMoveCard={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        getEffectiveCap={(name) => (name === "Seven Dwarves" ? 7 : 4)}
+      />,
+    );
+    expect(
+      screen.getByTitle("Seven Dwarves is at the copy limit"),
+    ).toBeDisabled();
   });
 
   it("disables the add button at 1 copy for singleton formats", () => {
@@ -217,6 +250,7 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
+        getEffectiveCap={() => 1}
       />,
     );
 
@@ -244,6 +278,7 @@ describe("DeckStack", () => {
         onRemoveCard={vi.fn()}
         onMoveCard={onMoveCard}
         onRemoveCommander={vi.fn()}
+        getEffectiveCap={() => 4}
       />,
     );
 
