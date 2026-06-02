@@ -113,6 +113,8 @@ pub struct GameSession {
     /// Host preference: start automatically when every configured seat is
     /// occupied by a joined human or AI.
     pub start_when_full: bool,
+    /// Ranked rooms apply rating updates when a match completes.
+    pub ranked: bool,
     /// Engine events produced by `start_game` (the d20 first-player contest's
     /// `DieRolled` batch). Captured here so the INITIAL post-start broadcast can
     /// surface them to clients; cleared after that broadcast so late joiners and
@@ -526,6 +528,7 @@ impl GameSession {
             ai_difficulties,
             game_started: self.game_started,
             start_when_full: self.start_when_full,
+            ranked: self.ranked,
             lobby_meta: self.lobby_meta.clone(),
         }
     }
@@ -585,6 +588,7 @@ impl GameSession {
             lobby_meta: ps.lobby_meta,
             game_started: ps.game_started,
             start_when_full: ps.start_when_full,
+            ranked: ps.ranked,
             start_events: Vec::new(),
         }
     }
@@ -692,6 +696,7 @@ impl SessionManager {
             lobby_meta: None,
             game_started: false,
             start_when_full: true,
+            ranked: false,
             start_events: Vec::new(),
         };
 
@@ -1950,6 +1955,7 @@ mod tests {
             lobby_meta: None,
             game_started: false,
             start_when_full: true,
+            ranked: false,
             start_events: Vec::new(),
         };
 

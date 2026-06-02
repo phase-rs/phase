@@ -1,5 +1,6 @@
 pub mod ai_seats_wire_guard;
 pub mod deck_resolve;
+pub mod draft_action_payload_guard;
 pub mod draft_session;
 pub mod draft_wire_guard;
 pub mod emote_guard;
@@ -20,6 +21,7 @@ pub mod starter_decks;
 
 pub use ai_seats_wire_guard::guard_create_ai_seats;
 pub use deck_resolve::resolve_deck;
+pub use draft_action_payload_guard::guard_draft_action_payload;
 pub use draft_session::{generate_draft_code, DraftSession, DraftSessionManager};
 pub use draft_wire_guard::{
     guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,

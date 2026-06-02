@@ -65,6 +65,9 @@ pub struct LobbyGame {
     /// `format_config.allow_debug_actions`.
     #[serde(default)]
     pub is_sandbox: bool,
+    /// True when the room is configured as ranked.
+    #[serde(default)]
+    pub is_ranked: bool,
     /// When present, this lobby entry is a draft pod rather than a
     /// constructed-play room.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,6 +129,8 @@ pub enum LobbyClientMessage {
         draft_metadata: Option<DraftLobbyMetadata>,
         #[serde(default = "default_true")]
         start_when_full: bool,
+        #[serde(default)]
+        ranked: bool,
     },
     JoinGameWithPassword {
         game_code: String,

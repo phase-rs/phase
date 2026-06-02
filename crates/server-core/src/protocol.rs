@@ -91,6 +91,15 @@ pub struct PlayerSlotInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankedPlayerResult {
+    pub player_id: u8,
+    pub rating_before: i32,
+    pub rating_after: i32,
+    pub rating_delta: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
     /// First frame the client must send after receiving `ServerHello`. Carries
@@ -150,6 +159,9 @@ pub enum ClientMessage {
         /// without requiring a protocol-version bump.
         #[serde(default = "default_true")]
         start_when_full: bool,
+        /// Enable ranked rating updates for this room.
+        #[serde(default)]
+        ranked: bool,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -334,6 +346,10 @@ pub enum ServerMessage {
     GameOver {
         winner: Option<PlayerId>,
         reason: String,
+        /// Present for ranked games where a two-player result produced
+        /// rating changes for both seats.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ranked_result: Option<Vec<RankedPlayerResult>>,
     },
     Error {
         message: String,
@@ -536,13 +552,19 @@ mod tests {
         let msg = ServerMessage::GameOver {
             winner: Some(PlayerId(1)),
             reason: "opponent conceded".to_string(),
+            ranked_result: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ServerMessage::GameOver { winner, reason } => {
+            ServerMessage::GameOver {
+                winner,
+                reason,
+                ranked_result,
+            } => {
                 assert_eq!(winner, Some(PlayerId(1)));
                 assert_eq!(reason, "opponent conceded");
+                assert!(ranked_result.is_none());
             }
             _ => panic!("wrong variant"),
         }
@@ -592,6 +614,7 @@ mod tests {
             host_peer_id: None,
             draft_metadata: None,
             start_when_full: true,
+            ranked: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -820,6 +843,7 @@ mod tests {
                 room_name: None,
                 is_p2p: false,
                 is_sandbox: false,
+                is_ranked: false,
                 draft_metadata: None,
             }],
         };
@@ -852,6 +876,7 @@ mod tests {
                 room_name: None,
                 is_p2p: true,
                 is_sandbox: false,
+                is_ranked: false,
                 draft_metadata: None,
             },
         };
@@ -882,6 +907,7 @@ mod tests {
                 room_name: Some("Board-wipe special".to_string()),
                 is_p2p: false,
                 is_sandbox: false,
+                is_ranked: false,
                 draft_metadata: None,
             },
         };
@@ -1047,6 +1073,7 @@ mod tests {
             host_peer_id: None,
             draft_metadata: None,
             start_when_full: true,
+            ranked: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1210,6 +1237,7 @@ mod tests {
             room_name: Some("Spellslingers".to_string()),
             is_p2p: true,
             is_sandbox: false,
+            is_ranked: false,
             draft_metadata: None,
         };
         let json = serde_json::to_string(&game).unwrap();
@@ -1350,6 +1378,7 @@ mod tests {
             host_peer_id: Some("peer-host-abc".to_string()),
             draft_metadata: None,
             start_when_full: true,
+            ranked: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();

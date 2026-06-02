@@ -250,6 +250,7 @@ mod tests {
             host_peer_id: None,
             draft_metadata: None,
             start_when_full: true,
+            ranked: false,
         }
     }
 

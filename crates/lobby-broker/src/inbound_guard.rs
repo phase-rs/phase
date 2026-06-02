@@ -37,7 +37,7 @@ fn validate_card_name(field: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_deck_list(field: &str, cards: &[String], max_entries: usize) -> Result<(), String> {
+pub fn validate_deck_list(field: &str, cards: &[String], max_entries: usize) -> Result<(), String> {
     if cards.len() > max_entries {
         return Err(format!(
             "{field} must contain at most {max_entries} entries"

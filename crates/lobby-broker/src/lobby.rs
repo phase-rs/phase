@@ -46,6 +46,7 @@ pub struct RegisterGameRequest {
     pub host_peer_id: String,
     /// Draft-specific metadata for lobby display. `None` for constructed-play.
     pub draft_metadata: Option<DraftLobbyMetadata>,
+    pub ranked: bool,
 }
 
 /// Fields returned by `join_target_info` — everything the server needs to
@@ -87,6 +88,7 @@ struct LobbyGameMeta {
     room_name: Option<String>,
     host_peer_id: String,
     draft_metadata: Option<DraftLobbyMetadata>,
+    ranked: bool,
     reservations: HashMap<String, LobbyReservation>,
 }
 
@@ -137,6 +139,7 @@ impl LobbyManager {
                 room_name: req.room_name,
                 host_peer_id: req.host_peer_id,
                 draft_metadata: req.draft_metadata,
+                ranked: req.ranked,
                 reservations: HashMap::new(),
             },
         );
@@ -323,6 +326,7 @@ impl LobbyManager {
                 .format_config
                 .as_ref()
                 .is_some_and(|fc| fc.allow_debug_actions),
+            is_ranked: meta.ranked,
             draft_metadata: meta.draft_metadata.clone(),
         }
     }

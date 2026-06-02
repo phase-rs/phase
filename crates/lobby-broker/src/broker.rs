@@ -191,6 +191,7 @@ impl Broker {
                 host_peer_id,
                 draft_metadata,
                 start_when_full: _,
+                ranked,
             } => self.handle_create_game(
                 conn,
                 display_name,
@@ -203,6 +204,7 @@ impl Broker {
                 room_name,
                 host_peer_id,
                 draft_metadata,
+                ranked,
                 env,
             ),
 
@@ -324,6 +326,7 @@ impl Broker {
         room_name: Option<String>,
         host_peer_id: Option<String>,
         draft_metadata: Option<crate::protocol::DraftLobbyMetadata>,
+        ranked: bool,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
         let peer_id = match host_peer_id
@@ -399,6 +402,7 @@ impl Broker {
                     .map(str::to_string),
                 host_peer_id: peer_id,
                 draft_metadata,
+                ranked,
             },
             env,
         );
@@ -823,6 +827,7 @@ mod tests {
                 host_peer_id: Some("peer-1".into()),
                 draft_metadata: None,
                 start_when_full: true,
+                ranked: false,
             },
             env,
         )
@@ -1253,6 +1258,7 @@ mod tests {
                 host_peer_id: None,
                 draft_metadata: None,
                 start_when_full: true,
+                ranked: false,
             },
             &env,
         );
@@ -1284,6 +1290,7 @@ mod tests {
                 host_peer_id: Some("peer-host".into()),
                 draft_metadata: None,
                 start_when_full: true,
+                ranked: false,
             },
             &env,
         );

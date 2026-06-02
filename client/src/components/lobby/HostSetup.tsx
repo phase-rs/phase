@@ -111,6 +111,7 @@ export function HostSetup({
   const [matchType, setMatchType] = useState<MatchType>(remembered?.matchType ?? "Bo1");
   const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>(remembered?.aiSeats ?? []);
   const [startWhenFull, setStartWhenFull] = useState(remembered?.startWhenFull ?? true);
+  const [ranked, setRanked] = useState(remembered?.ranked ?? false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const effectiveMatchType = playerCount === 2 ? matchType : "Bo1";
   const aiDeckCatalog = useAiDeckCatalog({
@@ -213,6 +214,7 @@ export function HostSetup({
       matchType: effectiveMatchType,
       isPublic,
       startWhenFull,
+      ranked,
       aiSeats,
     });
     try {
@@ -228,6 +230,7 @@ export function HostSetup({
           ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
         })),
         startWhenFull,
+        ranked,
         roomName: resolvedRoomName,
       });
       if (ok !== false) return;
@@ -534,6 +537,16 @@ export function HostSetup({
             className={isP2P ? "accent-cyan-500" : "accent-emerald-500"}
           />
           <span className="text-sm text-gray-300">{t("hostSetup.startWhenFull")}</span>
+        </label>
+
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={ranked}
+            onChange={(e) => setRanked(e.target.checked)}
+            className={isP2P ? "accent-cyan-500" : "accent-emerald-500"}
+          />
+          <span className="text-sm text-gray-300">{t("hostSetup.ranked")}</span>
         </label>
 
         {/* List in lobby (server mode only) */}
