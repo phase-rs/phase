@@ -1588,7 +1588,10 @@ fn static_red_or_green_spell_cost_less_issue_141() {
         ..
     } = def.mode
     else {
-        panic!("expected ModifyCost Reduce with spell_filter, got {:?}", def.mode);
+        panic!(
+            "expected ModifyCost Reduce with spell_filter, got {:?}",
+            def.mode
+        );
     };
     match filter {
         TargetFilter::Typed(tf) => {
