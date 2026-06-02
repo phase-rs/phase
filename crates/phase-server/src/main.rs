@@ -83,8 +83,7 @@ type SharedDraftSpectators = Arc<
     >,
 >;
 /// Spectator senders keyed by game code (live games only).
-type SharedGameSpectators =
-    Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
+type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
 
 /// Build the `GameStarted` message for a single seat.
 ///
@@ -223,7 +222,8 @@ fn build_spectator_game_started_message(session: &GameSession) -> ServerMessage 
 
 fn build_spectator_state_update_message(result: &ActionResult) -> ServerMessage {
     let spectator_viewer = PlayerId(u8::MAX);
-    let (raw_state, events, _legal_actions, log_entries, _auto_pass, _spell_costs, _by_object) = result;
+    let (raw_state, events, _legal_actions, log_entries, _auto_pass, _spell_costs, _by_object) =
+        result;
     let filtered = server_core::filter_state_for_player(raw_state, spectator_viewer);
     let derived = derive_views(&filtered, None);
 
@@ -3889,8 +3889,14 @@ async fn handle_client_message(
                         )
                         .await;
                     }
-                    broadcast_game_started(state, connections, game_spectators, game_db, &game_code)
-                        .await;
+                    broadcast_game_started(
+                        state,
+                        connections,
+                        game_spectators,
+                        game_db,
+                        &game_code,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     error!(game = %game_code, error = %e, "JoinGameWithPassword failed");
