@@ -716,7 +716,8 @@ fn granted_spell_keywords(
     // through SpellCast event) over pending_cast_origin_zone_for (transient and
     // cleared after finalize_cast). This ensures origin zone is available when
     // triggers are processed for filters like "InZone { zone: Hand }".
-    let origin_zone = spell_obj.cast_from_zone
+    let origin_zone = spell_obj
+        .cast_from_zone
         .or_else(|| pending_cast_origin_zone_for(state, object_id))
         .unwrap_or(spell_obj.zone);
 

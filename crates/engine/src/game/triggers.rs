@@ -12070,9 +12070,7 @@ pub mod tests {
         .affected(TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Sorcery)
                 .controller(ControllerRef::You)
-                .properties(vec![crate::types::ability::FilterProp::InZone {
-                    zone: Zone::Hand,
-                }]),
+                .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
         ));
         state
             .objects
