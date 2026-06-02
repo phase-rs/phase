@@ -1,10 +1,22 @@
 //! CR 717.5 + CR 702.159a: Attraction visit abilities and numbered visit lines.
 
+use nom::branch::alt;
+use nom::bytes::complete::{tag, take_while1};
+use nom::character::complete::multispace0;
+use nom::combinator::{eof, map, opt, rest as nom_rest, value};
+use nom::sequence::preceded;
+use nom::Parser;
+
+use crate::parser::oracle_nom::bridge::{nom_parse_lower, split_once_on_lower};
 use crate::types::ability::{AbilityKind, TriggerCondition, TriggerDefinition};
 use crate::types::triggers::TriggerMode;
 
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_util::strip_reminder_text;
+
+const VISIT_EM_DASH_SEP: &str = " — ";
+const VISIT_HYPHEN_SEP: &str = " - ";
+const NUMBERED_VISIT_PIPE: &str = " | ";
 
 /// Parse `"Visit — …"` or `"N—M | …"` / `"N | …"` attraction visit lines.
 pub(crate) fn parse_visit_trigger(line: &str, card_name: &str) -> Option<TriggerDefinition> {
@@ -43,11 +55,7 @@ pub(crate) fn parse_attraction_visit_triggers(
             continue;
         }
         let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("visit ")
-            || lower.starts_with("visit—")
-            || lower.starts_with("visit-")
-            || is_numbered_visit_line(&lower)
-        {
+        if is_attraction_visit_line(&lower) {
             if let Some(trigger) = parse_visit_trigger(trimmed, card_name) {
                 triggers.push(trigger);
                 consumed.insert(idx);
@@ -57,58 +65,101 @@ pub(crate) fn parse_attraction_visit_triggers(
     (triggers, consumed)
 }
 
+fn is_attraction_visit_line(lower: &str) -> bool {
+    parse_visit_line_header(lower).is_ok() || parse_numbered_visit_line(lower, lower).is_some()
+}
+
+fn parse_visit_line_header(input: &str) -> nom::IResult<&str, ()> {
+    preceded(
+        tag("visit"),
+        alt((
+            value((), multispace0),
+            value((), tag("—")),
+            value((), tag("-")),
+        )),
+    )
+    .parse(input)
+}
+
 fn strip_visit_effect_text(line: &str) -> Option<&str> {
-    let mut rest = line.strip_prefix("Visit")?;
-    rest = rest.trim_start();
-    if let Some((_, effect)) = rest.split_once(" — ") {
-        return Some(effect.trim());
-    }
-    if let Some((_, effect)) = rest.split_once(" - ") {
-        return Some(effect.trim());
-    }
-    if let Some((_, effect)) = rest.split_once('—') {
-        return Some(effect.trim());
-    }
-    if let Some((_, effect)) = rest.split_once('-') {
-        return Some(effect.trim());
-    }
-    if let Some((_, effect)) = rest.split_once(':') {
-        return Some(effect.trim());
-    }
-    if rest.is_empty() {
-        None
+    let lower = line.to_ascii_lowercase();
+    let (effect_start, effect_end) = nom_parse_lower(&lower, |input| {
+        let (rest, _) = tag("visit").parse(input)?;
+        let (rest, _) = multispace0.parse(rest)?;
+        let effect_start = input.len() - rest.len();
+        let before_effect = rest;
+        let (rest, effect_body) = alt((
+            map(
+                preceded(
+                    alt((
+                        tag(VISIT_EM_DASH_SEP),
+                        tag(VISIT_HYPHEN_SEP),
+                        tag("—"),
+                        tag("-"),
+                        tag(":"),
+                    )),
+                    nom_rest,
+                ),
+                |s: &str| s.trim(),
+            ),
+            map(nom_rest, |s: &str| s.trim()),
+        ))
+        .parse(rest)?;
+        if effect_body.is_empty() {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )));
+        }
+        let effect_end = effect_start + (before_effect.len() - rest.len());
+        let raw = &lower[effect_start..effect_end];
+        let trim_start = raw.len() - raw.trim_start().len();
+        let trim_end = raw.len() - raw.trim_end().len();
+        Ok((rest, (effect_start + trim_start, effect_end - trim_end)))
+    })?;
+    Some(&line[effect_start..effect_end])
+}
+
+fn parse_attraction_die_face(input: &str) -> nom::IResult<&str, u8> {
+    let (rest, digits) = take_while1(|c: char| c.is_ascii_digit()).parse(input)?;
+    let n = digits
+        .parse::<u8>()
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail)))?;
+    if (1..=6).contains(&n) {
+        Ok((rest, n))
     } else {
-        Some(rest)
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )))
     }
 }
 
-fn is_numbered_visit_line(lower: &str) -> bool {
-    parse_numbered_visit_line(lower, lower).is_some()
+fn parse_roll_range_prefix(input: &str) -> nom::IResult<&str, (u8, u8)> {
+    let (input, _) = multispace0.parse(input)?;
+    alt((
+        map(
+            (
+                parse_attraction_die_face,
+                alt((tag("\u{2014}"), tag("-"))),
+                parse_attraction_die_face,
+            ),
+            |(min, _, max)| (min, max),
+        ),
+        map(parse_attraction_die_face, |n| (n, n)),
+    ))
+    .parse(input)
 }
 
 fn parse_numbered_visit_line(lower: &str, original: &str) -> Option<(u8, u8, String)> {
-    let pipe_pos = lower.find(" | ")?;
-    let prefix = lower[..pipe_pos].trim();
-    let effect = original[pipe_pos + 3..].trim().to_string();
-    if effect.is_empty() {
+    let (prefix_lower, effect_original) =
+        split_once_on_lower(original, lower, NUMBERED_VISIT_PIPE)?;
+    let (min, max) = nom_parse_lower(prefix_lower, parse_roll_range_prefix)?;
+    let effect = effect_original.trim();
+    if effect.is_empty() || min > max {
         return None;
     }
-    let (min, max) = if let Some((a, b)) = prefix
-        .split_once('\u{2014}')
-        .or_else(|| prefix.split_once('-'))
-    {
-        let min: u8 = a.trim().parse().ok()?;
-        let max: u8 = b.trim().parse().ok()?;
-        (min, max)
-    } else {
-        let n: u8 = prefix.parse().ok()?;
-        (n, n)
-    };
-    if (1..=6).contains(&min) && (1..=6).contains(&max) && min <= max {
-        Some((min, max, effect))
-    } else {
-        None
-    }
+    Some((min, max, effect.to_string()))
 }
 
 #[cfg(test)]

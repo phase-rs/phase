@@ -1,6 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::space1;
 use nom::combinator::{all_consuming, eof, map, not, opt, rest, value};
 use nom::error::ParseError;
 use nom::sequence::{preceded, terminated};
@@ -17,7 +18,7 @@ use super::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_nom::bridge::nom_on_lower;
+use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
@@ -6096,33 +6097,34 @@ fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
     Some((sides, after_word))
 }
 
+/// CR 701.48: "open N attraction(s)" after the open/opens prefix.
+fn parse_open_attractions_count_imperative(input: &str) -> OracleResult<'_, ImperativeFamilyAst> {
+    let (rest, count) = nom_primitives::parse_number(input)?;
+    let (rest, _) = space1(rest)?;
+    let (rest, _) = alt((tag("attractions"), tag("attraction"))).parse(rest)?;
+    Ok((rest, ImperativeFamilyAst::OpenAttractions { count }))
+}
+
 /// CR 701.48: "open an Attraction" / "open two Attractions".
 fn parse_open_attraction_imperative(lower: &str) -> Option<ImperativeFamilyAst> {
-    let lower = lower.trim_end_matches(['.', ',']);
-    let rest = lower
-        .strip_prefix("open ")
-        .or_else(|| lower.strip_prefix("opens "))?;
-    if rest == "an attraction" || rest == "a attraction" {
-        return Some(ImperativeFamilyAst::OpenAttraction);
-    }
-    let (count_word, suffix) = rest.split_once(' ')?;
-    if suffix != "attractions" && suffix != "attraction" {
-        return None;
-    }
-    let count = match count_word {
-        "one" | "a" | "an" => 1,
-        "two" => 2,
-        "three" => 3,
-        "four" => 4,
-        "five" => 5,
-        "six" => 6,
-        "seven" => 7,
-        "eight" => 8,
-        "nine" => 9,
-        "ten" => 10,
-        digits => digits.parse().ok()?,
-    };
-    Some(ImperativeFamilyAst::OpenAttractions { count })
+    nom_parse_lower(lower, |input| {
+        map(
+            (
+                alt((tag("open "), tag("opens "))),
+                alt((
+                    value(ImperativeFamilyAst::OpenAttraction, tag("an attraction")),
+                    value(ImperativeFamilyAst::OpenAttraction, tag("a attraction")),
+                    parse_open_attractions_count_imperative,
+                )),
+                opt(nom::bytes::complete::take_while(|c: char| {
+                    c == '.' || c == ','
+                })),
+                eof,
+            ),
+            |(_, ast, _, _)| ast,
+        )
+        .parse(input)
+    })
 }
 
 /// CR 706 + CR 706.2: Try to parse a full `"roll a d{N}"` clause, including
