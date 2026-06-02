@@ -118,6 +118,7 @@ mod springheart_nantuko_bestow_landfall;
 mod swans_prevention_followup;
 mod talon_gates_from_hand_activation;
 mod tempt_with_discovery;
+mod terra_herald_optional_prompt;
 mod terra_magical_adept_milled_enchantment;
 mod the_chain_veil_loyalty_grants;
 mod the_ur_dragon_eminence;
