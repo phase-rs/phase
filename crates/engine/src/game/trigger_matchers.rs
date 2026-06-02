@@ -1865,12 +1865,8 @@ pub(super) fn match_becomes_target(
         // BecomesTarget events during effect execution, after the entry has been
         // popped from the stack (stack.rs::resolve_top pops before executing effect).
         let targeting_entry = targeting_entry.or_else(|| {
-            state.resolving_stack_entry.as_ref().and_then(|entry| {
-                if entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id {
-                    Some(entry)
-                } else {
-                    None
-                }
+            state.resolving_stack_entry.as_ref().filter(|entry| {
+                entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id
             })
         });
         let Some(targeting_entry) = targeting_entry else {
@@ -7832,7 +7828,7 @@ mod tests {
         let entry_id = ObjectId(60);
         state.stack.push_back(StackEntry {
             id: entry_id,
-            source_id: pw_id, // The planeswalker object id
+            source_id: pw_id,        // The planeswalker object id
             controller: PlayerId(0), // Same player as trigger owner
             kind: StackEntryKind::ActivatedAbility {
                 source_id: pw_id,
