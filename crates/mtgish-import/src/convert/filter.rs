@@ -425,6 +425,35 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
                 });
             }
         },
+        // CR 508.1b + CR 506.3: "attacking you or a planeswalker you control."
+        // `FilterProp::AttackingController` matches any attacker whose recorded
+        // defending side equals the source controller — and the engine records
+        // an attacker's defending player as the controller of the attacked
+        // planeswalker/battle, so the player- and permanent-defended cases both
+        // collapse onto the one predicate. Only the `You` axis is expressible;
+        // an opponent-relative defended axis needs a primitive we don't have.
+        Permanents::IsAttackingAPlayerOrPlaneswalkerTheyControl(players) => {
+            match players_to_controller(players)? {
+                ControllerRef::You => TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::AttackingController]),
+                ),
+                other => {
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "Permanents/convert",
+                        path: String::new(),
+                        detail: format!(
+                            "IsAttackingAPlayerOrPlaneswalkerTheyControl with non-You axis: {other:?}"
+                        ),
+                    });
+                }
+            }
+        }
+        // CR 111.1 + CR 603.7c: "the created tokens" / "those tokens" anaphor —
+        // the set of tokens created earlier in this same resolution. Maps to
+        // `TargetFilter::LastCreated`, which the engine snapshots at the moment a
+        // composed delayed trigger is built (the exile-at-end-of-combat half of
+        // Mirror Match) so it survives later token creation.
+        Permanents::TheCreatedTokens => TargetFilter::LastCreated,
 
         // "Except for ~" set-difference subject — semantically the
         // complement of the inner filter. mtgish surfaces this distinct from

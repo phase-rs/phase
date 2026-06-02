@@ -92,6 +92,21 @@ impl CounterType {
         }
     }
 
+    /// Player-facing counter name for prompts and choice descriptions, e.g.
+    /// "+1/+1", "-1/-1", "first strike", "vigilance". Unlike [`as_str`], which
+    /// produces serialization keys ("P1P1"/"M1M1"), this renders the P/T-shaped
+    /// variants in MTG `+N/+M` display form. Non-P/T variants reuse `as_str`.
+    pub fn display_phrase(&self) -> Cow<'_, str> {
+        match self {
+            CounterType::Plus1Plus1 => Cow::Owned(format_power_toughness_counter(1, 1)),
+            CounterType::Minus1Minus1 => Cow::Owned(format_power_toughness_counter(-1, -1)),
+            CounterType::PowerToughness { power, toughness } => {
+                Cow::Owned(format_power_toughness_counter(*power, *toughness))
+            }
+            _ => self.as_str(),
+        }
+    }
+
     pub fn power_toughness_delta(&self) -> Option<(i32, i32)> {
         match self {
             CounterType::Plus1Plus1 => Some((1, 1)),

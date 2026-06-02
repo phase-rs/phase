@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, space0};
+use nom::character::complete::{alpha1, space0, space1};
 use nom::combinator::{all_consuming, not, opt, peek, value};
 use nom::sequence::preceded;
 use nom::Parser;
@@ -693,6 +693,18 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         return Some(kw);
     }
 
+    // CR 702.112a: Renown N — parameterized keyword from Oracle text.
+    // MTGJSON's keyword list carries only "Renown"; the Oracle line supplies N.
+    if let Ok((_, (_, _, n))) = all_consuming((
+        tag::<_, _, OracleError<'_>>("renown"),
+        space1,
+        nom_primitives::parse_number,
+    ))
+    .parse(text)
+    {
+        return Some(Keyword::Renown(n));
+    }
+
     // First try direct parse (handles simple keywords like "flying")
     let direct: Keyword = text.parse().unwrap();
     if !matches!(direct, Keyword::Unknown(_)) {
@@ -807,6 +819,16 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // CR 702.162a: "more than meets the eye {cost}" — alternative cost to cast the
+    // card converted (back face up). The Oracle line supplies the alternative cost.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("more than meets the eye ").parse(text) {
+        let cost_str = rest.trim();
+        if !cost_str.is_empty() {
+            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            return Some(Keyword::MoreThanMeetsTheEye(cost));
+        }
+    }
+
     // CR 701.57a: "discover N"
     // Delegates to nom combinator for number parsing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("discover ").parse(text) {
@@ -870,6 +892,24 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
             if !cost_str.is_empty() {
                 let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
                 return Some(Keyword::Awaken { count, cost });
+            }
+        }
+    }
+
+    // CR 702.77a: Reinforce N—{cost} — "[Cost], Discard this card: Put N +1/+1 counters
+    // on target creature." Same N—{cost} format as Suspend/Awaken.
+    // Uses parse_number_or_x to handle "Reinforce X—{cost}" (e.g. Swell of Courage).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("reinforce ").parse(text) {
+        if let Ok((after_count, count)) = nom_primitives::parse_number_or_x.parse(rest.trim()) {
+            let cost_str = after_count
+                .strip_prefix('\u{2014}') // allow-noncombinator: em-dash punctuation separator
+                .or_else(|| after_count.strip_prefix("\u{2014}")) // allow-noncombinator: em-dash variant
+                .or_else(|| after_count.strip_prefix("--")) // allow-noncombinator: ascii dash fallback
+                .unwrap_or(after_count)
+                .trim();
+            if !cost_str.is_empty() {
+                let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+                return Some(Keyword::Reinforce { count, cost });
             }
         }
     }
@@ -1139,10 +1179,16 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Increment => "increment".to_string(),
         Keyword::Specialize(_) => "specialize".to_string(),
         Keyword::Offering(quality) => format!("{} offering", quality.to_lowercase()),
+        Keyword::Reinforce { count, .. } => {
+            if *count == 0 {
+                "reinforce x".to_string()
+            } else {
+                format!("reinforce {count}")
+            }
+        }
         Keyword::Unknown(s) => s.to_lowercase(),
     }
 }
-
 /// CR 702.24a: Render a cumulative-upkeep base cost as the display fragment
 /// used after `cumulative upkeep — `. Only the four cost shapes the
 /// cumulative-upkeep parser actually emits are handled (`Mana`, `PayLife`,
@@ -1314,6 +1360,7 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
         "blitz",
         "overload",
         "spectacle",
+        "freerunning",
         "surge",
         "encore",
         "buyback",
@@ -1487,6 +1534,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_keyword_from_oracle_renown() {
+        // CR 702.112a: Renown N — parameterized keyword from Oracle text.
+        let kw = parse_keyword_from_oracle("renown 2").unwrap();
+        assert_eq!(kw, Keyword::Renown(2));
+    }
+
+    #[test]
     fn parse_keyword_from_oracle_saddle() {
         // CR 702.171a: Saddle N
         let kw = parse_keyword_from_oracle("saddle 3").unwrap();
@@ -1512,6 +1566,35 @@ mod tests {
         // CR 702.157: Squad {cost}
         let kw = parse_keyword_from_oracle("squad {2}").unwrap();
         assert!(matches!(kw, Keyword::Squad(ManaCost::Cost { .. })));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_more_than_meets_the_eye() {
+        use crate::types::mana::ManaCostShard;
+        // CR 702.162a: "more than meets the eye {cost}" — the alternative cost
+        // is supplied by the Oracle line. Colored cost case (Flamewar: {B}{R}).
+        let kw = parse_keyword_from_oracle("more than meets the eye {b}{r}").unwrap();
+        match kw {
+            Keyword::MoreThanMeetsTheEye(ManaCost::Cost { shards, generic }) => {
+                assert_eq!(generic, 0);
+                assert!(shards.contains(&ManaCostShard::Black));
+                assert!(shards.contains(&ManaCostShard::Red));
+                assert_eq!(shards.len(), 2);
+            }
+            other => panic!("expected MoreThanMeetsTheEye({{B}}{{R}}), got {other:?}"),
+        }
+
+        // Class-general: a generic + single color cost parses the same way,
+        // proving the arm is not specialized to one card's cost.
+        let kw2 = parse_keyword_from_oracle("more than meets the eye {2}{u}").unwrap();
+        match kw2 {
+            Keyword::MoreThanMeetsTheEye(ManaCost::Cost { shards, generic }) => {
+                assert_eq!(generic, 2);
+                assert!(shards.contains(&ManaCostShard::Blue));
+                assert_eq!(shards.len(), 1);
+            }
+            other => panic!("expected MoreThanMeetsTheEye({{2}}{{U}}), got {other:?}"),
+        }
     }
 
     #[test]
@@ -1587,6 +1670,21 @@ mod tests {
         // CR 702.16: "protection from the chosen color" parses to Protection(ChosenColor)
         let kw = parse_keyword_from_oracle("protection from the chosen color").unwrap();
         assert_eq!(kw, Keyword::Protection(ProtectionTarget::ChosenColor));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_protection_from_each_of_your_opponents() {
+        use crate::types::ability::ControllerRef;
+        use crate::types::keywords::ProtectionTarget;
+
+        // Issue #767 / CR 702.16k: Figure of Fable's Avatar form. Previously
+        // fell through to ProtectionTarget::CardType("each of your opponents"),
+        // which never matched any source at runtime.
+        let kw = parse_keyword_from_oracle("protection from each of your opponents").unwrap();
+        assert_eq!(
+            kw,
+            Keyword::Protection(ProtectionTarget::FromPlayer(ControllerRef::Opponent))
+        );
     }
 
     #[test]
@@ -2676,5 +2774,25 @@ mod tests {
         assert!(s.contains("{G}"), "{s}");
         // allow-noncombinator: substring assertion on display-formatter output, not parsing dispatch.
         assert!(s.contains("{W}"), "{s}");
+    }
+
+    /// CR 702.173a: Freerunning recognized by is_keyword_cost_line.
+    #[test]
+    fn is_keyword_cost_line_freerunning() {
+        assert!(is_keyword_cost_line("freerunning {3}{b}{b}"));
+        assert!(is_keyword_cost_line("freerunning {1}{b}"));
+    }
+
+    /// CR 702.173a: Freerunning parsed from oracle text via parse_keyword_from_oracle.
+    #[test]
+    fn parse_keyword_from_oracle_freerunning() {
+        use crate::types::keywords::Keyword;
+        let kw = parse_keyword_from_oracle("freerunning {3}{b}{b}").unwrap();
+        match kw {
+            Keyword::Freerunning(_cost) => {
+                // Successfully parsed — cost structure validated by ManaCost parser
+            }
+            other => panic!("expected Keyword::Freerunning, got {other:?}"),
+        }
     }
 }

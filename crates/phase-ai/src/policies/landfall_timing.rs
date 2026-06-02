@@ -242,8 +242,8 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
-        QuantityExpr, TargetFilter, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
+        ManaProduction, QuantityExpr, TargetFilter, TypedFilter,
     };
     use engine::types::game_state::{GameState, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
@@ -263,6 +263,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         ability.cost = Some(AbilityCost::Composite {
@@ -282,7 +283,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::land()),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,

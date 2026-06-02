@@ -1,23 +1,21 @@
 import { useTranslation } from "react-i18next";
 
-import type { GameAction, WaitingFor } from "../../adapter/types.ts";
+import type { GameAction } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { DialogShell } from "./DialogShell.tsx";
-
-type AdventureCastChoice = Extract<WaitingFor, { type: "AdventureCastChoice" }>;
 
 export function AdventureCastModal() {
   const canActForWaitingState = useCanActForWaitingState();
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
 
-  if (waitingFor?.type !== "AdventureCastChoice") return null;
+  if (waitingFor?.type !== "CastOffer" || waitingFor.data.kind.type !== "Adventure") return null;
   if (!canActForWaitingState) return null;
 
-  const data = waitingFor.data as AdventureCastChoice["data"];
+  const kind = waitingFor.data.kind;
 
-  return <AdventureCastContent objectId={data.object_id} dispatch={dispatch} />;
+  return <AdventureCastContent objectId={kind.object_id} dispatch={dispatch} />;
 }
 
 function AdventureCastContent({
@@ -40,6 +38,7 @@ function AdventureCastContent({
       eyebrow={t("adventureCast.eyebrow")}
       title={t("adventureCast.title")}
       subtitle={t("adventureCast.subtitle")}
+      previewObjectId={objectId}
     >
       <div className="flex flex-col gap-2 px-3 py-3 lg:px-5 lg:py-5">
         <button

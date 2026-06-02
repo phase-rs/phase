@@ -36,6 +36,7 @@ export function TopOrBottomChoiceModalContent({
     <ChoiceModal
       title={t("topOrBottom.title", { name: cardName })}
       previewCardName={cardName}
+      previewObjectId={objectId}
       options={[
         { id: "top", label: t("topOrBottom.top") },
         { id: "bottom", label: t("topOrBottom.bottom") },

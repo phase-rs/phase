@@ -6,7 +6,7 @@ use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, Effect, QuantityExpr,
     TargetFilter, TargetRef,
 };
-use engine::types::game_state::{CastingVariant, StackEntryKind};
+use engine::types::game_state::{CastOfferKind, CastingVariant, StackEntryKind};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -57,7 +57,10 @@ fn optional_cost_paid_sets_flag() {
             target: TargetFilter::Any,
             damage_source: None,
         })
-        .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
+        .with_additional_cost(AdditionalCost::Optional {
+            cost: AbilityCost::Blight { count: 1 },
+            repeatable: false,
+        })
         .id();
 
     let mut runner = scenario.build();
@@ -144,7 +147,10 @@ fn optional_cost_skipped_clears_flag() {
             target: TargetFilter::Any,
             damage_source: None,
         })
-        .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
+        .with_additional_cost(AdditionalCost::Optional {
+            cost: AbilityCost::Blight { count: 1 },
+            repeatable: false,
+        })
         .id();
 
     let mut runner = scenario.build();
@@ -185,7 +191,7 @@ fn optional_cost_skipped_clears_flag() {
 #[test]
 fn bargain_additional_cost_paid_reduces_self_spell_cost() {
     use engine::types::ability::{StaticCondition, StaticDefinition};
-    use engine::types::statics::StaticMode;
+    use engine::types::statics::{CostModifyMode, StaticMode};
 
     fn build_scenario() -> (engine::game::scenario::GameRunner, ObjectId, Vec<ObjectId>) {
         let mut scenario = GameScenario::new();
@@ -195,7 +201,8 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
             .map(|_| scenario.add_basic_land(P0, ManaColor::Green))
             .collect();
 
-        let reduce_static = StaticDefinition::new(StaticMode::ReduceCost {
+        let reduce_static = StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
             amount: ManaCost::generic(2),
             spell_filter: None,
             dynamic_count: None,
@@ -210,9 +217,12 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
                 shards: vec![],
                 generic: 4,
             })
-            .with_additional_cost(AdditionalCost::Optional(AbilityCost::PayLife {
-                amount: QuantityExpr::Fixed { value: 1 },
-            }))
+            .with_additional_cost(AdditionalCost::Optional {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                repeatable: false,
+            })
             .with_static_definition(reduce_static)
             .id();
 
@@ -322,7 +332,10 @@ fn cancel_cast_at_optional_cost_choice() {
             target: TargetFilter::Any,
             damage_source: None,
         })
-        .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
+        .with_additional_cost(AdditionalCost::Optional {
+            cost: AbilityCost::Blight { count: 1 },
+            repeatable: false,
+        })
         .id();
 
     let mut runner = scenario.build();
@@ -461,20 +474,25 @@ fn escape_full_casting_flow() {
     assert!(
         matches!(
             result.waiting_for,
-            WaitingFor::ExileForCost {
-                zone: ExileCostSourceZone::Graveyard,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Graveyard,
+                },
                 count: 2,
                 ..
             }
         ),
-        "Expected ExileForCost (Graveyard), got {:?}",
+        "Expected PayCost ExileFromZone (Graveyard), got {:?}",
         result.waiting_for
     );
 
     // Verify the escape card itself is NOT in the eligible list
-    if let WaitingFor::ExileForCost {
-        zone: ExileCostSourceZone::Graveyard,
-        ref cards,
+    if let WaitingFor::PayCost {
+        kind:
+            PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Graveyard,
+            },
+        choices: ref cards,
         ..
     } = result.waiting_for
     {
@@ -585,16 +603,21 @@ fn escape_variant_preserved_through_mana_payment() {
     // Should prompt for exile selection
     assert!(matches!(
         result.waiting_for,
-        WaitingFor::ExileForCost {
-            zone: ExileCostSourceZone::Graveyard,
+        WaitingFor::PayCost {
+            kind: PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Graveyard,
+            },
             ..
         }
     ));
 
     // Select exile targets
-    if let WaitingFor::ExileForCost {
-        zone: ExileCostSourceZone::Graveyard,
-        ref cards,
+    if let WaitingFor::PayCost {
+        kind:
+            PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Graveyard,
+            },
+        choices: ref cards,
         ..
     } = result.waiting_for
     {
@@ -778,9 +801,12 @@ fn pitch_full_casting_flow() {
     };
 
     let eligible = match &result.waiting_for {
-        WaitingFor::ExileForCost {
-            zone: ExileCostSourceZone::Hand,
-            cards,
+        WaitingFor::PayCost {
+            kind:
+                PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Hand,
+                },
+            choices: cards,
             count,
             player,
             ..
@@ -789,7 +815,7 @@ fn pitch_full_casting_flow() {
             assert_eq!(*count, 1);
             cards.clone()
         }
-        other => panic!("expected ExileForCost (Hand), got {other:?}"),
+        other => panic!("expected PayCost ExileFromZone (Hand), got {other:?}"),
     };
     assert!(
         !eligible.contains(&spell_id),
@@ -861,12 +887,14 @@ fn pitch_cancel_returns_to_priority() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::ExileForCost {
-                zone: ExileCostSourceZone::Hand,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Hand,
+                },
                 ..
             }
         ),
-        "expected ExileForCost (Hand) before cancel, got {:?}",
+        "expected PayCost ExileFromZone (Hand) before cancel, got {:?}",
         runner.state().waiting_for
     );
 
@@ -1236,7 +1264,10 @@ fn optional_blight_with_no_creatures_skips_prompt() {
             target: TargetFilter::Any,
             damage_source: None,
         })
-        .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
+        .with_additional_cost(AdditionalCost::Optional {
+            cost: AbilityCost::Blight { count: 1 },
+            repeatable: false,
+        })
         .id();
 
     let mut runner = scenario.build();
@@ -1722,7 +1753,10 @@ fn miracle_accept_casts_for_miracle_cost() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::MiracleCastOffer { .. }
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Miracle { .. },
+                ..
+            }
         ),
         "should be MiracleCastOffer, got {:?}",
         runner.state().waiting_for
@@ -1824,7 +1858,10 @@ fn miracle_sorcery_casts_during_draw_step() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::MiracleCastOffer { .. }
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Miracle { .. },
+                ..
+            }
         ),
         "should be MiracleCastOffer during draw step"
     );
@@ -1848,4 +1885,147 @@ fn miracle_sorcery_casts_during_draw_step() {
         ),
         "sorcery should be on the stack via Miracle variant"
     );
+}
+
+/// CR 118.9: Rooftop Storm — "You may pay {0} rather than pay the mana cost for
+/// Zombie creature spells you cast." End-to-end: parse the Oracle text onto a
+/// battlefield permanent, then casting a Zombie creature offers the alternative
+/// {0} cost (CR 118.9 grant), accepting reaches the stack with the alternative
+/// paid, while a non-Zombie creature is NOT offered the grant.
+#[test]
+fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
+    use engine::types::statics::StaticMode;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Rooftop Storm on the battlefield, abilities from Oracle text (full parser
+    // path → CastWithAlternativeCost static).
+    let storm_id = scenario
+        .add_creature(P0, "Rooftop Storm", 0, 0)
+        .from_oracle_text(
+            "You may pay {0} rather than pay the mana cost for Zombie creature spells you cast.",
+        )
+        .id();
+
+    // A Zombie creature in hand with a nonzero printed mana cost (so {0} is a
+    // meaningful alternative).
+    let zombie_id = scenario
+        .add_creature_to_hand(P0, "Test Zombie", 2, 2)
+        .with_subtypes(vec!["Zombie"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 6,
+        })
+        .id();
+
+    // A non-Zombie creature in hand — must NOT receive the grant.
+    let elf_id = scenario
+        .add_creature_to_hand(P0, "Test Elf", 1, 1)
+        .with_subtypes(vec!["Elf"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+
+    // Regression: the line must parse to a CastWithAlternativeCost static, NOT
+    // a free-floating Effect::PayCost ability (the prior misparse).
+    {
+        use engine::types::ability::Effect;
+        let storm = &runner.state().objects[&storm_id];
+        assert!(
+            storm
+                .static_definitions
+                .iter_unchecked()
+                .any(|d| matches!(d.mode, StaticMode::CastWithAlternativeCost { .. })),
+            "Rooftop Storm must carry a CastWithAlternativeCost static"
+        );
+        assert!(
+            !storm
+                .abilities
+                .iter()
+                .any(|a| matches!(*a.effect, Effect::PayCost { .. })),
+            "Rooftop Storm must NOT have a free-floating PayCost ability (prior misparse)"
+        );
+    }
+
+    // --- Zombie: grant offered, accepting reaches the stack. ---
+    let zombie_card = runner.state().objects[&zombie_id].card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: zombie_id,
+            card_id: zombie_card,
+            targets: vec![],
+        })
+        .expect("casting a Zombie should succeed");
+    handle_target_selection(&mut runner, &result);
+
+    match &runner.state().waiting_for {
+        WaitingFor::OptionalCostChoice { cost, .. } => match cost {
+            AdditionalCost::Choice(alt, printed) => {
+                assert_eq!(
+                    *alt,
+                    AbilityCost::Mana {
+                        cost: ManaCost::zero()
+                    },
+                    "alternative cost must be {{0}} (Rooftop Storm)"
+                );
+                assert_eq!(
+                    *printed,
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards: vec![],
+                            generic: 6,
+                        }
+                    },
+                    "printed fallback must be the Zombie's {{6}} mana cost"
+                );
+            }
+            other => panic!("expected AdditionalCost::Choice(alt, printed), got {other:?}"),
+        },
+        other => panic!("expected OptionalCostChoice for the grant, got {other:?}"),
+    }
+
+    // Accept the alternative cost → Zombie reaches the stack with {0} paid.
+    runner
+        .act(GameAction::DecideOptionalCost { pay: true })
+        .expect("accepting the alternative cost should succeed");
+    assert_eq!(
+        runner.state().objects[&zombie_id].zone,
+        Zone::Stack,
+        "Zombie should be on the stack after paying the alternative cost"
+    );
+
+    // --- Non-Zombie: grant NOT offered. ---
+    // Sanity: the static is present so the negative is meaningful.
+    assert!(
+        runner.state().objects.values().any(|o| matches!(
+            o.static_definitions.first().map(|d| &d.mode),
+            Some(StaticMode::CastWithAlternativeCost { .. })
+        )),
+        "Rooftop Storm must carry a CastWithAlternativeCost static"
+    );
+
+    let elf_card = runner.state().objects[&elf_id].card_id;
+    let elf_result = runner.act(GameAction::CastSpell {
+        object_id: elf_id,
+        card_id: elf_card,
+        targets: vec![],
+    });
+    // The Elf has a {2} cost and no mana available, so the cast may fail at
+    // payment — but it must NEVER enter the OptionalCostChoice grant prompt.
+    if let Ok(elf_result) = elf_result {
+        handle_target_selection(&mut runner, &elf_result);
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "non-Zombie spell must not be offered the Rooftop Storm grant, got {:?}",
+            runner.state().waiting_for,
+        );
+    }
 }

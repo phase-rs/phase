@@ -87,6 +87,12 @@ pub enum PolicyId {
     SpellslingerKeepablesMulligan,
     CombatTaxPayment,
     ReactiveSelfProtection,
+    ComboLineProgress,
+    CedhKeepablesMulligan,
+    PlaneswalkerLoyalty,
+    EquipmentPriority,
+    LandSequencing,
+    ConditionGatedActivation,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -209,6 +215,11 @@ impl Default for PolicyRegistry {
             Box::new(SpellslingerCastingPolicy),
             Box::new(super::combat_tax::CombatTaxPaymentPolicy),
             Box::new(ReactiveSelfProtectionPolicy),
+            Box::new(super::combo_line::ComboLinePolicy::new()),
+            Box::new(super::planeswalker_loyalty::PlaneswalkerLoyaltyPolicy),
+            Box::new(super::equipment_priority::EquipmentPriorityPolicy),
+            Box::new(super::land_sequencing::LandSequencingPolicy),
+            Box::new(super::condition_gated_activation::ConditionGatedActivationPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
@@ -293,6 +304,12 @@ impl PolicyRegistry {
         total
     }
 
+    /// Returns `true` if any registered policy has the given `PolicyId`.
+    /// Intended for integration tests and diagnostics — not for hot paths.
+    pub fn has_policy(&self, id: PolicyId) -> bool {
+        self.policies.iter().any(|p| p.id() == id)
+    }
+
     pub fn priors(
         &self,
         state: &GameState,
@@ -353,6 +370,19 @@ impl PolicyRegistry {
 #[cfg(test)]
 mod shared_invariant_tests {
     use super::*;
+
+    #[test]
+    fn default_registry_contains_combo_line_progress() {
+        let reg = PolicyRegistry::default();
+        let has = reg
+            .policies
+            .iter()
+            .any(|p| p.id() == PolicyId::ComboLineProgress);
+        assert!(
+            has,
+            "PolicyRegistry::default() must register ComboLinePolicy"
+        );
+    }
 
     /// `PolicyRegistry::shared()` returns a stable process-wide instance.
     /// Two calls must hand back the same pointer and the same policy count —

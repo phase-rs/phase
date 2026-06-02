@@ -6,6 +6,7 @@ use crate::types::ability::{
     ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
     TargetRef,
 };
+use crate::types::card_type::SubtypeSet;
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -104,6 +105,25 @@ pub fn resolve(
             .ok_or_else(|| {
                 EffectError::MissingParam("CopyTokenOf requires a cost-paid object".to_string())
             })?
+    } else if matches!(
+        target_filter,
+        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+    ) {
+        let effective_filter =
+            crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
+        let id = match &effective_filter {
+            TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => *id,
+            _ => unreachable!("tracked-set filter resolved to non-tracked filter"),
+        };
+        let filter_ctx = FilterContext::from_ability(ability);
+        state
+            .tracked_object_sets
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|id| matches_target_filter(state, *id, &effective_filter, &filter_ctx))
+            .collect()
     } else {
         // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch so
         // `SelfRef` always resolves to the source object (the LTB
@@ -283,7 +303,10 @@ pub fn resolve(
             // Step 6b: Inject predefined abilities, record entry, and mark layers dirty.
             // CR 111.10a-v: Predefined token abilities for known subtypes (Treasure, Food, etc.).
             super::token::inject_predefined_token_abilities(state, token_id);
-            state.layers_dirty = true;
+            // Battlefield entry of a copy token: request an incremental re-derive
+            // for just this token. `flush_layers` escalates to a full pass when
+            // the copied object sources a continuous effect, carries a CDA, etc.
+            crate::game::layers::mark_layers_entered(state, token_id);
             crate::game::restrictions::record_battlefield_entry(state, token_id);
             crate::game::restrictions::record_token_created(state, token_id);
 
@@ -324,6 +347,45 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 707.2: Compute the longest contiguous prefix of `source_ids` (top-down
+/// resolution order) whose copy sources all share IDENTICAL copiable values.
+///
+/// Tier-3 batch support: a run of "create a token that's a copy of it"
+/// self-copy triggers from distinct sources produces N tokens with identical
+/// characteristics iff every source has the same CR 707.2 copiable values. This
+/// walks the run, snapshots the top source's copiable values, then extends the
+/// prefix while each subsequent source's values are `==` to the snapshot.
+///
+/// Conserves on a vanished source: if `compute_current_copiable_values` returns
+/// `None` for any source in the prefix walk, the prefix stops there (the top
+/// source returning `None` yields `None` overall — nothing to batch).
+///
+/// Returns `(prefix_values, prefix_len)`. `prefix_len` may be shorter than
+/// `source_ids.len()` (a divergent tail resolves later). Token art is read from
+/// the live source at resolution time (`token_copy::resolve`), so no display
+/// `PrintedCardRef` is threaded through the batch probe (CR 707.2: not a
+/// copiable characteristic).
+pub(crate) fn compute_copy_batch_prefix(
+    state: &GameState,
+    source_ids: &[ObjectId],
+) -> Option<(crate::types::ability::CopiableValues, u32)> {
+    let top_id = *source_ids.first()?;
+    // Conserve on a vanished top source.
+    let prefix_values = compute_current_copiable_values(state, top_id)?;
+
+    let mut prefix_len = 1u32;
+    for &id in source_ids.iter().skip(1) {
+        // CR 707.2: stop at the first source that vanished (None) or whose
+        // copiable values diverge from the prefix snapshot.
+        match compute_current_copiable_values(state, id) {
+            Some(values) if values == prefix_values => prefix_len += 1,
+            _ => break,
+        }
+    }
+
+    Some((prefix_values, prefix_len))
 }
 
 /// CR 707.2 + CR 707.9: Apply non-keyword `, except <body>` modifications to
@@ -454,6 +516,45 @@ fn apply_token_modifications(
                     token.base_card_types.subtypes.retain(|s| s != subtype);
                 }
             }
+            // CR 707.9b + CR 613.1d: a copy exception with no "in addition"
+            // carve-out replaces the copied creature subtypes (CR 707.9d). The
+            // wiped set becomes part of the token's copiable values, so apply it
+            // to both live and base subtype lists.
+            ContinuousModification::RemoveAllSubtypes { set } => {
+                let all_creature_types = &state.all_creature_types;
+                let objects = &mut state.objects;
+                if let Some(token) = objects.get_mut(&token_id) {
+                    remove_subtype_set(&mut token.card_types.subtypes, *set, all_creature_types);
+                    remove_subtype_set(
+                        &mut token.base_card_types.subtypes,
+                        *set,
+                        all_creature_types,
+                    );
+                }
+            }
+            // CR 707.9b + CR 613.1e: a copy exception that sets color (no
+            // "in addition to its other colors" carve-out, CR 707.9d) replaces
+            // the copied color. The result becomes part of the token's copiable
+            // values, so set both live and base color.
+            ContinuousModification::SetColor { colors } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    token.color = colors.clone();
+                    token.base_color = colors.clone();
+                }
+            }
+            // CR 707.9b + CR 613.1e: a copy exception that adds color
+            // ("in addition to its other colors") becomes part of the token's
+            // copiable values without removing the copied color.
+            ContinuousModification::AddColor { color } => {
+                if let Some(token) = state.objects.get_mut(&token_id) {
+                    if !token.color.contains(color) {
+                        token.color.push(*color);
+                    }
+                    if !token.base_color.contains(color) {
+                        token.base_color.push(*color);
+                    }
+                }
+            }
             // CR 707.9b: "except it's 1/1" — set base and live P/T so the
             // override persists through layer resets. Used by Offspring
             // (CR 702.175a) and Saw in Half.
@@ -521,6 +622,37 @@ fn apply_token_modifications(
     }
 }
 
+/// CR 205.1a + CR 613.1d: remove every subtype belonging to the given
+/// [`SubtypeSet`] from a token's subtype list. Creature types are recognised
+/// against the game's live `all_creature_types` list (Changeling / set-defined
+/// types are runtime data); every other set has a fixed CR-defined membership.
+fn remove_subtype_set(subtypes: &mut Vec<String>, set: SubtypeSet, all_creature_types: &[String]) {
+    match set {
+        // CR 205.3m: creature types.
+        SubtypeSet::Creature => {
+            subtypes.retain(|s| {
+                !all_creature_types
+                    .iter()
+                    .any(|creature_type| creature_type == s)
+            });
+        }
+        SubtypeSet::Land => subtypes.retain(|s| !crate::types::card_type::is_land_subtype(s)),
+        SubtypeSet::Artifact => {
+            subtypes.retain(|s| !crate::types::card_type::ARTIFACT_SUBTYPES.contains(&s.as_str()))
+        }
+        SubtypeSet::Enchantment => subtypes
+            .retain(|s| !crate::types::card_type::ENCHANTMENT_SUBTYPES.contains(&s.as_str())),
+        SubtypeSet::Planeswalker => subtypes
+            .retain(|s| !crate::types::card_type::PLANESWALKER_SUBTYPES.contains(&s.as_str())),
+        SubtypeSet::Spell => {
+            subtypes.retain(|s| !crate::types::card_type::SPELL_SUBTYPES.contains(&s.as_str()));
+        }
+        SubtypeSet::Battle => {
+            subtypes.retain(|s| !crate::types::card_type::BATTLE_SUBTYPES.contains(&s.as_str()));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,10 +663,104 @@ mod tests {
         TypedFilter,
     };
     use crate::types::card_type::{CardType, CoreType, Supertype};
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{ObjectId, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
+
+    /// CR 707.9b + CR 707.9d: a copy token whose exception sets P/T, replaces
+    /// color, and replaces creature subtypes (The Scarab God shape) stamps each
+    /// characteristic onto both the live and base (copiable) values of the
+    /// synthesized token.
+    #[test]
+    fn copy_token_exceptions_stamp_pt_color_and_subtype() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec![
+            "Human".to_string(),
+            "Soldier".to_string(),
+            "Zombie".to_string(),
+        ];
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Elite Vanguard".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_power = Some(2);
+            source.base_toughness = Some(1);
+            source.power = Some(2);
+            source.toughness = Some(1);
+            source.base_color = vec![ManaColor::White];
+            source.color = vec![ManaColor::White];
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Human".to_string(), "Soldier".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![
+                    ContinuousModification::SetPower { value: 4 },
+                    ContinuousModification::SetToughness { value: 4 },
+                    ContinuousModification::SetColor {
+                        colors: vec![ManaColor::Black],
+                    },
+                    ContinuousModification::RemoveAllSubtypes {
+                        set: SubtypeSet::Creature,
+                    },
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    },
+                    ContinuousModification::AddSubtype {
+                        subtype: "Zombie".to_string(),
+                    },
+                ],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert_eq!(token.power, Some(4));
+        assert_eq!(token.toughness, Some(4));
+        assert_eq!(token.color, vec![ManaColor::Black]);
+        assert!(token.card_types.subtypes.contains(&"Zombie".to_string()));
+        assert!(!token.card_types.subtypes.contains(&"Human".to_string()));
+        assert!(!token.card_types.subtypes.contains(&"Soldier".to_string()));
+        assert_eq!(token.base_power, Some(4));
+        assert_eq!(token.base_toughness, Some(4));
+        assert_eq!(token.base_color, vec![ManaColor::Black]);
+        assert!(token
+            .base_card_types
+            .subtypes
+            .contains(&"Zombie".to_string()));
+        assert!(!token
+            .base_card_types
+            .subtypes
+            .contains(&"Human".to_string()));
+        assert!(!token
+            .base_card_types
+            .subtypes
+            .contains(&"Soldier".to_string()));
+    }
 
     #[test]
     fn copy_token_of_self_creates_copy() {
@@ -597,7 +823,7 @@ mod tests {
         assert!(token.card_types.subtypes.contains(&"Snake".to_string()));
         assert!(token.is_token);
         assert!(token.zone == Zone::Battlefield);
-        assert!(state.layers_dirty);
+        assert!(state.layers_dirty.is_dirty());
         assert!(events.iter().any(
             |e| matches!(e, GameEvent::TokenCreated { name, .. } if name == "Mist-Syndicate Naga")
         ));
@@ -999,6 +1225,65 @@ mod tests {
         assert_eq!(state.objects[&source_id].zone, Zone::Graveyard);
     }
 
+    /// CR 603.7 + CR 707.2: "copy of that card" after an exile instruction
+    /// must read the tracked set published by the prior zone change. Copy
+    /// sources are zone-agnostic, so an exiled card is a valid source.
+    #[test]
+    fn copy_token_of_tracked_set_source_from_exile() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Kheru Goldkeeper".to_string(),
+            Zone::Exile,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_power = Some(3);
+            source.base_toughness = Some(3);
+            source.power = Some(3);
+            source.toughness = Some(3);
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Zombie".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![source_id]);
+
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(1),
+                },
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: true,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.is_token);
+        assert!(token.tapped);
+        assert_eq!(token.name, "Kheru Goldkeeper");
+        assert_eq!(token.power, Some(3));
+        assert_eq!(token.toughness, Some(3));
+    }
+
     #[test]
     fn copy_token_enters_tapped_and_attacking() {
         let mut state = GameState::new_two_player(42);
@@ -1322,6 +1607,86 @@ mod tests {
                 .contains(&Supertype::Legendary),
             "token's base_card_types must not contain Legendary; got {:?}",
             token.base_card_types.supertypes
+        );
+    }
+
+    /// CR 704.5j + CR 707.9b: Issue #685 regression. When token-copy strips
+    /// the Legendary supertype via `additional_modifications`, the legend
+    /// rule SBA must NOT prompt the controller to choose which copy to
+    /// sacrifice — the token is no longer Legendary, so there is exactly one
+    /// Legendary permanent with the shared name (the original). Both
+    /// permanents must remain on the battlefield. This is the SBA-side
+    /// counterpart to the parser-side fix for the contracted "it's not
+    /// legendary" form (Delina, Wild Mage; Ratadrabik of Urborg; etc.).
+    #[test]
+    fn legend_rule_does_not_fire_when_copy_token_drops_legendary() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bahamut".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let s = state.objects.get_mut(&source_id).unwrap();
+            s.base_power = Some(7);
+            s.base_toughness = Some(7);
+            s.power = Some(7);
+            s.toughness = Some(7);
+            s.base_card_types = CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Dragon".to_string()],
+            };
+            s.card_types = s.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary,
+                }],
+            },
+            vec![TargetRef::Object(source_id)],
+            source_id,
+            PlayerId(0),
+        );
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = state.last_created_token_ids[0];
+
+        // Run state-based actions; the legend rule SBA must NOT fire because
+        // the token is not Legendary.
+        let mut sba_events = Vec::new();
+        crate::game::sba::check_state_based_actions(&mut state, &mut sba_events);
+
+        assert!(
+            !matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::ChooseLegend { .. }
+            ),
+            "legend rule must not present a choice when token is not legendary; \
+             got waiting_for={:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.objects[&source_id].zone,
+            Zone::Battlefield,
+            "original legendary creature must remain on battlefield"
+        );
+        assert_eq!(
+            state.objects[&token_id].zone,
+            Zone::Battlefield,
+            "non-legendary token-copy must remain on battlefield"
         );
     }
 

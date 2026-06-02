@@ -102,6 +102,7 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::FaceDown, tag("face down")),
         value(FilterProp::Unblocked, tag("unblocked")),
         value(FilterProp::Suspected, tag("suspected")),
+        value(FilterProp::Renowned, tag("renowned")),
         value(FilterProp::EnchantedBy, tag("enchanted")),
         value(FilterProp::EquippedBy, tag("equipped")),
         parse_color_property,
@@ -143,9 +144,9 @@ fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
 
 /// CR 208 + CR 208.4b + CR 613.4b: the single, shared power/toughness comparison
 /// combinator. This is the canonical home for the
-/// `[base ][each ](power|toughness|power or toughness) <comparison> N` grammar;
-/// every context (target suffixes, "with" clauses, sacrifice filters) delegates
-/// here so the grammar lives in exactly one place.
+/// `[base ][each ](power|toughness|power or toughness|total power and toughness)
+/// <comparison> N` grammar; every context (target suffixes, "with" clauses,
+/// sacrifice filters) delegates here so the grammar lives in exactly one place.
 ///
 /// Axes parsed:
 /// - optional leading `each ` — the distributive qualifier in "creatures each
@@ -154,7 +155,7 @@ fn parse_with_inner(input: &str) -> OracleResult<'_, FilterProp> {
 ///   discarded.
 /// - optional `base ` → `PtValueScope::Base` (CR 208.4b); otherwise `Current`.
 /// - stat selector: `power or toughness` (disjunction → `AnyOf` of two
-///   `PtComparison`), `power`, or `toughness`.
+///   `PtComparison`), `total power and toughness`, `power`, or `toughness`.
 /// - comparison tail: either the postfix `N or less` / `N or greater` form, or
 ///   the infix `less than [or equal to] N` / `greater than [or equal to] N`
 ///   form (resolving to LE/GE with an `Offset` for strict `<`/`>`).
@@ -171,8 +172,12 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
         }
     })
     .parse(input)?;
-    // Stat selector. "power or toughness" must be tried before "power".
+    // Stat selector. Longer phrases must be tried before "power".
     let (input, stats): (_, &[PtStat]) = alt((
+        value(
+            &[PtStat::TotalPowerToughness][..],
+            tag("total power and toughness"),
+        ),
         value(
             &[PtStat::Power, PtStat::Toughness][..],
             tag("power or toughness"),
@@ -209,7 +214,12 @@ pub fn parse_pt_comparison(input: &str) -> OracleResult<'_, FilterProp> {
 /// - postfix: `N or less` / `N or greater` (literal or X thresholds).
 fn parse_pt_comparison_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExpr)> {
     let input = input.trim_start();
-    alt((parse_pt_infix_tail, parse_pt_postfix_tail)).parse(input)
+    alt((
+        parse_pt_infix_tail,
+        parse_pt_postfix_tail,
+        parse_pt_exact_tail,
+    ))
+    .parse(input)
 }
 
 /// Infix form: "less than [or equal to] <qty>" / "greater than [or equal to] <qty>".
@@ -261,6 +271,13 @@ fn parse_pt_postfix_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityE
         map(tag("or greater"), move |_| (Comparator::GE, value.clone())),
     ))
     .parse(rest)
+}
+
+/// Exact form: "<qty>".
+fn parse_pt_exact_tail(input: &str) -> OracleResult<'_, (Comparator, QuantityExpr)> {
+    let input = input.trim_start();
+    let (rest, value) = parse_quantity_expr_number(input)?;
+    Ok((rest, (Comparator::EQ, value)))
 }
 
 /// Parse "a +1/+1 counter" / "a -1/-1 counter" from a "with" clause.
@@ -400,6 +417,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_property_filter_renowned() {
+        let (rest, p) = parse_property_filter("renowned creature").unwrap();
+        assert_eq!(p, FilterProp::Renowned);
+        assert_eq!(rest, " creature");
+    }
+
+    #[test]
     fn test_parse_property_filter_failure() {
         assert!(parse_property_filter("flying").is_err());
     }
@@ -476,6 +500,36 @@ mod tests {
                         value: QuantityExpr::Fixed { value: 1 },
                     },
                 ]
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_total_power_toughness() {
+        let (rest, p) = parse_pt_comparison("total power and toughness 5 or less").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::TotalPowerToughness,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 5 },
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_pt_comparison_exact_base_power() {
+        let (rest, p) = parse_with_property("with base power 1").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Base,
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Fixed { value: 1 },
             }
         );
     }

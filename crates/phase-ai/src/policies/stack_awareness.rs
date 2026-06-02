@@ -317,7 +317,7 @@ mod tests {
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{ResolvedAbility, TargetFilter};
+    use engine::types::ability::{BounceSelection, ResolvedAbility, TargetFilter};
     use engine::types::card_type::CoreType;
     use engine::types::game_state::{
         GameState, PendingCast, StackEntry, StackEntryKind, TargetSelectionSlot, WaitingFor,
@@ -384,6 +384,7 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(target_id)],
                     optional: false,
                 }],
+                mode_labels: Vec::new(),
                 selection: Default::default(),
             },
             candidates: Vec::new(),
@@ -528,6 +529,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Any,
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
             vec![TargetRef::Object(creature)],
         );

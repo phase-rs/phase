@@ -183,7 +183,7 @@ pub fn turn_face_up(
     apply_back_face_to_object(obj, back_face);
     obj.back_face = None;
 
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
 
     events.push(GameEvent::TurnedFaceUp { object_id });
 

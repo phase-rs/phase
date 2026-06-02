@@ -15,6 +15,8 @@ import {
 } from "../constants/storage";
 import type { CommanderBracket } from "../types/bracket";
 import { getPreconBracket } from "../data/preconBrackets";
+import { BUNDLED_CEDH_DECKS } from "../data/cedhDecks";
+import { CEDH_BRACKET } from "./cedhLock";
 import type { Feed, FeedDeck } from "../types/feed";
 import {
   isCommanderPreconDeck,
@@ -89,6 +91,40 @@ function cachedFeed(feedId: string, feedCache?: Record<string, Feed>): Feed | nu
   return feedCache?.[feedId] ?? getCachedFeed(feedId);
 }
 
+/**
+ * Shared push logic for precon-shaped deck candidates. Used by both the
+ * MTGJSON precon loop and the bundled-cEDH loop, which differ only in the
+ * bracket source (caller-supplied) and bundled-only id-collision guard
+ * (kept at the call site, not pushed in here).
+ *
+ * Mutates `candidates` and `savedDisplayNames` in place — they are the
+ * loop accumulators owned by `buildDeckCatalog`. Skips non-Commander
+ * decks and decks whose display name collides with an already-emitted
+ * candidate, matching the pre-extraction behavior exactly.
+ */
+function pushPreconCandidate(
+  candidates: DeckCatalogCandidate[],
+  savedDisplayNames: Set<string>,
+  deckId: string,
+  deck: PreconDeckEntry,
+  bracket: CommanderBracket | null,
+): void {
+  if (!isCommanderPreconDeck(deck)) return;
+  const name = `${deck.name} (${deck.code})`;
+  if (savedDisplayNames.has(name)) return;
+  savedDisplayNames.add(name);
+  candidates.push({
+    id: preconDeckCatalogId(deckId),
+    name,
+    source: { type: "precon", deckId, code: deck.code, releaseDate: deck.releaseDate },
+    deck: preconDeckEntryToParsedDeck(deck),
+    knownFormat: "Commander",
+    coveragePct: deck.coveragePct,
+    bracket,
+    preconDeck: deck,
+  });
+}
+
 export async function buildDeckCatalog({
   savedDeckNames = listSavedDeckNames(),
   feedCache,
@@ -136,23 +172,26 @@ export async function buildDeckCatalog({
   if (!includePrecons) return candidates;
 
   const decks = await loadPreconDeckMap();
-  if (!decks) return candidates;
+  if (decks) {
+    for (const [deckId, deck] of Object.entries(decks)) {
+      pushPreconCandidate(candidates, savedDisplayNames, deckId, deck, getPreconBracket(deckId));
+    }
+  }
 
-  for (const [deckId, deck] of Object.entries(decks)) {
-    if (!isCommanderPreconDeck(deck)) continue;
-    const name = `${deck.name} (${deck.code})`;
-    if (savedDisplayNames.has(name)) continue;
-    savedDisplayNames.add(name);
-    candidates.push({
-      id: preconDeckCatalogId(deckId),
-      name,
-      source: { type: "precon", deckId, code: deck.code, releaseDate: deck.releaseDate },
-      deck: preconDeckEntryToParsedDeck(deck),
-      knownFormat: "Commander",
-      coveragePct: deck.coveragePct,
-      bracket: getPreconBracket(deckId),
-      preconDeck: deck,
-    });
+  // Bundled cEDH decks (hand-curated in TypeScript, NOT MTGJSON-derived). They
+  // flow through the same precon-source path so the AI picker and downstream
+  // compatibility checks treat them uniformly, but their bracket is bracket 5
+  // by authorship — never looked up via `getPreconBracket`, which is reserved
+  // for MTGJSON precons. Surfaced independently of MTGJSON availability so
+  // the cEDH picker has options even if the MTGJSON catalog fetch fails.
+  for (const [deckId, deck] of Object.entries(BUNDLED_CEDH_DECKS)) {
+    // Defensive: skip if an MTGJSON precon already claimed this id. In
+    // practice IDs cannot collide because bundled IDs use the
+    // `BundledCedh_` prefix, but the check keeps the loop honest. This
+    // guard is bundled-specific and stays at the call site (not in
+    // `pushPreconCandidate`) so the helper remains source-agnostic.
+    if (decks && decks[deckId]) continue;
+    pushPreconCandidate(candidates, savedDisplayNames, deckId, deck, CEDH_BRACKET);
   }
 
   return candidates;

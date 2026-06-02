@@ -9,7 +9,11 @@ import type {
 } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { manaCostToShards, SHARD_ABBREVIATION } from "../../viewmodel/costLabel.ts";
+import {
+  abilityCostToManaShards,
+  manaCostToShards,
+  SHARD_ABBREVIATION,
+} from "../../viewmodel/costLabel.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { ManaBadge } from "./ManaBadge.tsx";
 import { ManaSymbol } from "./ManaSymbol.tsx";
@@ -60,6 +64,12 @@ export function ManaPaymentUI() {
   const costShards = useMemo(() => {
     if (!gameState) return null;
     if (gameState.pending_cast) {
+      // Activated-ability mana payment: prefer `activation_cost` when present.
+      // The engine reuses PendingCast for both spell casts and activated abilities;
+      // for the latter, the mana to be paid is stored on `activation_cost`.
+      if (gameState.pending_cast.activation_cost) {
+        return abilityCostToManaShards(gameState.pending_cast.activation_cost) ?? [];
+      }
       return manaCostToShards(gameState.pending_cast.cost);
     }
     if (isPhyrexianPayment && spellObjectId != null) {

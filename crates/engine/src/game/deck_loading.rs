@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
+use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::types::card::CardFace;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
@@ -18,40 +19,65 @@ pub struct DeckEntry {
     pub count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayerDeckPayload {
+    #[serde(default)]
     pub main_deck: Vec<DeckEntry>,
     #[serde(default)]
     pub sideboard: Vec<DeckEntry>,
     #[serde(default)]
     pub commander: Vec<DeckEntry>,
+    /// The declared bracket tier for this player's deck. Defaults to `Core`
+    /// so that existing serialized payloads and test fixtures that omit the
+    /// field continue to deserialize correctly.
+    #[serde(default)]
+    pub bracket_tier: CommanderBracketTier,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeckPayload {
     pub player: PlayerDeckPayload,
     pub opponent: PlayerDeckPayload,
     #[serde(default)]
     pub ai_decks: Vec<PlayerDeckPayload>,
+    /// AI difficulty strings per AI seat (opponent-first, then `ai_decks`).
+    /// Used by Tauri and server-core to gate cEDH validation on AI difficulty
+    /// rather than deck bracket tier. Defaults to empty, which means no AI
+    /// seat is cEDH and validation is skipped — safe backward-compat default.
+    #[serde(default)]
+    pub ai_difficulties: Vec<String>,
 }
 
 /// Lightweight deck format using card names only.
 /// Resolved into a DeckPayload via a CardDatabase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayerDeckList {
     pub main_deck: Vec<String>,
     #[serde(default)]
     pub sideboard: Vec<String>,
     #[serde(default)]
     pub commander: Vec<String>,
+    /// Declared bracket tier for this player's deck. Defaults to `Core` for
+    /// backward-compatible deserialization (payloads that predate this field
+    /// omit it, which `#[serde(default)]` handles transparently).
+    #[serde(default)]
+    pub bracket_tier: CommanderBracketTier,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeckList {
     pub player: PlayerDeckList,
     pub opponent: PlayerDeckList,
     #[serde(default)]
     pub ai_decks: Vec<PlayerDeckList>,
+    /// AI difficulty strings per seat, in the same order as the AI seats
+    /// (opponent first, then `ai_decks`). Used by the WASM bridge and Tauri
+    /// commands to gate cEDH bracket validation on AI difficulty rather than
+    /// deck bracket tier: validation fires only when any AI seat is `"CEDH"`.
+    /// Old payloads that omit this field deserialize as an empty vec, which
+    /// means no AI seat is cEDH and validation is skipped — safe default.
+    #[serde(default)]
+    pub ai_difficulties: Vec<String>,
 }
 
 /// Resolve a flat name list into DeckEntry entries using the card database.
@@ -75,27 +101,40 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
 
 /// Resolve a single player's deck list (name-only) into a `PlayerDeckPayload`
 /// using a `CardDatabase` for lookup. Unresolvable names are silently skipped.
+///
+/// The `bracket_tier` is taken from `list.bracket_tier` — `PlayerDeckList`
+/// already carries the declared tier, so there is no separate parameter to
+/// keep in sync. Callers that need a specific tier set it on the
+/// `PlayerDeckList` before calling.
 pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> PlayerDeckPayload {
     PlayerDeckPayload {
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
+        bracket_tier: list.bracket_tier,
     }
 }
 
 /// Resolve a DeckList (name-only) into a DeckPayload (full CardFace objects)
 /// using a CardDatabase for lookup. Unresolvable names are silently skipped.
+///
+/// Each `PlayerDeckList`'s `bracket_tier` field is forwarded directly to the
+/// corresponding `PlayerDeckPayload`, so callers that populate the tier before
+/// calling this function receive correctly-tiered payloads. Old payloads that
+/// omit the field deserialize with `CommanderBracketTier::Core` (the `default`).
 pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
     DeckPayload {
         player: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.player.main_deck),
             sideboard: resolve_names(db, &list.player.sideboard),
             commander: resolve_names(db, &list.player.commander),
+            bracket_tier: list.player.bracket_tier,
         },
         opponent: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.opponent.main_deck),
             sideboard: resolve_names(db, &list.opponent.sideboard),
             commander: resolve_names(db, &list.opponent.commander),
+            bracket_tier: list.opponent.bracket_tier,
         },
         ai_decks: list
             .ai_decks
@@ -104,8 +143,12 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 main_deck: resolve_names(db, &deck.main_deck),
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
+                bracket_tier: deck.bracket_tier,
             })
             .collect(),
+        // ai_difficulties is carried through from the DeckList so the caller's
+        // per-seat difficulty annotations survive resolution.
+        ai_difficulties: list.ai_difficulties.clone(),
     }
 }
 
@@ -181,6 +224,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_sideboard: p0_side,
             registered_commander: std::sync::Arc::clone(&p0_cmdr),
             current_commander: p0_cmdr,
+            bracket_tier: payload.player.bracket_tier,
         });
     let p1_main = std::sync::Arc::new(payload.opponent.main_deck.clone());
     let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
@@ -195,6 +239,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_sideboard: p1_side,
             registered_commander: std::sync::Arc::clone(&p1_cmdr),
             current_commander: p1_cmdr,
+            bracket_tier: payload.opponent.bracket_tier,
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
@@ -211,6 +256,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 current_sideboard: side,
                 registered_commander: std::sync::Arc::clone(&cmdr),
                 current_commander: cmdr,
+                bracket_tier: ai_deck.bracket_tier,
             });
     }
 
@@ -259,8 +305,16 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         }
     }
 
-    // Collect all creature subtypes for Changeling CDA expansion
-    let mut creature_types: HashSet<String> = HashSet::new();
+    // Collect all creature subtypes for Changeling CDA expansion.
+    // CR 205.2b + CR 205.3m + CR 308.1: creature subtypes are shared by Creature
+    // and Kindred (legacy Tribal) faces. Subtype categories are disjoint, so a
+    // multi-type entry ("Land Creature — Forest Dryad") carries non-creature
+    // subtypes alongside the creature type; subtract any subtype that also
+    // appears on a non-creature entry so land/artifact/enchantment types don't
+    // leak in. This must stay in lockstep with `collect_creature_type_vocabulary`
+    // in `database/card_db.rs` (the db==Some path's corpus seed).
+    let mut creature_candidates: HashSet<String> = HashSet::new();
+    let mut non_creature_subtypes: HashSet<String> = HashSet::new();
     let all_entries = payload
         .player
         .main_deck
@@ -275,16 +329,21 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 .flat_map(|d| d.main_deck.iter().chain(d.commander.iter())),
         );
     for entry in all_entries {
-        if entry
-            .card
-            .card_type
-            .core_types
-            .contains(&crate::types::card_type::CoreType::Creature)
-        {
-            creature_types.extend(entry.card.card_type.subtypes.iter().cloned());
-        }
+        let core_types = &entry.card.card_type.core_types;
+        let is_creature = core_types.contains(&crate::types::card_type::CoreType::Creature)
+            || core_types.contains(&crate::types::card_type::CoreType::Kindred)
+            || core_types.contains(&crate::types::card_type::CoreType::Tribal);
+        let bucket = if is_creature {
+            &mut creature_candidates
+        } else {
+            &mut non_creature_subtypes
+        };
+        bucket.extend(entry.card.card_type.subtypes.iter().cloned());
     }
-    let mut sorted: Vec<String> = creature_types.into_iter().collect();
+    let mut sorted: Vec<String> = creature_candidates
+        .difference(&non_creature_subtypes)
+        .cloned()
+        .collect();
     sorted.sort();
     state.all_creature_types = sorted;
 
@@ -319,6 +378,18 @@ pub fn load_and_hydrate_decks(
     match db {
         Some(db) => {
             super::printed_cards::rehydrate_game_from_card_db(state, db);
+            // CR 205.3m: Seed the creature subtype vocabulary from the full
+            // card corpus (not just loaded decks) so token-only types like
+            // Saproling and not-in-this-deck types like Golem are recognized
+            // by `SharesQuality::CreatureType` (Coat of Arms #1471), the
+            // Changeling expansion, and `ChoiceType::CreatureType` (Morophon
+            // #1472). The deck-only union performed by `load_deck_into_state`
+            // remains as a safety net for the `db == None` path below.
+            let mut merged: HashSet<String> = state.all_creature_types.drain(..).collect();
+            merged.extend(db.creature_type_vocabulary().iter().cloned());
+            let mut sorted: Vec<String> = merged.into_iter().collect();
+            sorted.sort();
+            state.all_creature_types = sorted;
         }
         None => {
             // Latch the warning so a long-running desktop session that
@@ -385,6 +456,7 @@ mod tests {
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
+            cleave_variant: None,
             color_override: None,
             color_identity: vec![],
             scryfall_oracle_id: None,
@@ -433,6 +505,7 @@ mod tests {
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
+            cleave_variant: None,
             color_override: None,
             color_identity: vec![],
             scryfall_oracle_id: None,
@@ -530,18 +603,16 @@ mod tests {
                         count: 2,
                     },
                 ],
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![DeckEntry {
                     card: make_creature_face(),
                     count: 3,
                 }],
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
-            ai_decks: vec![],
+            ..Default::default()
         };
 
         load_deck_into_state(&mut state, &payload);
@@ -571,6 +642,7 @@ mod tests {
                     count: 3,
                 }],
                 commander: vec![],
+                bracket_tier: Default::default(),
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![DeckEntry {
@@ -582,8 +654,10 @@ mod tests {
                     count: 2,
                 }],
                 commander: vec![],
+                bracket_tier: Default::default(),
             },
             ai_decks: vec![],
+            ai_difficulties: vec![],
         };
 
         load_deck_into_state(&mut state, &payload);
@@ -614,17 +688,16 @@ mod tests {
                     card: make_instant_face(),
                     count: 1,
                 }],
-                commander: vec![],
+                ..Default::default()
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![DeckEntry {
                     card: make_creature_face(),
                     count: 1,
                 }],
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
-            ai_decks: vec![],
+            ..Default::default()
         };
 
         load_deck_into_state(&mut state, &payload);
@@ -650,15 +723,10 @@ mod tests {
         let payload = DeckPayload {
             player: PlayerDeckPayload {
                 main_deck: entries,
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
-            opponent: PlayerDeckPayload {
-                main_deck: vec![],
-                sideboard: vec![],
-                commander: vec![],
-            },
-            ai_decks: vec![],
+            opponent: PlayerDeckPayload::default(),
+            ..Default::default()
         };
         load_deck_into_state(&mut state, &payload);
 
@@ -771,15 +839,10 @@ mod tests {
                     card: make_creature_face(),
                     count: 4,
                 }],
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
-            opponent: PlayerDeckPayload {
-                main_deck: vec![],
-                sideboard: vec![],
-                commander: vec![],
-            },
-            ai_decks: vec![],
+            opponent: PlayerDeckPayload::default(),
+            ..Default::default()
         };
         let json = serde_json::to_string(&payload).unwrap();
         let deserialized: DeckPayload = serde_json::from_str(&json).unwrap();
@@ -807,21 +870,20 @@ mod tests {
                     card: make_creature_face(),
                     count: 3,
                 }],
-                sideboard: vec![],
                 commander: vec![DeckEntry {
                     card: commander_face,
                     count: 1,
                 }],
+                ..Default::default()
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![DeckEntry {
                     card: make_creature_face(),
                     count: 3,
                 }],
-                sideboard: vec![],
-                commander: vec![],
+                ..Default::default()
             },
-            ai_decks: vec![],
+            ..Default::default()
         };
 
         load_deck_into_state(&mut state, &payload);
@@ -871,13 +933,15 @@ mod tests {
                 commander: vec![String::from(
                     "Brigid, Clachan's Heart // Brigid, Doun's Mind",
                 )],
+                bracket_tier: Default::default(),
             },
             opponent: PlayerDeckList {
                 main_deck: vec![],
                 sideboard: vec![],
                 commander: vec![],
+                bracket_tier: Default::default(),
             },
-            ai_decks: vec![],
+            ..Default::default()
         };
 
         let payload = resolve_deck_list(&db, &list);
@@ -898,6 +962,107 @@ mod tests {
     }
 
     #[test]
+    fn load_and_hydrate_seeds_creature_types_from_card_database() {
+        // CR 205.3m + #1471/#1472: the creature type vocabulary must come from
+        // the full CardDatabase corpus, not just from the loaded decks. A deck
+        // that lists only Grizzly Bears must still recognize "Saproling" and
+        // "Golem" as creature types because they appear on cards in the DB
+        // (Saproling token producers, Golem artifact creatures, etc.).
+        //
+        // This is the building-block test for SharesQuality::CreatureType
+        // (Coat of Arms) and ChoiceType::CreatureType (Morophon) — once the
+        // vocabulary is populated from the corpus, both effects see the
+        // complete creature-type universe regardless of deck composition.
+        let bears = make_creature_face();
+        let saproling_token = CardFace {
+            name: "Saproling Token".to_string(),
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Saproling".to_string()],
+            },
+            ..make_creature_face()
+        };
+        let golem_creature = CardFace {
+            name: "Walking Golem".to_string(),
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: vec![
+                    crate::types::card_type::CoreType::Artifact,
+                    crate::types::card_type::CoreType::Creature,
+                ],
+                subtypes: vec!["Golem".to_string()],
+            },
+            ..make_creature_face()
+        };
+        let db_json = serde_json::json!({
+            "grizzly bears": bears.clone(),
+            "saproling token": saproling_token,
+            "walking golem": golem_creature,
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&db_json).unwrap();
+
+        // Deck lists ONLY Grizzly Bears — Saproling and Golem must still be
+        // recognized after hydration because the DB knows about them.
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: bears,
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload::default(),
+            ..Default::default()
+        };
+
+        let mut state = GameState::new_two_player(42);
+        load_and_hydrate_decks(&mut state, &payload, Some(&db));
+
+        assert!(
+            state.all_creature_types.contains(&"Saproling".to_string()),
+            "Saproling must be recognized via corpus seeding (#1471 Coat of Arms)"
+        );
+        assert!(
+            state.all_creature_types.contains(&"Golem".to_string()),
+            "Golem must be recognized via corpus seeding (#1472 Morophon)"
+        );
+        assert!(
+            state.all_creature_types.contains(&"Bear".to_string()),
+            "deck-listed subtype must still appear"
+        );
+        // Sorted and deduped.
+        let mut sorted = state.all_creature_types.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(state.all_creature_types, sorted);
+    }
+
+    #[test]
+    fn load_and_hydrate_without_db_preserves_deck_only_vocabulary() {
+        // The db == None path must still seed creature types from the loaded
+        // deck (the existing fallback behavior in `load_deck_into_state`).
+        // This guards against regressing the safety net when callers do not
+        // thread a CardDatabase through.
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload::default(),
+            ..Default::default()
+        };
+
+        let mut state = GameState::new_two_player(42);
+        load_and_hydrate_decks(&mut state, &payload, None);
+        assert!(state.all_creature_types.contains(&"Bear".to_string()));
+    }
+
+    #[test]
     fn load_deck_commander_subtypes_collected() {
         let mut state = GameState::new_two_player(42);
         let commander_face = CardFace {
@@ -912,19 +1077,14 @@ mod tests {
 
         let payload = DeckPayload {
             player: PlayerDeckPayload {
-                main_deck: vec![],
-                sideboard: vec![],
                 commander: vec![DeckEntry {
                     card: commander_face,
                     count: 1,
                 }],
+                ..Default::default()
             },
-            opponent: PlayerDeckPayload {
-                main_deck: vec![],
-                sideboard: vec![],
-                commander: vec![],
-            },
-            ai_decks: vec![],
+            opponent: PlayerDeckPayload::default(),
+            ..Default::default()
         };
 
         load_deck_into_state(&mut state, &payload);

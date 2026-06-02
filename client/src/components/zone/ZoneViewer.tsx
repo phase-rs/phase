@@ -9,12 +9,11 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
+import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { getPlayerZoneIds, getWaitingForObjectChoiceIds } from "../../viewmodel/gameStateView.ts";
-import { CASTABLE_AFFORDANCE_ACTIVE, CASTABLE_AFFORDANCE_IDLE } from "../../viewmodel/castableAffordance.ts";
-import { playOrCastActionsForObject } from "../../viewmodel/cardActionChoice.ts";
-import { abilityChoiceLabel } from "../../viewmodel/costLabel.ts";
+import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
+import { playOrCastActionsForObject, resolveSingleActionDispatch } from "../../viewmodel/cardActionChoice.ts";
 
 interface ZoneViewerProps {
   zone: "graveyard" | "exile";
@@ -39,8 +38,9 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
   const dispatchAction = useGameDispatch();
-  const currentPlayerId = usePerspectivePlayerId();
   const canActForWaitingState = useCanActForWaitingState();
   const zoneIds = useMemo(
     () => getPlayerZoneIds(gameState, zone, playerId),
@@ -52,7 +52,6 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
     return zoneIds.map((id) => objects[id]).filter(Boolean);
   }, [objects, zoneIds]);
 
-  const isMyZone = playerId === currentPlayerId;
   const hasPriority = waitingFor?.type === "Priority" && canActForWaitingState;
 
   const currentLegalTargets = useMemo(() => {
@@ -63,6 +62,28 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
     }
     return targets;
   }, [canActForWaitingState, waitingFor]);
+
+  // Click-to-cast mirrors ZoneHand: a lone non-confirming action dispatches
+  // immediately, otherwise the shared ability-choice modal opens. Closing the
+  // viewer surfaces that modal (DialogHost z-40) which would otherwise sit
+  // behind the ZoneViewer panel (z-50), and matches Arena dismissing the zone
+  // view once a cast begins. resolveSingleActionDispatch is the single
+  // auto-vs-confirm authority — never re-decided inline here.
+  const handleCast = useCallback(
+    (target: GameObject, actions: GameAction[]) => {
+      inspectObject(null);
+      const auto = resolveSingleActionDispatch(actions, target);
+      if (auto) {
+        dispatch(auto);
+      } else {
+        setPendingAbilityChoice({ objectId: target.id, actions });
+      }
+      onClose();
+    },
+    [dispatch, inspectObject, setPendingAbilityChoice, onClose],
+  );
+
+  const zoneLabel = t(ZONE_TITLE_KEYS[zone]);
 
   return (
     <ModalPanelShell
@@ -84,10 +105,17 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
             {cards.map((obj) => {
               // CR 702.81a + CR 702.143a + CR 715.3a + CR 702.62a + CR 702.170d + CR 702.185a:
               // Engine surfaces a CastSpell-family action for every legally
-              // castable owner-viewed graveyard/exile card (Retrace, Adventure,
-              // Foretell, Suspend, Plot, Warp, etc.). The zone viewer surfaces
-              // whatever the engine reports — no per-mechanic permission inspection.
-              const castActions = (zone === "graveyard" || zone === "exile") && isMyZone && hasPriority
+              // castable graveyard/exile card (Retrace, Adventure, Foretell,
+              // Suspend, Plot, Warp, etc.). The zone viewer surfaces whatever
+              // the engine reports — no per-mechanic permission inspection.
+              //
+              // CR 715.3d / CR 400.7i: this includes opponent-OWNED cards in
+              // exile the viewer was granted permission to play (Hostage Taker,
+              // Gonti, Thief of Sanity). Those live in the owner's exile pile,
+              // so castability must NOT be gated on the pile belonging to the
+              // viewer — `legalActionsByObject` (engine authority, keyed to the
+              // player the permission was granted to) is the sole gate.
+              const castActions = (zone === "graveyard" || zone === "exile") && hasPriority
                 ? playOrCastActionsForObject(legalActionsByObject, obj.id)
                 : [];
               const isValidTarget = currentLegalTargets.has(obj.id);
@@ -96,9 +124,10 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
                   key={obj.id}
                   obj={obj}
                   isValidTarget={isValidTarget}
-                  castActions={castActions}
+                  canCast={castActions.length > 0}
+                  castTitle={t("zone.castFromZone", { zone: zoneLabel, name: obj.name })}
                   onTarget={() => dispatchAction({ type: "ChooseTarget", data: { target: { Object: obj.id } } })}
-                  onCast={(action) => dispatch(action)}
+                  onCast={() => handleCast(obj, castActions)}
                 />
               );
             })}
@@ -112,15 +141,17 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
 function ZoneCard({
   obj,
   isValidTarget,
-  castActions,
+  canCast,
+  castTitle,
   onTarget,
   onCast,
 }: {
   obj: GameObject;
   isValidTarget: boolean;
-  castActions: GameAction[];
+  canCast: boolean;
+  castTitle: string;
   onTarget: () => void;
-  onCast: (action: GameAction) => void;
+  onCast: () => void;
 }) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
@@ -139,40 +170,35 @@ function ZoneCard({
       useUiStore.getState().openDebugContextMenu({ objectId: obj.id, x: e.clientX, y: e.clientY });
       return;
     }
-    if (isValidTarget) onTarget();
-  }, [obj.id, isValidTarget, onTarget, longPressFired]);
+    if (isValidTarget) { onTarget(); return; }
+    if (canCast) onCast();
+  }, [obj.id, isValidTarget, canCast, onTarget, onCast, longPressFired]);
 
-  const canCast = castActions.length > 0;
   return (
     <div
-      className={`shrink-0 cursor-pointer rounded transition-colors ${
+      className={`group relative inline-flex shrink-0 cursor-pointer rounded-lg transition-transform ${
         isValidTarget
           ? CASTABLE_AFFORDANCE_ACTIVE
           : canCast
-            ? CASTABLE_AFFORDANCE_IDLE
+            ? "hover:scale-[1.03]"
             : "hover:ring-1 hover:ring-white/20"
       }`}
       data-card-hover
+      title={canCast && !isValidTarget ? castTitle : undefined}
       {...hoverProps(obj.id)}
       onClick={handleClick}
       {...longPressHandlers}
     >
       <CardImage cardName={obj.name} size="normal" />
       {canCast && !isValidTarget && (
-        <div className="mt-1 flex flex-col gap-1">
-          {castActions.map((action, i) => {
-            const { label } = abilityChoiceLabel(action, obj);
-            return (
-              <button
-                key={i}
-                onClick={() => onCast(action)}
-                className="w-full rounded-md bg-amber-600/80 px-2 py-1 text-xs font-semibold text-white transition hover:bg-amber-500"
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
+        <>
+          {/* Arena-style purple "playable" affordance — same treatment as the
+              ZoneHand castable stack, replacing the per-card "Cast/Play" button
+              so castable cards keep their natural size. pointer-events-none lets
+              clicks fall through to the card's own onClick (handleCast). */}
+          <div className="pointer-events-none absolute inset-0 rounded-lg bg-purple-600/30 transition-colors group-hover:bg-purple-600/10" />
+          <div className="pointer-events-none absolute inset-0 rounded-lg ring-2 ring-purple-400/70 shadow-[0_0_12px_3px_rgba(147,51,234,0.5)]" />
+        </>
       )}
     </div>
   );

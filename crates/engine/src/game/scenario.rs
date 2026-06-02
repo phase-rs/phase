@@ -7,12 +7,11 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::database::synthesis::synthesize_all;
+use crate::database::synthesis::{parse_oracle_with_cleave_brackets, synthesize_all};
 use crate::game::engine::{apply_as_current, EngineError};
 use crate::game::game_object::GameObject;
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::zones::create_object;
-use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AdditionalCost, Effect, PtValue, QuantityExpr,
     ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition,
@@ -22,7 +21,9 @@ use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ActionResult, ConvokeMode, GameState, PendingCast, WaitingFor};
+use crate::types::game_state::{
+    ActionResult, CastOfferKind, ConvokeMode, GameState, PendingCast, WaitingFor,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaUnit};
@@ -82,7 +83,14 @@ fn build_face_from_oracle(
         keyword_names
     };
 
-    let parsed = parse_oracle_text(
+    // CR 702.148a-b + CR 612: Route the cleave bracket prep through the SAME
+    // authority the real card-data build pipeline uses
+    // (`parse_oracle_with_cleave_brackets`) so test fixtures exercise the real
+    // cleave flow and the two pipelines cannot silently diverge. The helper
+    // gates the bracket strip on the keyword hints containing "cleave" (the
+    // inline-Oracle analog of MTGJSON reporting the keyword) so loyalty/other
+    // bracket usage is never stripped.
+    let (parsed, cleave_variant) = parse_oracle_with_cleave_brackets(
         oracle_text,
         &obj.name,
         effective_kw_names,
@@ -124,6 +132,7 @@ fn build_face_from_oracle(
         triggers: parsed.triggers,
         static_abilities: parsed.statics,
         replacements: parsed.replacements,
+        cleave_variant,
         modal: parsed.modal,
         additional_cost: parsed.additional_cost,
         casting_restrictions: parsed.casting_restrictions,
@@ -211,8 +220,8 @@ impl GameScenario {
 
     /// Add generic named cards to the top of a player's library.
     ///
-    /// The last supplied name becomes the current top card, matching the engine's
-    /// library-top convention (`Vec::last()` / pop-from-end flows).
+    /// The first supplied name becomes the current top card, matching the
+    /// engine's library-top convention (`library[0]`).
     pub fn with_library_top(&mut self, player: PlayerId, names_top_first: &[&str]) -> &mut Self {
         for &name in names_top_first.iter().rev() {
             self.add_card_to_library_top(player, name);
@@ -223,13 +232,25 @@ impl GameScenario {
     /// Add one generic named card to the top of a player's library.
     pub fn add_card_to_library_top(&mut self, player: PlayerId, name: &str) -> ObjectId {
         let card_id = CardId(self.state.next_object_id);
-        create_object(
+        let id = create_object(
             &mut self.state,
             card_id,
             player,
             name.to_string(),
             Zone::Library,
-        )
+        );
+        // Engine convention: `library[0]` is the top. `create_object` appends
+        // to the bottom, so re-seat this card at index 0 for deterministic top
+        // tests.
+        let player_state = self
+            .state
+            .players
+            .iter_mut()
+            .find(|p| p.id == player)
+            .expect("player exists");
+        player_state.library.retain(|&oid| oid != id);
+        player_state.library.insert(0, id);
+        id
     }
 
     /// Add generic named cards to a player's graveyard without rules text.
@@ -365,6 +386,10 @@ impl GameScenario {
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.card_types.supertypes.push(Supertype::Basic);
+        // CR 205.4: Basic lands have a single land subtype matching their name
+        // (e.g. Forest). Filters like Quirion Ranger's "return a Forest" cost
+        // match on subtypes, not the card name.
+        obj.card_types.subtypes.push(name.to_string());
         obj.base_card_types = obj.card_types.clone();
         obj.entered_battlefield_turn = Some(self.state.turn_number.saturating_sub(1));
         // Pre-existing land — see `add_creature` for the parallel rationale.
@@ -604,6 +629,17 @@ impl GameScenario {
         };
         obj.card_types.core_types.push(core_type);
         obj.base_card_types = obj.card_types.clone();
+
+        if zone == Zone::Library {
+            let player_state = self
+                .state
+                .players
+                .iter_mut()
+                .find(|p| p.id == player)
+                .expect("player exists");
+            player_state.library.retain(|&oid| oid != id);
+            player_state.library.insert(0, id);
+        }
 
         CardBuilder {
             state: &mut self.state,
@@ -966,10 +1002,27 @@ impl<'a> CardBuilder<'a> {
         oracle_text: &str,
     ) -> &mut Self {
         let kw_strings: Vec<String> = keyword_names.iter().map(|s| s.to_string()).collect();
+        let zone = self.state.objects.get(&self.id).unwrap().zone;
         let obj = self.state.objects.get(&self.id).unwrap();
         let face = build_face_from_oracle(obj, &kw_strings, oracle_text);
         let obj = self.state.objects.get_mut(&self.id).unwrap();
         apply_card_face_to_object(obj, &face);
+        // CR 603.6a: `create_object` registers the trigger index before Oracle
+        // text is applied. Re-index after `from_oracle_text` so scenario-seeded
+        // triggers (e.g. upkeep lines added via `add_creature_from_oracle`) fire.
+        if zone == Zone::Battlefield {
+            let object_id = self.id;
+            let registration = self.state.objects.get(&object_id).map(|obj| {
+                let defs: smallvec::SmallVec<[crate::types::ability::TriggerDefinition; 4]> =
+                    obj.trigger_definitions.as_slice().iter().cloned().collect();
+                let synthetic = crate::game::trigger_index::has_synthetic_keyword_trigger_for(obj);
+                (defs, synthetic)
+            });
+            if let Some((defs, synthetic)) = registration {
+                self.state.trigger_index.remove(object_id);
+                self.state.trigger_index.add(object_id, &defs, synthetic);
+            }
+        }
         self
     }
 }
@@ -1217,6 +1270,7 @@ impl GameRunner {
             WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
             WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
             WaitingFor::UntapChoice { .. } => "UntapChoice",
+            WaitingFor::ExertChoice { .. } => "ExertChoice",
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
@@ -1247,7 +1301,10 @@ impl GameRunner {
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
             WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
-            WaitingFor::AdventureCastChoice { .. } => "AdventureCastChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Adventure { .. },
+                ..
+            } => "AdventureCastChoice",
             WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
             WaitingFor::AlternativeCastChoice { keyword, .. } => match keyword {
                 crate::types::game_state::AlternativeCastKeyword::Warp => {
@@ -1262,6 +1319,15 @@ impl GameRunner {
                 crate::types::game_state::AlternativeCastKeyword::Bestow => {
                     "AlternativeCastChoice(Bestow)"
                 }
+                crate::types::game_state::AlternativeCastKeyword::Awaken => {
+                    "AlternativeCastChoice(Awaken)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Cleave => {
+                    "AlternativeCastChoice(Cleave)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::MoreThanMeetsTheEye => {
+                    "AlternativeCastChoice(MoreThanMeetsTheEye)"
+                }
             },
             WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",
             WaitingFor::ChoosePermanentTypeSlot { .. } => "ChoosePermanentTypeSlot",
@@ -1275,27 +1341,21 @@ impl GameRunner {
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
-            WaitingFor::DiscardForCost { .. } => "DiscardForCost",
-            WaitingFor::SacrificeForCost { .. } => "SacrificeForCost",
-            WaitingFor::ReturnToHandForCost { .. } => "ReturnToHandForCost",
-            WaitingFor::RemoveCounterForCost { .. } => "RemoveCounterForCost",
-            WaitingFor::BeholdForCost { .. } => "BeholdForCost",
-            WaitingFor::TapCreaturesForSpellCost { .. } => "TapCreaturesForSpellCost",
-            WaitingFor::TapCreaturesForManaAbility { .. } => "TapCreaturesForManaAbility",
-            WaitingFor::DiscardForManaAbility { .. } => "DiscardForManaAbility",
-            WaitingFor::ExileFromBattlefieldForManaAbility { .. } => {
-                "ExileFromBattlefieldForManaAbility"
-            }
-            WaitingFor::SacrificeForManaAbility { .. } => "SacrificeForManaAbility",
+            WaitingFor::PayCost { .. } => "PayCost",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
-            WaitingFor::ExileForCost { .. } => "ExileForCost",
             WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
             WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
-            WaitingFor::DiscoverChoice { .. } => "DiscoverChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { .. },
+                ..
+            } => "DiscoverChoice",
             WaitingFor::RevealUntilKeptChoice { .. } => "RevealUntilKeptChoice",
             WaitingFor::RepeatDecision { .. } => "RepeatDecision",
-            WaitingFor::CascadeChoice { .. } => "CascadeChoice",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { .. },
+                ..
+            } => "CascadeChoice",
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
             WaitingFor::ChooseLegend { .. } => "ChooseLegend",
             WaitingFor::BattleProtectorChoice { .. } => "BattleProtectorChoice",
@@ -1304,6 +1364,7 @@ impl GameRunner {
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
             WaitingFor::DistributeAmong { .. } => "DistributeAmong",
+            WaitingFor::MoveCountersDistribution { .. } => "MoveCountersDistribution",
             WaitingFor::PayAmountChoice { .. } => "PayAmountChoice",
             WaitingFor::RetargetChoice { .. } => "RetargetChoice",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
@@ -1316,6 +1377,7 @@ impl GameRunner {
             WaitingFor::ChooseDungeon { .. } => "ChooseDungeon",
             WaitingFor::ChooseDungeonRoom { .. } => "ChooseDungeonRoom",
             WaitingFor::PopulateChoice { .. } => "PopulateChoice",
+            WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
@@ -1323,10 +1385,19 @@ impl GameRunner {
             WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
             WaitingFor::PhyrexianPayment { .. } => "PhyrexianPayment",
             WaitingFor::BlightChoice { .. } => "BlightChoice",
-            WaitingFor::ParadigmCastOffer { .. } => "ParadigmCastOffer",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Paradigm { .. },
+                ..
+            } => "ParadigmCastOffer",
             WaitingFor::MiracleReveal { .. } => "MiracleReveal",
-            WaitingFor::MiracleCastOffer { .. } => "MiracleCastOffer",
-            WaitingFor::MadnessCastOffer { .. } => "MadnessCastOffer",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Miracle { .. },
+                ..
+            } => "MiracleCastOffer",
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Madness { .. },
+                ..
+            } => "MadnessCastOffer",
             WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
             WaitingFor::SeparatePilesPartition { .. } => "SeparatePilesPartition",
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",

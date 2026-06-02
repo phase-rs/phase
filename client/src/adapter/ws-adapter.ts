@@ -110,6 +110,10 @@ export class WebSocketAdapter implements EngineAdapter {
   private pendingReject: ((error: Error) => void) | null = null;
   private initResolve: (() => void) | null = null;
   private initReject: ((error: Error) => void) | null = null;
+  /** Starting-player contest DieRolled batch captured from the initial
+   *  GameStarted message, handed back by `initializeGame()` so the dice overlay
+   *  animates it. Empty on reconnects (the server drains it after first send). */
+  private initStartEvents: GameEvent[] = [];
   private listeners: WsAdapterEventListener[] = [];
   private reconnectAttempt = 0;
   private readonly maxReconnectAttempts = 8;
@@ -175,8 +179,13 @@ export class WebSocketAdapter implements EngineAdapter {
     _matchConfig?: unknown,
     _firstPlayer?: number,
   ): Promise<SubmitResult> {
-    // Server handles deck data via WebSocket protocol during initialize()
-    return { events: [] };
+    // Server handles deck data via WebSocket protocol during initialize().
+    // The starting-player contest events (if any) were captured from the
+    // initial GameStarted message; hand them back so gameStore.initGame routes
+    // them to the dice overlay, then clear so they're consumed once.
+    const events = this.initStartEvents;
+    this.initStartEvents = [];
+    return { events };
   }
 
   async initialize(): Promise<void> {
@@ -303,7 +312,16 @@ export class WebSocketAdapter implements EngineAdapter {
       }
     };
 
-    socket.ws.send(JSON.stringify(setupFrame));
+    if (!this.send(setupFrame)) {
+      socket.close();
+      if (this.initReject) {
+        this.initReject(
+          new AdapterError("WS_CLOSED", "Failed to send setup frame", true),
+        );
+        this.initResolve = null;
+        this.initReject = null;
+      }
+    }
   }
 
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {
@@ -320,7 +338,14 @@ export class WebSocketAdapter implements EngineAdapter {
     return new Promise<SubmitResult>((resolve, reject) => {
       this.pendingResolve = resolve;
       this.pendingReject = reject;
-      this.send({ type: "Action", data: { action } });
+      // If the frame cannot be sent, the server will never reply, so clear the
+      // pending state and reject now instead of leaving the caller hanging.
+      if (!this.send({ type: "Action", data: { action } })) {
+        this.pendingResolve = null;
+        this.pendingReject = null;
+        this.emit({ type: "actionPendingChanged", pending: false });
+        reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+      }
     });
   }
 
@@ -463,8 +488,33 @@ export class WebSocketAdapter implements EngineAdapter {
     }, 5000);
   }
 
-  private send(msg: unknown): void {
-    this.ws?.send(JSON.stringify(msg));
+  /**
+   * Serialize and send a frame. Returns `false` (and emits an `error` event)
+   * instead of throwing when the socket is missing/closed or `WebSocket.send`
+   * throws, so callers — especially `submitAction` — can recover rather than
+   * leaving the adapter wedged. Mirrors the guarded send in `PeerSession`.
+   */
+  private send(msg: unknown): boolean {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      this.emit({
+        type: "error",
+        message: "Cannot send message: WebSocket is not open.",
+      });
+      return false;
+    }
+    try {
+      ws.send(JSON.stringify(msg));
+      return true;
+    } catch (err) {
+      this.emit({
+        type: "error",
+        message: `Failed to send message: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      });
+      return false;
+    }
   }
 
   /** Snapshot of the server's advertised identity, or null before ServerHello. */
@@ -524,7 +574,7 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
-        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; derived?: GameState["derived"]; player_token?: string };
+        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; derived?: GameState["derived"]; player_token?: string; events?: GameEvent[] };
         if (this.reconnectInFlight) {
           this.reconnectInFlight = false;
           this.reconnectAttempt = 0;
@@ -563,6 +613,12 @@ export class WebSocketAdapter implements EngineAdapter {
           ...(playerNames === undefined ? {} : { playerNames }),
         });
         if (this.initResolve) {
+          // CR 103.1: the server sends the starting-player contest DieRolled
+          // batch only on the initial GameStarted (drained server-side, so
+          // reconnects carry none). Stash it for initializeGame() to return,
+          // routing it through the same gameStore.initGame contest path as
+          // local games.
+          this.initStartEvents = data.events ?? [];
           this.initResolve();
           this.initResolve = null;
           this.initReject = null;

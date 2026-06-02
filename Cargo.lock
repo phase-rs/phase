@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "draft-core"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "engine",
  "rand 0.9.4",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "draft-wasm"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "console_error_panic_hook",
  "draft-core",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "assert_matches",
  "im",
@@ -610,8 +610,10 @@ dependencies = [
  "proptest",
  "rand 0.9.4",
  "rand_chacha",
+ "rustc-hash",
  "serde",
  "serde_json",
+ "smallvec",
  "strum",
  "tempfile",
  "thiserror",
@@ -623,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "engine-inventory-gen"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -636,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "engine-wasm"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "console_error_panic_hook",
  "engine",
@@ -688,7 +690,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "feed-scraper"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "clap",
  "reqwest",
@@ -1338,7 +1340,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lobby-broker"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "engine",
  "serde",
@@ -1366,6 +1368,16 @@ name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
+
+[[package]]
+name = "manabrew-compat"
+version = "0.1.44"
+dependencies = [
+ "engine",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "markup5ever"
@@ -1432,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "mtgish-import"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "anyhow",
  "engine",
@@ -1513,9 +1525,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openssl"
-version = "0.10.79"
+version = "0.10.80"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf0b434746ee2832f4f0baf10137e1cabb18cbe6912c69e2e33263c45250f542"
+checksum = "a45fa2aa886c42762255da344f0a0d313e254066c46aad76f300c3d3da62d967"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -1544,9 +1556,9 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.115"
+version = "0.9.116"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "158fe5b292746440aa6e7a7e690e55aeb72d41505e2804c23c6973ad0e9c9781"
+checksum = "f28a22dc7140cda5f096e5e7724a6962ca81a7f8bfd2979f9b18c11af56318c4"
 dependencies = [
  "cc",
  "libc",
@@ -1595,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "phase-ai"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "engine",
  "rand 0.9.4",
@@ -1609,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "phase-server"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "axum",
  "clap",
@@ -2012,6 +2024,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustc-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
+
+[[package]]
 name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2146,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "seat-reducer"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "engine",
  "phase-ai",
@@ -2322,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.1.39"
+version = "0.1.44"
 dependencies = [
  "draft-core",
  "engine",
@@ -2417,6 +2435,9 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "socket2"

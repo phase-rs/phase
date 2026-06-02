@@ -272,6 +272,7 @@ mod tests {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         };
         let put_in_play = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -281,7 +282,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::land()),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,

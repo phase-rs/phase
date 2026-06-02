@@ -14,7 +14,7 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
 use engine::types::game_state::CastingVariant;
-use engine::types::game_state::{StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastOfferKind, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -66,7 +66,13 @@ fn elusive_otter_creature_face_cast_does_not_panic() {
         })
         .expect("cast should be accepted");
     assert!(
-        matches!(r1.waiting_for, WaitingFor::AdventureCastChoice { .. }),
+        matches!(
+            r1.waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Adventure { .. },
+                ..
+            }
+        ),
         "Expected AdventureCastChoice, got {:?}",
         r1.waiting_for
     );

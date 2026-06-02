@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, GainLifePlayer, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -21,31 +21,16 @@ pub fn resolve_gain(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (amount, player_kind) = match &ability.effect {
+    let (amount, player_filter) = match &ability.effect {
         Effect::GainLife { amount, player } => (amount, player),
         _ => return Err(EffectError::MissingParam("GainLife amount".to_string())),
     };
 
-    // Resolve the target object (if any) for TargetedController.
-    let target_obj = ability.targets.iter().find_map(|t| {
-        if let TargetRef::Object(id) = t {
-            state.objects.get(id)
-        } else {
-            None
-        }
-    });
-
-    let player_id: PlayerId = match player_kind {
-        GainLifePlayer::TargetedController => target_obj
-            .map(|o| o.controller)
-            .unwrap_or(ability.controller),
-        GainLifePlayer::Controller => ability.controller,
-        // CR 115.2 + CR 601.2c: "Target player gains N life" — the
-        // chosen player is bound on `ability.targets` via the spell-
-        // announcement target slot. `target_player()` extracts the
-        // first `TargetRef::Player` and falls back to controller.
-        GainLifePlayer::TargetPlayer => ability.target_player(),
-    };
+    // CR 119.3: Who gains the life. `resolve_life_loss_target` is the single
+    // authority for player resolution from a TargetFilter — context-refs
+    // (Controller, ParentTargetController) resolve via state slots; explicit
+    // Player targets come from `ability.targets`.
+    let player_id: PlayerId = resolve_life_loss_target(state, ability, Some(player_filter));
 
     // CR 119.7: "If an effect says that a player can't gain life ... a replacement
     // effect that would replace a life gain event affecting that player won't do
@@ -91,7 +76,7 @@ pub fn resolve_gain(
                 player.life += gain_amount as i32;
                 // CR 119.9: Track life gained this turn for triggered ability matching.
                 player.life_gained_this_turn += gain_amount;
-                state.layers_dirty = true;
+                crate::game::layers::mark_layers_full(state);
 
                 events.push(GameEvent::LifeChanged {
                     player_id,
@@ -220,7 +205,7 @@ pub fn apply_life_gain_after_replacement(
         player.life += gain_amount as i32;
         player.life_gained_this_turn += gain_amount;
     }
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: gain_amount as i32,
@@ -296,7 +281,7 @@ pub fn apply_life_loss_after_replacement(
         player.life -= loss_amount as i32;
         player.life_lost_this_turn += loss_amount;
     }
-    state.layers_dirty = true;
+    crate::game::layers::mark_layers_full(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: -(loss_amount as i32),
@@ -351,7 +336,7 @@ pub fn resolve_lose(
                     .ok_or(EffectError::PlayerNotFound)?;
                 player.life -= loss_amount as i32;
                 player.life_lost_this_turn += loss_amount;
-                state.layers_dirty = true;
+                crate::game::layers::mark_layers_full(state);
 
                 events.push(GameEvent::LifeChanged {
                     player_id,
@@ -477,9 +462,12 @@ mod tests {
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, QuantityExpr, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
+        AggregateFunction, ControllerRef, QuantityExpr, QuantityRef, SharedQuality,
+        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::statics::StaticMode;
     use crate::types::zones::Zone;
@@ -513,7 +501,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 5 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -524,6 +512,79 @@ mod tests {
         resolve_gain(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.players[0].life, 25);
+    }
+
+    #[test]
+    fn skemfar_shadowsage_gain_life_mode_uses_shared_creature_type_count() {
+        let mut state = GameState::new_two_player(42);
+        state.all_creature_types = vec![
+            "Elf".to_string(),
+            "Warrior".to_string(),
+            "Druid".to_string(),
+            "Human".to_string(),
+        ];
+        let source = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Skemfar Shadowsage".to_string(),
+            Zone::Battlefield,
+        );
+        for (name, subtypes) in [
+            ("Elf Warrior", vec!["Elf", "Warrior"]),
+            ("Elf Druid", vec!["Elf", "Druid"]),
+            ("Human Warrior", vec!["Human", "Warrior"]),
+        ] {
+            let id = create_object(
+                &mut state,
+                CardId(902),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = subtypes
+                .into_iter()
+                .map(|subtype| subtype.to_string())
+                .collect();
+        }
+        let changeling = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Masked Vandal".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&changeling).unwrap();
+        obj.card_types.core_types = vec![CoreType::Creature];
+        obj.card_types.subtypes = vec!["Shapeshifter".to_string()];
+        obj.keywords.push(Keyword::Changeling);
+
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCountBySharedQuality {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::You),
+                            properties: Vec::new(),
+                        }),
+                        quality: SharedQuality::CreatureType,
+                        aggregate: AggregateFunction::Max,
+                    },
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_gain(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, 23);
     }
 
     #[test]
@@ -623,7 +684,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 4 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -673,7 +734,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 5 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -919,7 +980,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 5 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(200),
@@ -1013,9 +1074,7 @@ mod tests {
     /// fallback path).
     #[test]
     fn lich_gain_life_substituted_by_draw_cards_instead() {
-        use crate::types::ability::{
-            AbilityDefinition, AbilityKind, GainLifePlayer, ReplacementDefinition,
-        };
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
         use crate::types::replacements::ReplacementEvent;
 
         let mut state = GameState::new_two_player(42);
@@ -1061,7 +1120,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 4 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -1096,9 +1155,7 @@ mod tests {
     /// "substitution" (different event type).
     #[test]
     fn gain_life_scaling_shape_modifies_amount_does_not_substitute() {
-        use crate::types::ability::{
-            AbilityDefinition, AbilityKind, GainLifePlayer, ReplacementDefinition,
-        };
+        use crate::types::ability::{AbilityDefinition, AbilityKind, ReplacementDefinition};
         use crate::types::replacements::ReplacementEvent;
 
         let mut state = GameState::new_two_player(42);
@@ -1119,7 +1176,7 @@ mod tests {
                             qty: crate::types::ability::QuantityRef::EventContextAmount,
                         }),
                     },
-                    player: GainLifePlayer::Controller,
+                    player: TargetFilter::Controller,
                 },
             ));
         state
@@ -1132,7 +1189,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -1158,5 +1215,25 @@ mod tests {
              continuation; found {:?}",
             state.post_replacement_continuation
         );
+    }
+
+    #[test]
+    fn gain_life_target_player_uses_declared_target() {
+        // CR 115.1 + CR 119.3: "target player gains N life" — the gaining
+        // player is the declared target in ability.targets, not the controller.
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_gain(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(state.players[1].life, 24, "target player (p1) gains 4 life");
+        assert_eq!(state.players[0].life, 20, "controller (p0) is unaffected");
     }
 }

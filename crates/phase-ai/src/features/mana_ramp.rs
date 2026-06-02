@@ -19,7 +19,7 @@
 //! - Controller scoping: `TypedFilter.controller: Option<ControllerRef>` at
 //!   `ability.rs:815-818`.
 //!
-//! `StaticMode::ReduceCost` is deliberately out of scope — cost reducers are a
+//! `StaticMode::ModifyCost` is deliberately out of scope — cost reducers are a
 //! follow-up feature.
 
 use engine::game::DeckEntry;
@@ -349,6 +349,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -359,7 +360,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::land()),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: false,
@@ -533,6 +534,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -545,7 +547,7 @@ mod tests {
                 ),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -574,6 +576,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         fetch_ability.cost = Some(AbilityCost::Composite {
@@ -593,7 +596,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::land()),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,

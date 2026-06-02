@@ -20,6 +20,11 @@ pub fn commander_tax(state: &GameState, commander_id: ObjectId) -> u32 {
 /// CR 408.3 + CR 903.8: Record that a commander was cast from the command zone, incrementing its cast count.
 pub fn record_commander_cast(state: &mut GameState, commander_id: ObjectId) {
     *state.commander_cast_count.entry(commander_id).or_insert(0) += 1;
+    if let Some(obj) = state.objects.get(&commander_id) {
+        if obj.is_commander {
+            state.commander_cast_owners.insert(commander_id, obj.owner);
+        }
+    }
 }
 
 /// CR 903.8: Count previous times `player` has cast their commander(s) from
@@ -29,13 +34,26 @@ pub fn commander_casts_from_command_zone(state: &GameState, player: PlayerId) ->
         .commander_cast_count
         .iter()
         .filter(|(commander_id, _)| {
-            state
-                .objects
-                .get(commander_id)
-                .is_some_and(|obj| obj.is_commander && obj.owner == player)
+            cast_owner_for_command_zone_count(state, **commander_id) == Some(player)
         })
         .map(|(_, count)| *count)
         .sum()
+}
+
+/// CR 903.8: Resolve which player owns a recorded command-zone cast for aggregation.
+fn cast_owner_for_command_zone_count(
+    state: &GameState,
+    commander_id: ObjectId,
+) -> Option<PlayerId> {
+    if let Some(&owner) = state.commander_cast_owners.get(&commander_id) {
+        return Some(owner);
+    }
+    // Legacy saves / tests that called `record_commander_cast` before owner stamping.
+    state
+        .objects
+        .get(&commander_id)
+        .filter(|obj| obj.is_commander)
+        .map(|obj| obj.owner)
 }
 
 /// CR 903.3d: "you control a commander" (generic) — true when any commander on
@@ -904,6 +922,297 @@ mod tests {
 
         // Commander tax should be 2 after first cast (for next cast)
         assert_eq!(commander_tax(&state, cmd_id), 2);
+        assert_eq!(
+            commander_casts_from_command_zone(&state, PlayerId(0)),
+            1,
+            "CR 903.8: cast-from-command-zone count must include committed casts"
+        );
+    }
+
+    /// CR 903.8: `commander_casts_from_command_zone` must count casts after the
+    /// commander has left the command zone (stack or battlefield), not only while
+    /// the recorded object id still looks like a command-zone commander.
+    #[test]
+    fn integration_commander_cast_count_survives_battlefield_resolution() {
+        use crate::game::casting::handle_cast_spell;
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        let mut state = setup_commander_game();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.turn_number = 2;
+
+        let cmd_id = create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Kaalia",
+            vec![ManaColor::Red, ManaColor::White, ManaColor::Black],
+        );
+        let card_id = state.objects[&cmd_id].card_id;
+        {
+            let obj = state.objects.get_mut(&cmd_id).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 2,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Commander".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let player_data = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap();
+        for _ in 0..3 {
+            player_data.mana_pool.add(ManaUnit {
+                color: ManaType::Red,
+                source_id: crate::types::identifiers::ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+
+        let mut events = Vec::new();
+        handle_cast_spell(&mut state, PlayerId(0), cmd_id, card_id, &mut events)
+            .expect("cast commander from command zone");
+
+        assert_eq!(commander_casts_from_command_zone(&state, PlayerId(0)), 1);
+        assert_eq!(state.objects[&cmd_id].zone, Zone::Stack);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Battlefield, &mut events);
+        assert_eq!(state.objects[&cmd_id].zone, Zone::Battlefield);
+
+        assert_eq!(
+            commander_casts_from_command_zone(&state, PlayerId(0)),
+            1,
+            "cast count must persist after commander resolves to the battlefield"
+        );
+
+        // Regression guard: cast counts must not depend on `is_commander` still
+        // being stamped on the object (deck rehydration / copy paths can clear it).
+        state.objects.get_mut(&cmd_id).unwrap().is_commander = false;
+        assert_eq!(
+            commander_casts_from_command_zone(&state, PlayerId(0)),
+            1,
+            "cast count must not require is_commander on the recorded object id"
+        );
+    }
+
+    /// CR 107.4f + CR 601.2h: Casting a Phyrexian commander with insufficient colored
+    /// mana must pause at `PhyrexianPayment` with `LifeOnly` rather than silently
+    /// deducting 2 life per shard (issue #704). The caster confirms with `PayLife`
+    /// to finalize the cast, and life drops by exactly 2 per Phyrexian shard.
+    #[test]
+    fn integration_phyrexian_commander_with_insufficient_mana_pauses_for_consent() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::{ShardChoice, ShardOptions, WaitingFor};
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        let mut state = setup_commander_game();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.turn_number = 2;
+
+        // Create a black Phyrexian commander with cost {1}{B/P} (Sheoldred-like).
+        let cmd_id = create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Phyrexian Commander Stand-In",
+            vec![ManaColor::Black],
+        );
+        let card_id = state.objects[&cmd_id].card_id;
+        {
+            let obj = state.objects.get_mut(&cmd_id).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::PhyrexianBlack],
+                generic: 1,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Commander".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        // Give the caster 1 colorless mana (covers the generic shard) and no black
+        // mana — so the {B/P} shard's only viable payment is 2 life.
+        let player_data = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap();
+        player_data.mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: crate::types::identifiers::ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+        player_data.life = 20;
+        let life_before = state.players[0].life;
+
+        // Announce the cast — engine must surface a LifeOnly Phyrexian pause.
+        let cast = GameAction::CastSpell {
+            object_id: cmd_id,
+            card_id,
+            targets: Vec::new(),
+        };
+        let result = apply_as_current(&mut state, cast).expect("announce commander cast");
+        match &result.waiting_for {
+            WaitingFor::PhyrexianPayment { shards, .. } => {
+                assert_eq!(shards.len(), 1);
+                assert!(
+                    matches!(shards[0].options, ShardOptions::LifeOnly),
+                    "CR 107.4f: no black mana available → shard is LifeOnly"
+                );
+            }
+            other => panic!("expected PhyrexianPayment (LifeOnly), got {other:?}"),
+        }
+        assert_eq!(
+            state.players[0].life, life_before,
+            "CR 601.2h: life must not be deducted before the caster confirms (issue #704)"
+        );
+
+        // Submit PayLife — cast finalizes, life drops by 2.
+        let submit = GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        };
+        apply_as_current(&mut state, submit).expect("submit PayLife");
+
+        assert_eq!(
+            state.players[0].life,
+            life_before - 2,
+            "CR 118.3b: PayLife must deduct exactly 2 life"
+        );
+        assert!(
+            state.stack.iter().any(|s| s.source_id == cmd_id),
+            "CR 601.2a: cast must reach the stack after confirmed payment"
+        );
+    }
+
+    /// CR 601.2h + issue #704: At a Phyrexian `LifeOnly` pause, the caster's right to
+    /// refuse the cast is exercised by submitting `CancelCast`. The cast rolls back —
+    /// life is unchanged, the stack is unchanged, and the commander returns to the
+    /// command zone — and the engine returns to `Priority`.
+    #[test]
+    fn integration_phyrexian_commander_cancel_preserves_life() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::{ShardOptions, WaitingFor};
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        let mut state = setup_commander_game();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.turn_number = 2;
+
+        let cmd_id = create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Phyrexian Commander Stand-In",
+            vec![ManaColor::Black],
+        );
+        let card_id = state.objects[&cmd_id].card_id;
+        {
+            let obj = state.objects.get_mut(&cmd_id).unwrap();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::PhyrexianBlack],
+                generic: 1,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Commander".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let player_data = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap();
+        player_data.mana_pool.add(ManaUnit {
+            color: ManaType::Colorless,
+            source_id: crate::types::identifiers::ObjectId(0),
+            snow: false,
+            source_could_produce_two_or_more_colors: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+        player_data.life = 20;
+        let life_before = state.players[0].life;
+        let stack_len_before = state.stack.len();
+
+        let cast = GameAction::CastSpell {
+            object_id: cmd_id,
+            card_id,
+            targets: Vec::new(),
+        };
+        let result = apply_as_current(&mut state, cast).expect("announce commander cast");
+        assert!(matches!(
+            &result.waiting_for,
+            WaitingFor::PhyrexianPayment { shards, .. }
+                if shards.len() == 1 && matches!(shards[0].options, ShardOptions::LifeOnly)
+        ));
+
+        // CR 601.2h + issue #704: caster refuses the life payment via CancelCast.
+        let result = apply_as_current(&mut state, GameAction::CancelCast).expect("cancel cast");
+
+        assert_eq!(
+            state.players[0].life, life_before,
+            "CR 601.2h: cancelled cast must not deduct life"
+        );
+        assert_eq!(
+            state.stack.len(),
+            stack_len_before,
+            "CR 601.2i: cancelled cast must not leave the spell on the stack"
+        );
+        assert_eq!(
+            state.objects[&cmd_id].zone,
+            Zone::Command,
+            "CR 903.9: commander returns to the command zone on cancel"
+        );
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::Priority { player } if player == PlayerId(0)
+        ));
     }
 
     #[test]
@@ -1087,6 +1396,7 @@ mod tests {
             triggers: vec![],
             static_abilities: vec![],
             replacements: vec![],
+            cleave_variant: None,
             color_override: None,
             color_identity: vec![],
             scryfall_oracle_id: None,

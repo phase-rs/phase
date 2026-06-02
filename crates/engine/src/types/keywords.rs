@@ -108,6 +108,8 @@ pub enum KeywordKind {
     Modular,
     Renown,
     Fabricate,
+    /// CR 702.58a: Graft N — see `Keyword::Graft`.
+    Graft,
     Annihilator,
     Bushido,
     Tribute,
@@ -347,6 +349,14 @@ pub enum ProtectionTarget {
     /// filter's properties — only `FilterProp` predicates that can be resolved
     /// from the object alone (without game state) are valid here.
     Filter(super::ability::TargetFilter),
+    /// CR 702.16k: "Protection from [a player]" — protection from each object
+    /// controlled by the scoped player(s), relative to the protected object's
+    /// controller, regardless of the source's characteristic values. Covers
+    /// "protection from each of your opponents" (Figure of Fable's Avatar form)
+    /// via `ControllerRef::Opponent`. CR 702.16i makes "each of your opponents"
+    /// behave as protection from every opponent, which the Opponent scope
+    /// captures in one variant.
+    FromPlayer(super::ability::ControllerRef),
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -574,6 +584,12 @@ pub enum Keyword {
     Entwine(ManaCost),
     Outlast(ManaCost),
     Scavenge(ManaCost),
+    /// CR 702.77a: Reinforce N—[cost] means "[Cost], Discard this card:
+    /// Put N +1/+1 counters on target creature."
+    Reinforce {
+        count: u32,
+        cost: ManaCost,
+    },
     Fortify(ManaCost),
     /// RUNTIME: TODO — converter accepts this keyword but engine has no
     /// behavioral handler. CR 702.160a: Prototype — alt-cast using the
@@ -676,8 +692,6 @@ pub enum Keyword {
     /// CR 702.46: Soulshift N — when this creature dies, return target Spirit card
     /// with mana value N or less from your graveyard to your hand.
     Soulshift(u32),
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (ETB +1/+1 counters + ability-grant trigger not wired).
     /// CR 702.165: Backup N — when this creature enters, put N +1/+1 counters
     /// on target creature, which gains this creature's other abilities until EOT.
     Backup(u32),
@@ -914,6 +928,7 @@ impl Keyword {
             Keyword::Dredge(_) => KeywordKind::Dredge,
             Keyword::Modular(_) => KeywordKind::Modular,
             Keyword::Renown(_) => KeywordKind::Renown,
+            Keyword::Graft(_) => KeywordKind::Graft,
             Keyword::Fabricate(_) => KeywordKind::Fabricate,
             Keyword::Annihilator(_) => KeywordKind::Annihilator,
             Keyword::Bushido(_) => KeywordKind::Bushido,
@@ -1037,7 +1052,6 @@ impl Keyword {
             | Keyword::Evoke(_)
             | Keyword::Fortify(_)
             | Keyword::Fuse
-            | Keyword::Graft(_)
             | Keyword::Gravestorm
             | Keyword::Haunt
             | Keyword::Hideaway(_)
@@ -1060,6 +1074,7 @@ impl Keyword {
             | Keyword::Ravenous
             | Keyword::ReadAhead
             | Keyword::Rebound
+            | Keyword::Reinforce { .. }
             | Keyword::Ripple
             | Keyword::Saddle(_)
             | Keyword::Scavenge(_)
@@ -1508,7 +1523,13 @@ impl FromStr for Keyword {
                 "disguise" => return Ok(Keyword::Disguise(parse_keyword_mana_cost(p))),
                 "blitz" => return Ok(Keyword::Blitz(parse_keyword_mana_cost(p))),
                 "overload" => return Ok(Keyword::Overload(parse_keyword_mana_cost(p))),
+                // CR 702.162a: More Than Meets the Eye {cost} — alternative cost to cast converted.
+                "more than meets the eye" => {
+                    return Ok(Keyword::MoreThanMeetsTheEye(parse_keyword_mana_cost(p)))
+                }
                 "spectacle" => return Ok(Keyword::Spectacle(parse_keyword_mana_cost(p))),
+                // CR 702.173a: Freerunning alternative cost.
+                "freerunning" => return Ok(Keyword::Freerunning(parse_keyword_mana_cost(p))),
                 "surge" => return Ok(Keyword::Surge(parse_keyword_mana_cost(p))),
                 "encore" => return Ok(Keyword::Encore(parse_keyword_mana_cost(p))),
                 "buyback" => {
@@ -1527,6 +1548,49 @@ impl FromStr for Keyword {
                 "echo" => return Ok(Keyword::Echo(parse_keyword_mana_cost(p))),
                 "outlast" => return Ok(Keyword::Outlast(parse_keyword_mana_cost(p))),
                 "scavenge" => return Ok(Keyword::Scavenge(parse_keyword_mana_cost(p))),
+                "reinforce" => {
+                    // CR 702.77a: "Reinforce N\u{2014}[cost]" \u{2014} N is the first token, rest is mana cost.
+                    // "x" or "X" maps to count=0 (sentinel for Variable X).
+                    let p = p.trim();
+                    if let Some((n_str, cost_str)) = p.split_once(' ') {
+                        let n_trimmed = n_str.trim();
+                        let count = if n_trimmed.eq_ignore_ascii_case("x") {
+                            0
+                        } else {
+                            n_trimmed.parse::<u32>().unwrap_or(1)
+                        };
+                        let cost = parse_keyword_mana_cost(cost_str.trim());
+                        return Ok(Keyword::Reinforce { count, cost });
+                    } else if p.eq_ignore_ascii_case("x") {
+                        return Ok(Keyword::Reinforce {
+                            count: 0,
+                            cost: ManaCost::zero(),
+                        });
+                    } else if let Ok(count) = p.parse::<u32>() {
+                        return Ok(Keyword::Reinforce {
+                            count,
+                            cost: ManaCost::zero(),
+                        });
+                    }
+                    // Fall through to Unknown
+                }
+                // CR 702.113a: Awaken N—{cost} — same count+cost shape as Reinforce.
+                "awaken" => {
+                    let p = p.trim();
+                    // Handle "4—{5}{w}{w}{w}" (em-dash) or "4 {5}{w}{w}{w}" (space)
+                    let split = p.split_once('\u{2014}').or_else(|| p.split_once(' '));
+                    if let Some((n_str, cost_str)) = split {
+                        let count = n_str.trim().parse::<u32>().unwrap_or(0);
+                        let cost = parse_keyword_mana_cost(cost_str.trim());
+                        return Ok(Keyword::Awaken { count, cost });
+                    } else if let Ok(count) = p.parse::<u32>() {
+                        return Ok(Keyword::Awaken {
+                            count,
+                            cost: ManaCost::zero(),
+                        });
+                    }
+                    // Fall through to Unknown
+                }
                 "fortify" => return Ok(Keyword::Fortify(parse_keyword_mana_cost(p))),
                 "prototype" => return Ok(Keyword::Prototype(parse_keyword_mana_cost(p))),
                 "plot" => return Ok(Keyword::Plot(parse_keyword_mana_cost(p))),
@@ -1825,6 +1889,14 @@ fn parse_protection_target(s: &str) -> ProtectionTarget {
         "the chosen card type" | "chosen card type" => ProtectionTarget::ChosenCardType,
         // CR 702.16j: "protection from everything" — typed variant, not stringly-typed
         "everything" => ProtectionTarget::Everything,
+        // CR 702.16k: "protection from each of your opponents" (Figure of
+        // Fable's Avatar form) and its phrasings — protection from every
+        // opponent of the protected permanent's controller.
+        // CR 702.16i: "protection from each ... players" is shorthand for
+        // separate protection from each; the Opponent scope captures all of them.
+        "each of your opponents" | "your opponents" | "an opponent" | "opponents" => {
+            ProtectionTarget::FromPlayer(super::ability::ControllerRef::Opponent)
+        }
         // Lowercase the stored quality — `source_matches_card_type` only matches
         // lowercase, so the canonical stored form must be lowercase.
         _ if lower.starts_with("from ") => ProtectionTarget::Quality(lower),
@@ -2113,8 +2185,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Disguise" => Ok(Keyword::Disguise(mana(data)?)),
         "Blitz" => Ok(Keyword::Blitz(mana(data)?)),
         "Overload" => Ok(Keyword::Overload(mana(data)?)),
+        // CR 702.162a: More Than Meets the Eye {cost} — alternative cost to cast converted.
+        "MoreThanMeetsTheEye" => Ok(Keyword::MoreThanMeetsTheEye(mana(data)?)),
         "Spectacle" => Ok(Keyword::Spectacle(mana(data)?)),
+        // CR 702.173a: Freerunning alternative cost.
+        "Freerunning" => Ok(Keyword::Freerunning(mana(data)?)),
         "Surge" => Ok(Keyword::Surge(mana(data)?)),
+        // CR 702.59a: Recover {cost}
+        "Recover" => Ok(Keyword::Recover(mana(data)?)),
         "Encore" => Ok(Keyword::Encore(mana(data)?)),
         "Buyback" => {
             // Accept both legacy ManaCost format and new BuybackCost tagged format.
@@ -2145,6 +2223,34 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Echo" => Ok(Keyword::Echo(mana(data)?)),
         "Outlast" => Ok(Keyword::Outlast(mana(data)?)),
         "Scavenge" => Ok(Keyword::Scavenge(mana(data)?)),
+        // CR 702.77a: Reinforce N—[cost]. Data is { "count": N, "cost": "..." }.
+        // count may be a number (fixed N) or the string "x"/"X" (Variable X, stored as 0).
+        "Reinforce" => {
+            let obj = data.as_object().ok_or("Reinforce: expected object")?;
+            let count = obj
+                .get("count")
+                .map(|v| {
+                    if let Some(n) = v.as_u64() {
+                        n as u32
+                    } else if v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("x")) {
+                        0
+                    } else {
+                        1
+                    }
+                })
+                .unwrap_or(1);
+            let cost_val = obj.get("cost").unwrap_or(data);
+            let cost = mana(cost_val)?;
+            Ok(Keyword::Reinforce { count, cost })
+        }
+        // CR 702.113a: Awaken N—{cost} — same count+cost shape as Reinforce.
+        "Awaken" => {
+            let obj = data.as_object().ok_or("Awaken: expected object")?;
+            let count = obj.get("count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let cost_val = obj.get("cost").unwrap_or(data);
+            let cost = mana(cost_val)?;
+            Ok(Keyword::Awaken { count, cost })
+        }
         "Fortify" => Ok(Keyword::Fortify(mana(data)?)),
         "Prototype" => Ok(Keyword::Prototype(mana(data)?)),
         "Plot" => Ok(Keyword::Plot(mana(data)?)),
@@ -3080,5 +3186,151 @@ mod tests {
                 }
             })
         );
+    }
+
+    /// CR 702.59a: Recover keyword FromStr parsing.
+    #[test]
+    fn recover_from_str_parses_cost() {
+        let parsed = Keyword::from_str("recover:{2}{B}").unwrap();
+        let expected_cost = parse_keyword_mana_cost("{2}{B}");
+        match parsed {
+            Keyword::Recover(cost) => {
+                assert_eq!(cost, expected_cost, "Recover cost mismatch");
+            }
+            other => panic!("expected Keyword::Recover, got {other:?}"),
+        }
+    }
+
+    /// CR 702.59a: Recover keyword discriminant and serde round-trip.
+    #[test]
+    fn recover_kind_and_round_trip() {
+        let kw = Keyword::Recover(parse_keyword_mana_cost("{2}{B}"));
+        assert_eq!(kw.kind(), KeywordKind::Recover);
+        let json = serde_json::to_value(&kw).unwrap();
+        let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(kw, deserialized, "round-trip failed for {json}");
+    }
+
+    /// CR 702.59a: Recover keyword_from_tagged deserialization.
+    #[test]
+    fn recover_keyword_from_tagged() {
+        let data = serde_json::json!({
+            "type": "Cost",
+            "shards": ["Black"],
+            "generic": 2
+        });
+        let kw = keyword_from_tagged("Recover", &data).unwrap();
+        assert_eq!(kw.kind(), KeywordKind::Recover);
+        match kw {
+            Keyword::Recover(_) => {} // cost shape validated by ManaCost deser
+            other => panic!("expected Keyword::Recover, got {other:?}"),
+        }
+    }
+
+    /// CR 702.173a: Freerunning keyword FromStr parsing.
+    #[test]
+    fn freerunning_from_str_parses_cost() {
+        let parsed = Keyword::from_str("freerunning:{3}{B}{B}").unwrap();
+        let expected_cost = parse_keyword_mana_cost("{3}{B}{B}");
+        match parsed {
+            Keyword::Freerunning(cost) => {
+                assert_eq!(cost, expected_cost, "Freerunning cost mismatch");
+            }
+            other => panic!("expected Keyword::Freerunning, got {other:?}"),
+        }
+    }
+
+    /// CR 702.173a: Freerunning keyword discriminant and serde round-trip.
+    #[test]
+    fn freerunning_kind_and_round_trip() {
+        let kw = Keyword::Freerunning(parse_keyword_mana_cost("{3}{B}{B}"));
+        assert_eq!(kw.kind(), KeywordKind::Freerunning);
+        let json = serde_json::to_value(&kw).unwrap();
+        let deserialized: Keyword = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(kw, deserialized, "round-trip failed for {json}");
+    }
+
+    /// CR 702.173a: Freerunning keyword_from_tagged deserialization.
+    #[test]
+    fn freerunning_keyword_from_tagged() {
+        // ManaCost is serde-tagged with "type": "Cost", shards as enum variants, generic as u32.
+        let data = serde_json::json!({
+            "type": "Cost",
+            "shards": ["Black", "Black"],
+            "generic": 3
+        });
+        let kw = keyword_from_tagged("Freerunning", &data).unwrap();
+        assert_eq!(kw.kind(), KeywordKind::Freerunning);
+        match kw {
+            Keyword::Freerunning(_) => {} // cost shape validated by ManaCost deser
+            other => panic!("expected Keyword::Freerunning, got {other:?}"),
+        }
+    }
+
+    // ─── Awaken ───────────────────────────────────────────────────────
+
+    #[test]
+    fn awaken_from_str_parses_em_dash_format() {
+        // Simulates colon_form path: "awaken:4\u{2014}{5}{w}{w}{w}"
+        let kw: Keyword = "awaken:4\u{2014}{5}{w}{w}{w}".parse().unwrap();
+        match kw {
+            Keyword::Awaken { count, cost } => {
+                assert_eq!(count, 4);
+                assert_eq!(cost, parse_keyword_mana_cost("{5}{W}{W}{W}"));
+            }
+            other => panic!("expected Keyword::Awaken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awaken_from_str_parses_space_format() {
+        // Simulates "awaken:4 {5}{w}{w}{w}" format
+        let kw: Keyword = "awaken:4 {5}{w}{w}{w}".parse().unwrap();
+        match kw {
+            Keyword::Awaken { count, cost } => {
+                assert_eq!(count, 4);
+                assert_eq!(cost, parse_keyword_mana_cost("{5}{W}{W}{W}"));
+            }
+            other => panic!("expected Keyword::Awaken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awaken_from_str_count_only() {
+        let kw: Keyword = "awaken:3".parse().unwrap();
+        match kw {
+            Keyword::Awaken { count, cost } => {
+                assert_eq!(count, 3);
+                assert_eq!(cost, ManaCost::zero());
+            }
+            other => panic!("expected Keyword::Awaken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awaken_keyword_from_tagged() {
+        let data = serde_json::json!({
+            "count": 4,
+            "cost": {
+                "type": "Cost",
+                "shards": ["White", "White", "White"],
+                "generic": 5
+            }
+        });
+        let kw = keyword_from_tagged("Awaken", &data).unwrap();
+        assert_eq!(kw.kind(), KeywordKind::Awaken);
+        match kw {
+            Keyword::Awaken { count, cost } => {
+                assert_eq!(count, 4);
+                assert_eq!(cost, parse_keyword_mana_cost("{5}{W}{W}{W}"));
+            }
+            other => panic!("expected Keyword::Awaken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn awaken_kind_round_trip() {
+        let kw: Keyword = "awaken:2\u{2014}{3}{u}".parse().unwrap();
+        assert_eq!(kw.kind(), KeywordKind::Awaken);
     }
 }

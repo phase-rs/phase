@@ -135,7 +135,57 @@ describe("ZoneViewer", () => {
   it("dispatches an engine-provided graveyard CastSpell action", () => {
     render(<ZoneViewer zone="graveyard" playerId={0} onClose={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /cast flame jab/i }));
+    // The castable card carries the purple "playable" affordance instead of a
+    // labeled button; clicking the card itself routes through handleCast and
+    // auto-dispatches the lone CastSpell action.
+    fireEvent.click(screen.getByTestId("card-image"));
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "CastSpell" }),
+    );
+  });
+
+  it("dispatches a CastSpell for an opponent-owned exiled card the viewer may play", () => {
+    // Hostage Taker / Gonti / Thief of Sanity: the card is owned by the
+    // opponent (player 1) and sits in their exile pile, but the engine granted
+    // the viewer (player 0) permission to play it — surfaced as a CastSpell in
+    // legalActionsByObject. The viewer must honor the engine's authority even
+    // though the pile is not the viewer's own. Regression guard for the removed
+    // client-side `isMyZone` ownership gate.
+    const object = makeObject({
+      id: 9,
+      owner: 1,
+      controller: 1,
+      zone: "Exile",
+      name: "Gonti, Lord of Luxury",
+      keywords: [],
+      base_keywords: [],
+    });
+    const action = makeCastAction(object.id);
+    const base = makeState(object);
+    const gameState = {
+      ...base,
+      objects: { [object.id]: object },
+      exile: [object.id],
+      players: [
+        { ...base.players[0], graveyard: [] },
+        { ...base.players[1], graveyard: [] },
+      ],
+    } as unknown as GameState;
+
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [action],
+      legalActionsByObject: { [String(object.id)]: [action] },
+      spellCosts: {},
+      dispatch,
+      gameMode: "ai",
+    });
+
+    render(<ZoneViewer zone="exile" playerId={1} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("card-image"));
 
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(dispatch).toHaveBeenCalledWith(

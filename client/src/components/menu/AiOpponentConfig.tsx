@@ -4,7 +4,9 @@ import { useTranslation } from "react-i18next";
 import type { GameFormat, MatchType } from "../../adapter/types";
 import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
-import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { filterByBracket, useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { CEDH_BRACKET } from "../../services/cedhLock";
+import { isCommanderFamilyFormat } from "../../types/bracket";
 import {
   AI_DECK_RANDOM,
   usePreferencesStore,
@@ -15,7 +17,7 @@ import type { DeckArchetype } from "../../services/engineRuntime";
 import { BracketFilter } from "./BracketFilter";
 
 interface Props {
-  selectedFormat?: GameFormat;
+  selectedFormat?: GameFormat | null;
   selectedMatchType?: MatchType;
   /** Number of AI opponents to configure (i.e. playerCount - 1). Defaults to 1
    *  so the component still renders sensibly when mounted outside the setup
@@ -58,6 +60,8 @@ export function AiOpponentConfig({
 }: Props) {
   const { t } = useTranslation("menu");
   const aiSeats = usePreferencesStore((s) => s.aiSeats);
+  const cedhMode = usePreferencesStore((s) => s.cedhMode);
+  const setCedhMode = usePreferencesStore((s) => s.setCedhMode);
   const setAiSeatDifficulty = usePreferencesStore((s) => s.setAiSeatDifficulty);
   const setAiSeatDeckId = usePreferencesStore((s) => s.setAiSeatDeckId);
   const ensureAiSeatCount = usePreferencesStore((s) => s.ensureAiSeatCount);
@@ -67,11 +71,25 @@ export function AiOpponentConfig({
   const setCoverageFloor = usePreferencesStore((s) => s.setAiCoverageFloor);
   const bracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
   const setBracketFilter = usePreferencesStore((s) => s.setAiBracketFilter);
+  const isCedhFormat = isCommanderFamilyFormat(selectedFormat);
+  const effectiveCedhMode = cedhMode && isCedhFormat;
 
   // Keep the persisted seat list in sync with the setup page's player count.
   useEffect(() => {
     ensureAiSeatCount(opponentCount);
   }, [opponentCount, ensureAiSeatCount]);
+
+  // cEDH mode is a persisted preference read directly at game start
+  // (GameProvider → effectiveAiDifficulty). When the format is known to be a
+  // non-Commander variant the toggle is hidden, so clear any stale enabled
+  // state to stop it silently forcing cEDH difficulty on non-Commander tables.
+  // Guard on a truthy format so the brief format-loading window doesn't clobber
+  // a legitimate flag.
+  useEffect(() => {
+    if (selectedFormat && !isCedhFormat && cedhMode) {
+      setCedhMode(false);
+    }
+  }, [selectedFormat, isCedhFormat, cedhMode, setCedhMode]);
 
   const { candidates, loading, error } = useAiDeckCatalog({ selectedFormat, selectedMatchType });
 
@@ -84,18 +102,20 @@ export function AiOpponentConfig({
   // considering, not which deck ends up assigned — a concept that doesn't
   // vary per seat.
   const filteredDecks = useMemo(() => {
-    return candidates.filter((d) => {
+    // In cEDH mode, restrict the random pool to bracket-5 decks.
+    const cedhFiltered = effectiveCedhMode ? filterByBracket(candidates, CEDH_BRACKET) : candidates;
+    return cedhFiltered.filter((d) => {
       if (d.coveragePct != null && d.coveragePct < coverageFloor) return false;
       if (archetypeFilter !== "Any" && d.archetype && d.archetype !== archetypeFilter) {
         return false;
       }
-      if (bracketFilter.length > 0 && selectedFormat === "Commander") {
+      if (!effectiveCedhMode && bracketFilter.length > 0 && isCedhFormat) {
         if (d.bracket === null) return false;             // untagged excluded
         if (!bracketFilter.includes(d.bracket)) return false;
       }
       return true;
     });
-  }, [candidates, coverageFloor, archetypeFilter, bracketFilter, selectedFormat]);
+  }, [candidates, coverageFloor, archetypeFilter, bracketFilter, isCedhFormat, effectiveCedhMode]);
 
   // Render exactly `opponentCount` panels regardless of how many slots the
   // store currently holds — the effect above will catch the store up on the
@@ -129,12 +149,41 @@ export function AiOpponentConfig({
         {loading && <span className="text-[10px] text-slate-500">{t("aiOpponent.analyzingDecks")}</span>}
       </div>
 
+      {/* Table-wide cEDH toggle. cEDH is a table property (every deck bracket 5),
+          not a per-seat difficulty — enabling it makes all AI play cEDH without
+          touching each opponent's remembered difficulty. Commander-only. */}
+      {isCedhFormat && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-rose-500/25 bg-rose-500/5 px-3 py-2">
+          <div className="flex min-w-0 flex-col">
+            <span className="text-xs font-semibold text-rose-200">{t("aiOpponent.cedhToggle.label")}</span>
+            <span className="text-[10px] text-slate-400">{t("aiOpponent.cedhToggle.hint")}</span>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={cedhMode}
+            aria-label={t("aiOpponent.cedhToggle.label")}
+            onClick={() => setCedhMode(!cedhMode)}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300/60 ${
+              cedhMode ? "bg-rose-500" : "bg-white/15"
+            }`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                cedhMode ? "translate-x-5" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-col gap-1.5">
         {seatsToRender.map((seat, i) => (
           <AiSeatPanel
             key={i}
             index={i}
             seat={seat}
+            cedhMode={effectiveCedhMode}
             candidates={candidates}
             filteredDecks={filteredDecks}
             expanded={!isMulti || expandedIndex === i}
@@ -199,7 +248,7 @@ export function AiOpponentConfig({
           </span>
         </label>
 
-        {selectedFormat === "Commander" && (
+        {isCedhFormat && (
           <div className="flex flex-col gap-1">
             <span className="text-xs text-slate-400">{t("aiOpponent.bracket")}</span>
             <BracketFilter selected={bracketFilter} onChange={setBracketFilter} />
@@ -216,6 +265,10 @@ export function AiOpponentConfig({
 interface AiSeatPanelProps {
   index: number;
   seat: { difficulty: AIDifficulty; deckId: AiDeckSelection };
+  /** Table-wide cEDH mode. When on, the per-seat difficulty is overridden by
+   *  cEDH, so the dropdown is disabled and badged (the remembered value is kept
+   *  for when cEDH is turned back off). */
+  cedhMode: boolean;
   candidates: AiDeckCandidate[];
   filteredDecks: AiDeckCandidate[];
   expanded: boolean;
@@ -228,6 +281,7 @@ interface AiSeatPanelProps {
 function AiSeatPanel({
   index,
   seat,
+  cedhMode,
   candidates,
   filteredDecks,
   expanded,
@@ -260,7 +314,9 @@ function AiSeatPanel({
   const summaryDeck = isRandom
     ? t("aiOpponent.deckRandomCount", { count: filteredDecks.length })
     : (selectedCandidate?.name ?? t("aiOpponent.deckRandom"));
-  const summaryDifficulty = t(`aiDifficulty.levels.${seat.difficulty}`);
+  const summaryDifficulty = cedhMode
+    ? t("aiOpponent.cedhToggle.badge")
+    : t(`aiDifficulty.levels.${seat.difficulty}`);
 
   const body = (
     <div className="flex flex-col gap-2.5 px-3 pb-3 pt-1">
@@ -288,17 +344,31 @@ function AiSeatPanel({
 
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.difficulty")}</span>
-        <select
-          value={seat.difficulty}
-          onChange={(e) => onDifficultyChange(e.target.value as AIDifficulty)}
-          className="rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm text-white"
-        >
-          {AI_DIFFICULTIES.map((item) => (
-            <option key={item.id} value={item.id}>
-              {t(`aiDifficulty.levels.${item.id}`)}
-            </option>
-          ))}
-        </select>
+        <div className="relative">
+          <select
+            value={seat.difficulty}
+            onChange={(e) => onDifficultyChange(e.target.value as AIDifficulty)}
+            disabled={cedhMode}
+            aria-disabled={cedhMode}
+            className={`w-full rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm text-white ${
+              cedhMode ? "cursor-not-allowed opacity-50" : ""
+            }`}
+          >
+            {AI_DIFFICULTIES.map((item) => (
+              <option key={item.id} value={item.id}>
+                {t(`aiDifficulty.levels.${item.id}`)}
+              </option>
+            ))}
+          </select>
+          {cedhMode && (
+            <span
+              aria-label="cEDH"
+              className="absolute -top-2 left-2 rounded bg-rose-500/80 px-1 py-0.5 text-[9px] font-bold uppercase tracking-wider text-white"
+            >
+              {t("aiOpponent.cedhToggle.badge")}
+            </span>
+          )}
+        </div>
       </label>
     </div>
   );

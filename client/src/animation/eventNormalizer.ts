@@ -29,6 +29,10 @@ const NON_VISUAL_EVENTS = new Set([
   "Regenerated",
   "AttackersDeclared",
   "BlockersDeclared",
+  // Dice/coin are presented out-of-band by DiceRollOverlay (via flashDiceRoll),
+  // not as queued animation steps — same pattern as TurnStarted → the turn banner.
+  "DieRolled",
+  "CoinFlipped",
 ]);
 
 /** Events that always begin a new step, regardless of context. */

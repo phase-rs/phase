@@ -169,7 +169,27 @@ pub(super) fn drain_pending_phase_transition_progress(
         let scan_entries = scan_step_end_mana_handlers(state, player_id);
         state.pending_step_end_mana_handlers = scan_entries;
 
-        // Build per-unit decision payload from the player's surviving (non-expiry) pool.
+        // Build per-unit decision payload from the player's surviving pool.
+        //
+        // CR 500.5 + CR 703.4q (H2 invariant): expiry-bound units (e.g.
+        // Klauth's "you don't lose this mana as steps and phases end",
+        // Firebending's "Until end of combat, you don't lose this mana as
+        // steps and phases end" — CR 702.189a) have *already* had their fate
+        // decided by `clear_expiring_at_step_end` above — they were either
+        // dropped (their rule fired) or deliberately retained.
+        //
+        // CR 614.17 + CR 614.17c: "you don't lose this mana …" is a "can't"
+        // effect, not a replacement effect. It prevents the CR 106.4 /
+        // CR 703.4q lose-mana event for the protected units, and per
+        // CR 614.17c, once that event can't happen no other replacement
+        // effect — including a step-end mana handler (Upwelling, Horizon
+        // Stone, Kruphix) — can modify or replace it. So such units must NOT
+        // enter the empty-pool replacement pipeline at all; emitting a `Drop`
+        // decision here would empty the very mana the card promises to keep.
+        // Only `None`-expiry units flow into the pipeline as Drop-disposition
+        // decisions. The `enumerate` runs over the full pool so `pool_index`
+        // stays aligned with the retained expiry units that remain in
+        // `mana_pool.mana`.
         let units: Vec<crate::types::mana::UnitDecision> = state
             .players
             .iter()
@@ -179,6 +199,7 @@ pub(super) fn drain_pending_phase_transition_progress(
                     .mana
                     .iter()
                     .enumerate()
+                    .filter(|(_, u)| u.expiry.is_none())
                     .map(|(idx, u)| crate::types::mana::UnitDecision {
                         pool_index: idx,
                         color: u.color,
@@ -457,6 +478,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // to the same turn, so both maps clear together at turn start.
     state.loyalty_abilities_activated_this_turn.clear();
     state.extra_loyalty_activations_this_turn.clear();
+    // CR 701.43d: the "exerted this turn" record gates the linked "when you do"
+    // trigger to once per turn; reset it alongside the other per-turn trackers.
+    state.exerted_this_turn.clear();
     // CR 514 + CR 603.4: Per-ability per-turn resolution counter resets at turn
     // boundary alongside other "this turn" trackers (mirrors the cleanup of
     // `trigger_fire_counts_this_turn`).
@@ -468,6 +492,14 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.hand_cast_free_permissions_used.clear();
     // CR 601.2a: Reset per-turn PlayFromExile source usage (Evelyn-style permissions).
     state.exile_play_permissions_used.clear();
+    // CR 601.2a + CR 113.6b: Reset per-turn ExileCastPermission once-per-turn
+    // tracking (Maralen, Fae Ascendant) and the rolling list of cards exiled
+    // with each tracked source this turn. Both are turn-scoped slices; the
+    // persistent `exile_links` pool is untouched and continues to back the
+    // open-ended "cards exiled with ~" filter for sources without a per-turn
+    // cap.
+    state.exile_cast_permissions_used.clear();
+    state.cards_exiled_with_source_this_turn.clear();
     // CR 702.94a: Reset per-player first-card-drawn-this-turn tracking for miracle.
     state.first_card_drawn_this_turn.clear();
     state.cards_drawn_this_turn.clear();
@@ -482,6 +514,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_attacked_this_step.clear();
     state.players_attacked_this_turn.clear();
     state.attacking_creatures_this_turn.clear();
+    state.attacked_defenders_this_turn.clear();
+    state.creature_attacked_defenders_this_turn.clear();
     state.combat_phases_started_this_turn = 0;
     state.creatures_attacked_this_turn.clear();
     state.creatures_blocked_this_turn.clear();
@@ -1266,12 +1300,46 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 
 /// CR 503.1 / CR 504.2 / CR 507.1 / CR 513.1: Process phase triggers for the current step.
 /// Fabricates a PhaseChanged event for `state.phase` and runs trigger matching.
-/// Returns `true` if any triggers were placed on the stack or are pending target selection.
-fn process_phase_triggers(state: &mut GameState) -> bool {
+///
+/// Returns `(fired, ordering_prompt)`:
+/// * `fired` is `true` if any triggers were placed on the stack, are pending
+///   target selection, or are awaiting CR 603.3b ordering. The combat arms
+///   (BeginCombat / EndCombat) use this to decide whether to set up / tear down
+///   combat and grant a priority window.
+/// * `ordering_prompt` is `Some(WaitingFor::OrderTriggers { .. })` when 2+
+///   simultaneous triggers controlled by the same player fired and that player
+///   must order them (CR 603.3b) before anyone receives priority. The caller
+///   MUST surface this prompt instead of granting priority — `process_triggers`
+///   populated `state.pending_trigger_order` and set `state.waiting_for` to the
+///   prompt, but the phase arm's return value is what `apply` writes back to
+///   `state.waiting_for`. Returning `Priority` here would overwrite the prompt
+///   and strand the queued triggers in `pending_trigger_order` forever (they
+///   never reach the stack). Single-trigger steps take the `NoChoiceNeeded`
+///   path with no prompt and fall through to the normal priority grant. The
+///   prompt is rebuilt from the AUTHORITATIVE `pending_trigger_order` state via
+///   `build_next_order_triggers_prompt_public`, not cloned from
+///   `state.waiting_for` — so a stale `waiting_for` left by an upstream
+///   phase-advance can't re-surface and hang, and already-corrupted saves
+///   recover by surfacing the real ordering prompt.
+fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
     let phase_event = [GameEvent::PhaseChanged { phase: state.phase }];
     let stack_before = state.stack.len();
     super::triggers::process_triggers(state, &phase_event);
-    state.stack.len() > stack_before || state.pending_trigger.is_some()
+    // CR 603.3b: an unresolved ordering pass keeps its triggers in
+    // `pending_trigger_order` (not on the stack, not in `pending_trigger`), so it
+    // must count toward `fired` and surface its prompt. Reconstruct the prompt
+    // from the AUTHORITATIVE source (`pending_trigger_order`) rather than cloning
+    // `state.waiting_for`: if an upstream phase-advance orphaned the pass and left
+    // `waiting_for` stale, cloning it would re-surface the stale state and hang.
+    // Reading the canonical pending state also RECOVERS already-corrupted saves by
+    // surfacing the real ordering prompt. Note `pending_trigger_order.is_some()` no
+    // longer blindly implies `waiting_for == OrderTriggers`, which is exactly why
+    // the prior `.then(|| clone)` idiom was unsafe.
+    let ordering_prompt = super::triggers::build_next_order_triggers_prompt_public(state);
+    let fired = state.stack.len() > stack_before
+        || state.pending_trigger.is_some()
+        || ordering_prompt.is_some();
+    (fired, ordering_prompt)
 }
 
 pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
@@ -1319,7 +1387,12 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     continue;
                 }
                 // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
-                process_phase_triggers(state);
+                // CR 603.3b: 2+ same-controller upkeep triggers (multiple suspended
+                // cards, two Howling Mines) require an ordering choice that must be
+                // surfaced before priority — see `process_phase_triggers`.
+                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                    return prompt;
+                }
                 // CR 503.2 + CR 117.1c: The active player ALWAYS receives priority
                 // during the upkeep step, regardless of whether triggers fired.
                 // Whether to auto-pass through this priority window (or honor the
@@ -1348,7 +1421,10 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     return wf;
                 }
                 // CR 504.2: "At the beginning of [your] draw step" triggers fire here.
-                process_phase_triggers(state);
+                // CR 603.3b: surface a same-controller ordering prompt before priority.
+                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                    return prompt;
+                }
                 // CR 504.3 + CR 117.1c: The active player ALWAYS receives priority
                 // during the draw step (after the turn-based draw and any triggers).
                 // See the Upkeep arm above for the rationale — same pattern.
@@ -1375,10 +1451,9 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 }
                 // CR 603.2b + CR 603.3: beginning-of-main-phase triggers are
                 // put on the stack before the active player receives priority.
-                if process_phase_triggers(state) {
-                    return WaitingFor::Priority {
-                        player: state.active_player,
-                    };
+                // CR 603.3b: surface a same-controller ordering prompt first.
+                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                    return prompt;
                 }
                 // CR 505.6: The active player receives priority during a main phase.
                 return WaitingFor::Priority {
@@ -1390,9 +1465,15 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // Process triggers regardless of attackers — CR 507.1 says the step
                 // happens unconditionally; trigger conditions (e.g., ControlCount)
                 // are checked by the trigger system, not by skipping the step.
-                let triggers_fired = process_phase_triggers(state);
+                let (triggers_fired, ordering_prompt) = process_phase_triggers(state);
                 if triggers_fired {
                     state.combat = Some(crate::game::combat::CombatState::default());
+                    // CR 603.3b: surface a same-controller ordering prompt before
+                    // priority; combat state is set first so it exists when the
+                    // ordered begin-combat triggers later resolve.
+                    if let Some(prompt) = ordering_prompt {
+                        return prompt;
+                    }
                     return WaitingFor::Priority {
                         player: state.active_player,
                     };
@@ -1464,6 +1545,23 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     state.waiting_for = waiting.clone();
                     return waiting;
                 }
+                // CR 603.3b: combat-damage triggers ran inside resolve_combat_damage
+                // (process_combat_damage_triggers -> process_triggers). If 2+ triggers
+                // controlled by the same player fired simultaneously, process_triggers
+                // populated `pending_trigger_order` and set `waiting_for` to the
+                // OrderTriggers prompt. Those triggers sit in `pending_trigger_order`, NOT
+                // on the stack, so the `!state.stack.is_empty()` guard below would advance
+                // past the prompt and strand them forever (the turn-18 hang). Surface the
+                // ordering prompt now, mirroring finish_declare_attackers (engine_combat.rs).
+                // NOTE: a first-strike sub-step OrderTriggers prompt is surfaced earlier,
+                // via the `Some(waiting)` return from resolve_combat_damage above (CR 510.4
+                // Part A in combat_damage.rs); the mandatory regular sub-step is then resumed
+                // by the empty-stack completeness gate in priority.rs. This guard handles the
+                // regular-step case, where resolve_combat_damage returns None but set
+                // `waiting_for` to the OrderTriggers prompt internally.
+                if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+                    return state.waiting_for.clone();
+                }
                 // CR 704.3 / CR 800.4: SBAs may have ended the game during combat damage.
                 if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
                     return state.waiting_for.clone();
@@ -1480,7 +1578,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::EndCombat => {
                 // CR 511.1: "At end of combat" triggers fire here.
-                let triggers_fired = process_phase_triggers(state);
+                let (triggers_fired, ordering_prompt) = process_phase_triggers(state);
                 // CR 511.3: At end of combat, all creatures are removed from combat.
                 state.combat = None;
                 super::layers::prune_end_of_combat_effects(state);
@@ -1492,6 +1590,10 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                     .pending_damage_replacements
                     .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
                 if triggers_fired {
+                    // CR 603.3b: surface a same-controller ordering prompt before priority.
+                    if let Some(prompt) = ordering_prompt {
+                        return prompt;
+                    }
                     return WaitingFor::Priority {
                         player: state.active_player,
                     };
@@ -1515,7 +1617,10 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 super::layers::prune_until_next_end_step_effects(state, state.active_player);
                 // CR 513.1: End step — active player receives priority.
                 // CR 513.1a: "At the beginning of [your] end step" triggers fire here.
-                process_phase_triggers(state);
+                // CR 603.3b: surface a same-controller ordering prompt before priority.
+                if let (_, Some(prompt)) = process_phase_triggers(state) {
+                    return prompt;
+                }
                 return WaitingFor::Priority {
                     player: state.active_player,
                 };
@@ -1998,6 +2103,89 @@ mod tests {
         );
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
         assert_eq!(state.players[1].mana_pool.total(), 0);
+    }
+
+    #[test]
+    fn advance_phase_keeps_end_of_turn_mana_until_cleanup() {
+        // CR 500.5 + CR 703.4q (H2 invariant, Klauth, Unrivaled Ancient):
+        // "Until end of turn, you don't lose this mana as steps and phases
+        // end." A unit carrying `ManaExpiry::EndOfTurn` must survive every
+        // non-cleanup phase/step transition and only drain when the turn
+        // actually ends. A plain `None`-expiry unit drains on the very first
+        // transition. RUNTIME test driving `advance_phase` through the live
+        // empty-pool pipeline — guards the payload builder that previously
+        // emitted a `Drop` decision for retained expiry-bound units.
+        use crate::types::mana::{ManaExpiry, ManaType, ManaUnit};
+
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+
+        let mut klauth_mana = ManaUnit::new(ManaType::Red, ObjectId(10), false, Vec::new());
+        klauth_mana.expiry = Some(ManaExpiry::EndOfTurn);
+        state.players[0].mana_pool.add(klauth_mana);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(11),
+            false,
+            Vec::new(),
+        ));
+
+        // First transition (PreCombatMain → next step, not cleanup): the
+        // plain Blue mana drains; the EndOfTurn Red mana is retained.
+        advance_phase(&mut state, &mut Vec::new());
+        assert_ne!(state.phase, Phase::Cleanup);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
+
+        // Drive forward until cleanup; the EndOfTurn mana survives each
+        // intermediate step and only drains once the turn ends.
+        while state.phase != Phase::Cleanup {
+            assert_eq!(
+                state.players[0].mana_pool.count_color(ManaType::Red),
+                1,
+                "EndOfTurn mana must persist through {:?}",
+                state.phase
+            );
+            advance_phase(&mut state, &mut Vec::new());
+        }
+        assert_eq!(state.phase, Phase::Cleanup);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
+    }
+
+    #[test]
+    fn advance_phase_keeps_end_of_combat_mana_until_combat_ends() {
+        // CR 500.5 + CR 703.4q + CR 702.189a: Firebending mana says "Until
+        // end of combat, you don't lose this mana as steps and phases end."
+        // It must survive combat step transitions through the live empty-pool
+        // pipeline, then drain when the game leaves combat.
+        use crate::types::mana::{ManaExpiry, ManaType, ManaUnit};
+
+        let mut state = setup();
+        state.phase = Phase::BeginCombat;
+
+        let mut firebending_mana = ManaUnit::new(ManaType::Red, ObjectId(10), false, Vec::new());
+        firebending_mana.expiry = Some(ManaExpiry::EndOfCombat);
+        state.players[0].mana_pool.add(firebending_mana);
+        state.players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(11),
+            false,
+            Vec::new(),
+        ));
+
+        while state.phase != Phase::PostCombatMain {
+            assert_eq!(
+                state.players[0].mana_pool.count_color(ManaType::Red),
+                1,
+                "EndOfCombat mana must persist through {:?}",
+                state.phase
+            );
+            advance_phase(&mut state, &mut Vec::new());
+            assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 0);
+        }
+
+        assert_eq!(state.phase, Phase::PostCombatMain);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 0);
     }
 
     #[test]
@@ -2845,6 +3033,34 @@ mod tests {
         assert!(!state.players[0].has_drawn_this_turn);
         assert_eq!(state.players[0].lands_played_this_turn, 0);
         assert!(state.counter_added_this_turn.is_empty());
+    }
+
+    /// CR 601.2a + CR 113.6b: Turn cleanup must clear BOTH the per-source
+    /// `ExileCastPermission` once-per-turn slots AND the rolling "cards exiled
+    /// with this source this turn" pool (Maralen, Fae Ascendant). Driven
+    /// through `start_next_turn` rather than a manual `.clear()`, so a
+    /// regression dropping either reset line in `start_next_turn` fails here
+    /// instead of staying green.
+    #[test]
+    fn start_next_turn_resets_exile_cast_permission_tracking() {
+        let mut state = setup();
+        let source = ObjectId(42);
+        state.exile_cast_permissions_used.insert(source);
+        state
+            .cards_exiled_with_source_this_turn
+            .insert(source, vec![ObjectId(7)]);
+
+        let mut events = Vec::new();
+        start_next_turn(&mut state, &mut events);
+
+        assert!(
+            state.exile_cast_permissions_used.is_empty(),
+            "OncePerTurn exile-cast slots must reset at turn start"
+        );
+        assert!(
+            state.cards_exiled_with_source_this_turn.is_empty(),
+            "per-turn exiled-with-source pool must reset at turn start"
+        );
     }
 
     #[test]

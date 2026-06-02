@@ -607,7 +607,7 @@ mod tests {
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::combat::{AttackerInfo, CombatState};
     use engine::game::scenario::{GameScenario, P0, P1};
-    use engine::types::ability::{ResolvedAbility, TargetFilter};
+    use engine::types::ability::{BounceSelection, ResolvedAbility, TargetFilter};
     use engine::types::game_state::{
         PendingCast, StackEntry, StackEntryKind, TargetSelectionProgress, TargetSelectionSlot,
         WaitingFor,
@@ -766,6 +766,7 @@ mod tests {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
                 }],
+                mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
             },
             candidates: Vec::new(),
@@ -825,6 +826,7 @@ mod tests {
                     Effect::Bounce {
                         target: TargetFilter::Any,
                         destination: None,
+                        selection: BounceSelection::Targeted,
                     },
                     Vec::new(),
                     unsummon,
@@ -836,6 +838,7 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(creature)],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             selection: TargetSelectionProgress::default(),
         };
 

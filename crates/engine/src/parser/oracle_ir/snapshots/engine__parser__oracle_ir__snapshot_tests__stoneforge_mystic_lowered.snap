@@ -1,6 +1,5 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 691
 expression: "&lowered"
 ---
 {
@@ -28,7 +27,6 @@ expression: "&lowered"
         },
         "owner_library": false,
         "enter_transformed": false,
-        "under_your_control": false,
         "enter_tapped": false,
         "enters_attacking": false
       },
@@ -98,7 +96,6 @@ expression: "&lowered"
             },
             "owner_library": false,
             "enter_transformed": false,
-            "under_your_control": false,
             "enter_tapped": false,
             "enters_attacking": false
           },

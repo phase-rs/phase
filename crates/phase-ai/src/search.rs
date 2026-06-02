@@ -3,7 +3,7 @@ use rand::Rng;
 use engine::ai_support::build_decision_context;
 use engine::types::actions::{AlternativeCastDecision, GameAction, MulliganChoice};
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{CastOfferKind, CostResume, GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::cast_facts_for_action;
@@ -55,6 +55,18 @@ fn first_serum_powder_in_hand(
 /// decks contain such cards; if one is added, revisit this cap or replace
 /// it with structural "source-state-unchanged" detection.
 const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
+
+/// CR 117.1 + Whitemane Lion loop mitigation (issue #563): AI safety cap on
+/// the number of times the same card can be CAST in a single turn by the AI.
+/// Identification is by card name captured in `SpellCastRecord` so different
+/// printings/copies of the same card share the cap. CR 117.1 permits unbounded
+/// casting at priority — this cap is a pure AI-pathology mitigation against
+/// loop-prone cards (ETB self-bounce, Whitemane Lion class) whose
+/// per-occurrence value remains positive even when the net board state is
+/// unchanged. Three is generous enough for legitimate value plays (Snapcaster
+/// flashback + recast, Eternal Witness reanimate chain) while preventing the
+/// thousands-of-iterations pathology observed in #563.
+const MAX_CASTS_OF_SAME_CARD_PER_TURN: usize = 3;
 
 /// Choose the best action for the AI player given the current game state.
 ///
@@ -302,6 +314,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
                     untap: true,
                 })
         }
+        // CR 508.1g: exert-as-attack is optional; the conservative fallback
+        // declines (never has a downside). Real exert decisions come from the
+        // evaluated candidate actions.
+        WaitingFor::ExertChoice { .. } => Some(GameAction::ChooseExert { exert: false }),
 
         // Target selection: skip optional slots, fizzle mandatory ones.
         // TriggerTargetSelection is not a pending cast — the trigger is
@@ -398,10 +414,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::TributeChoice { .. }
         | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::MiracleReveal { .. }
-        | WaitingFor::MiracleCastOffer { .. }
-        | WaitingFor::MadnessCastOffer { .. } => {
-            Some(GameAction::DecideOptionalEffect { accept: false })
-        }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::Miracle { .. } | CastOfferKind::Madness { .. },
+            ..
+        } => Some(GameAction::DecideOptionalEffect { accept: false }),
 
         // Unless payment: decline to pay (let the effect resolve).
         WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
@@ -493,7 +509,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ChooseOneOfBranch { .. } => Some(GameAction::ChooseBranch { index: 0 }),
 
         // Discover/Cascade: decline.
-        WaitingFor::DiscoverChoice { .. } => Some(GameAction::DiscoverChoice {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Discover { .. },
+            ..
+        } => Some(GameAction::DiscoverChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
         // CR 701.20a: RevealUntil kept choice — accept (put onto the battlefield)
@@ -501,7 +520,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::RevealUntilKeptChoice { .. } => {
             Some(GameAction::DecideOptionalEffect { accept: true })
         }
-        WaitingFor::CascadeChoice { .. } => Some(GameAction::CascadeChoice {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Cascade { .. },
+            ..
+        } => Some(GameAction::CascadeChoice {
             choice: engine::types::actions::CastChoice::Decline,
         }),
         // CR 107.1c: "repeat this process" — stop as the forced-action default;
@@ -520,10 +542,16 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::ChooseTopOrBottom { top: true })
         }
 
+        // CR 701.30b: clash opponent choice — fall back to the first candidate.
+        WaitingFor::ClashChooseOpponent { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseClashOpponent { opponent }),
+
         // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
-        WaitingFor::AdventureCastChoice { .. } => {
-            Some(GameAction::ChooseAdventureFace { creature: true })
-        }
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Adventure { .. },
+            ..
+        } => Some(GameAction::ChooseAdventureFace { creature: true }),
         WaitingFor::ModalFaceChoice { .. } => {
             Some(GameAction::ChooseModalFace { back_face: false })
         }
@@ -593,7 +621,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .map(|&room_index| GameAction::ChooseDungeonRoom { room_index }),
 
         // Paradigm: pass.
-        WaitingFor::ParadigmCastOffer { .. } => Some(GameAction::PassParadigmOffer),
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::Paradigm { .. },
+            ..
+        } => Some(GameAction::PassParadigmOffer),
 
         // Vote: pick the first option.
         // CR 608.2c: For `ControllerLabels` votes (Battlebond friend-or-foe),
@@ -666,22 +697,54 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets.map(|new_targets| GameAction::RetargetSpell { new_targets })
         }
 
-        // Assign combat damage: all damage to first blocker or zero.
+        // Assign combat damage: greedy lethal-to-each, mirroring the engine's
+        // ai_support::candidates AssignCombatDamage arm so the fallback stays
+        // rules-legal for trample (CR 702.19b) and trample-over-PW (CR 702.19c).
         WaitingFor::AssignCombatDamage {
             total_damage,
             blockers,
+            trample,
+            pw_loyalty,
+            attack_target,
             ..
         } => {
-            let assignments: Vec<_> = blockers
-                .iter()
-                .enumerate()
-                .map(|(i, slot)| (slot.blocker_id, if i == 0 { *total_damage } else { 0 }))
-                .collect();
+            let mut remaining = *total_damage;
+            let mut assignments = Vec::new();
+            // CR 702.19b: Assign lethal to each blocker in order.
+            for slot in blockers {
+                let assign = remaining.min(slot.lethal_minimum);
+                assignments.push((slot.blocker_id, assign));
+                remaining = remaining.saturating_sub(assign);
+            }
+            // CR 510.1c: Non-trample — the leftover must land on a blocker (no player
+            // spillover), so dump it on the last blocker to keep the total == power.
+            if trample.is_none() && remaining > 0 {
+                if let Some(last) = assignments.last_mut() {
+                    last.1 += remaining;
+                    remaining = 0;
+                }
+            }
+            // CR 702.19c: Trample-over-PW attacking a PW splits excess into
+            // loyalty-worth to the PW and the remainder to the PW's controller.
+            let (trample_damage, controller_damage) = if *trample
+                == Some(engine::game::combat::TrampleKind::OverPlaneswalkers)
+                && matches!(
+                    attack_target,
+                    engine::game::combat::AttackTarget::Planeswalker(_)
+                ) {
+                let loyalty = pw_loyalty.unwrap_or(0);
+                let to_pw = remaining.min(loyalty);
+                let to_ctrl = remaining.saturating_sub(to_pw);
+                (to_pw, to_ctrl)
+            } else {
+                // CR 702.19b: Standard trample — all excess to the attack target.
+                (if trample.is_some() { remaining } else { 0 }, 0)
+            };
             Some(GameAction::AssignCombatDamage {
                 mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
                 assignments,
-                trample_damage: 0,
-                controller_damage: 0,
+                trample_damage,
+                controller_damage,
             })
         }
 
@@ -712,20 +775,32 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
-        // CR 303.4 + CR 303.4g: Return-as-Aura attach pick — the engine only
-        // installs this state when `legal_targets` is non-empty, so picking
-        // the first candidate is always a legal fallback.
+        // CR 303.4 + CR 303.4g: Aura attach pick — the engine only installs
+        // this state when `legal_targets` is non-empty, so picking the first
+        // candidate is always a legal fallback.
         WaitingFor::ReturnAsAuraTarget { legal_targets, .. } => {
-            legal_targets.first().map(|&id| GameAction::ChooseTarget {
-                target: Some(engine::types::ability::TargetRef::Object(id)),
-            })
+            legal_targets
+                .first()
+                .cloned()
+                .map(|target| GameAction::ChooseTarget {
+                    target: Some(target),
+                })
         }
 
-        // Phyrexian payment: pay mana for all shards (safe default).
+        // Phyrexian payment: preserve each shard's only legal route when there
+        // is no scored candidate to choose from.
         WaitingFor::PhyrexianPayment { shards, .. } => {
             let choices = shards
                 .iter()
-                .map(|_| engine::types::game_state::ShardChoice::PayMana)
+                .map(|shard| match shard.options {
+                    engine::types::game_state::ShardOptions::LifeOnly => {
+                        engine::types::game_state::ShardChoice::PayLife
+                    }
+                    engine::types::game_state::ShardOptions::ManaOrLife
+                    | engine::types::game_state::ShardOptions::ManaOnly => {
+                        engine::types::game_state::ShardChoice::PayMana
+                    }
+                })
                 .collect();
             Some(GameAction::SubmitPhyrexianChoices { choices })
         }
@@ -770,36 +845,23 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         // Mana ability sub-costs: these are not pending-cast states but
         // carry PendingManaAbility. Empty eligible lists shouldn't normally
         // happen but CancelCast is not valid here. Use empty selection.
-        WaitingFor::TapCreaturesForManaAbility { .. }
-        | WaitingFor::DiscardForManaAbility { .. }
-        | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
-        | WaitingFor::SacrificeForManaAbility { .. } => {
-            Some(GameAction::SelectCards { cards: Vec::new() })
-        }
+        WaitingFor::PayCost {
+            resume: CostResume::ManaAbility { .. },
+            ..
+        } => Some(GameAction::SelectCards { cards: Vec::new() }),
 
-        // CR 101.4 + CR 701.21a: Category choice — pick one distinct permanent
+        // CR 101.4 + CR 701.21a: Category choice — pick one permanent
         // per type category, the rest are sacrificed. A permanent that belongs
         // to multiple categories (e.g. an artifact creature) is eligible in
-        // each, but the engine rejects choosing the same object for more than
-        // one category (`engine_resolution_choices.rs` SelectCategoryPermanents
-        // duplicate guard). Greedily pick the first not-yet-used eligible
-        // object per category, mirroring the `used`-vec algorithm in
-        // `choose_and_sacrifice_rest::try_auto_resolve` so the two stay
-        // consistent. `None` for empty/exhausted categories is a legal choice.
+        // each and may be chosen in each eligible slot. `None` is legal only
+        // for an empty category.
         WaitingFor::CategoryChoice {
             eligible_per_category,
             ..
         } => {
-            let mut used: Vec<engine::types::identifiers::ObjectId> = Vec::new();
             let choices = eligible_per_category
                 .iter()
-                .map(|eligible| {
-                    let pick = eligible.iter().copied().find(|id| !used.contains(id));
-                    if let Some(id) = pick {
-                        used.push(id);
-                    }
-                    pick
-                })
+                .map(|eligible| eligible.first().copied())
                 .collect();
             Some(GameAction::SelectCategoryPermanents { choices })
         }
@@ -814,6 +876,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::SeparatePilesChoice { .. } => Some(GameAction::ChoosePile {
             pile: engine::types::game_state::PileSide::A,
         }),
+        WaitingFor::MoveCountersDistribution { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| matches!(action, GameAction::ChooseCounterMoveDistribution { .. })),
 
         // Remaining pending-cast states are caught by the has_pending_cast
         // guard above. This arm is structurally unreachable but required
@@ -821,14 +886,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ManaPayment { .. }
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::DefilerPayment { .. }
-        | WaitingFor::DiscardForCost { .. }
-        | WaitingFor::SacrificeForCost { .. }
-        | WaitingFor::ReturnToHandForCost { .. }
+        | WaitingFor::PayCost {
+            resume: CostResume::Spell { .. },
+            ..
+        }
         | WaitingFor::BlightChoice { .. }
-        | WaitingFor::BeholdForCost { .. }
-        | WaitingFor::TapCreaturesForSpellCost { .. }
-        | WaitingFor::ExileForCost { .. }
-        | WaitingFor::RemoveCounterForCost { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. } => {
             // These are all pending-cast states — the has_pending_cast guard
@@ -900,7 +962,37 @@ pub fn score_candidates(
     let gated: Vec<_> = gated
         .into_iter()
         .filter(|g| match &g.candidate.action {
-            GameAction::CastSpell { object_id, .. } => !state.cancelled_casts.contains(object_id),
+            GameAction::CastSpell { object_id, .. } => {
+                if state.cancelled_casts.contains(object_id) {
+                    return false;
+                }
+                // CR 117.1 + #563: Cap repeated casts of the same card by name
+                // within a single turn. The AI player's
+                // `spells_cast_this_turn_by_player` record carries each cast's
+                // captured name (`SpellCastRecord.name`) so the cap survives
+                // the spell having left the stack. Lookups are case-sensitive
+                // matches against the candidate object's current name (set at
+                // creation from the card name).
+                let candidate_name = state
+                    .objects
+                    .get(object_id)
+                    .map(|o| o.name.as_str())
+                    .unwrap_or("");
+                if candidate_name.is_empty() {
+                    return true;
+                }
+                let cast_count = state
+                    .spells_cast_this_turn_by_player
+                    .get(&ai_player)
+                    .map(|history| {
+                        history
+                            .iter()
+                            .filter(|rec| rec.name == candidate_name)
+                            .count()
+                    })
+                    .unwrap_or(0);
+                cast_count < MAX_CASTS_OF_SAME_CARD_PER_TURN
+            }
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
@@ -1047,12 +1139,8 @@ pub fn score_candidates(
 
 /// Build AI context from the player's deck pool, or a neutral default if unavailable.
 fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> AiContext {
-    let deck = state
-        .deck_pools
-        .iter()
-        .find(|p| p.player == player)
-        .map(|p| p.current_main.as_slice())
-        .unwrap_or(&[]);
+    let ai_pool = state.deck_pools.iter().find(|p| p.player == player);
+    let deck = ai_pool.map(|p| p.current_main.as_slice()).unwrap_or(&[]);
     if deck.is_empty() {
         let mut ctx = AiContext::empty(&config.weights);
         ctx.player = player;
@@ -1066,9 +1154,21 @@ fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> A
     // Populate opponent features so archetype lookups hit the cache instead
     // of re-running `DeckProfile::analyze` per search call.
     let session = std::sync::Arc::make_mut(&mut ctx.session);
+    // `analyze_for_player` defaults the AI player's bracket tier to `Core`
+    // (it has no `state` access). Read the declared tier from the AI's
+    // `PlayerDeckPool` and refresh the session features with it so
+    // `DeckFeatures::is_cedh` (and any future tier-gated feature) reflects
+    // the real bracket — without this, `ComboLinePolicy::activation()` would
+    // never fire for cEDH decks.
+    if let Some(pool) = ai_pool {
+        if pool.bracket_tier != engine::game::bracket_estimate::CommanderBracketTier::Core {
+            session.invalidate_player_features(player);
+            session.ensure_player_features(player, deck, pool.bracket_tier);
+        }
+    }
     for pool in &state.deck_pools {
         if pool.player != player {
-            session.ensure_player_features(pool.player, &pool.current_main);
+            session.ensure_player_features(pool.player, &pool.current_main, pool.bracket_tier);
         }
     }
 
@@ -1399,9 +1499,10 @@ pub(crate) fn deterministic_choice(
         };
 
         let pay = match additional_cost {
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::Mana { cost: extra_mana },
-            ) => affordable_mana_cost(extra_mana),
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::Mana { cost: extra_mana },
+                ..
+            } => affordable_mana_cost(extra_mana),
             // CR 702.33c: a multikicker / kicker re-prompt presents exactly one
             // live cost. When that cost is pure mana, apply the same
             // affordability + over-commit guard as Optional(Mana).
@@ -1418,12 +1519,14 @@ pub(crate) fn deterministic_choice(
                 affordable_mana_cost(extra_mana)
             }
             // Non-mana optional costs: sacrifice → usually worth it for the upgrade
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::Sacrifice { .. },
-            ) => false, // Conservative: don't sacrifice unless search says so
-            engine::types::ability::AdditionalCost::Optional(
-                engine::types::ability::AbilityCost::PayLife { amount },
-            ) => {
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::Sacrifice { .. },
+                ..
+            } => false, // Conservative: don't sacrifice unless search says so
+            engine::types::ability::AdditionalCost::Optional {
+                cost: engine::types::ability::AbilityCost::PayLife { amount },
+                ..
+            } => {
                 // CR 119.4 + CR 903.4: PayLife carries a QuantityExpr; resolve
                 // against the activator/source so dynamic costs (e.g. commander
                 // color identity) are costed correctly. Source = 0 falls back
@@ -1439,7 +1542,7 @@ pub(crate) fn deterministic_choice(
                 let life = state.players[player.0 as usize].life;
                 life > resolved * 3
             }
-            engine::types::ability::AdditionalCost::Optional(_) => true,
+            engine::types::ability::AdditionalCost::Optional { .. } => true,
             engine::types::ability::AdditionalCost::Kicker { .. } => true,
             engine::types::ability::AdditionalCost::Choice(_, _) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,
@@ -1469,7 +1572,9 @@ pub(crate) fn deterministic_choice(
 
     // Combat decisions: delegate to specialized combat AI
     if let WaitingFor::DeclareAttackers {
-        valid_attacker_ids, ..
+        valid_attacker_ids,
+        valid_attack_targets,
+        ..
     } = &state.waiting_for
     {
         let attacks = choose_attackers_with_targets_with_profile(
@@ -1478,8 +1583,9 @@ pub(crate) fn deterministic_choice(
             &config.profile,
             config.combat_lookahead,
             Some(valid_attacker_ids),
+            Some(valid_attack_targets),
         );
-        return Some(GameAction::DeclareAttackers { attacks });
+        return Some(validated_declare_attackers(state, attacks));
     }
 
     if let WaitingFor::DeclareBlockers {
@@ -1525,7 +1631,9 @@ fn deterministic_combat_choice(
     profile: &crate::config::AiProfile,
 ) -> Option<GameAction> {
     if let WaitingFor::DeclareAttackers {
-        valid_attacker_ids, ..
+        valid_attacker_ids,
+        valid_attack_targets,
+        ..
     } = &state.waiting_for
     {
         let attacks = choose_attackers_with_targets_with_profile(
@@ -1534,8 +1642,9 @@ fn deterministic_combat_choice(
             profile,
             false,
             Some(valid_attacker_ids),
+            Some(valid_attack_targets),
         );
-        return Some(GameAction::DeclareAttackers { attacks });
+        return Some(validated_declare_attackers(state, attacks));
     }
 
     if let WaitingFor::DeclareBlockers {
@@ -1566,6 +1675,42 @@ fn deterministic_combat_choice(
     }
 
     None
+}
+
+/// CR 508.1 (issue #1523): Guard the combat AI's attacker declaration so the
+/// engine never rejects it. The combat AI draws attackers from the
+/// engine-provided `valid_attacker_ids`, but the chosen *subset* + *target
+/// assignment* can still be illegal as a whole — e.g. a "can't attack alone"
+/// creature swinging solo, a split must-attack-together pair, or a target an
+/// attacker may not legally be assigned. The action driver re-requests the AI's
+/// (deterministic) decision after a rejection, so an illegal declaration loops
+/// forever and softlocks the game ("repeated attempts to attack").
+///
+/// Dry-run the declaration on a cloned state; if the engine would reject it,
+/// fall back to an engine-validated legal `DeclareAttackers` (the first such
+/// candidate from `legal_actions`, which prefers declining combat but still
+/// satisfies any mandatory must-attack requirement, since illegal candidates
+/// are filtered out by the simulation pipeline). This costs one state clone per
+/// attacker declaration — infrequent and far cheaper than the combat AI's own
+/// lookahead — and the fallback path only runs on the rare illegal choice.
+fn validated_declare_attackers(
+    state: &GameState,
+    attacks: Vec<(
+        engine::types::identifiers::ObjectId,
+        engine::game::combat::AttackTarget,
+    )>,
+) -> GameAction {
+    let candidate = GameAction::DeclareAttackers { attacks };
+    let mut sim = state.clone();
+    if engine::game::engine::apply_as_current(&mut sim, candidate.clone()).is_ok() {
+        return candidate;
+    }
+    engine::ai_support::legal_actions(state)
+        .into_iter()
+        .find(|action| matches!(action, GameAction::DeclareAttackers { .. }))
+        .unwrap_or(GameAction::DeclareAttackers {
+            attacks: Vec::new(),
+        })
 }
 
 fn prefer_land_drop(
@@ -1703,7 +1848,7 @@ mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::TargetRef;
+    use engine::types::ability::{CategoryChooserScope, TargetFilter, TargetRef, TypedFilter};
     use engine::types::card_type::CoreType;
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
@@ -2122,6 +2267,7 @@ mod tests {
             waiting_for: WaitingFor::TriggerTargetSelection {
                 player: PlayerId(0),
                 target_slots: Vec::new(),
+                mode_labels: Vec::new(),
                 target_constraints: Vec::new(),
                 selection: Default::default(),
                 source_id: None,
@@ -2183,6 +2329,7 @@ mod tests {
                 ],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: engine::types::game_state::TargetSelectionProgress {
                 current_slot: 0,
@@ -2217,6 +2364,7 @@ mod tests {
                 legal_targets: Vec::new(),
                 optional: true,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: Default::default(),
             source_id: None,
@@ -2317,6 +2465,39 @@ mod tests {
             "Should return DeclareAttackers, got {:?}",
             action
         );
+    }
+
+    /// Issue #1523 (p0 softlock): `validated_declare_attackers` must never
+    /// return an attacker declaration the engine would reject — otherwise the
+    /// deterministic action driver re-submits it forever ("repeated attempts to
+    /// attack"). Given an illegal declaration (here a tapped creature, which
+    /// can't be declared as an attacker, CR 508.1a), the guard dry-runs it,
+    /// sees the rejection, and falls back to a legal declaration that does NOT
+    /// contain the illegal attacker.
+    #[test]
+    fn validated_declare_attackers_drops_illegal_attacker() {
+        let mut state = make_state();
+        state.phase = Phase::DeclareAttackers;
+        let creature = add_creature(&mut state, PlayerId(0), 3, 3);
+        // Tap it: a tapped creature can't be a legal attacker.
+        state.objects.get_mut(&creature).unwrap().tapped = true;
+        let target = engine::game::combat::AttackTarget::Player(PlayerId(1));
+
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![creature],
+            valid_attack_targets: vec![target],
+        };
+
+        let action = validated_declare_attackers(&state, vec![(creature, target)]);
+
+        match action {
+            GameAction::DeclareAttackers { attacks } => assert!(
+                !attacks.iter().any(|(id, _)| *id == creature),
+                "guard must drop the illegal (tapped) attacker, got {attacks:?}"
+            ),
+            other => panic!("expected DeclareAttackers, got {other:?}"),
+        }
     }
 
     /// CR 608.2c + CR 701.23: Gifts Ungiven scaling regression — with a
@@ -2536,15 +2717,12 @@ mod tests {
         );
     }
 
-    /// Regression for #447: when a permanent belongs to multiple type
-    /// categories (an artifact creature), the `CategoryChoice` fallback must
-    /// pick *distinct* objects per category. Picking the same object twice is
-    /// rejected by the engine (`engine_resolution_choices.rs`
-    /// SelectCategoryPermanents duplicate guard), which would softlock the AI
-    /// seat. The greedy `used`-vec algorithm mirrors
-    /// `choose_and_sacrifice_rest::try_auto_resolve`.
+    /// Regression for #1591: when a permanent belongs to multiple type
+    /// categories (an artifact creature), the `CategoryChoice` fallback may
+    /// choose that same object for every eligible category slot. The engine
+    /// dedupes only the protected set before sacrificing the rest.
     #[test]
-    fn category_choice_fallback_picks_distinct_objects_and_applies() {
+    fn category_choice_fallback_allows_duplicate_object_slots_and_applies() {
         let mut state = make_state();
         // Source of the ChooseAndSacrificeRest ability.
         let source_card = CardId(state.next_object_id);
@@ -2570,13 +2748,16 @@ mod tests {
             obj.card_types.core_types = vec![CoreType::Artifact, CoreType::Creature];
         }
 
-        // `[[X],[X]]` — X shared across both categories. The fallback must
-        // resolve this to distinct objects (X for the first, None for the
-        // second once X is used).
+        // `[[X],[X]]` — X shared across both categories. The fallback may use
+        // X for both slots because each slot asks a separate category question.
         state.waiting_for = WaitingFor::CategoryChoice {
             player: PlayerId(0),
             target_player: PlayerId(0),
             categories: vec![CoreType::Artifact, CoreType::Creature],
+            chooser_scope: CategoryChooserScope::EachPlayerSelf,
+            choose_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            sacrifice_filter: TargetFilter::Typed(TypedFilter::permanent()),
+            source_controller: PlayerId(0),
             eligible_per_category: vec![vec![artifact_creature], vec![artifact_creature]],
             source_id: source,
             remaining_players: Vec::new(),
@@ -2590,19 +2771,13 @@ mod tests {
             other => panic!("expected SelectCategoryPermanents, got {other:?}"),
         };
 
-        // No object may be repeated across categories.
-        let picked: Vec<ObjectId> = choices.iter().filter_map(|c| *c).collect();
-        for (i, id) in picked.iter().enumerate() {
-            assert!(
-                !picked[i + 1..].contains(id),
-                "fallback must not repeat an object across categories: {choices:?}"
-            );
-        }
+        assert_eq!(
+            choices,
+            vec![Some(artifact_creature), Some(artifact_creature)]
+        );
 
-        // Driving the chosen action through the real engine must succeed —
-        // the duplicate guard would reject a repeated object.
         engine::game::engine::apply(&mut state, PlayerId(0), action)
-            .expect("engine must accept the distinct-object category choice");
+            .expect("engine must accept duplicate-object category choices");
     }
 
     // --- Multikicker mana-budget guard (issue #454) ---
@@ -2709,5 +2884,79 @@ mod tests {
             GameAction::DecideOptionalCost { pay: true },
             "AI must pay a multikick when it has mana to spare"
         );
+    }
+
+    /// Build a single-blocker AssignCombatDamage prompt and run the AI fallback.
+    fn assign_combat_damage_fallback(
+        total_damage: u32,
+        lethal_minimum: u32,
+        trample: Option<engine::game::combat::TrampleKind>,
+    ) -> GameAction {
+        let mut state = make_state();
+        let attacker = add_creature(&mut state, PlayerId(0), total_damage as i32, 1);
+        let blocker = add_creature(&mut state, PlayerId(1), 1, lethal_minimum as i32);
+        state.waiting_for = WaitingFor::AssignCombatDamage {
+            player: PlayerId(0),
+            attacker_id: attacker,
+            total_damage,
+            blockers: vec![engine::types::game_state::DamageSlot {
+                blocker_id: blocker,
+                lethal_minimum,
+            }],
+            assignment_modes: vec![engine::types::game_state::CombatDamageAssignmentMode::Normal],
+            trample,
+            defending_player: PlayerId(1),
+            attack_target: engine::game::combat::AttackTarget::Player(PlayerId(1)),
+            pw_loyalty: None,
+            pw_controller: None,
+        };
+        fallback_action(&state).expect("AssignCombatDamage fallback must produce an action")
+    }
+
+    /// CR 702.19b: single-blocker trample attacker — the AI fallback keeps lethal
+    /// on the blocker and tramples the excess through to the defending player.
+    #[test]
+    fn fallback_single_blocker_trample_tramples_excess() {
+        let action =
+            assign_combat_damage_fallback(5, 2, Some(engine::game::combat::TrampleKind::Standard));
+        match action {
+            GameAction::AssignCombatDamage {
+                mode,
+                assignments,
+                trample_damage,
+                controller_damage,
+            } => {
+                assert_eq!(
+                    mode,
+                    engine::types::game_state::CombatDamageAssignmentMode::Normal
+                );
+                assert_eq!(assignments.len(), 1);
+                assert_eq!(assignments[0].1, 2, "lethal (2) assigned to blocker");
+                assert_eq!(trample_damage, 3, "excess (3) tramples through");
+                assert_eq!(controller_damage, 0);
+            }
+            other => panic!("expected AssignCombatDamage, got {other:?}"),
+        }
+    }
+
+    /// CR 510.1c: single-blocker non-trample attacker — the AI fallback assigns
+    /// all damage to the blocker (no spillover to the player is legal).
+    #[test]
+    fn fallback_single_blocker_no_trample_all_to_blocker() {
+        let action = assign_combat_damage_fallback(5, 2, None);
+        match action {
+            GameAction::AssignCombatDamage {
+                assignments,
+                trample_damage,
+                controller_damage,
+                ..
+            } => {
+                assert_eq!(assignments.len(), 1);
+                assert_eq!(assignments[0].1, 5, "all 5 to the single blocker");
+                assert_eq!(trample_damage, 0, "no trample without trample keyword");
+                assert_eq!(controller_damage, 0);
+            }
+            other => panic!("expected AssignCombatDamage, got {other:?}"),
+        }
     }
 }

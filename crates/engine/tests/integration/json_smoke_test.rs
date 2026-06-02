@@ -16,7 +16,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardLayout;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastOfferKind, WaitingFor};
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -343,7 +343,13 @@ fn sagu_wildling_cast_from_hand_prompts_adventure_choice() {
         })
         .expect("cast should be accepted");
     assert!(
-        matches!(result.waiting_for, WaitingFor::AdventureCastChoice { .. }),
+        matches!(
+            result.waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::Adventure { .. },
+                ..
+            }
+        ),
         "Expected AdventureCastChoice when casting Omen card with only adventure-face mana, got {:?}",
         result.waiting_for
     );

@@ -124,9 +124,12 @@ pub fn resolve(
                     cast_transformed,
                     constraint: constraint.clone(),
                     granted_to,
+                    resolution_cleanup: None,
                 }
             };
-            obj.casting_permissions.push(permission);
+            if !obj.casting_permissions.contains(&permission) {
+                obj.casting_permissions.push(permission);
+            }
         }
     }
 

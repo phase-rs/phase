@@ -487,6 +487,7 @@ mod tests {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
         ability.cost = Some(AbilityCost::Composite {
@@ -506,7 +507,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::land()),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -525,6 +526,7 @@ mod tests {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         };
         let mut ability = AbilityDefinition::new(AbilityKind::Activated, search);
         ability.cost = Some(AbilityCost::Sacrifice {
@@ -543,7 +545,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -655,7 +657,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,

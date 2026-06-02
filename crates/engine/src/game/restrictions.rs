@@ -1,8 +1,8 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingRestriction,
-    ControllerRef, FilterProp, ParsedCondition, QuantityExpr, SpellCastingOptionKind, TargetFilter,
-    TypeFilter,
+    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, CastingPermission,
+    CastingRestriction, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
+    SpellCastingOptionKind, TargetFilter, TypeFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -34,6 +34,24 @@ pub fn check_spell_timing(
         casting_variant,
         CastingVariant::Miracle | CastingVariant::Madness
     ) {
+        return Ok(());
+    }
+
+    // CR 608.2g + CR 702.85a / CR 701.57a: A cascade/discover hit is cast DURING
+    // the resolution of its source ability, following the 601.2a-i cast steps but
+    // bypassing normal timing — sorcery-speed, empty-stack, and active-player
+    // gates do not apply (the stack is necessarily non-empty mid-resolution). Such
+    // a cast is driven by `initiate_cast_during_resolution`, which marks the
+    // exiled hit with an `ExileWithAltCost` permission carrying `resolution_cleanup`.
+    if obj.casting_permissions.iter().any(|p| {
+        matches!(
+            p,
+            CastingPermission::ExileWithAltCost {
+                resolution_cleanup: Some(_),
+                ..
+            }
+        )
+    }) {
         return Ok(());
     }
 
@@ -233,6 +251,15 @@ pub fn record_attackers_declared(
         .attacking_creatures_this_turn
         .entry(state.active_player)
         .or_insert(0) += attacker_count as u32;
+
+    // CR 508.6 + CR 508.5: record the defending players attacked this declaration.
+    // `players_attacked_this_step` already holds this declaration's defenders.
+    let active = state.active_player;
+    state
+        .attacked_defenders_this_turn
+        .entry(active)
+        .or_default()
+        .extend(state.players_attacked_this_step.iter().copied());
 }
 
 pub fn record_discard(state: &mut crate::types::game_state::GameState, player: PlayerId) {
@@ -533,6 +560,10 @@ fn effective_activation_limit(
         AbilityTag::Evolve => "evolve",
         AbilityTag::Exhaust => "exhaust",
         AbilityTag::Outlast => "outlast",
+        // CR 702.29: Cycling has no per-turn activation limit. Unreachable here —
+        // this fn is only called for abilities carrying an `OnlyOnceEachTurn`
+        // restriction, which the synthesized cycling ability never has.
+        AbilityTag::Cycling => "cycling",
     };
     // Scan battlefield for ModifyActivationLimit statics that affect this keyword
     let mut limit: u32 = 1;
@@ -840,6 +871,16 @@ pub(crate) fn evaluate_condition(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature)),
+        // CR 301.5 + CR 602.5b: Attachment activation gates only apply when
+        // the source is attached to an object of the required type. Player
+        // hosts have no core types, so `as_object()` correctly rejects them.
+        ParsedCondition::SourceAttachedTo { required_type } => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.attached_to)
+            .and_then(|t| t.as_object())
+            .and_then(|attached_to| state.objects.get(&attached_to))
+            .is_some_and(|obj| obj.card_types.core_types.contains(required_type)),
         // CR 301.5 + CR 303.4: This condition is meaningful only when the host is
         // an object (Equipment/Aura attached to a permanent). A player host
         // (CR 303.4 + CR 702.5d, Curse cycle) has no `tapped` or core_type, so
@@ -1320,9 +1361,7 @@ pub(crate) fn target_dependent_flash_permission_feasible(
     // granted types/keywords are visible — mirror `spell_has_legal_targets`
     // (casting.rs). `find_legal_targets` does not evaluate layers itself.
     let mut simulated = state.clone();
-    if simulated.layers_dirty {
-        super::layers::evaluate_layers(&mut simulated);
-    }
+    super::layers::flush_layers(&mut simulated);
     let Some(obj) = simulated.objects.get(&object_id) else {
         return true;
     };
@@ -1469,12 +1508,16 @@ fn you_control_subtype_count(
         .iter()
         .filter(|object_id| {
             state.objects.get(object_id).is_some_and(|obj| {
-                obj.controller == player
-                    && obj
-                        .card_types
-                        .subtypes
-                        .iter()
-                        .any(|candidate| candidate.eq_ignore_ascii_case(subtype))
+                if obj.controller != player {
+                    return false;
+                }
+                if subtype.eq_ignore_ascii_case("commander") {
+                    return obj.is_commander;
+                }
+                obj.card_types
+                    .subtypes
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(subtype))
             })
         })
         .count()
@@ -1703,6 +1746,58 @@ mod tests {
     }
 
     #[test]
+    fn source_attached_to_condition_checks_host_type() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Reconfigurer".to_string(),
+            Zone::Battlefield,
+        );
+        let creature_id = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Host Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let land_id = create_object(
+            &mut state,
+            CardId(3),
+            player,
+            "Host Land".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let condition = ParsedCondition::SourceAttachedTo {
+            required_type: CoreType::Creature,
+        };
+
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+
+        state.objects.get_mut(&source_id).unwrap().attached_to = Some(creature_id.into());
+        assert!(evaluate_condition(&state, player, source_id, &condition));
+
+        state.objects.get_mut(&source_id).unwrap().attached_to = Some(land_id.into());
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    #[test]
     fn battlefield_entry_history_condition_survives_object_leaving() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state
@@ -1827,6 +1922,40 @@ mod tests {
             PlayerId(0),
             ObjectId(1),
             "you control two or more vampires"
+        ));
+    }
+
+    #[test]
+    fn evaluates_you_control_a_commander_condition() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Legendary Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert!(!parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            creature,
+            "you control a commander"
+        ));
+
+        state.objects.get_mut(&creature).unwrap().is_commander = true;
+        assert!(parse_and_evaluate_condition(
+            &state,
+            PlayerId(0),
+            creature,
+            "you control a commander"
         ));
     }
 

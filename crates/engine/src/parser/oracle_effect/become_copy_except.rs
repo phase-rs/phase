@@ -65,7 +65,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::char;
-use nom::combinator::opt;
+use nom::combinator::{opt, value};
 use nom::Parser;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
@@ -73,10 +73,12 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{parse_quoted_ability_modifications, split_keyword_list};
 use super::super::oracle_util::canonicalize_subtype_name;
 use crate::parser::oracle_ir::context::ParseContext;
-use crate::types::ability::{ContinuousModification, QuantityExpr};
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::ability::{
+    ContinuousModification, ObjectScope, QuantityExpr, QuantityRef, RoundingMode,
+};
+use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet, Supertype};
 
-/// CR 707.9a: ", except {except_body} [and {except_body}]*[.]"
+/// CR 707.9a: "[,] except {except_body} [and {except_body}]*[.]"
 ///
 /// Each `except_body` independently contributes typed modifications. Bodies
 /// that don't match a known shape are silently skipped so we still keep the
@@ -91,14 +93,14 @@ use crate::types::card_type::{CoreType, Supertype};
 /// - `card_name` is the *original* card name spelling, used to populate
 ///   `ContinuousModification::SetName` so the override matches printed casing.
 ///
-/// Returns `None` only when the leading ", except " tag is absent.
+/// Returns `None` only when the leading except tag is absent.
 pub(crate) fn parse_except_clause<'a>(
     input: &'a str,
     card_name: &str,
     ctx: &ParseContext,
 ) -> Option<(&'a str, Vec<ContinuousModification>)> {
-    // ", except " — if missing, there are no modifications to extract.
-    let (mut rest, _) = tag::<_, _, OracleError<'_>>(", except ")
+    // "[,] except " — if missing, there are no modifications to extract.
+    let (mut rest, _) = alt((tag::<_, _, OracleError<'_>>(", except "), tag(" except ")))
         .parse(input)
         .ok()?;
     let mut modifications = Vec::new();
@@ -146,6 +148,8 @@ pub(crate) fn parse_except_clause<'a>(
 ///   - `<possessive> name is ~`                                → SetName(card_name)
 ///   - `<subject>'s N/M {type list} in addition to its other types`
 ///     → SetPower + SetToughness + AddType/AddSubtype per word
+///   - `<subject> power/toughness is half <copy source> power/toughness`
+///     → SetPowerDynamic + SetToughnessDynamic using copied source values
 ///   - `<subject pronoun> has this ability`
 ///     → RetainPrintedTriggerFromSource (when ctx provides the index)
 ///   - `it's a(n) {core_type} in addition to its other types`  → AddType
@@ -159,6 +163,9 @@ pub(crate) fn parse_except_body<'a>(
 ) -> Option<(&'a str, Vec<ContinuousModification>)> {
     if let Some((rest, name_mod)) = parse_name_override(input, card_name) {
         return Some((rest, vec![name_mod]));
+    }
+    if let Some((rest, mods)) = parse_half_pt_override(input) {
+        return Some((rest, mods));
     }
     if let Some((rest, mods)) = parse_subject_pt_and_types(input) {
         return Some((rest, mods));
@@ -225,14 +232,140 @@ fn parse_name_override<'a>(
     ))
 }
 
-/// CR 707.9b: "<subject> N/M {type list} in addition to its other types" where
-/// the subject is a pronoun-contraction ("he's" / "she's" / "it's" with either
-/// straight or curly apostrophes). Produces `SetPower` + `SetToughness`
-/// (overriding the copied P/T per CR 707.9b) and one `AddType`/`AddSubtype`
-/// per word in the type list. Layer placement is automatic from the variants'
-/// own `layer()` methods: SetPT at layer 7b, type additions at layer 4
-/// (CR 613.1d) — the layer system applies type additions after the copy's
-/// own types via timestamp order.
+/// CR 707.9b + CR 107.1a: "their power is half that creature's power and
+/// their toughness is half that creature's toughness" — Saw in Half class.
+///
+/// Token-copy exceptions are applied after the copied copiable values have
+/// been stamped onto the new token, so `ObjectScope::Source` deliberately
+/// points at the synthesized token. At that point its source P/T equals the
+/// copied object's copiable P/T, which is the value the exception halves.
+fn parse_half_pt_override(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (rest, _) = parse_possessive_subject(input).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" power is half ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = parse_copy_source_power_reference(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" and ").parse(rest).ok()?;
+    let (rest, _) = parse_possessive_subject(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" toughness is half ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = parse_copy_source_toughness_reference(rest).ok()?;
+
+    let (rest, rounding) = parse_rounding_sentence(rest).unwrap_or((rest, RoundingMode::Up));
+    let power = QuantityExpr::DivideRounded {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        }),
+        divisor: 2,
+        rounding,
+    };
+    let toughness = QuantityExpr::DivideRounded {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::Toughness {
+                scope: ObjectScope::Source,
+            },
+        }),
+        divisor: 2,
+        rounding,
+    };
+
+    Some((
+        rest,
+        vec![
+            ContinuousModification::SetPowerDynamic { value: power },
+            ContinuousModification::SetToughnessDynamic { value: toughness },
+        ],
+    ))
+}
+
+fn parse_possessive_subject(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("its"),
+            tag("their"),
+            tag("his"),
+            tag("her"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_copy_source_power_reference(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("that creature's power"),
+            tag("that card's power"),
+            tag("its power"),
+            tag("their power"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_copy_source_toughness_reference(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("that creature's toughness"),
+            tag("that card's toughness"),
+            tag("its toughness"),
+            tag("their toughness"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_rounding_sentence(input: &str) -> Option<(&str, RoundingMode)> {
+    let (rest, rounding) = opt((
+        alt((
+            tag::<_, _, OracleError<'_>>(". round "),
+            tag(", rounded "),
+            tag(" rounded "),
+        )),
+        alt((
+            value(RoundingMode::Up, tag::<_, _, OracleError<'_>>("up")),
+            value(RoundingMode::Down, tag("down")),
+        )),
+        opt(tag(" each time")),
+    ))
+    .parse(input)
+    .ok()?;
+    rounding.map(|(_, rounding, _)| (rest, rounding))
+}
+
+/// CR 707.9d: which characteristic carve-out a copy exception declares. Drives
+/// whether color and/or creature subtypes REPLACE the copied values (no carve-out)
+/// or are ADDED. The "in addition to its other types" carve-out covers ONLY card
+/// type/supertype/subtype — color is NOT carved out, so color still replaces there.
+enum AdditiveSuffix {
+    None,
+    Types,
+    Colors,
+    ColorsAndTypes,
+}
+
+/// CR 707.9b: "<subject> N/M {type list} [in addition to {its|his|her} other
+/// [colors and] types]" where the subject is a pronoun-contraction ("he's" /
+/// "she's" / "it's" with either straight or curly apostrophes). Produces
+/// `SetPower` + `SetToughness` (overriding the copied P/T per CR 707.9b) plus
+/// color and type modifications.
+///
+/// CR 707.9d: a copy exception with no "in addition to its other types"
+/// carve-out (The Scarab God: "it's a 4/4 black Zombie") REPLACES color and
+/// creature subtypes — the copied object's color and creature-type CDAs are not
+/// copied. A carve-out limited to "types" still replaces color (color is not
+/// carved out); a carve-out naming "colors and types" adds both.
+///
+/// Layer placement is automatic from the variants' own `layer()` methods:
+/// SetPT at layer 7b, color at layer 5 (CR 613.1e), type additions and
+/// subtype removal at layer 4 (CR 613.1d).
 fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("he's a "),
@@ -249,37 +382,127 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
-    // Grab the type list up to " in addition to its/his/her other types".
-    let (type_text, rest) = split_on_first_of(
+    // Recognise the type list and which carve-out (if any) follows it. Try the
+    // carve-out variants longest-first so "colors and types" is not consumed as
+    // the shorter "colors" tail. First `Some` wins.
+    let (type_text, rest, suffix) = if let Some((type_text, rest)) = split_on_first_of(
+        rest,
+        &[
+            " in addition to its other colors and types",
+            " in addition to his other colors and types",
+            " in addition to her other colors and types",
+        ],
+    ) {
+        (type_text, rest, AdditiveSuffix::ColorsAndTypes)
+    } else if let Some((type_text, rest)) = split_on_first_of(
+        rest,
+        &[
+            " in addition to its other colors",
+            " in addition to his other colors",
+            " in addition to her other colors",
+        ],
+    ) {
+        (type_text, rest, AdditiveSuffix::Colors)
+    } else if let Some((type_text, rest)) = split_on_first_of(
         rest,
         &[
             " in addition to its other types",
             " in addition to his other types",
             " in addition to her other types",
         ],
-    )?;
+    ) {
+        (type_text, rest, AdditiveSuffix::Types)
+    } else {
+        let (type_text, rest) = split_at_body_boundary(rest);
+        (type_text, rest, AdditiveSuffix::None)
+    };
+
+    // CR 707.9d: derive the replace-vs-add axes from the carve-out. No carve-out
+    // replaces both; a "types"-only carve-out still replaces color; a "colors"
+    // carve-out still replaces creature subtypes; "colors and types" adds both.
+    let (replace_color, replace_types) = match suffix {
+        AdditiveSuffix::None => (true, true),
+        AdditiveSuffix::Types => (true, false),
+        AdditiveSuffix::Colors => (false, true),
+        AdditiveSuffix::ColorsAndTypes => (false, false),
+    };
 
     let mut mods = vec![
         ContinuousModification::SetPower { value: power },
         ContinuousModification::SetToughness { value: toughness },
     ];
 
-    // Type list is space-separated in the copy class ("Spider Human Hero").
-    // Reuse the shared core-type vs subtype dispatch from parse_its_a_type_in_addition.
+    append_color_and_type_modifications(type_text.trim(), replace_color, replace_types, &mut mods);
+
+    Some((rest, mods))
+}
+
+/// CR 707.9b + CR 707.9d: append the color and type modifications declared by a
+/// copy exception's type list. `replace_color` selects `SetColor` (no carve-out
+/// for color) vs per-color `AddColor`; `replace_types` selects whether an exact
+/// creature subtype REPLACES the copied creature types (via `RemoveAllSubtypes`
+/// plus `AddType { Creature }`) or is merely added. Color is applied at layer 5
+/// (CR 613.1e); type/subtype changes at layer 4 (CR 613.1d).
+fn append_color_and_type_modifications(
+    type_text: &str,
+    replace_color: bool,
+    replace_types: bool,
+    mods: &mut Vec<ContinuousModification>,
+) {
+    let mut colors = Vec::new();
+    let mut type_mods = Vec::new();
+    let mut has_exact_creature_subtype = false;
     for word in type_text.split_whitespace() {
-        if word.is_empty() {
+        if word.is_empty() || word == "and" || word == "token" {
+            continue;
+        }
+        if let Ok((rest, color)) = nom_primitives::parse_color(word) {
+            if rest.is_empty() {
+                if !colors.contains(&color) {
+                    colors.push(color);
+                }
+                continue;
+            }
+        }
+        if let Some((_, supertype)) = parse_supertype_word(word) {
+            type_mods.push(ContinuousModification::AddSupertype { supertype });
             continue;
         }
         let canonical = canonicalize_subtype_name(word);
-        let modification = if let Ok(core_type) = CoreType::from_str(&canonical) {
-            ContinuousModification::AddType { core_type }
+        if let Ok(core_type) = CoreType::from_str(&canonical) {
+            type_mods.push(ContinuousModification::AddType { core_type });
         } else {
-            ContinuousModification::AddSubtype { subtype: canonical }
-        };
-        mods.push(modification);
+            if noncreature_subtype_set(&canonical).is_none() {
+                has_exact_creature_subtype = true;
+            }
+            type_mods.push(ContinuousModification::AddSubtype { subtype: canonical });
+        }
     }
-
-    Some((rest, mods))
+    if !colors.is_empty() {
+        // CR 613.1e: color-changing modifications apply at layer 5.
+        if replace_color {
+            mods.push(ContinuousModification::SetColor { colors });
+        } else {
+            for color in colors {
+                mods.push(ContinuousModification::AddColor { color });
+            }
+        }
+    }
+    if replace_types && has_exact_creature_subtype {
+        // CR 707.9d + CR 205.1a: no "in addition" carve-out means the new
+        // creature subtypes replace the copied creature types. Re-add the
+        // Creature core type so the wipe doesn't strip it.
+        type_mods.insert(
+            0,
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+        );
+        mods.push(ContinuousModification::RemoveAllSubtypes {
+            set: SubtypeSet::Creature,
+        });
+    }
+    mods.extend(type_mods);
 }
 
 /// CR 707.9a: "<subject pronoun> has this ability" — emit a
@@ -412,28 +635,39 @@ fn split_single_quoted_ability(input: &str) -> Option<(&str, &str)> {
 }
 
 /// CR 205.4 + CR 707.9b: Match `"the token isn't <supertype>"` /
-/// `"it isn't <supertype>"` (and apostrophe-free / "is not" variants).
+/// `"it isn't <supertype>"` (and apostrophe-free, "is not", and contracted
+/// `"it's not"` variants).
 /// Emits [`ContinuousModification::RemoveSupertype`].
 ///
 /// Miirym, Sentinel Wyrm: `"create a token that's a copy of it, except the
 /// token isn't legendary"` is the canonical case. The arm is permissive about
 /// subject phrasing because both forms appear across token-copy and
 /// replacement-copy texts (Spark Double's `"and it isn't legendary"` is the
-/// replacement-form variant).
+/// replacement-form variant). The contracted negated-copula form `"it's not
+/// legendary"` (Delina, Wild Mage; Ember Island Production; Ratadrabik of
+/// Urborg; etc.) is also accepted with both ASCII and curly apostrophes.
 fn parse_isnt_supertype(input: &str) -> Option<(&str, ContinuousModification)> {
     let (rest, _) = alt((
         tag::<_, _, OracleError<'_>>("the token isn't "),
         tag("the token isnt "),
         tag("the token is not "),
+        tag("the token's not "),
+        tag("the token\u{2019}s not "),
         tag("it isn't "),
         tag("it isnt "),
         tag("it is not "),
+        tag("it's not "),
+        tag("it\u{2019}s not "),
         tag("he isn't "),
         tag("he isnt "),
         tag("he is not "),
+        tag("he's not "),
+        tag("he\u{2019}s not "),
         tag("she isn't "),
         tag("she isnt "),
         tag("she is not "),
+        tag("she's not "),
+        tag("she\u{2019}s not "),
     ))
     .parse(input)
     .ok()?;
@@ -693,7 +927,9 @@ fn skip_to_next_conjunction(text: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{ObjectScope, QuantityRef, RoundingMode};
     use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaColor;
 
     #[test]
     fn name_override_emits_set_name() {
@@ -726,6 +962,43 @@ mod tests {
                 name: "Test Card".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn half_power_toughness_override_emits_dynamic_setters() {
+        let (rest, mods) = parse_except_clause(
+            ", except their power is half that creature's power and their toughness is half that creature's toughness. round up each time",
+            "",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            mods.as_slice(),
+            [
+                ContinuousModification::SetPowerDynamic {
+                    value: QuantityExpr::DivideRounded {
+                        inner,
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                    },
+                },
+                ContinuousModification::SetToughnessDynamic {
+                    value: QuantityExpr::DivideRounded {
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                        ..
+                    },
+                },
+            ] if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source
+                    }
+                }
+            )
+        ));
     }
 
     // CR 707.9b: An empty `card_name` (no card name threaded through the
@@ -1022,6 +1295,288 @@ mod tests {
             vec![ContinuousModification::RemoveSupertype {
                 supertype: Supertype::Legendary,
             }]
+        );
+    }
+
+    /// CR 205.4 + CR 707.9b: contracted negated-copula form "it's not
+    /// legendary" (Delina, Wild Mage; Ratadrabik of Urborg; Jace, Mirror Mage;
+    /// etc.). Issue #685: previously fell through, leaving the token Legendary
+    /// and triggering the legend rule (CR 704.5j) against the original.
+    #[test]
+    fn it_is_not_legendary_contracted_emits_remove_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's not legendary",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 205.4 + CR 707.9b: curly-apostrophe variant of the contracted
+    /// negated-copula form. Mirrors the apostrophe-pair parity used by
+    /// `parse_subject_pt_and_types` and `parse_is_supertype_in_addition`.
+    #[test]
+    fn its_not_legendary_curly_apostrophe_emits_remove_supertype() {
+        let (_, mods) = parse_except_clause(
+            ", except it\u{2019}s not legendary",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::RemoveSupertype {
+                supertype: Supertype::Legendary,
+            }]
+        );
+    }
+
+    /// CR 707.9a + CR 707.9b: Delina, Wild Mage's full token-copy except clause
+    /// chains the contracted "it's not legendary" with a quoted triggered
+    /// ability. Both modifications must flow through together; previously the
+    /// contracted form was dropped, leaving the token Legendary. The granted
+    /// ability variant (GrantTrigger vs GrantAbility) depends on whether the
+    /// quoted body's trigger condition is recognised — either is acceptable
+    /// here; the assertion is that *some* granted-ability modification
+    /// accompanies the RemoveSupertype, not that the contracted form blocks
+    /// the trailing " and " conjunction.
+    #[test]
+    fn token_compound_clause_strips_legendary_and_grants_ability() {
+        let (_, mods) = parse_except_clause(
+            ", except it's not legendary and it has \"when ~ enters, draw a card.\"",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods.len(),
+            2,
+            "expected RemoveSupertype + a granted ability; got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary
+                }
+            )),
+            "missing RemoveSupertype(Legendary); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::GrantTrigger { .. }
+                    | ContinuousModification::GrantAbility { .. }
+            )),
+            "missing granted ability (GrantTrigger or GrantAbility); got {mods:?}"
+        );
+    }
+
+    /// CR 707.9b + CR 707.9d: The Scarab God — "except it's a 4/4 black Zombie"
+    /// (no "in addition to its other types" suffix). With no carve-out, color
+    /// and creature subtypes REPLACE the copied values: `SetColor` (not
+    /// `AddColor`) and `RemoveAllSubtypes { Creature }` + `AddType { Creature }`
+    /// + `AddSubtype("Zombie")`.
+    #[test]
+    fn scarab_god_copy_token_except_sets_pt_color_and_zombie() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a 4/4 black Zombie",
+            "The Scarab God",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+            "missing SetPower(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+            "missing SetToughness(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetColor { colors } if colors == &vec![ManaColor::Black]
+            )),
+            "missing SetColor([Black]); got {mods:?}"
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddColor { .. })),
+            "Scarab class must REPLACE color, not add; got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveAllSubtypes {
+                    set: SubtypeSet::Creature
+                }
+            )),
+            "missing RemoveAllSubtypes(Creature); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddType {
+                    core_type: CoreType::Creature
+                }
+            )),
+            "missing AddType(Creature); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Zombie"
+            )),
+            "missing AddSubtype(Zombie); got {mods:?}"
+        );
+    }
+
+    /// CR 707.9b + CR 707.9d: additive "...black zombie in addition to its
+    /// other colors and types" — both color and creature subtypes are ADDED,
+    /// not replaced. `AddColor` (not `SetColor`), `AddSubtype("Zombie")`, and no
+    /// `RemoveAllSubtypes`.
+    #[test]
+    fn additive_colors_and_types_suffix_adds_color_and_subtype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a 4/4 black zombie in addition to its other colors and types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+            "missing SetPower(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+            "missing SetToughness(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddColor {
+                    color: ManaColor::Black
+                }
+            )),
+            "missing AddColor(Black); got {mods:?}"
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::SetColor { .. })),
+            "additive class must ADD color, not replace; got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Zombie"
+            )),
+            "missing AddSubtype(Zombie); got {mods:?}"
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "additive class must NOT wipe subtypes; got {mods:?}"
+        );
+        // No suffix word leaked into the type list as a garbage subtype.
+        let garbage = [
+            "In", "Addition", "To", "Its", "Other", "Colors", "Types", "And", "Token",
+        ];
+        assert!(
+            !mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if garbage.contains(&subtype.as_str())
+            )),
+            "suffix word leaked as AddSubtype; got {mods:?}"
+        );
+    }
+
+    /// CR 707.9d: "...black spider in addition to its other types" — the
+    /// carve-out covers only card type/supertype/subtype, NOT color. So the
+    /// creature subtype is ADDED (no `RemoveAllSubtypes`) while color still
+    /// REPLACES (`SetColor`, not `AddColor`).
+    #[test]
+    fn additive_types_suffix_adds_subtype_but_replaces_color() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a 4/4 black spider in addition to its other types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Spider"
+            )),
+            "missing AddSubtype(Spider); got {mods:?}"
+        );
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::RemoveAllSubtypes { .. })),
+            "types-only carve-out must NOT wipe subtypes; got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetColor { colors } if colors == &vec![ManaColor::Black]
+            )),
+            "color must REPLACE under the types-only carve-out; got {mods:?}"
+        );
+    }
+
+    /// CR 707.9b: Ember Island Production's first-mode body chains the
+    /// contracted "it's not legendary" with a P/T+subtype override. Both
+    /// halves are characteristic modifications (RemoveSupertype + SetPower +
+    /// SetToughness + AddSubtype), so 707.9b covers the full clause. Confirms
+    /// the contracted negated-copula does not block the
+    /// `parse_subject_pt_and_types` arm that follows the " and " conjunction.
+    #[test]
+    fn token_compound_clause_strips_legendary_and_sets_pt_subtype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's not legendary and it's a 4/4 hero in addition to its other types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::RemoveSupertype {
+                    supertype: Supertype::Legendary
+                }
+            )),
+            "missing RemoveSupertype(Legendary); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPower { value: 4 })),
+            "missing SetPower(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetToughness { value: 4 })),
+            "missing SetToughness(4); got {mods:?}"
+        );
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Hero"
+            )),
+            "missing AddSubtype(Hero); got {mods:?}"
         );
     }
 

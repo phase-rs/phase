@@ -826,7 +826,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             target: TargetFilter::Any,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: true,
             enters_attacking: false,
             up_to: false,
@@ -840,7 +840,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: false,
@@ -866,6 +866,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -882,6 +883,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
             vec![],
             source_id,
@@ -1157,7 +1159,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             target: TargetFilter::Any,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under: None,
             enter_tapped: true,
             enters_attacking: false,
             up_to: false,
@@ -1171,7 +1173,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: false,
@@ -1197,6 +1199,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             target_player: None,
             selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             split: None,
+            source_zones: vec![engine::types::zones::Zone::Library],
         },
         sub_ability: Some(Box::new(change_zone_ability)),
         ..ResolvedAbility::new(
@@ -1213,6 +1216,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
             vec![],
             enchantment_id,
@@ -1804,7 +1808,7 @@ fn install_shock_land(state: &mut GameState, card_id: CardId, zone: Zone, name: 
 
 /// Drive the Earthbend delayed-trigger resolution for a shock land that died
 /// while animated: the ChangeZone effect carries `enter_tapped=true` and
-/// `under_your_control=true` (the fields set by the Earthbending trigger).
+/// `enters_under=Some(ControllerRef::You)` (the fields set by the Earthbending trigger).
 /// The shock land's own Optional replacement must NOT prompt the player — the
 /// decline branch (`Tap SelfRef`) is a no-op when `enter_tapped` is already
 /// `true`, and presenting "pay 2 life or decline" would be a dominated choice.
@@ -1830,6 +1834,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         from: Zone::Graveyard,
         to: Zone::Battlefield,
         cause: None,
+        attach_to: None,
         enter_tapped: EtbTapState::Tapped,
         enter_with_counters: Vec::new(),
         controller_override: Some(P0),
@@ -1903,6 +1908,7 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         from: Zone::Hand,
         to: Zone::Battlefield,
         cause: None,
+        attach_to: None,
         enter_tapped: EtbTapState::Unspecified,
         enter_with_counters: Vec::new(),
         controller_override: None,
@@ -1968,7 +1974,7 @@ fn build_earthbend_ability(
             target: TargetFilter::TriggeringSource,
             owner_library: false,
             enter_transformed: false,
-            under_your_control: true,
+            enters_under: Some(ControllerRef::You),
             enter_tapped: true,
             enters_attacking: false,
             up_to: false,
@@ -2231,6 +2237,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: TargetFilter::SpecificObject { id: land_id },
+            enters_under: None,
             enter_tapped: false,
         },
         vec![TargetRef::Object(land_id)],
@@ -2465,12 +2472,12 @@ fn earthbend_registers_dies_or_exiled_delayed_trigger_on_target() {
     assert_eq!(trigger.controller, P0);
 
     // Inner effect must be ChangeZone(destination=Battlefield, enter_tapped=true,
-    // under_your_control=true) — this is the actual return-tapped behavior.
+    // enters_under=Some(ControllerRef::You)) — this is the actual return-tapped behavior.
     match &trigger.ability.effect {
         Effect::ChangeZone {
             destination,
             enter_tapped,
-            under_your_control,
+            enters_under,
             ..
         } => {
             assert_eq!(*destination, Zone::Battlefield);
@@ -2478,9 +2485,10 @@ fn earthbend_registers_dies_or_exiled_delayed_trigger_on_target() {
                 *enter_tapped,
                 "Inner ChangeZone must carry enter_tapped=true"
             );
-            assert!(
-                *under_your_control,
-                "Inner ChangeZone must carry under_your_control=true (returns under earthbender's control)"
+            assert_eq!(
+                *enters_under,
+                Some(engine::types::ability::ControllerRef::You),
+                "Inner ChangeZone must carry enters_under=Some(ControllerRef::You) (returns under earthbender's control)"
             );
         }
         other => panic!("Expected ChangeZone return effect, got {:?}", other),

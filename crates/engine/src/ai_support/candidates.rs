@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::game::casting;
 use crate::game::combat::AttackTarget;
 use crate::game::deck_loading::DeckEntry;
+use crate::game::effects::prepare;
 use crate::game::game_object::RoomDoor;
 use crate::game::keywords;
 use crate::game::mana_sources;
@@ -13,7 +14,10 @@ use crate::types::actions::{
 };
 use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
-use crate::types::game_state::{ConvokeMode, GameState, TargetSelectionSlot, WaitingFor};
+use crate::types::game_state::{
+    CastOfferKind, ConvokeMode, CounterMoveChoice, GameState, PayCostKind, TargetSelectionSlot,
+    WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
 use crate::types::match_config::DeckCardCount;
@@ -198,6 +202,87 @@ fn order_triggers_candidates(player: PlayerId, len: usize) -> Vec<CandidateActio
         .collect()
 }
 
+fn counter_move_distribution_candidates(
+    player: PlayerId,
+    available: &[(crate::types::counter::CounterType, u32)],
+    destinations: &[ObjectId],
+) -> Vec<CandidateAction> {
+    let mut actions = vec![candidate(
+        GameAction::ChooseCounterMoveDistribution { selections: vec![] },
+        TacticalClass::Selection,
+        Some(player),
+    )];
+    let Some((counter_type, count)) = available.iter().find(|(_, count)| *count > 0) else {
+        return actions;
+    };
+    let Some(&first_destination) = destinations.first() else {
+        return actions;
+    };
+    let all_to_first: Vec<CounterMoveChoice> = available
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(counter_type, count)| CounterMoveChoice {
+            destination_id: first_destination,
+            counter_type: counter_type.clone(),
+            count: *count,
+        })
+        .collect();
+    if !all_to_first.is_empty() {
+        actions.push(candidate(
+            GameAction::ChooseCounterMoveDistribution {
+                selections: all_to_first,
+            },
+            TacticalClass::Selection,
+            Some(player),
+        ));
+    }
+    actions.push(candidate(
+        GameAction::ChooseCounterMoveDistribution {
+            selections: vec![CounterMoveChoice {
+                destination_id: first_destination,
+                counter_type: counter_type.clone(),
+                count: *count,
+            }],
+        },
+        TacticalClass::Selection,
+        Some(player),
+    ));
+    actions.push(candidate(
+        GameAction::ChooseCounterMoveDistribution {
+            selections: vec![CounterMoveChoice {
+                destination_id: first_destination,
+                counter_type: counter_type.clone(),
+                count: 1,
+            }],
+        },
+        TacticalClass::Selection,
+        Some(player),
+    ));
+    if *count >= 2 {
+        if let Some(&second_destination) = destinations.get(1) {
+            actions.push(candidate(
+                GameAction::ChooseCounterMoveDistribution {
+                    selections: vec![
+                        CounterMoveChoice {
+                            destination_id: first_destination,
+                            counter_type: counter_type.clone(),
+                            count: 1,
+                        },
+                        CounterMoveChoice {
+                            destination_id: second_destination,
+                            counter_type: counter_type.clone(),
+                            count: count.saturating_sub(1),
+                        },
+                    ],
+                },
+                TacticalClass::Selection,
+                Some(player),
+            ));
+        }
+    }
+    actions
+}
+
 fn permute_into(
     items: &[usize],
     current: &mut Vec<usize>,
@@ -243,6 +328,12 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::MoveCountersDistribution {
+            player,
+            available,
+            destinations,
+            ..
+        } => counter_move_distribution_candidates(*player, available, destinations),
         // CR 603.3b: Trigger ordering enumeration. Full n! permutations explode
         // (8! = 40320) so cap at n <= 4 (24 perms); larger groups generate only
         // identity + reverse, which is enough variety for search lookahead to
@@ -313,17 +404,20 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             ..
         } => legal_targets
             .iter()
-            .map(|&target_id| {
+            .map(|target| {
                 candidate(
                     GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(target_id)),
+                        target: Some(target.clone()),
                     },
                     TacticalClass::Selection,
                     Some(*player),
                 )
             })
             .collect(),
-        WaitingFor::DiscoverChoice { player, .. } => vec![
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::Discover { .. },
+        } => vec![
             candidate(
                 GameAction::DiscoverChoice {
                     choice: CastChoice::Cast,
@@ -377,8 +471,9 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
         // preferred over a no-effect cast that still consumes the resource.
         // Both candidates remain legal — the selector / search may still
         // pick either based on deeper evaluation.
-        WaitingFor::CascadeChoice {
-            player, hit_card, ..
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::Cascade { hit_card, .. },
         } => {
             let cast_first = state.objects.get(hit_card).is_some_and(|obj| {
                 crate::game::casting::spell_has_legal_targets(state, obj, *player)
@@ -438,6 +533,21 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 701.30b: One candidate per choosable opponent.
+        WaitingFor::ClashChooseOpponent {
+            player, candidates, ..
+        } => candidates
+            .iter()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseClashOpponent {
+                        opponent: *opponent,
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::BetweenGamesChoosePlayDraw { player, .. } => vec![
             candidate(
                 GameAction::ChoosePlayDraw { play_first: true },
@@ -507,6 +617,12 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             convoke_mode,
         } => mana_payment_actions(state, *player, *convoke_mode),
+        WaitingFor::MoveCountersDistribution {
+            player,
+            available,
+            destinations,
+            ..
+        } => counter_move_distribution_candidates(*player, available, destinations),
         WaitingFor::TargetSelection {
             player,
             target_slots,
@@ -555,6 +671,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 508.1g + CR 701.43d: exert-as-attack is optional — offer both
+        // paying the exert cost and declining so search can weigh the linked
+        // "when you do" payoff against losing the next untap.
+        WaitingFor::ExertChoice { player, .. } => vec![
+            candidate(
+                GameAction::ChooseExert { exert: true },
+                TacticalClass::Utility,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::ChooseExert { exert: false },
+                TacticalClass::Pass,
+                Some(*player),
+            ),
+        ],
         WaitingFor::EquipTarget {
             player,
             equipment_id,
@@ -603,28 +734,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             saddle_power,
             eligible_creatures,
         } => saddle_mount_candidates(state, *player, *mount_id, *saddle_power, eligible_creatures),
-        WaitingFor::TapCreaturesForManaAbility {
-            player,
-            count,
-            creatures,
-            ..
-        } => select_cards_variants(*player, creatures, Some(*count)),
-        // CR 117.1 + CR 118.3 + CR 605.3b: Food Chain class — pick which
-        // permanent(s) to exile to pay the mana ability cost.
-        WaitingFor::ExileFromBattlefieldForManaAbility {
-            player,
-            count,
-            permanents,
-            ..
-        } => select_cards_variants(*player, permanents, Some(*count)),
-        // CR 117.1 + CR 118.3 + CR 605.3b: Phyrexian Altar class — pick which
-        // permanent(s) to sacrifice to pay the mana ability cost.
-        WaitingFor::SacrificeForManaAbility {
-            player,
-            count,
-            permanents,
-            ..
-        } => select_cards_variants(*player, permanents, Some(*count)),
         WaitingFor::PayManaAbilityMana {
             player, options, ..
         } => options
@@ -927,25 +1036,8 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 };
                 for existing in &all_combos {
                     for opt in &options {
-                        // Skip if this object was already chosen in a prior category.
-                        if let Some(_id) = opt {
-                            if existing.iter().any(|prev| prev == opt) {
-                                // Allow None duplicates, but not object duplicates.
-                                // However, also need None as fallback if all are taken.
-                                continue;
-                            }
-                        }
                         let mut combo = existing.clone();
                         combo.push(*opt);
-                        new_combos.push(combo);
-                    }
-                    // If all options for this category conflict, allow None.
-                    if category_eligible
-                        .iter()
-                        .all(|id| existing.contains(&Some(*id)))
-                    {
-                        let mut combo = existing.clone();
-                        combo.push(None);
                         new_combos.push(combo);
                     }
                 }
@@ -1266,25 +1358,39 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
-        WaitingFor::DiscardForCost {
+        // CR 118.3 + CR 601.2b + CR 605.3b: AI selects objects to pay a cost.
+        // RemoveCounter chooses exactly one source (one permanent per
+        // candidate); Sacrifice honors the [min, max] range; every other kind
+        // selects exactly `count` objects.
+        WaitingFor::PayCost {
             player,
-            count,
-            cards,
+            kind: PayCostKind::RemoveCounter { .. },
+            choices,
             ..
-        } => bounded_select_card_candidates(*player, cards, [*count]),
-        WaitingFor::DiscardForManaAbility {
+        } => choices
+            .iter()
+            .map(|id| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![*id] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
+        WaitingFor::PayCost {
             player,
+            kind: PayCostKind::Sacrifice,
+            choices,
             count,
-            cards,
+            min_count,
             ..
-        } => bounded_select_card_candidates(*player, cards, [*count]),
-        // CR 118.3: AI selects permanents to sacrifice as cost
-        WaitingFor::SacrificeForCost {
+        } => bounded_select_card_candidates(*player, choices, *min_count..=*count),
+        WaitingFor::PayCost {
             player,
+            choices,
             count,
-            permanents,
             ..
-        } => bounded_select_card_candidates(*player, permanents, [*count]),
+        } => bounded_select_card_candidates(*player, choices, [*count]),
         // CR 118.12a: AI selects a branch of a disjunctive activation cost.
         WaitingFor::ActivationCostOneOfChoice {
             player,
@@ -1297,24 +1403,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             .map(|(i, _)| {
                 candidate(
                     GameAction::ChooseActivationCostBranch { index: i },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
-        WaitingFor::ReturnToHandForCost {
-            player,
-            count,
-            permanents,
-            ..
-        } => bounded_select_card_candidates(*player, permanents, [*count]),
-        WaitingFor::RemoveCounterForCost {
-            player, permanents, ..
-        } => permanents
-            .iter()
-            .map(|id| {
-                candidate(
-                    GameAction::SelectCards { cards: vec![*id] },
                     TacticalClass::Selection,
                     Some(*player),
                 )
@@ -1333,28 +1421,6 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
-        WaitingFor::BeholdForCost {
-            player,
-            count,
-            choices,
-            ..
-        } => bounded_select_card_candidates(*player, choices, [*count]),
-        // CR 702.34a: AI selects creatures to tap as part of paying flashback tap cost.
-        WaitingFor::TapCreaturesForSpellCost {
-            player,
-            count,
-            creatures,
-            ..
-        } => bounded_select_card_candidates(*player, creatures, [*count]),
-        // CR 118.9a + CR 601.2b + CR 601.2h: AI selects cards to exile as part
-        // of paying an alternative or additional casting cost — escape
-        // (CR 702.138a, graveyard) or pitch spells (hand).
-        WaitingFor::ExileForCost {
-            player,
-            count,
-            cards,
-            ..
-        } => bounded_select_card_candidates(*player, cards, [*count]),
         WaitingFor::CollectEvidenceChoice {
             player,
             minimum_mana_value,
@@ -1414,7 +1480,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             }
             actions
         }
-        WaitingFor::AdventureCastChoice { player, .. } => vec![
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::Adventure { .. },
+        } => vec![
             candidate(
                 GameAction::ChooseAdventureFace { creature: true },
                 TacticalClass::Selection,
@@ -2040,12 +2109,19 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
-        | WaitingFor::DiscoverChoice { .. }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::Discover { .. },
+            ..
+        }
+        | WaitingFor::CastOffer {
+            kind: CastOfferKind::Cascade { .. },
+            ..
+        }
         | WaitingFor::RevealUntilKeptChoice { .. }
         | WaitingFor::RepeatDecision { .. }
-        | WaitingFor::CascadeChoice { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::TopOrBottomChoice { .. }
+        | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
         | WaitingFor::OrderTriggers { .. }
@@ -2088,10 +2164,9 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         }
         // CR 702.94a: Miracle cast offer — the trigger has resolved; cast if
         // the miracle cost is affordable, otherwise decline.
-        WaitingFor::MiracleCastOffer {
+        WaitingFor::CastOffer {
             player,
-            object_id,
-            cost,
+            kind: CastOfferKind::Miracle { object_id, cost },
         } => {
             let card_id = state
                 .objects
@@ -2120,10 +2195,9 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         }
         // CR 702.35a: Madness cast offer — cast if the madness cost is affordable,
         // otherwise decline and put the card into its owner's graveyard.
-        WaitingFor::MadnessCastOffer {
+        WaitingFor::CastOffer {
             player,
-            object_id,
-            cost,
+            kind: CastOfferKind::Madness { object_id, cost },
         } => {
             let card_id = state
                 .objects
@@ -2150,7 +2224,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ));
             v
         }
-        WaitingFor::ParadigmCastOffer { player, offers } => {
+        WaitingFor::CastOffer {
+            player,
+            kind: CastOfferKind::Paradigm { offers },
+        } => {
             let mut v: Vec<CandidateAction> = offers
                 .iter()
                 .map(|source| {
@@ -2339,6 +2416,7 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
             ));
         }
 
+        let mut prepare_castability_sim: Option<GameState> = None;
         for &obj_id in &state.battlefield {
             if let Some(obj) = state.objects.get(&obj_id) {
                 if obj.controller == player {
@@ -2363,11 +2441,17 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                     // by `game::effects::prepare`). Assign when WotC publishes
                     // SOS CR update.
                     if obj.prepared.is_some() {
-                        actions.push(candidate(
-                            GameAction::CastPreparedCopy { source: obj_id },
-                            TacticalClass::Spell,
-                            Some(player),
-                        ));
+                        let simulated =
+                            prepare_castability_sim.get_or_insert_with(|| state.clone());
+                        if prepare::can_cast_prepared_copy_now_with_simulation(
+                            simulated, player, obj_id,
+                        ) {
+                            actions.push(candidate(
+                                GameAction::CastPreparedCopy { source: obj_id },
+                                TacticalClass::Spell,
+                                Some(player),
+                            ));
+                        }
                     }
                 }
             }
@@ -2809,7 +2893,7 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 .map(|p| p.hand.iter().copied().collect::<Vec<_>>())
                 .unwrap_or_default();
             for hand_id in hand_ids {
-                if keywords::effective_web_slinging_cost(state, hand_id).is_none() {
+                if keywords::effective_web_slinging_cost(state, player, hand_id).is_none() {
                     continue;
                 }
                 let Some(card_id) = state.objects.get(&hand_id).map(|o| o.card_id) else {
@@ -3658,6 +3742,39 @@ mod tests {
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
 
+    fn prepare_back_face_with_cost(mana_cost: ManaCost) -> crate::game::game_object::BackFaceData {
+        let mut card_types = crate::types::card_type::CardType::default();
+        card_types.core_types.push(CoreType::Sorcery);
+        crate::game::game_object::BackFaceData {
+            name: "Prepared Spell Face".to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            card_types,
+            mana_cost,
+            keywords: Vec::new(),
+            abilities: vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            )],
+            trigger_definitions: crate::types::definitions::Definitions::default(),
+            replacement_definitions: crate::types::definitions::Definitions::default(),
+            static_definitions: crate::types::definitions::Definitions::default(),
+            color: Vec::new(),
+            printed_ref: None,
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            layout_kind: Some(LayoutKind::Prepare),
+        }
+    }
+
     // CR 702.xxx: Prepare (Strixhaven) — the AI candidate enumerator must
     // surface a `CastPreparedCopy` action for every prepared creature under
     // the acting player's control while they hold priority. Without this an
@@ -3758,6 +3875,8 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         state.objects.get_mut(&prepared_id).unwrap().prepared = Some(PreparedState);
+        state.objects.get_mut(&prepared_id).unwrap().back_face =
+            Some(prepare_back_face_with_cost(ManaCost::NoCost));
 
         // Create an unprepared creature on battlefield (must NOT appear).
         let plain_id = create_object(
@@ -3777,6 +3896,8 @@ mod tests {
 
         state.waiting_for = WaitingFor::Priority { player: p0 };
         state.priority_player = p0;
+        state.active_player = p0;
+        state.phase = crate::types::Phase::PreCombatMain;
 
         let actions = candidate_actions(&state);
         let has_prepared_cast = actions.iter().any(|c| {
@@ -3793,6 +3914,46 @@ mod tests {
         assert!(
             !has_plain_cast,
             "must not offer CastPreparedCopy for unprepared creatures"
+        );
+    }
+
+    #[test]
+    fn priority_actions_skip_cast_prepared_copy_when_cost_unpayable() {
+        use crate::game::game_object::PreparedState;
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        let prepared_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Prepared Costly".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&prepared_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&prepared_id).unwrap().prepared = Some(PreparedState);
+        state.objects.get_mut(&prepared_id).unwrap().back_face =
+            Some(prepare_back_face_with_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            }));
+
+        state.waiting_for = WaitingFor::Priority { player: p0 };
+        state.priority_player = p0;
+
+        let actions = candidate_actions(&state);
+        let has_prepared_cast = actions.iter().any(|c| {
+            matches!(c.action, GameAction::CastPreparedCopy { source } if source == prepared_id)
+        });
+        assert!(
+            !has_prepared_cast,
+            "must not offer CastPreparedCopy when mana cost cannot be paid"
         );
     }
 
@@ -3853,6 +4014,7 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: Vec::new(),
             selection: Default::default(),
             source_id: None,
@@ -3938,7 +4100,7 @@ mod tests {
             destination: None,
             enter_tapped: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under_player: None,
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
@@ -4165,7 +4327,7 @@ mod tests {
             };
         }
 
-        state.layers_dirty = true;
+        state.layers_dirty.mark_full();
 
         let actions = candidate_actions(&state);
         assert!(actions.iter().any(|candidate| {
@@ -4350,6 +4512,110 @@ mod tests {
         }));
     }
 
+    // Issue #562: During WaitingFor::ManaPayment, the filtered legal-actions
+    // surface (legal_actions / legal_actions_full) must expose sacrifice-cost
+    // mana ability activations — not just `candidate_actions`. The
+    // pre-existing test above (`mana_payment_actions_include_no_tap_sacrifice_mana_abilities`)
+    // proves the candidate enumerator emits the action; this test proves the
+    // SimulationFilter clone-through path keeps it in the public surface.
+    //
+    // CR 117.1d + CR 605.3a: A player may activate a mana ability during cost
+    // payment. KCI / Phyrexian Altar / Ashnod's Altar must remain activatable
+    // while the engine is in ManaPayment.
+    #[test]
+    fn legal_actions_include_sacrifice_mana_activation_during_mana_payment() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        // KCI-shape: bare `Sacrifice { target: Typed(Artifact) }` cost, no Tap.
+        let kci = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Krark-Clan Ironworks".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&kci).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 2 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Sacrifice {
+                    target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    count: 1,
+                }),
+            );
+        }
+
+        // Two sacrificable artifacts on the battlefield.
+        for (cid, name) in [
+            (CardId(702), "Myr Retriever"),
+            (CardId(703), "Scrap Trawler"),
+        ] {
+            let sac_target = create_object(
+                &mut state,
+                cid,
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&sac_target).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        // candidate_actions must include the activation (already covered by
+        // the sibling test, but assert here so the regression scope is clear).
+        let candidates = candidate_actions(&state);
+        assert!(
+            candidates.iter().any(|c| matches!(
+                c.action,
+                GameAction::ActivateAbility { source_id, ability_index: 0 } if source_id == kci
+            )),
+            "candidate_actions must include KCI activation during ManaPayment",
+        );
+
+        // legal_actions (the filtered surface the frontend dispatches against)
+        // must also include the activation.
+        let actions = crate::ai_support::legal_actions(&state);
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                GameAction::ActivateAbility { source_id, ability_index: 0 } if *source_id == kci
+            )),
+            "legal_actions must expose KCI activation during ManaPayment (#562)",
+        );
+
+        // legal_actions_full's grouped map must place the activation under KCI.
+        let (_, _, grouped) = crate::ai_support::legal_actions_full(&state);
+        let kci_actions = grouped
+            .get(&kci)
+            .expect("KCI must appear in grouped legal_actions_full");
+        assert!(
+            kci_actions.iter().any(|a| matches!(
+                a,
+                GameAction::ActivateAbility { source_id, ability_index: 0 } if *source_id == kci
+            )),
+            "grouped legal_actions_full[KCI] must include the KCI activation (#562)",
+        );
+    }
+
     #[test]
     fn priority_actions_do_not_offer_lands_as_cast_spells() {
         let mut state = GameState::new_two_player(42);
@@ -4389,11 +4655,13 @@ mod tests {
     #[test]
     fn ai_adventure_generates_face_choice() {
         let mut state = GameState::new_two_player(42);
-        state.waiting_for = WaitingFor::AdventureCastChoice {
+        state.waiting_for = WaitingFor::CastOffer {
             player: PlayerId(0),
-            object_id: crate::types::identifiers::ObjectId(1),
-            card_id: CardId(70),
-            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            kind: CastOfferKind::Adventure {
+                object_id: crate::types::identifiers::ObjectId(1),
+                card_id: CardId(70),
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
         };
 
         let actions = candidate_actions(&state);
@@ -4755,7 +5023,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: false,

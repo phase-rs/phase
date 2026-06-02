@@ -81,6 +81,8 @@
     "waitTimeHours": "vor {{count}}h",
     "buildMismatchTitle": "Host nutzt {{version}} ({{commit}}) — dein Build ist anders. Aktualisiere, um auf den neuesten Stand zu kommen.",
     "gameFull": "Dieses Spiel ist voll.",
+    "youAreHosting": "Du hostest dieses Spiel.",
+    "hosting": "Hosten",
     "sandboxConfirm": "Dies ist ein Sandbox-Spiel. Spieler mit Debug-Berechtigung können den Spielzustand direkt manipulieren. Fortfahren?",
     "draftBadgeTitle": "{{kind}} Draft — {{setCode}}",
     "draftBadge": "{{setCode}} Draft",
@@ -88,7 +90,8 @@
     "sandboxBadgeTitle": "Dieses Spiel erlaubt Debug-Aktionen. Zum Testen nutzen — keine kompetitive Partie.",
     "anonymous": "Anonym",
     "by": "von {{name}}",
-    "passwordProtected": "Passwortgeschützt"
+    "passwordProtected": "Passwortgeschützt",
+    "join": "Beitreten"
   },
   "serverPicker": {
     "title": "Server",

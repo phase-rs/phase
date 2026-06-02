@@ -108,5 +108,8 @@ export function objectImageProps(obj: GameObject) {
     isToken,
     tokenFilters: isToken ? tokenFiltersForObject(obj) : undefined,
     tokenImageRef: isToken ? obj.token_image_ref : undefined,
+    // Mark tapped battlefield permanents so choice modals (which render cards
+    // upright, not rotated) can still surface tapped state via a {T} overlay.
+    tapIndicator: obj.zone === "Battlefield" && obj.tapped,
   };
 }

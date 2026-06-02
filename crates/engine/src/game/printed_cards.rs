@@ -4,8 +4,10 @@ use crate::types::ability::{
     Effect, PtValue, ReplacementDefinition, ReplacementMode, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
+use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -17,6 +19,44 @@ use super::morph::apply_face_down_creature_characteristics;
 use super::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
 };
+
+/// CR 205.3m: Look up printed core types for a card name from deck-pool faces or
+/// the card-face registry when a runtime `GameObject` lacks characteristic data.
+pub fn printed_core_types_for_name<'a>(state: &'a GameState, name: &str) -> Option<&'a [CoreType]> {
+    let key = name.to_lowercase();
+    if let Some(face) = state.card_face_registry.get(&key) {
+        return Some(&face.card_type.core_types);
+    }
+    for pool in &state.deck_pools {
+        for entries in [
+            pool.registered_main.as_ref(),
+            pool.registered_sideboard.as_ref(),
+            pool.current_main.as_ref(),
+            pool.current_sideboard.as_ref(),
+            pool.registered_commander.as_ref(),
+            pool.current_commander.as_ref(),
+        ] {
+            for entry in entries {
+                if entry.card.name.eq_ignore_ascii_case(name) {
+                    return Some(&entry.card.card_type.core_types);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// CR 205.3m + CR 608.2c: Whether an object matches a core card type, including
+/// printed-type fallback for name-only library objects (issue #1604 class).
+pub fn object_has_core_type(state: &GameState, object_id: ObjectId, card_type: CoreType) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if obj.card_types.core_types.contains(&card_type) {
+        return true;
+    }
+    printed_core_types_for_name(state, &obj.name).is_some_and(|types| types.contains(&card_type))
+}
 
 pub fn printed_ref_from_face(card_face: &CardFace) -> Option<PrintedCardRef> {
     card_face
@@ -70,6 +110,9 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.trigger_definitions = card_face.triggers.clone().into();
     obj.replacement_definitions = card_face.replacements.clone().into();
     obj.static_definitions = card_face.static_abilities.clone().into();
+    // CR 702.148a-b: Carry the cleave-cost ability set onto the object so the
+    // casting flow can swap it in when the spell is cast for its cleave cost.
+    obj.cleave_variant = card_face.cleave_variant.clone();
     obj.color = color.clone();
     obj.base_power = power;
     obj.base_toughness = toughness;
@@ -437,6 +480,7 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::AddDynamicKeyword { .. }
         | ContinuousModification::AddAllCreatureTypes
         | ContinuousModification::AddAllBasicLandTypes
+        | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
         | ContinuousModification::AddChosenColor
         | ContinuousModification::RemoveChosenKeyword
@@ -617,6 +661,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::CounterAll { .. }
         | Effect::GainLife { .. }
         | Effect::LoseLife { .. }
+        | Effect::ExchangeLifeWithStat { .. }
         | Effect::Tap { .. }
         | Effect::Untap { .. }
         | Effect::TapAll { .. }
@@ -653,8 +698,10 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Clash
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
+        | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
@@ -737,6 +784,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
         | Effect::Monstrosity { .. }
+        | Effect::Renown { .. }
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
         | Effect::Learn
@@ -1007,10 +1055,10 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
     }
 
     if changed_battlefield {
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
     }
 
-    if changed_any || state.layers_dirty {
+    if changed_any || state.layers_dirty.is_dirty() {
         bump_state_revision(state);
         mark_public_state_all_dirty(state);
         finalize_public_state(state);
@@ -1154,6 +1202,7 @@ mod tests {
             triggers: Vec::<TriggerDefinition>::new(),
             static_abilities: Vec::<StaticDefinition>::new(),
             replacements: Vec::<ReplacementDefinition>::new(),
+            cleave_variant: None,
             color_override: None,
             color_identity: vec![],
             scryfall_oracle_id: Some(oracle_id.to_string()),
@@ -1801,6 +1850,7 @@ mod tests {
                 max: 6,
                 effect: Box::new(conjure_ability("roll", Zone::Hand)),
             }],
+            modifier: None,
         };
         walk_effect(&roll, &mut names);
 

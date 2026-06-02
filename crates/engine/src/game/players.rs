@@ -1,4 +1,4 @@
-use crate::types::ability::{ControllerRef, PlayerRelation};
+use crate::types::ability::{ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 use crate::types::game_state::LinkedExileSnapshot;
@@ -37,6 +37,47 @@ pub fn next_player(state: &GameState, current: PlayerId) -> PlayerId {
 
     // Only living player (or no living players — shouldn't happen)
     current
+}
+
+/// CR 102.1 / CR 500.1: Previous living player in seat (turn) order.
+///
+/// Returns the previous living player in seat order before `current`, wrapping
+/// around (the seat to `current`'s right, since turn order proceeds to the
+/// left per CR 101.4 / CR 103.1). Skips eliminated players. If `current` is the
+/// only living player, returns `current`.
+pub fn previous_player(state: &GameState, current: PlayerId) -> PlayerId {
+    let seat_order = &state.seat_order;
+    let len = seat_order.len();
+    if len == 0 {
+        return current;
+    }
+
+    let current_idx = seat_order.iter().position(|&id| id == current).unwrap_or(0);
+
+    for offset in 1..=len {
+        // Walk backward through the seat ring (wrapping) by adding `len - offset`.
+        let idx = (current_idx + len - (offset % len)) % len;
+        let candidate = seat_order[idx];
+        if is_alive(state, candidate) {
+            return candidate;
+        }
+    }
+
+    // Only living player (or no living players — shouldn't happen)
+    current
+}
+
+/// CR 102.1 + CR 103.1: Single authority for seating-neighbor resolution.
+///
+/// Resolves the living player seated immediately to `controller`'s left or
+/// right. Turn order proceeds clockwise to the active player's left
+/// (CR 101.4 / CR 103.1), so `Left` walks forward in `seat_order`
+/// (`next_player`) and `Right` walks backward (`previous_player`).
+pub fn neighbor(state: &GameState, controller: PlayerId, direction: SeatDirection) -> PlayerId {
+    match direction {
+        SeatDirection::Left => next_player(state, controller),
+        SeatDirection::Right => previous_player(state, controller),
+    }
 }
 
 /// CR 102.2 / CR 102.3: Opponents in two-player and multiplayer games.
@@ -293,6 +334,62 @@ mod tests {
         let state = make_state(2, FormatConfig::standard());
         assert_eq!(next_player(&state, PlayerId(0)), PlayerId(1));
         assert_eq!(next_player(&state, PlayerId(1)), PlayerId(0));
+    }
+
+    // --- previous_player ---
+
+    #[test]
+    fn previous_player_returns_previous_in_seat_order() {
+        let state = make_state(3, FormatConfig::free_for_all());
+        // seat_order [P0,P1,P2]: previous of P1 is P0, previous of P2 is P1.
+        assert_eq!(previous_player(&state, PlayerId(1)), PlayerId(0));
+        assert_eq!(previous_player(&state, PlayerId(2)), PlayerId(1));
+    }
+
+    #[test]
+    fn previous_player_wraps_around() {
+        let state = make_state(3, FormatConfig::free_for_all());
+        // previous of P0 wraps to the last seat P2.
+        assert_eq!(previous_player(&state, PlayerId(0)), PlayerId(2));
+    }
+
+    #[test]
+    fn previous_player_skips_eliminated() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        // seat_order [P0,P1,P2,P3]: immediate previous of P0 is P3; eliminate it.
+        eliminate(&mut state, PlayerId(3));
+        assert_eq!(previous_player(&state, PlayerId(0)), PlayerId(2));
+    }
+
+    #[test]
+    fn previous_player_returns_self_if_only_living() {
+        let mut state = make_state(3, FormatConfig::free_for_all());
+        eliminate(&mut state, PlayerId(1));
+        eliminate(&mut state, PlayerId(2));
+        assert_eq!(previous_player(&state, PlayerId(0)), PlayerId(0));
+    }
+
+    #[test]
+    fn previous_player_two_player_standard() {
+        let state = make_state(2, FormatConfig::standard());
+        assert_eq!(previous_player(&state, PlayerId(0)), PlayerId(1));
+        assert_eq!(previous_player(&state, PlayerId(1)), PlayerId(0));
+    }
+
+    // --- neighbor ---
+
+    #[test]
+    fn neighbor_left_is_next_right_is_previous() {
+        let state = make_state(3, FormatConfig::free_for_all());
+        // seat_order [P0,P1,P2], controller P0: left = next = P1, right = prev = P2.
+        assert_eq!(
+            neighbor(&state, PlayerId(0), SeatDirection::Left),
+            PlayerId(1)
+        );
+        assert_eq!(
+            neighbor(&state, PlayerId(0), SeatDirection::Right),
+            PlayerId(2)
+        );
     }
 
     // --- opponents ---

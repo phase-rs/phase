@@ -7,11 +7,13 @@ import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerDesignations } from "../../hooks/usePlayerDesignations.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
+import { isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
@@ -61,7 +63,13 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
 
   const eliminated = gameState?.eliminated_players ?? [];
   const liveOpponents = allOpponents.filter((id) => !eliminated.includes(id));
-  const isMultiplayer = allOpponents.length > 1;
+  // Routed through `isOneOnOne` so this can't drift from GameBoard's
+  // layout decision — the bug that motivated the helper was exactly
+  // those two derivations disagreeing after an elimination. The
+  // `gameState != null` guard preserves the original null-state default
+  // (treat as 1v1) so the pre-game placeholder renders the pill, not an
+  // empty rail.
+  const isMultiplayer = gameState != null && !isOneOnOne(gameState);
 
   // The `OpponentTab` row renders with a default-focused opponent even when
   // `focusedOpponent` is null (it falls back to the first live opponent).
@@ -223,6 +231,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     const opponentSpeed = gameState?.players[opponentId]?.speed ?? 0;
     const opponentPoisonCounters = gameState?.players[opponentId]?.poison_counters ?? 0;
     const opponentRadCounters = gameState?.players[opponentId]?.player_counters?.Rad ?? 0;
+    const opponentExperienceCounters = gameState?.players[opponentId]?.player_counters?.Experience ?? 0;
     const opponentDesignations = primaryOpponentDesignations;
     const isDisconnected = isOnline && disconnectedPlayers.has(opponentId);
     const isOpponentPhasedOut =
@@ -266,10 +275,17 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
                 <DungeonBadge dungeonName={opponentDesignations.activeDungeon} roomIndex={opponentDesignations.currentRoom} />
               ) : null}
               {isOpponentPhasedOut ? <StatusBadge label={t("player.phasedOut")} tone="neutral" /> : null}
-              {opponentDesignations.ringLevel > 0 ? <CounterBadge kind="ring" value={opponentDesignations.ringLevel} /> : null}
+              {opponentDesignations.ringLevel > 0 ? (
+                <CounterBadge
+                  kind="ring"
+                  value={opponentDesignations.ringLevel}
+                  ringBearerName={opponentDesignations.ringBearerName}
+                />
+              ) : null}
               {opponentDesignations.energy > 0 ? <CounterBadge kind="energy" value={opponentDesignations.energy} /> : null}
               {opponentPoisonCounters > 0 ? <CounterBadge kind="poison" value={opponentPoisonCounters} /> : null}
               {opponentRadCounters > 0 ? <CounterBadge kind="rad" value={opponentRadCounters} /> : null}
+              {opponentExperienceCounters > 0 ? <CounterBadge kind="experience" value={opponentExperienceCounters} /> : null}
               {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
               {opponentCompanion ? <StatusBadge label={t("badges.companion")} /> : null}
               {isOnline ? <ConnectionDotInline disconnected={isDisconnected} /> : null}
@@ -484,6 +500,7 @@ interface OpponentTabProps {
 
 function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isValidTarget, isTargeting, legalObjectTargetIds, showMana, incomingAttackerIds, onSelectFocus, onTargetPlayer, onKick }: OpponentTabProps) {
   const { t } = useTranslation("game");
+  const isMobile = useIsMobile();
   const gameState = useGameStore((s) => s.gameState);
   const isTheirTurn = gameState?.active_player === playerId;
   const seatColor = getSeatColor(playerId, gameState?.seat_order);
@@ -601,6 +618,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   const speed = player.speed ?? 0;
   const poisonCounters = player.poison_counters;
   const radCounters = player.player_counters?.Rad ?? 0;
+  const experienceCounters = player.player_counters?.Experience ?? 0;
   const isPhasedOut = player.status?.type === "PhasedOut";
 
   const label = ally ? t("opponentHud.ally") : getOpponentDisplayName(playerId);
@@ -667,10 +685,17 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       {designations.activeDungeon ? (
         <DungeonBadge dungeonName={designations.activeDungeon} roomIndex={designations.currentRoom} />
       ) : null}
-      {designations.ringLevel > 0 ? <CounterBadge kind="ring" value={designations.ringLevel} /> : null}
+      {designations.ringLevel > 0 ? (
+        <CounterBadge
+          kind="ring"
+          value={designations.ringLevel}
+          ringBearerName={designations.ringBearerName}
+        />
+      ) : null}
       {designations.energy > 0 ? <CounterBadge kind="energy" value={designations.energy} /> : null}
       {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
       {radCounters > 0 ? <CounterBadge kind="rad" value={radCounters} /> : null}
+      {experienceCounters > 0 ? <CounterBadge kind="experience" value={experienceCounters} /> : null}
       {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
       {isOnline && <ConnectionDotInline disconnected={isDisconnected} />}
       {onKick && !isEliminated && (
@@ -842,6 +867,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
           ref={auraBadgeRef}
           role="button"
           tabIndex={0}
+          data-testid={`opponent-aura-badge-${playerId}`}
           aria-label={t("enchantmentsBadge.ariaLabel", { count: auraIds.length })}
           title={t("enchantmentsBadge.tooltip", { count: auraIds.length })}
           onClick={(e) => {
@@ -855,17 +881,17 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
               setEnchantmentsDialogPlayer(playerId);
             }
           }}
-          onMouseEnter={onAuraEnter}
-          onMouseLeave={onAuraLeave}
-          onFocus={onAuraEnter}
-          onBlur={onAuraLeave}
-          className={`absolute -right-1.5 z-10 flex h-5 min-w-5 cursor-pointer items-center justify-center rounded-full bg-gradient-to-b from-violet-500 to-violet-700 px-1 text-[10px] font-bold text-violet-50 shadow ring-2 ring-violet-300/70 transition-all hover:from-violet-400 hover:to-violet-600 ${compact ? "-bottom-5" : "-bottom-1.5"}`}
+          onMouseEnter={isMobile ? undefined : onAuraEnter}
+          onMouseLeave={isMobile ? undefined : onAuraLeave}
+          onFocus={isMobile ? undefined : onAuraEnter}
+          onBlur={isMobile ? undefined : onAuraLeave}
+          className={`absolute -right-1.5 z-10 flex min-w-5 cursor-pointer items-center justify-center rounded-full bg-gradient-to-b from-violet-500 to-violet-700 px-1 text-[10px] font-bold text-violet-50 shadow ring-2 ring-violet-300/70 transition-all hover:from-violet-400 hover:to-violet-600 ${compact ? "-top-1.5 h-6" : "-bottom-1.5 h-5"}`}
         >
           <span aria-hidden className="text-[11px] leading-none">✧</span>
           {auraIds.length > 1 ? <span className="ml-0.5 tabular-nums">×{auraIds.length}</span> : null}
         </span>
       )}
-      {auraHoverOpen && auraBadgeRef.current && (
+      {!isMobile && auraHoverOpen && auraBadgeRef.current && (
         <AurasHoverPreview anchorEl={auraBadgeRef.current} attachmentIds={auraIds} />
       )}
       {hoverPopover === "incoming" && tabRef.current && (

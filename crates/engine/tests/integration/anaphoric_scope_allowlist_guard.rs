@@ -134,7 +134,6 @@ use serde_json::Value;
 /// a legitimate category-1/2/3/4 case may be added; a real regression must be
 /// fixed in the parser instead.
 const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
-    "a-heartfire hero",
     "abattoir ghoul",
     "ad nauseam",
     "alchemist's talent",
@@ -143,7 +142,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "angelic chorus",
     "archdruid's charm",
     "archon of redemption",
-    "aspiring champion",
     "assert perfection",
     "augury adept",
     "avatar destiny",
@@ -151,7 +149,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "baneful omen",
     "banewasp affliction",
     "bartz and boko",
-    "be'lakor, the dark master",
     "beastie beatdown",
     "bite down on crime",
     "blood poet",
@@ -181,7 +178,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "dark tutelage",
     "darkstar augur",
     "daxos of meletis",
-    "dead before sunrise",
     "deadshot",
     "death",
     "death watch",
@@ -196,30 +192,25 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "domri's ambush",
     "doomgape",
     "durkwood tracker",
-    "efteekay, flame of the kav",
+    "duskmantle seer",
     "electrosiphon",
     "electryte",
     "energy tap",
     "engulfing slagwurm",
     "erratic explosion",
-    "evereth, viceroy of plunder",
     "exile",
     "explosive revelation",
     "feed the swarm",
     "felling blow",
     "feral encounter",
-    "fiendlash",
     "fiery encore",
     "flamethrower sonata",
-    "flaming tyrannosaurus",
     "foot chopper",
     "gargantuan gorilla",
     "garruk relentless",
     "garruk, apex predator",
-    "gau, feral youth",
     "gaze of pain",
     "ghastly death tyrant",
-    "giggling skitterspike",
     "goblin crash pilot",
     "goblin sleigh ride",
     "goblin tinkerer",
@@ -231,7 +222,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "grisly spectacle",
     "heal the scars",
     "healing technique",
-    "heartfire hero",
     "hellhole rats",
     "hidetsugu and kairi",
     "hit",
@@ -257,19 +247,15 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "kefka, dancing mad",
     "kindle the carnage",
     "knockout maneuver",
-    "laccolith rig",
     "lagonna-band storyteller",
     "lammastide weave",
     "lifeblood hydra",
     "living inferno",
     "lorcan, warlock collector",
-    "lothlórien blade",
     "lozhan, dragons' legacy",
     "lukka, coppercoat outcast",
-    "lukka, wayward bonder",
     "luminate primordial",
     "madame null, power broker",
-    "mage slayer",
     "make yourself useful",
     "mana drain",
     "marshland bloodcaster",
@@ -350,7 +336,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "spinal embrace",
     "spirit flare",
     "spoils of the hunt",
-    "stalking vengeance",
     "steadfast armasaur",
     "stronghold arena",
     "summon: kujata",
@@ -392,7 +377,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "vivien's invocation",
     "volcanic vision",
     "vraska's stoneglare",
-    "warstorm surge",
     "weed strangle",
     "willow geist",
     "wolverine riders",
@@ -457,24 +441,21 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        263,
-        "Expected exactly 263 cards retaining ObjectScope::Anaphoric (the #495 \
-         behavior-neutral floor of 156, minus four cards unlocked by #607's \
-         target-subject DamageAll source wrapper, plus 88 cards from category 4, \
-         plus the UUID-disambiguated Reanimate print key \
-         — the Yuriko/Dark Confidant bare-anaphoric-possessive class \
-         routed onto the Anaphoric arm by `classify_possessive_referent` \
-         — plus 17 category-3 \"pump/tap target creature, then it deals damage \
-         equal to its power\" fight spells newly parsed by the token-then-pump \
-         chain fix, anaphoric on the spell's chosen target creature, plus \
-         Phthisis — destroy-target-creature + LoseLife-equal-to-its-P+T, \
-         category-3 target-spell anaphora); count moved to {}.",
+        247,
+        "Expected exactly 247 cards retaining ObjectScope::Anaphoric. PR #1451 \
+         re-scoped 8 dynamic-quantity 'its power' anaphora off the Anaphoric \
+         arm onto typed quantity refs; PR #1522 re-scoped Dead Before Sunrise \
+         through the recipient/subject rewrite. The category-2 'it deals damage \
+         equal to its power' trigger-subject class (#512) then moved 10 more \
+         cards (Warstorm Surge, Stalking Vengeance, Mage Slayer, et al.) onto \
+         `Power {{ scope: EventSource }}`, dropping 257 -> 247. Count moved to \
+         {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        263,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 263 cards."
+        247,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 247 cards."
     );
 }
 

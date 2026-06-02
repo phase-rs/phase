@@ -1,9 +1,13 @@
 {
+  "resolutionProgress": {
+    "label": "Auflösen {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Verdeckte Karte",
     "loading": "{{name}} wird geladen",
     "unimplemented": "Nicht implementiert: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Getappt"
   },
   "preview": {
     "holdCtrlBack": "Strg halten für Rückseite",
@@ -25,9 +29,32 @@
     "fromSource": "(von {{source}})",
     "basePT": "(Basis {{power}}/{{toughness}})",
     "damage": "Schaden: {{amount}}",
+    "activateCost": "Aktivieren — {{cost}}",
     "ptDeltaFrom": "{{delta}} von {{source}}",
     "colors": "Farben: {{colors}}",
-    "colorless": "Farblos"
+    "colorless": "Farblos",
+    "chosen": {
+      "title": "Gewählt",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Spieler {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Unbekannt",
+      "kind": {
+        "color": "Farbe",
+        "creatureType": "Kreaturentyp",
+        "basicLandType": "Standardlandtyp",
+        "cardType": "Kartentyp",
+        "oddOrEven": "Ungerade oder gerade",
+        "cardName": "Kartenname",
+        "number": "Zahl",
+        "player": "Spieler",
+        "twoColors": "Zwei Farben",
+        "tributeOutcome": "Tribut",
+        "keyword": "Schlüsselwort",
+        "label": "Label",
+        "fallback": "Auswahl"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Angreifer löschen",
@@ -62,6 +89,7 @@
   },
   "permanent": {
     "expandGroup": "{{name}}-Gruppe aufklappen",
+    "collapseGroup": "{{name}}-Gruppe zuklappen",
     "chooseToken": "{{name}}-Spielstein wählen",
     "pick": "Wählen",
     "close": "schließen",
@@ -74,7 +102,9 @@
     "underAttack_other": "Von {{count}} Kreaturen angegriffen",
     "target": "Ziel",
     "copy": "Kopie",
-    "copyTooltip": "Spielstein-Kopie einer echten Karte"
+    "copyTooltip": "Spielstein-Kopie einer echten Karte",
+    "ringBearer": "Ring",
+    "ringBearerTooltip": "Ringträger"
   },
   "player": {
     "opponent": "Geg {{seat}}",
@@ -196,11 +226,21 @@
     "energyAriaLabel_one": "{{count}} Energiemarke",
     "energyAriaLabel_other": "{{count}} Energiemarken",
     "energyTooltip": "Energie: {{count}}",
-    "ringAriaLabel": "Der Eine Ring verlockt dich (Stufe {{level}})",
+    "ringAriaLabel": "Der Eine Ring verlockt dich (Stufe {{level}}), Ringträger: {{bearer}}",
     "ringTooltip": "Der Eine Ring verlockt dich — Stufe {{level}}",
+    "ringBearerTooltip": "Ringträger: {{name}}",
+    "noRingBearer": "keiner",
+    "noRingBearerTooltip": "Kein Ringträger",
+    "ringLevel1": "1. Der Ringträger ist legendär und kann nicht von Kreaturen mit größerer Stärke geblockt werden.",
+    "ringLevel2": "2. Wenn er angreift, ziehst du eine Karte und wirfst dann eine Karte ab.",
+    "ringLevel3": "3. Wenn er von einer Kreatur geblockt wird, opfert deren Beherrscher sie am Ende des Kampfes.",
+    "ringLevel4": "4. Wenn er einem Spieler Kampfschaden zufügt, verliert jeder Gegner 3 Lebenspunkte.",
     "radAriaLabel_one": "{{count}} Strahlungsmarke",
     "radAriaLabel_other": "{{count}} Strahlungsmarken",
     "radTooltip": "Strahlungsmarken: {{count}}",
+    "experienceAriaLabel_one": "{{count}} Erfahrungsmarke",
+    "experienceAriaLabel_other": "{{count}} Erfahrungsmarken",
+    "experienceTooltip": "Erfahrungsmarken: {{count}}",
     "speedAriaLabel": "Tempo {{value}}",
     "speedTooltip": "Tempo: {{value}}",
     "companion": "Gefährte"
@@ -375,6 +415,7 @@
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",
     "chooseTarget": "Wähle ein Ziel",
     "noLegalTargets": "Keine legalen Ziele verfügbar",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "bis zu eine {{target}}",
     "one": "eine {{target}}",
     "nounPlayer": "Spieler",
@@ -434,6 +475,7 @@
     "blockersDeclared_one": "{{count}} Blocker zugeordnet",
     "blockersDeclared_other": "{{count}} Blocker zugeordnet",
     "becomesTarget": "Objekt {{objectId}} von {{sourceId}} anvisiert",
+    "becomesTargetPlayer": "{{player}} von {{sourceId}} anvisiert",
     "replacementApplied": "Ersatzeffekt angewendet: {{eventType}}",
     "companionRevealed": "{{player}} hat den Gefährten aufgedeckt: {{cardName}}",
     "companionMovedToHand": "{{player}} hat den Gefährten {{cardName}} auf die Hand genommen",
@@ -633,6 +675,15 @@
       "keepTapped": "Getappt lassen",
       "keepTappedDescription": "{{name}} bleibt diesen Enttappschritt getappt."
     },
+    "exert": {
+      "creatureFallback": "Kreatur",
+      "title": "{{name}} anstrengen?",
+      "subtitle": "Wähle, ob du diesen Angreifer anstrengen willst. Eine angestrengte Kreatur enttappt in deinem nächsten Enttappschritt nicht.",
+      "exert": "Anstrengen",
+      "exertDescription": "{{name}} enttappt nächste Runde nicht und löst die Anstrengen-Fähigkeit aus.",
+      "decline": "Nicht anstrengen",
+      "declineDescription": "{{name}} greift normal an und enttappt wie üblich."
+    },
     "cost": {
       "discardCard": "eine Karte abwerfen",
       "life": "{{amount}} Leben",
@@ -685,6 +736,13 @@
     "startMatch": "Partie starten",
     "startMatchWithOpponents": "Partie starten ({{count}} Geg.)",
     "deckNotLegal": "Das Deck ist nicht legal in {{format}}.",
+    "cedhWarning": "Dein Deck ist Bracket {{bracket}} gegen eine cEDH-KI – rechne mit einer schnellen Niederlage.",
+    "cedhWarningUntagged": "ohne Bracket",
+    "bracketViolation": {
+      "title": "cEDH-Bracket-Sperre",
+      "body": "Alle Decks an einem cEDH-Tisch müssen als Bracket 5 deklariert sein. Aktualisiere das Bracket deines Decks im Deckbauer und versuche es erneut.",
+      "returnToSetup": "Zurück zur Einrichtung"
+    },
     "selectDeckPrompt": "Wähle ein Deck",
     "commanderNote": "Commander: 100-Karten-Singleton, Kommandeurschaden bei {{threshold}}",
     "formatChip": {
@@ -876,6 +934,20 @@
       "subtitle_one": "Wähle {{count}} bleibende Karte fürs Exil",
       "subtitle_other": "Wähle {{count}} bleibende Karten fürs Exil"
     },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
+    },
     "multiTarget": {
       "title": "Ziele wählen",
       "subtitleExact_one": "Wähle {{count}} Ziel",
@@ -1064,6 +1136,18 @@
     "bestowNormalLabel": "Als Kreatur wirken",
     "bestowAltLabel": "Mit Verleihen wirken",
     "bestowSubtitle": "Wirke {{name}} normal als Kreatur oder zahle seine Verleihen-Kosten, um es als Aura zu wirken.",
+    "awakenEyebrow": "Erwecken",
+    "awakenNormalLabel": "Normal wirken",
+    "awakenAltLabel": "Mit Erwecken wirken",
+    "awakenSubtitle": "Wirke {{name}} normal oder zahle seine Erwecken-Kosten, um außerdem +1/+1-Marken auf ein Land deiner Wahl zu legen und es in eine 0/0 Elementarwesen-Kreatur mit Eile zu verwandeln.",
+    "cleaveEyebrow": "Abspalten",
+    "cleaveNormalLabel": "Normal wirken",
+    "cleaveAltLabel": "Mit Abspalten wirken",
+    "cleaveSubtitle": "Wirke {{name}} normal oder zahle seine Abspaltungskosten, um den Text in eckigen Klammern zu entfernen.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Eine Karte ins Exil schicken",
     "additionalSacrifice": "+ Eine bleibende Karte opfern",
     "additionalPayLife": "+ Leben bezahlen",
@@ -1075,6 +1159,10 @@
     "title": "Beschützer wählen",
     "battleFallback": "Schlacht",
     "subtitle": "{{name}} benötigt einen neuen Beschützer. Wähle, welcher Gegner sie verteidigt."
+  },
+  "clashOpponent": {
+    "title": "Kampf-Gegner wählen",
+    "subtitle": "Wähle, welcher Gegner mit dir kämpft."
   },
   "cardDataMissing": {
     "title": "Kartendaten fehlen",
@@ -1122,8 +1210,8 @@
   },
   "categoryChoice": {
     "title": "Bleibende Karten zum Behalten wählen",
-    "subtitleOpponent": "Wähle eine bleibende Karte jedes Typs unter den bleibenden Nichtländer-Karten, die {{name}} kontrolliert; der Rest wird geopfert.",
-    "subtitleSelf": "Wähle eine bleibende Karte jedes Typs unter den bleibenden Nichtländer-Karten, die du kontrollierst; der Rest wird geopfert.",
+    "subtitleOpponent": "Wähle eine bleibende Karte für jede Kategorie für {{name}}.",
+    "subtitleSelf": "Wähle eine bleibende Karte für jede Kategorie.",
     "noneToKeep": "Kein {{category}} — keine zum Behalten",
     "objectFallback": "Objekt {{id}}"
   },
@@ -1227,7 +1315,9 @@
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",
     "searchPlaceholder": "Nach Name suchen...",
     "noCardsFound": "Keine Karten gefunden",
-    "buttonSubtitle": "Wähle eine Option"
+    "buttonSubtitle": "Wähle eine Option",
+    "filterPlaceholder": "Optionen filtern...",
+    "noOptionsMatch": "Keine Option passt"
   },
   "nonFatalPanic": {
     "heading": "Engine-Warnung (nicht fatal)",
@@ -1360,5 +1450,9 @@
     "PostCombatMain": "Hauptphase 2",
     "End": "Endschritt",
     "Cleanup": "Aufräumen"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }

@@ -1,9 +1,13 @@
 {
+  "resolutionProgress": {
+    "label": "Resolving {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Face-down card",
     "loading": "Loading {{name}}",
     "unimplemented": "Unimplemented: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Tapped"
   },
   "preview": {
     "holdCtrlBack": "Hold Ctrl for back face",
@@ -25,9 +29,32 @@
     "fromSource": "(from {{source}})",
     "basePT": "(base {{power}}/{{toughness}})",
     "damage": "Damage: {{amount}}",
+    "activateCost": "Activate — {{cost}}",
     "ptDeltaFrom": "{{delta}} from {{source}}",
     "colors": "Colors: {{colors}}",
-    "colorless": "Colorless"
+    "colorless": "Colorless",
+    "chosen": {
+      "title": "Chosen",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Player {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Unknown",
+      "kind": {
+        "color": "Color",
+        "creatureType": "Creature type",
+        "basicLandType": "Basic land type",
+        "cardType": "Card type",
+        "oddOrEven": "Odd or even",
+        "cardName": "Card name",
+        "number": "Number",
+        "player": "Player",
+        "twoColors": "Two colors",
+        "tributeOutcome": "Tribute",
+        "keyword": "Keyword",
+        "label": "Label",
+        "fallback": "Choice"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Clear Attackers",
@@ -62,6 +89,7 @@
   },
   "permanent": {
     "expandGroup": "Expand {{name}} group",
+    "collapseGroup": "Collapse {{name}} group",
     "chooseToken": "Choose {{name}} token",
     "pick": "Pick",
     "close": "close",
@@ -74,7 +102,9 @@
     "underAttack_other": "Attacked by {{count}} creatures",
     "target": "Target",
     "copy": "Copy",
-    "copyTooltip": "Token copy of a real card"
+    "copyTooltip": "Token copy of a real card",
+    "ringBearer": "Ring",
+    "ringBearerTooltip": "Ring-bearer"
   },
   "player": {
     "opponent": "Opp {{seat}}",
@@ -196,11 +226,21 @@
     "energyAriaLabel_one": "{{count}} energy counter",
     "energyAriaLabel_other": "{{count}} energy counters",
     "energyTooltip": "Energy: {{count}}",
-    "ringAriaLabel": "The Ring tempts you (level {{level}})",
+    "ringAriaLabel": "The Ring tempts you (level {{level}}), Ring-bearer: {{bearer}}",
     "ringTooltip": "The Ring tempts you — level {{level}}",
+    "ringBearerTooltip": "Ring-bearer: {{name}}",
+    "noRingBearer": "none",
+    "noRingBearerTooltip": "No Ring-bearer",
+    "ringLevel1": "1. Ring-bearer is legendary and can't be blocked by creatures with greater power.",
+    "ringLevel2": "2. When it attacks, draw a card, then discard a card.",
+    "ringLevel3": "3. When it becomes blocked by a creature, that creature's controller sacrifices it at end of combat.",
+    "ringLevel4": "4. When it deals combat damage to a player, each opponent loses 3 life.",
     "radAriaLabel_one": "{{count}} rad counter",
     "radAriaLabel_other": "{{count}} rad counters",
     "radTooltip": "Rad counters: {{count}}",
+    "experienceAriaLabel_one": "{{count}} experience counter",
+    "experienceAriaLabel_other": "{{count}} experience counters",
+    "experienceTooltip": "Experience counters: {{count}}",
     "speedAriaLabel": "Speed {{value}}",
     "speedTooltip": "Speed: {{value}}",
     "companion": "Companion"
@@ -377,6 +417,7 @@
     "chooseTargetOf": "Choose target {{current}} of {{total}}",
     "chooseTarget": "Choose a target",
     "noLegalTargets": "No legal targets available",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "up to one {{target}}",
     "one": "a {{target}}",
     "nounPlayer": "player",
@@ -434,6 +475,7 @@
     "blockersDeclared_one": "{{count}} blocker assigned",
     "blockersDeclared_other": "{{count}} blockers assigned",
     "becomesTarget": "Object {{objectId}} targeted by {{sourceId}}",
+    "becomesTargetPlayer": "{{player}} targeted by {{sourceId}}",
     "replacementApplied": "Replacement applied: {{eventType}}",
     "companionRevealed": "{{player}} revealed companion: {{cardName}}",
     "companionMovedToHand": "{{player}} put companion {{cardName}} into hand",
@@ -633,6 +675,15 @@
       "keepTapped": "Keep tapped",
       "keepTappedDescription": "{{name}} stays tapped this untap step."
     },
+    "exert": {
+      "creatureFallback": "Creature",
+      "title": "Exert {{name}}?",
+      "subtitle": "Choose whether to exert this attacker. An exerted creature won't untap during your next untap step.",
+      "exert": "Exert",
+      "exertDescription": "{{name}} won't untap next turn, triggering its exert ability.",
+      "decline": "Don't exert",
+      "declineDescription": "{{name}} attacks normally and untaps as usual."
+    },
     "cost": {
       "discardCard": "discard a card",
       "life": "{{amount}} life",
@@ -685,6 +736,13 @@
     "startMatch": "Start Match",
     "startMatchWithOpponents": "Start Match ({{count}} opp.)",
     "deckNotLegal": "Deck is not legal in {{format}}.",
+    "cedhWarning": "Your deck is bracket {{bracket}} vs. a cEDH AI — expect to lose fast.",
+    "cedhWarningUntagged": "untagged",
+    "bracketViolation": {
+      "title": "cEDH bracket lock",
+      "body": "All decks at a cEDH table must be declared bracket 5. Update your deck's bracket in the deck builder and try again.",
+      "returnToSetup": "Return to setup"
+    },
     "selectDeckPrompt": "Select a deck",
     "commanderNote": "Commander: 100-card singleton, commander damage at {{threshold}}",
     "formatChip": {
@@ -876,6 +934,20 @@
       "subtitle_one": "Choose {{count}} permanent to exile",
       "subtitle_other": "Choose {{count}} permanents to exile"
     },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
+    },
     "multiTarget": {
       "title": "Choose Targets",
       "subtitleExact_one": "Choose {{count}} target",
@@ -1064,6 +1136,18 @@
     "bestowNormalLabel": "Cast as Creature",
     "bestowAltLabel": "Cast with Bestow",
     "bestowSubtitle": "Cast {{name}} normally as a creature, or pay its Bestow cost to cast it as an Aura.",
+    "awakenEyebrow": "Awaken",
+    "awakenNormalLabel": "Cast Normally",
+    "awakenAltLabel": "Cast with Awaken",
+    "awakenSubtitle": "Cast {{name}} normally, or pay its Awaken cost to also put +1/+1 counters on a land you control and turn it into a 0/0 Elemental creature with haste.",
+    "cleaveEyebrow": "Cleave",
+    "cleaveNormalLabel": "Cast Normally",
+    "cleaveAltLabel": "Cast with Cleave",
+    "cleaveSubtitle": "Cast {{name}} normally, or pay its Cleave cost to remove the bracketed text.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Exile a card",
     "additionalSacrifice": "+ Sacrifice a permanent",
     "additionalPayLife": "+ Pay life",
@@ -1075,6 +1159,10 @@
     "title": "Choose a Protector",
     "battleFallback": "Battle",
     "subtitle": "{{name}} needs a new protector. Choose which opponent will defend it."
+  },
+  "clashOpponent": {
+    "title": "Choose Clash Opponent",
+    "subtitle": "Choose which opponent will clash with you."
   },
   "cardDataMissing": {
     "title": "Card Data Missing",
@@ -1122,8 +1210,8 @@
   },
   "categoryChoice": {
     "title": "Choose Permanents to Keep",
-    "subtitleOpponent": "Choose one permanent of each type from among the nonland permanents {{name}} controls; the rest are sacrificed.",
-    "subtitleSelf": "Choose one permanent of each type from among the nonland permanents you control; the rest are sacrificed.",
+    "subtitleOpponent": "Choose a permanent for each category for {{name}}.",
+    "subtitleSelf": "Choose a permanent for each category.",
     "noneToKeep": "No {{category}} — none to keep",
     "objectFallback": "Object {{id}}"
   },
@@ -1227,7 +1315,9 @@
     "searchSubtitle": "Type to search all cards",
     "searchPlaceholder": "Search by name...",
     "noCardsFound": "No cards found",
-    "buttonSubtitle": "Select one option"
+    "buttonSubtitle": "Select one option",
+    "filterPlaceholder": "Filter options...",
+    "noOptionsMatch": "No options match"
   },
   "nonFatalPanic": {
     "heading": "Engine warning (non-fatal)",
@@ -1360,5 +1450,9 @@
     "PostCombatMain": "Main Phase 2",
     "End": "End Step",
     "Cleanup": "Cleanup"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }

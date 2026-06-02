@@ -21,7 +21,7 @@ const MAX_SBA_ITERATIONS: u32 = 9;
 /// capped at MAX_SBA_ITERATIONS.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
-    if state.layers_dirty {
+    if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
         let pt_snapshot: Vec<(crate::types::identifiers::ObjectId, i32, i32)> = state
             .battlefield
@@ -32,7 +32,7 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             })
             .collect();
 
-        layers::evaluate_layers(state);
+        layers::flush_layers(state);
 
         // Emit events for P/T changes (creatures only — skip objects that lost P/T).
         for (id, old_p, old_t) in &pt_snapshot {
@@ -56,37 +56,34 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
     for _ in 0..MAX_SBA_ITERATIONS {
         let mut any_performed = false;
 
-        // CR 704.5a: A player with 0 or less life loses the game.
-        check_player_life(state, events, &mut any_performed);
+        // CR 704.3 + CR 104.4a + CR 704.5a-c + CR 704.6c: Every player-loss
+        // condition met in this single SBA check forms ONE simultaneous event.
+        // Collect all losers across the conditions, then eliminate them together
+        // so the game-over check sees the true post-event living set — a draw
+        // (winner: None) when all remaining players lose at once, instead of
+        // crowning whichever player happened to be eliminated first.
+        // CR 704.5a-c + CR 704.6c: collect every player-loss SBA from this
+        // check before applying any of them.
+        let mut losers: Vec<PlayerId> = collect_life_losers(state);
+        losers.extend(collect_draw_from_empty_losers(state));
+        losers.extend(collect_poison_losers(state));
+        losers.extend(collect_commander_damage_losers(state));
 
-        // If game is over, stop immediately
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return;
-        }
+        // A player can meet several loss conditions at once — dedup so each is
+        // eliminated (and emits PlayerLost) exactly once.
+        losers.sort_unstable();
+        losers.dedup();
+        if !losers.is_empty() {
+            any_performed = true;
+            for &loser in &losers {
+                events.push(GameEvent::PlayerLost { player_id: loser });
+            }
+            super::elimination::eliminate_players_simultaneously(state, &losers, events);
 
-        // CR 704.5b: A player who attempted to draw from an empty library loses the game.
-        check_draw_from_empty(state, events, &mut any_performed);
-
-        // If game is over, stop immediately
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return;
-        }
-
-        // CR 704.5c: A player with ten or more poison counters loses the game.
-        check_poison_counters(state, events, &mut any_performed);
-
-        // If game is over, stop immediately
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return;
-        }
-
-        // CR 704.6c: A player who has been dealt 21 or more combat damage by the same
-        // commander loses the game.
-        check_commander_damage(state, events, &mut any_performed);
-
-        // If game is over, stop immediately
-        if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return;
+            // If the game ended (a sole winner or a CR 104.4a draw), stop now.
+            if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+                return;
+            }
         }
 
         // CR 903.9a: A commander in graveyard or exile (since last SBA check) may
@@ -209,7 +206,7 @@ fn check_city_blessing(
 
     for player_id in players_to_bless {
         state.city_blessing.insert(player_id);
-        state.layers_dirty = true;
+        crate::game::layers::mark_layers_full(state);
         events.push(GameEvent::CityBlessingGained { player_id });
         *any_performed = true;
     }
@@ -355,71 +352,47 @@ fn static_affects_player(
     }
 }
 
-/// CR 704.5a: A player with 0 or less life loses the game.
-fn check_player_life(state: &mut GameState, events: &mut Vec<GameEvent>, any_performed: &mut bool) {
-    // Collect all players who should be eliminated (check all, not just first)
-    // CR 104.3b: Skip players protected by CantLoseTheGame.
-    //
-    // Player-phasing exclusion: a phased-out player can't lose the game from
-    // 0-or-less life — they're treated as though they don't exist for SBA
-    // purposes (mirrors CR 702.26b for permanents, applied to players).
-    let to_eliminate: Vec<PlayerId> = state
+/// CR 704.5a: A player with 0 or less life loses the game. Pure collector — the
+/// SBA driver batches all loss conditions into a single simultaneous event
+/// (CR 704.3) so simultaneous deaths can resolve to a draw (CR 104.4a).
+///
+/// CR 104.3b: Skip players protected by CantLoseTheGame.
+///
+/// Player-phasing exclusion: a phased-out player can't lose the game from
+/// 0-or-less life — they're treated as though they don't exist for SBA
+/// purposes (mirrors CR 702.26b for permanents, applied to players).
+fn collect_life_losers(state: &GameState) -> Vec<PlayerId> {
+    state
         .players
         .iter()
         .filter(|p| !p.is_eliminated && !p.is_phased_out() && p.life <= 0)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
-        .collect();
-
-    for loser in to_eliminate {
-        events.push(GameEvent::PlayerLost { player_id: loser });
-        super::elimination::eliminate_player(state, loser, events);
-        *any_performed = true;
-    }
+        .collect()
 }
 
-/// CR 704.5b: A player who attempted to draw from an empty library loses the game.
-fn check_draw_from_empty(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    any_performed: &mut bool,
-) {
-    // CR 104.3b: Skip players protected by CantLoseTheGame.
-    let to_eliminate: Vec<PlayerId> = state
+/// CR 704.5b: A player who attempted to draw from an empty library loses the
+/// game. Pure collector (see `collect_life_losers`).
+fn collect_draw_from_empty_losers(state: &GameState) -> Vec<PlayerId> {
+    state
         .players
         .iter()
         .filter(|p| !p.is_eliminated && p.drew_from_empty_library)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
-        .collect();
-
-    for loser in to_eliminate {
-        events.push(GameEvent::PlayerLost { player_id: loser });
-        super::elimination::eliminate_player(state, loser, events);
-        *any_performed = true;
-    }
+        .collect()
 }
 
-/// CR 704.5c: A player with ten or more poison counters loses the game.
-fn check_poison_counters(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    any_performed: &mut bool,
-) {
-    // CR 104.3b: Skip players protected by CantLoseTheGame.
-    let to_eliminate: Vec<PlayerId> = state
+/// CR 704.5c: A player with ten or more poison counters loses the game. Pure
+/// collector (see `collect_life_losers`).
+fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
+    state
         .players
         .iter()
         .filter(|p| !p.is_eliminated && p.poison_counters >= 10)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
-        .collect();
-
-    for loser in to_eliminate {
-        events.push(GameEvent::PlayerLost { player_id: loser });
-        super::elimination::eliminate_player(state, loser, events);
-        *any_performed = true;
-    }
+        .collect()
 }
 
 /// CR 903.9a: If a commander is in a graveyard or exile (and was put there
@@ -445,31 +418,22 @@ fn check_commander_zone_return(state: &mut GameState) {
 }
 
 /// CR 704.6c: A player dealt 21+ combat damage by the same commander loses.
-fn check_commander_damage(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-    any_performed: &mut bool,
-) {
+/// Pure collector (see `collect_life_losers`).
+fn collect_commander_damage_losers(state: &GameState) -> Vec<PlayerId> {
     let threshold = match state.format_config.commander_damage_threshold {
         Some(t) => t as u32,
-        None => return, // Not a Commander format
+        None => return Vec::new(), // Not a Commander format
     };
 
-    // Collect players who should be eliminated
     // CR 104.3b: Skip players protected by CantLoseTheGame.
-    let to_eliminate: Vec<PlayerId> = state
+    state
         .commander_damage
         .iter()
         .filter(|entry| entry.damage >= threshold)
         .map(|entry| entry.player)
         .filter(|pid| !state.eliminated_players.contains(pid))
         .filter(|pid| !player_has_cant_lose(state, *pid))
-        .collect();
-
-    for player_id in to_eliminate {
-        super::elimination::eliminate_player(state, player_id, events);
-        *any_performed = true;
-    }
+        .collect()
 }
 
 /// CR 704.5f: A creature with toughness 0 or less is put into its owner's graveyard.
@@ -495,10 +459,14 @@ fn check_zero_toughness(
         })
         .collect();
 
-    for id in to_destroy {
+    for &id in &to_destroy {
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
+    // these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &to_destroy);
 }
 
 /// CR 704.5g / CR 704.5h: A creature with lethal damage (or deathtouch damage) is destroyed.
@@ -532,7 +500,7 @@ fn check_lethal_damage(
 
     // CR 701.19b: Route each destruction through the replacement pipeline
     // so regeneration shields can intercept.
-    for id in to_destroy {
+    for &id in &to_destroy {
         let proposed = ProposedEvent::Destroy {
             object_id: id,
             source: None,
@@ -582,6 +550,32 @@ fn check_lethal_damage(
             }
         }
     }
+    // CR 603.10a + CR 704.3: creatures destroyed by lethal damage in this SBA
+    // check died simultaneously as a single event — record the group so
+    // co-departing dies/LTB observers (Blood Artist) observe each other.
+    // CR 701.19a/b: a creature whose destruction was Prevented (regeneration)
+    // stays on the battlefield, so `departed_subset` excludes it from the group.
+    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &to_destroy));
+}
+
+/// CR 704.5j: A legendary permanent is exempt from the legend rule while an
+/// active `LegendRuleDoesntApply` static has an `affected` filter that matches
+/// it (Mirror Gallery's global exemption, Sakashima of a Thousand Faces /
+/// Mirror Box's "permanents you control", Cadric / Sliver Gravemother's
+/// type-scoped variants). The candidate is passed as the target object so
+/// type-scoped exemptions are evaluated per-permanent, not per-player.
+fn legend_rule_exempt(
+    state: &GameState,
+    permanent_id: crate::types::identifiers::ObjectId,
+) -> bool {
+    super::static_abilities::check_static_ability(
+        state,
+        StaticMode::LegendRuleDoesntApply,
+        &super::static_abilities::StaticCheckContext {
+            target_id: Some(permanent_id),
+            ..Default::default()
+        },
+    )
 }
 
 /// CR 704.5j: If a player controls two or more legendary permanents with the same name,
@@ -609,6 +603,9 @@ fn check_legend_rule(
                             && obj.card_types.supertypes.contains(&Supertype::Legendary)
                     })
                     .unwrap_or(false)
+                    // CR 704.5j: a permanent exempted by a "legend rule doesn't
+                    // apply" static is excluded from the same-name grouping.
+                    && !legend_rule_exempt(state, *id)
             })
             .collect();
 
@@ -701,7 +698,7 @@ fn check_unattached_auras(
                     !is_valid_attachment_target(state, id, t)
                 }
                 Some(crate::game::game_object::AttachTarget::Player(pid)) => {
-                    !is_player_in_game(state, pid)
+                    !crate::game::effects::attach::can_attach_to_player(state, id, pid)
                 }
                 None => true,
             };
@@ -913,10 +910,14 @@ fn check_zero_loyalty(
         })
         .collect();
 
-    for id in to_destroy {
+    for &id in &to_destroy {
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
+    // these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &to_destroy);
 }
 
 /// CR 704.5v + CR 310.7: A battle with defense 0 is put into its owner's graveyard,
@@ -956,10 +957,14 @@ fn check_zero_defense(
         })
         .collect();
 
-    for id in to_destroy {
+    for &id in &to_destroy {
         zones::move_to_zone(state, id, Zone::Graveyard, events);
         *any_performed = true;
     }
+    // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
+    // these permanents left the battlefield together — record the group so
+    // co-departing leaves-the-battlefield/dies observers observe each other.
+    zones::mark_simultaneous_departures(events, &to_destroy);
 }
 
 /// CR 704.5p + CR 310.9: A battle can't be attached to players or permanents.
@@ -1215,7 +1220,7 @@ fn check_counter_cancellation(state: &mut GameState, any_performed: &mut bool) {
             obj.counters
                 .insert(CounterType::Minus1Minus1, m1m1 - cancel);
             obj.counters.retain(|_, v| *v > 0);
-            state.layers_dirty = true; // P/T affected via Layer 7d
+            state.layers_dirty.mark_full(); // P/T affected via Layer 7d
             *any_performed = true;
         }
     }
@@ -1260,8 +1265,8 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
 /// Spellweaver Volute, Don't Worry About It), that zone IS the legal host
 /// zone and the battlefield default is suspended.
 ///
-/// CR 301.5 + CR 702.6: Equipment carries no `Keyword::Enchant`, so legality
-/// reduces to the printed "on the battlefield" requirement.
+/// CR 301.5: Equipment carries no `Keyword::Enchant`, so legality reduces to
+/// the printed "on the battlefield" requirement.
 fn is_valid_attachment_target(
     state: &GameState,
     attacher_id: crate::types::identifiers::ObjectId,
@@ -1273,6 +1278,16 @@ fn is_valid_attachment_target(
     let Some(target) = state.objects.get(&target_id) else {
         return false;
     };
+    // CR 704.5m: An Aura attached to an illegal object is put into its owner's
+    // graveyard.
+    // CR 704.5n: Equipment attached to an illegal permanent becomes unattached.
+    // Protection acquired by the host, or a prohibition static, makes the host
+    // an illegal attachment target even though the Enchant filter / zone below
+    // may still match.
+    if crate::game::effects::attach::attachment_illegality(state, attacher_id, target_id).is_some()
+    {
+        return false;
+    }
     let enchant_filter = attacher.keywords.iter().find_map(|k| match k {
         crate::types::keywords::Keyword::Enchant(f) => Some(f),
         _ => None,
@@ -1322,16 +1337,6 @@ fn explicit_enchant_zones(filter: &crate::types::ability::TargetFilter) -> Vec<Z
         TargetFilter::Not { filter } => explicit_enchant_zones(filter),
         _ => vec![],
     }
-}
-
-/// CR 303.4c: A player has "left the game" when they are eliminated. Multiplayer
-/// exits flip the same flag (CR 800.4a). Out-of-range PlayerIds (defensive) are
-/// treated as not in game so the Aura SBA cleans up the dangling reference.
-fn is_player_in_game(state: &GameState, player_id: crate::types::player::PlayerId) -> bool {
-    state
-        .players
-        .get(player_id.0 as usize)
-        .is_some_and(|p| !p.is_eliminated)
 }
 
 /// CR 704.5t: If a player's venture marker is on the bottommost room of a dungeon card,
@@ -1874,6 +1879,193 @@ mod tests {
     }
 
     #[test]
+    fn sba_aura_detaches_when_host_gains_protection() {
+        // CR 702.16c: a creature enchanted by an opponent's white
+        // Aura (Pacifism) that gains protection from white (Mother of Runes) →
+        // the Aura is put into its owner's graveyard as a state-based action.
+        // CR 704.5m: An illegal Aura is put into its owner's graveyard.
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Pacifism".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.color.push(crate::types::mana::ManaColor::White);
+            obj.attached_to = Some(creature.into());
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
+        // Host gains protection from white.
+        state.objects.get_mut(&creature).unwrap().keywords.push(
+            crate::types::keywords::Keyword::Protection(
+                crate::types::keywords::ProtectionTarget::Color(
+                    crate::types::mana::ManaColor::White,
+                ),
+            ),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 704.5m: the now-illegal Aura goes to its owner's graveyard.
+        assert!(
+            !state.battlefield.contains(&aura),
+            "an Aura on a host that gained protection must detach"
+        );
+        assert!(
+            state.players[1].graveyard.contains(&aura),
+            "the illegal Aura must move to its owner's graveyard"
+        );
+    }
+
+    #[test]
+    fn sba_player_aura_detaches_when_player_gains_protection() {
+        // CR 702.16c: a player with protection from everything can't be
+        // enchanted by an Aura.
+        // CR 704.5m: An Aura attached to an illegal player is put into its
+        // owner's graveyard.
+        let mut state = setup();
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Curse".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(crate::game::game_object::AttachTarget::Player(PlayerId(0)));
+        }
+        state.add_transient_continuous_effect(
+            aura,
+            PlayerId(0),
+            crate::types::ability::Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![crate::types::ability::ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Protection(
+                    crate::types::keywords::ProtectionTarget::Everything,
+                ),
+            }],
+            None,
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(!state.battlefield.contains(&aura));
+        assert!(state.players[1].graveyard.contains(&aura));
+    }
+
+    #[test]
+    fn sba_equipment_unattaches_when_host_gains_protection_from_artifacts() {
+        // CR 702.16d: an equipped creature that gains protection from artifacts
+        // can't be equipped by artifact Equipment.
+        // CR 704.5n: Illegal Equipment unattaches but stays on the battlefield.
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let equip = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Sword".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&equip).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Artifact);
+            obj.card_types.subtypes.push("Equipment".to_string());
+            obj.attached_to = Some(creature.into());
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(equip);
+        state.objects.get_mut(&creature).unwrap().keywords.push(
+            crate::types::keywords::Keyword::Protection(
+                // `source_matches_card_type` matches the lowercase type word
+                // (the form the parser stores for "protection from artifacts").
+                crate::types::keywords::ProtectionTarget::CardType("artifact".to_string()),
+            ),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // CR 704.5n: Equipment stays on the battlefield, but unattached.
+        assert!(
+            state.battlefield.contains(&equip),
+            "Equipment stays on the battlefield (CR 704.5n)"
+        );
+        assert_eq!(
+            state.objects.get(&equip).unwrap().attached_to,
+            None,
+            "Equipment must unattach from a host that gained protection from artifacts"
+        );
+    }
+
+    #[test]
+    fn sba_legal_aura_stays_attached() {
+        // Regression guard: an Aura on a legal host (no protection / prohibition)
+        // is not detached by the SBA re-check.
+        let mut state = setup();
+        let creature = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&aura).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+            obj.attached_to = Some(creature.into());
+        }
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .attachments
+            .push(aura);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            state.battlefield.contains(&aura),
+            "a legal Aura must remain attached"
+        );
+        assert_eq!(
+            state.objects.get(&aura).unwrap().attached_to,
+            Some(creature.into())
+        );
+    }
+
+    #[test]
     fn sba_equipment_on_battlefield_without_attachment_stays() {
         let mut state = setup();
         // Equipment on battlefield with no attached_to is a valid state
@@ -2350,6 +2542,156 @@ mod tests {
         assert!(state.battlefield.contains(&id));
     }
 
+    // --- CR 704.5j: Legend-rule exemption tests (Sakashima / Mirror Gallery class) ---
+
+    /// Helper: put a legendary creature with the given name onto the battlefield
+    /// under `owner`'s control.
+    fn add_legendary(
+        state: &mut GameState,
+        card: CardId,
+        owner: PlayerId,
+        name: &str,
+        turn: u32,
+    ) -> ObjectId {
+        let id = create_creature(state, card, owner, name, 2, 1);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.supertypes.push(Supertype::Legendary);
+        obj.entered_battlefield_turn = Some(turn);
+        id
+    }
+
+    /// Helper: add a permanent whose `LegendRuleDoesntApply` static carries the
+    /// given `affected` scope (`None` = global Mirror Gallery; a controller-scoped
+    /// filter = Sakashima/Cadric class).
+    fn add_legend_exemption(
+        state: &mut GameState,
+        owner: PlayerId,
+        affected: Option<TargetFilter>,
+    ) -> ObjectId {
+        use crate::types::ability::StaticDefinition;
+        let id = create_object(
+            state,
+            CardId(200),
+            owner,
+            "Legend Exemption".to_string(),
+            Zone::Battlefield,
+        );
+        let mut def = StaticDefinition::new(StaticMode::LegendRuleDoesntApply);
+        def.affected = affected;
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        id
+    }
+
+    #[test]
+    fn sba_legend_rule_suppressed_by_global_exemption() {
+        // CR 704.5j: Mirror Gallery — "The legend rule doesn't apply." (global).
+        let mut state = setup();
+        let id1 = add_legendary(&mut state, CardId(1), PlayerId(0), "Thalia", 1);
+        let id2 = add_legendary(&mut state, CardId(2), PlayerId(0), "Thalia", 2);
+        add_legend_exemption(&mut state, PlayerId(0), None);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "global legend-rule exemption must suppress the legend-rule choice"
+        );
+        assert!(state.battlefield.contains(&id1));
+        assert!(state.battlefield.contains(&id2));
+    }
+
+    #[test]
+    fn sba_legend_rule_suppressed_for_controller_scope() {
+        // CR 704.5j: Sakashima of a Thousand Faces — "doesn't apply to permanents
+        // you control." The controller keeps both same-name legendaries.
+        let mut state = setup();
+        let id1 = add_legendary(&mut state, CardId(1), PlayerId(0), "Sakashima", 1);
+        let id2 = add_legendary(&mut state, CardId(2), PlayerId(0), "Sakashima", 2);
+        add_legend_exemption(
+            &mut state,
+            PlayerId(0),
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "controller-scoped legend-rule exemption must suppress the choice for its controller"
+        );
+        assert!(state.battlefield.contains(&id1));
+        assert!(state.battlefield.contains(&id2));
+    }
+
+    #[test]
+    fn sba_legend_rule_still_applies_to_opponent_without_exemption() {
+        // CR 704.5j: Sakashima's "permanents you control" exemption is controller
+        // scoped — an opponent who controls two same-name legendaries is still
+        // subject to the legend rule.
+        let mut state = setup();
+        // Player 0 controls Sakashima (the exemption source).
+        add_legend_exemption(
+            &mut state,
+            PlayerId(0),
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        );
+        // Player 1 controls two copies of the same legendary, with no exemption.
+        let id1 = add_legendary(&mut state, CardId(1), PlayerId(1), "Atraxa", 1);
+        let id2 = add_legendary(&mut state, CardId(2), PlayerId(1), "Atraxa", 2);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        match &state.waiting_for {
+            WaitingFor::ChooseLegend {
+                player, candidates, ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert!(candidates.contains(&id1));
+                assert!(candidates.contains(&id2));
+            }
+            other => panic!("Expected ChooseLegend for opponent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sba_legend_rule_type_scoped_exemption_only_exempts_matching() {
+        // CR 704.5j: Sliver Gravemother — "doesn't apply to Slivers you control."
+        // Two same-name NON-Sliver legendaries are still collapsed by the rule.
+        let mut state = setup();
+        add_legendary(&mut state, CardId(1), PlayerId(0), "Sliver Overlord", 1);
+        add_legendary(&mut state, CardId(2), PlayerId(0), "Sliver Overlord", 2);
+        // The exemption only covers Slivers; the legendaries above have no subtype.
+        add_legend_exemption(
+            &mut state,
+            PlayerId(0),
+            Some(TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::You)
+                    .subtype("Sliver".to_string()),
+            )),
+        );
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseLegend { .. }),
+            "type-scoped exemption must not exempt permanents outside its filter"
+        );
+    }
+
     // --- CR 704.5q: Counter cancellation tests ---
 
     #[test]
@@ -2584,6 +2926,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sba_simultaneous_life_loss_is_a_draw() {
+        // CR 104.4a + CR 704.3: both players at <=0 life in one SBA check lose
+        // simultaneously → the game is a DRAW (winner: None), not a win for the
+        // player processed first.
+        let mut state = setup();
+        state.players[0].life = 0;
+        state.players[1].life = 0;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
+            "both players at 0 life simultaneously must be a draw, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    #[test]
+    fn sba_single_life_loss_yields_sole_winner() {
+        // Only one player loses → the other wins (single-loser behavior intact).
+        let mut state = setup();
+        state.players[1].life = 0;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
+            "a single player at 0 life leaves the other as sole winner, got {:?}",
+            state.waiting_for
+        );
+    }
+
+    #[test]
+    fn sba_mixed_life_and_poison_loss_is_a_draw() {
+        // CR 704.3: loss conditions of DIFFERENT kinds in the same SBA check are
+        // still one simultaneous event — one player at 0 life and the other at
+        // 10 poison both lose at once → draw.
+        let mut state = setup();
+        state.players[0].life = 0;
+        state.players[1].poison_counters = 10;
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            matches!(state.waiting_for, WaitingFor::GameOver { winner: None }),
+            "life-loss + poison-loss in one SBA check is a simultaneous draw, got {:?}",
+            state.waiting_for
+        );
+    }
+
     /// CR 104.3 + CR 704.5b + CR 611.1: Spell-applied transient continuous
     /// effects (Everybody Lives!: "Players can't lose the game ... this turn.")
     /// bound to a specific player via `SpecificPlayer { id }` must also block
@@ -2722,13 +3123,13 @@ mod tests {
         for i in 0..9 {
             add_filler_permanent(&mut state, PlayerId(0), &format!("Filler{i}"));
         }
-        state.layers_dirty = false;
+        state.layers_dirty = crate::types::game_state::LayersDirty::Clean;
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
 
         // CR 702.131d: continuous effects reapply after grant — layers must re-evaluate.
-        assert!(state.layers_dirty || state.city_blessing.contains(&PlayerId(0)));
+        assert!(state.layers_dirty.is_dirty() || state.city_blessing.contains(&PlayerId(0)));
         assert!(state.city_blessing.contains(&PlayerId(0)));
     }
 

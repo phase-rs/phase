@@ -50,6 +50,21 @@ export interface CardArtOverride {
 }
 
 export type CardSizePreference = "small" | "medium" | "large";
+/** How the hover card-preview behaves on desktop.
+ *  "follow" = the preview tracks the cursor (prior fixed behavior, default).
+ *  "side"   = the preview docks to the screen edge so it never covers the board.
+ *  "shift"  = the preview only appears while the Shift key is held (Tabletop
+ *             Simulator style), letting the player read the board uninterrupted. */
+export type CardPreviewMode = "follow" | "side" | "shift";
+/** Card-preview hover latency bounds (milliseconds). `0` = instant (the
+ *  default — the preview appears the moment the cursor lands on a card). The
+ *  upper bound keeps the slider meaningful; a delay longer than ~1s defeats the
+ *  purpose of an at-a-glance preview. Only applies to the hover-driven preview
+ *  modes ("follow"/"side"); the "shift" bind-key mode shows immediately on
+ *  keypress, so the latency is mutually exclusive with it. */
+export const CARD_PREVIEW_HOVER_DELAY_MIN = 0;
+export const CARD_PREVIEW_HOVER_DELAY_MAX = 1000;
+export const CARD_PREVIEW_HOVER_DELAY_STEP = 50;
 export type HudLayout = "inline" | "floating";
 export type LogDefaultState = "open" | "closed";
 export type BattlefieldCardDisplay = "art_crop" | "full_card";
@@ -128,16 +143,18 @@ function buildDefaultPreferences(): PreferencesState {
     spellPaymentMode: "auto",
     showKeywordStrip: true,
     battlefieldPeekOnHover: true,
+    cardPreviewMode: "follow",
+    cardPreviewHoverDelayMs: 0,
     stackDockSide: "right",
     opponentHudDensity: "comfortable",
     aiSeats: [defaultAiSeat()],
+    cedhMode: false,
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
     aiBracketFilter: [] as CommanderBracket[],
     lastFormat: null,
     lastMatchType: "Bo1",
     lastPlayerCount: 2,
-    experimentalFeatures: false,
     dismissedFlowHelpNudge: false,
     dismissedSandboxToolsNudge: false,
     artChain: [] as ArtChainEntry[],
@@ -182,18 +199,29 @@ interface PreferencesState {
    *  previewing that opponent's nonland permanents. Disable for a quieter
    *  HUD — focus is still reachable via tab click. */
   battlefieldPeekOnHover: boolean;
+  /** Desktop hover card-preview behavior — follow cursor, dock to the side, or
+   *  only show while Shift is held. See {@link CardPreviewMode}. */
+  cardPreviewMode: CardPreviewMode;
+  /** Latency (ms) before the hover preview appears in the "follow"/"side"
+   *  modes. `0` = instant (default). Ignored in "shift" mode, which is
+   *  keypress-triggered. See {@link CARD_PREVIEW_HOVER_DELAY_MAX}. */
+  cardPreviewHoverDelayMs: number;
   /** Screen edge the stack panel docks to and collapses toward. */
   stackDockSide: StackDockSide;
   /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
   opponentHudDensity: OpponentHudDensity;
   aiSeats: AiSeatPref[];
+  /** Table-wide cEDH toggle. When true, every AI opponent plays at cEDH
+   *  (bracket 5) regardless of its per-seat difficulty, and the AI/human deck
+   *  pools are restricted to bracket-5 decks. cEDH is a table property, not a
+   *  per-seat difficulty — see `effectiveAiDifficulty` in `services/cedhLock`. */
+  cedhMode: boolean;
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
   aiBracketFilter: CommanderBracket[];
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
   lastPlayerCount: number;
-  experimentalFeatures: boolean;
   dismissedFlowHelpNudge: boolean;
   dismissedSandboxToolsNudge: boolean;
   artChain: ArtChainEntry[];
@@ -234,19 +262,22 @@ interface PreferencesActions {
   setSpellPaymentMode: (mode: SpellPaymentMode) => void;
   setShowKeywordStrip: (show: boolean) => void;
   setBattlefieldPeekOnHover: (enabled: boolean) => void;
+  setCardPreviewMode: (mode: CardPreviewMode) => void;
+  setCardPreviewHoverDelayMs: (ms: number) => void;
   setAiSeatDifficulty: (index: number, difficulty: AIDifficulty) => void;
   setAiSeatDeckId: (index: number, id: AiDeckSelection) => void;
   /** Grow or shrink `aiSeats` to `count` slots. New slots inherit defaults;
    *  shrinking truncates trailing slots. Called whenever the player count
    *  changes so the UI always has exactly `playerCount - 1` panels to render. */
   ensureAiSeatCount: (count: number) => void;
+  /** Toggle the table-wide cEDH mode (all AI play cEDH, deck pools → bracket 5). */
+  setCedhMode: (enabled: boolean) => void;
   setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
   setAiCoverageFloor: (floor: number) => void;
   setAiBracketFilter: (brackets: CommanderBracket[]) => void;
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
-  setExperimentalFeatures: (enabled: boolean) => void;
   setDismissedFlowHelpNudge: (dismissed: boolean) => void;
   setDismissedSandboxToolsNudge: (dismissed: boolean) => void;
   addArtChainEntry: (entry: ArtChainEntry) => void;
@@ -344,6 +375,15 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setSpellPaymentMode: (mode) => set({ spellPaymentMode: mode }),
       setShowKeywordStrip: (show) => set({ showKeywordStrip: show }),
       setBattlefieldPeekOnHover: (enabled) => set({ battlefieldPeekOnHover: enabled }),
+      setCardPreviewMode: (mode) => set({ cardPreviewMode: mode }),
+      setCardPreviewHoverDelayMs: (ms) =>
+        set({
+          cardPreviewHoverDelayMs: clamp(
+            ms,
+            CARD_PREVIEW_HOVER_DELAY_MIN,
+            CARD_PREVIEW_HOVER_DELAY_MAX,
+          ),
+        }),
       setAiSeatDifficulty: (index, difficulty) =>
         set((state) => {
           if (index < 0 || index >= state.aiSeats.length) return state;
@@ -372,13 +412,13 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           }
           return { aiSeats: grown };
         }),
+      setCedhMode: (enabled) => set({ cedhMode: enabled }),
       setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
       setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
       setAiBracketFilter: (brackets) => set({ aiBracketFilter: brackets }),
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
-      setExperimentalFeatures: (enabled) => set({ experimentalFeatures: enabled }),
       setDismissedFlowHelpNudge: (dismissed) => set({ dismissedFlowHelpNudge: dismissed }),
       setDismissedSandboxToolsNudge: (dismissed) => set({ dismissedSandboxToolsNudge: dismissed }),
       addArtChainEntry: (entry) =>
@@ -427,7 +467,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 11,
+      version: 14,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -446,6 +486,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          browser-detected default so existing users keep their locale.
       // v9 → v10: Add stackDockSide; legacy stores default to right (the prior
       //          fixed behavior).
+      // v12 → v13: Add cardPreviewMode; legacy stores default to "follow" (the
+      //          prior fixed cursor-following behavior) via the shallow merge.
+      // v13 → v14: Add cardPreviewHoverDelayMs; legacy stores default to 0
+      //          (instant — the prior behavior) via the shallow merge.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -558,6 +602,28 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
         // comfortable two-row rail (the prior fixed behavior).
         if (version < 11) {
           migrated = { ...migrated, opponentHudDensity: "comfortable" };
+        }
+
+        // v11 → v12: cEDH is no longer a per-seat difficulty — it's the
+        // table-wide `cedhMode` toggle. Derive the flag from any seat that was
+        // set to "CEDH" (the old cascade forced every seat to it) and reset
+        // those seats to the default difficulty so the per-seat dropdowns no
+        // longer surface "CEDH".
+        if (version < 12) {
+          const legacy = migrated as {
+            aiSeats?: Array<{ difficulty?: string } & Record<string, unknown>>;
+          } & Record<string, unknown>;
+          const seats = Array.isArray(legacy.aiSeats) ? legacy.aiSeats : [];
+          const wasCedh = seats.some((s) => s?.difficulty === "CEDH");
+          migrated = {
+            ...legacy,
+            cedhMode: wasCedh,
+            aiSeats: seats.map((s) =>
+              s?.difficulty === "CEDH"
+                ? { ...s, difficulty: DEFAULT_AI_DIFFICULTY }
+                : s,
+            ),
+          };
         }
 
         return migrated;

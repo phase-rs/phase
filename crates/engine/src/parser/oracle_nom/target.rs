@@ -12,7 +12,7 @@ use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
 use super::primitives::parse_color;
-use crate::parser::oracle_util::parse_subtype;
+use crate::parser::oracle_util::{parse_subtype, OUTLAW_SUBTYPES};
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
 use crate::types::card_type::Supertype;
 use crate::types::mana::ManaColor;
@@ -180,6 +180,15 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
         ("spell", TypeFilter::Card),
     ];
 
+    // CR 700.12: "outlaw"/"outlaws" is a head noun for the Assassin, Mercenary,
+    // Pirate, Rogue, and/or Warlock creature types. Tried before the bare-prefix
+    // TYPE_WORDS scan and the subtype table because it expands to a disjunction
+    // rather than a single subtype. The word-boundary guard prevents "outlawry"
+    // (and similar prefixed words) from matching.
+    if let Ok((rest, tf)) = parse_outlaw_type(input) {
+        return Ok((rest, tf));
+    }
+
     for &(word, ref tf) in TYPE_WORDS {
         if let Some(rest) = input.strip_prefix(word) {
             return Ok((rest, tf.clone()));
@@ -196,17 +205,45 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
     )))
 }
 
-/// Parse a self-reference from Oracle text: "~", "it", "this creature",
-/// "this permanent", "this spell", "this enchantment", "this artifact".
+/// CR 700.12: Parse the "outlaw"/"outlaws" head noun into a disjunction of the
+/// Assassin, Mercenary, Pirate, Rogue, and Warlock creature types. Matches the
+/// plural form first (longest-match), then requires a non-alphanumeric word
+/// boundary so words like "outlawry" never match.
+fn parse_outlaw_type(input: &str) -> OracleResult<'_, TypeFilter> {
+    let (rest, _) = alt((tag("outlaws"), tag("outlaw"))).parse(input)?;
+    match rest.chars().next() {
+        // Word boundary: end of input or non-alphanumeric follower.
+        None => {}
+        Some(c) if !c.is_alphanumeric() => {}
+        _ => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )))
+        }
+    }
+    let any_of = OUTLAW_SUBTYPES
+        .iter()
+        .map(|s| TypeFilter::Subtype((*s).to_string()))
+        .collect();
+    Ok((rest, TypeFilter::AnyOf(any_of)))
+}
+
+/// Parse a self-reference from Oracle text: "~", "it", "itself",
+/// "this creature", "this permanent", "this spell", "this enchantment",
+/// "this artifact".
 ///
 /// Returns `TargetFilter::SelfRef` when a self-reference is recognized.
 pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
         value(TargetFilter::SelfRef, tag("~")),
         parse_it_self_reference,
+        // CR 201.5: "itself" is a self-reference to the object the ability is on.
+        parse_itself_self_reference,
         value(TargetFilter::SelfRef, tag("this creature")),
         value(TargetFilter::SelfRef, tag("this permanent")),
         value(TargetFilter::SelfRef, tag("this spell")),
+        value(TargetFilter::SelfRef, tag("this card")),
         value(TargetFilter::SelfRef, tag("this enchantment")),
         value(TargetFilter::SelfRef, tag("this artifact")),
         value(TargetFilter::SelfRef, tag("this land")),
@@ -223,6 +260,20 @@ fn parse_it_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
         None | Some(' ' | ',' | ';' | '.' | ':' | ')' | '/' | '\'' | '"') => {
             Ok((rest, TargetFilter::SelfRef))
         }
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
+    }
+}
+
+/// Parse "itself" as a self-reference, requiring a word boundary after "itself"
+/// to prevent false matches on words like "itselfless".
+fn parse_itself_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("itself").parse(input)?;
+    match rest.chars().next() {
+        None => Ok((rest, TargetFilter::SelfRef)),
+        Some(c) if !c.is_alphanumeric() => Ok((rest, TargetFilter::SelfRef)),
         _ => Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
@@ -591,6 +642,12 @@ mod tests {
         let (rest3, f3) = parse_self_reference("this creature gets").unwrap();
         assert_eq!(rest3, " gets");
         assert_eq!(f3, TargetFilter::SelfRef);
+
+        // "this card" used when the ability source is in a non-battlefield zone
+        // (e.g. Ichorid: "other than this card from your graveyard").
+        let (rest4, f4) = parse_self_reference("this card from your graveyard").unwrap();
+        assert_eq!(rest4, " from your graveyard");
+        assert_eq!(f4, TargetFilter::SelfRef);
     }
 
     #[test]
@@ -603,6 +660,26 @@ mod tests {
         let (rest, f) = parse_self_reference("it").unwrap();
         assert_eq!(rest, "");
         assert_eq!(f, TargetFilter::SelfRef);
+    }
+
+    #[test]
+    fn test_parse_self_reference_itself() {
+        // "itself" at end of input should match
+        let (rest, f) = parse_self_reference("itself").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(f, TargetFilter::SelfRef);
+
+        // "itself" followed by word boundary should match
+        let (rest2, f2) = parse_self_reference("itself.").unwrap();
+        assert_eq!(rest2, ".");
+        assert_eq!(f2, TargetFilter::SelfRef);
+
+        let (rest3, f3) = parse_self_reference("itself-damage").unwrap();
+        assert_eq!(rest3, "-damage");
+        assert_eq!(f3, TargetFilter::SelfRef);
+
+        // "itselfless" should NOT match as an "itself" self-reference.
+        assert!(parse_self_reference("itselfless").is_err());
     }
 
     #[test]
@@ -649,6 +726,45 @@ mod tests {
         let (rest, t) = parse_type_filter_word("spell").unwrap();
         assert!(matches!(t, TypeFilter::Card), "expected Card for spell");
         assert_eq!(rest, "");
+    }
+
+    /// CR 700.12: the expected outlaw disjunction (Assassin, Mercenary, Pirate,
+    /// Rogue, Warlock) produced by the "outlaw[s]" head noun.
+    fn outlaw_any_of() -> TypeFilter {
+        TypeFilter::AnyOf(
+            ["Assassin", "Mercenary", "Pirate", "Rogue", "Warlock"]
+                .iter()
+                .map(|s| TypeFilter::Subtype((*s).to_string()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn test_parse_type_filter_word_outlaws() {
+        // CR 700.12: "outlaws" expands to the five outlaw creature types.
+        let (rest, t) = parse_type_filter_word("outlaws you control").unwrap();
+        assert_eq!(t, outlaw_any_of());
+        assert_eq!(rest, " you control");
+    }
+
+    #[test]
+    fn test_parse_type_filter_word_outlaw_singular() {
+        let (rest, t) = parse_type_filter_word("outlaw").unwrap();
+        assert_eq!(t, outlaw_any_of());
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_type_filter_word_outlawry_does_not_match_outlaw() {
+        // Word-boundary guard: "outlawry" must NOT match the "outlaw" head noun.
+        // An `Err` is also acceptable — "outlawry" is not a type word at all.
+        if let Ok((_, tf)) = parse_type_filter_word("outlawry") {
+            assert_ne!(
+                tf,
+                outlaw_any_of(),
+                "outlawry must not parse as the outlaw disjunction"
+            );
+        }
     }
 
     // --- parse_stack_object_target (CR 701.6a + CR 115.1) ---

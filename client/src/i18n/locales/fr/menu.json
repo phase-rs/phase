@@ -10,7 +10,8 @@
       "Easy": "Facile",
       "Medium": "Moyen",
       "Hard": "Difficile",
-      "VeryHard": "Très difficile"
+      "VeryHard": "Très difficile",
+      "CEDH": "cEDH"
     }
   },
   "bracketFilter": {
@@ -38,7 +39,7 @@
     },
     "draft": {
       "title": "Draft",
-      "description": "Quick Draft contre l'IA, plus des options expérimentales de cube et de pod draft."
+      "description": "Quick Draft contre l'IA, draft de cube ou hébergez un pod draft."
     },
     "decks": {
       "title": "Decks",
@@ -95,6 +96,11 @@
     "difficulty": "Difficulté",
     "deckRandom": "Aléatoire",
     "deckRandomCount": "Aléatoire ({{count}})",
+    "cedhToggle": {
+      "label": "Mode cEDH",
+      "hint": "Tous les adversaires jouent en cEDH. Chaque deck doit être de palier 5.",
+      "badge": "cEDH"
+    },
     "source": {
       "feed": "Flux",
       "user": "Utilisateur",
@@ -116,9 +122,16 @@
   "importDeck": {
     "title": "Importer un deck",
     "tabPaste": "Coller du texte",
+    "tabUrl": "Depuis une URL",
     "tabFile": "Depuis un fichier",
     "deckNamePlaceholder": "Nom du deck",
+    "urlPlaceholder": "https://moxfield.com/decks/… ou https://archidekt.com/decks/…",
+    "urlHint": "Importe un deck public depuis Moxfield ou Archidekt.",
     "import": "Importer",
+    "importing": "Importation…",
+    "errorInvalidUrl": "Saisissez une URL de deck Moxfield ou Archidekt valide.",
+    "errorNetworkFailure": "Impossible de contacter le service d'import. Vérifiez votre connexion et réessayez.",
+    "errorGeneric": "Échec de l'import du deck.",
     "fileSupports": "Prend en charge les formats .dck, .dec, .txt et MTGA",
     "chooseFile": "Choisir un fichier"
   },

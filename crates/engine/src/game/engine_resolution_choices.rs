@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
 use crate::types::ability::{
-    CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
-    PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
+    ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind, PaymentCost, QuantityExpr,
+    QuantityRef, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, ChosenDamageSource, GameState, OutsideGameChoiceSource, PayableResource,
-    PendingContinuation, WaitingFor,
+    ActionResult, CastOfferKind, ChosenDamageSource, GameState, OutsideGameChoiceSource,
+    PayableResource, PendingContinuation, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -64,13 +64,20 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
         waiting_for,
         WaitingFor::ScryChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
-            | WaitingFor::DiscoverChoice { .. }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Discover { .. },
+                ..
+            }
             | WaitingFor::RevealUntilKeptChoice { .. }
             | WaitingFor::RepeatDecision { .. }
-            | WaitingFor::CascadeChoice { .. }
+            | WaitingFor::CastOffer {
+                kind: CastOfferKind::Cascade { .. },
+                ..
+            }
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
+            | WaitingFor::ClashChooseOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
             | WaitingFor::VoteChoice { .. }
             | WaitingFor::SeparatePilesPartition { .. }
@@ -155,6 +162,47 @@ fn validate_keep_on_top_selection(
     Ok(())
 }
 
+/// CR 401.2 + CR 608.2c: Validate a `DigChoice` keep-selection. A dig
+/// ("look at the top N, put [some] into your hand/elsewhere") may only act on
+/// the cards it actually looked at, and only on those matching the effect's
+/// filter. Mirrors `validate_keep_on_top_selection` (used by scry/surveil) but
+/// additionally enforces the filter, since `DigChoice` is one of the freeform
+/// card-selection states the multiplayer server forwards unvalidated — so
+/// `apply` is the sole legality boundary.
+///
+/// `looked_at` is the full revealed set; `selectable` is the subset matching the
+/// effect's filter (equal to `looked_at` when the effect has no filter, and
+/// empty when a filter matched nothing — in which case the only legal selection
+/// is empty). Previously the filter check was skipped whenever `selectable` was
+/// empty, which let a filtered dig that matched zero cards accept arbitrary
+/// object ids — moving cards the effect never looked at into the chooser's hand,
+/// or inserting foreign ids into the library and corrupting its order.
+fn validate_dig_selection(
+    kept: &[ObjectId],
+    looked_at: &[ObjectId],
+    selectable: &[ObjectId],
+) -> Result<(), EngineError> {
+    let mut seen = std::collections::HashSet::new();
+    for id in kept {
+        if !seen.insert(*id) {
+            return Err(EngineError::InvalidAction(
+                "dig selection contains a duplicate card".to_string(),
+            ));
+        }
+        if !looked_at.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "dig selection contains a card that was not looked at".to_string(),
+            ));
+        }
+        if !selectable.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "dig selection contains a card that does not match the effect's filter".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// CR 701.23a + CR 614.1 / CR 110.5b: Apply a cultivate-class search-destination
 /// split. `primary_ids` are routed to `primary_destination` through the full
 /// `change_zone::resolve` ETB pipeline (carrying `enter_tapped` so ETB-tapped
@@ -185,7 +233,7 @@ fn apply_search_partition(
                 target: crate::types::ability::TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: split.primary_enter_tapped,
                 enters_attacking: false,
                 up_to: false,
@@ -271,42 +319,59 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
-            WaitingFor::DiscoverChoice {
+            WaitingFor::CastOffer {
                 player,
-                hit_card,
-                exiled_misses,
+                kind:
+                    CastOfferKind::Discover {
+                        hit_card,
+                        exiled_misses,
+                        discover_value,
+                    },
             },
             GameAction::DiscoverChoice { choice },
         ) => {
             let cast = matches!(choice, crate::types::actions::CastChoice::Cast);
             if cast {
-                if let Some(obj) = state.objects.get_mut(&hit_card) {
-                    obj.casting_permissions.push(
-                        crate::types::ability::CastingPermission::ExileWithAltCost {
-                            cost: crate::types::mana::ManaCost::zero(),
-                            cast_transformed: false,
-                            constraint: None,
-                            // CR 702.190a (Discover): the discovering player is
-                            // the only player permitted to cast the hit card.
-                            granted_to: Some(player),
+                // CR 701.57a + CR 608.2g: cast the hit DURING resolution, gated
+                // by "resulting spell's mana value is less than or equal to N".
+                // The MV check is re-evaluated at finalization (after X), and on
+                // rejection the hit goes to the discovering player's hand
+                // (`ToHand`) while the misses go to the library bottom.
+                let cleanup = crate::types::ability::ResolutionCastCleanup {
+                    exiled_misses,
+                    reject_action: crate::types::ability::ResolutionMvRejectAction::ToHand,
+                };
+                let result = casting::initiate_cast_during_resolution(
+                    state,
+                    player,
+                    hit_card,
+                    Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                        comparator: crate::types::ability::Comparator::LE,
+                        value: QuantityExpr::Fixed {
+                            value: discover_value as i32,
                         },
-                    );
-                }
+                    }),
+                    cleanup,
+                    events,
+                )?;
+                ResolutionChoiceOutcome::WaitingFor(result)
             } else {
+                // CR 701.57a: decline — hit goes to the discovering player's
+                // hand; the misses go to the library bottom in a random order.
                 zones::move_to_zone(state, hit_card, Zone::Hand, events);
-            }
 
-            {
-                use rand::seq::SliceRandom;
+                {
+                    use rand::seq::SliceRandom;
 
-                let mut shuffled = exiled_misses;
-                shuffled.shuffle(&mut state.rng);
-                for card_id in shuffled {
-                    zones::move_to_library_position(state, card_id, false, events);
+                    let mut shuffled = exiled_misses;
+                    shuffled.shuffle(&mut state.rng);
+                    for card_id in shuffled {
+                        zones::move_to_library_position(state, card_id, false, events);
+                    }
                 }
-            }
 
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            }
         }
         // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
         // the controller routes the kept card after RevealUntil found a hit.
@@ -317,9 +382,11 @@ pub(super) fn handle_resolution_choice(
             WaitingFor::RevealUntilKeptChoice {
                 player,
                 hit_card,
+                source_id,
                 accept_zone,
                 decline_zone,
                 enter_tapped,
+                enters_attacking,
                 revealed_misses,
                 rest_destination,
             },
@@ -333,6 +400,17 @@ pub(super) fn handle_resolution_choice(
                     if let Some(obj) = state.objects.get_mut(&hit_card) {
                         obj.tapped = true;
                     }
+                }
+                // CR 508.4: "...tapped and attacking" — place the accepted card
+                // in combat. `source_id` (the ability source / trigger attacker)
+                // supplies the defending player, matching the synchronous path.
+                if enters_attacking && accept_zone == Zone::Battlefield {
+                    let controller = state
+                        .objects
+                        .get(&hit_card)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(player);
+                    crate::game::combat::enter_attacking(state, hit_card, source_id, controller);
                 }
             } else if decline_zone == rest_destination {
                 misses.push(hit_card);
@@ -372,47 +450,52 @@ pub(super) fn handle_resolution_choice(
             }
         }
         (
-            WaitingFor::CascadeChoice {
+            WaitingFor::CastOffer {
                 player,
-                hit_card,
-                exiled_misses,
-                source_mv,
+                kind:
+                    CastOfferKind::Cascade {
+                        hit_card,
+                        exiled_misses,
+                        source_mv,
+                    },
             },
             GameAction::CascadeChoice { choice },
         ) => {
             let cast = matches!(choice, crate::types::actions::CastChoice::Cast);
             if cast {
-                // CR 702.85a: Grant a cast-from-exile permission gated by
-                // `CascadeResultingMvBelow`. The second MV check is enforced
-                // at cast time in `casting_costs`, where X has been chosen.
-                // Bottom-shuffle of misses is deferred to that point so a
-                // cast-time rejection can still reach them.
-                if let Some(obj) = state.objects.get_mut(&hit_card) {
-                    obj.casting_permissions.push(
-                        crate::types::ability::CastingPermission::ExileWithAltCost {
-                            cost: crate::types::mana::ManaCost::zero(),
-                            cast_transformed: false,
-                            constraint: Some(
-                                crate::types::ability::CastPermissionConstraint::CascadeResultingMvBelow {
-                                    source_mv,
-                                    exiled_misses,
-                                },
-                            ),
-                            // CR 702.85a (Cascade): the cascading player is the
-                            // only player permitted to cast the hit card.
-                            granted_to: Some(player),
+                // CR 702.85a + CR 608.2g: cast the hit DURING resolution, gated
+                // by "resulting spell's mana value is less than this spell's
+                // mana value". The MV check is re-evaluated at finalization
+                // (after X), and on rejection the hit joins the misses on the
+                // library bottom (`BottomWithMisses`).
+                let cleanup = crate::types::ability::ResolutionCastCleanup {
+                    exiled_misses,
+                    reject_action:
+                        crate::types::ability::ResolutionMvRejectAction::BottomWithMisses,
+                };
+                let result = casting::initiate_cast_during_resolution(
+                    state,
+                    player,
+                    hit_card,
+                    Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                        comparator: crate::types::ability::Comparator::LT,
+                        value: QuantityExpr::Fixed {
+                            value: source_mv as i32,
                         },
-                    );
-                }
+                    }),
+                    cleanup,
+                    events,
+                )?;
+                ResolutionChoiceOutcome::WaitingFor(result)
             } else {
                 // CR 702.85a: Caster declines — hit and misses all go to the
                 // bottom of the library in a random order together.
                 let mut all_to_bottom = exiled_misses;
                 all_to_bottom.push(hit_card);
                 crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
-            }
 
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            }
         }
         (WaitingFor::LearnChoice { player, hand_cards }, GameAction::LearnDecision { choice }) => {
             match choice {
@@ -579,6 +662,33 @@ pub(super) fn handle_resolution_choice(
             );
             let _ = effects::populate::create_token_copy(state, token_id, &dummy_ability, events);
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
+            WaitingFor::ClashChooseOpponent {
+                player,
+                candidates,
+                ability,
+            },
+            GameAction::ChooseClashOpponent { opponent },
+        ) => {
+            // CR 701.30b: The chosen opponent must be one of the offered
+            // candidates (a non-eliminated opponent of the clashing player).
+            if !candidates.contains(&opponent) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Chosen clash opponent {opponent:?} is not a legal opponent"
+                )));
+            }
+            effects::clash::perform_clash(state, &ability, opponent, events)
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            // CR 701.30a: With at least one revealed card, `perform_clash` queued
+            // the APNAP placement (which drains the clash's sub_ability). With
+            // both libraries empty, no placement was queued, so drain the stashed
+            // sub_ability here and hand priority back to the clashing player.
+            if !matches!(state.waiting_for, WaitingFor::ClashCardPlacement { .. }) {
+                set_priority(state, player);
+                effects::drain_pending_continuation(state, events);
+            }
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
             WaitingFor::ClashCardPlacement {
@@ -849,25 +959,12 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
 
-            if kept
-                .iter()
-                .enumerate()
-                .any(|(index, card_id)| kept[index + 1..].contains(card_id))
-            {
-                return Err(EngineError::InvalidAction(
-                    "Selected cards must be unique".to_string(),
-                ));
-            }
-
-            if !selectable_cards.is_empty() {
-                for card_id in &kept {
-                    if !selectable_cards.contains(card_id) {
-                        return Err(EngineError::InvalidAction(
-                            "Selected card does not match filter".to_string(),
-                        ));
-                    }
-                }
-            }
+            // CR 401.2 + CR 608.2c: the keep-selection must be unique, drawn from
+            // the cards actually looked at, and (when the dig has a filter) from
+            // the filter-matching subset. The previous check skipped filter/look-
+            // at validation entirely whenever `selectable_cards` was empty, so a
+            // filtered dig that matched nothing accepted arbitrary object ids.
+            validate_dig_selection(&kept, &cards, &selectable_cards)?;
 
             let unkept: Vec<_> = cards
                 .iter()
@@ -1337,6 +1434,12 @@ pub(super) fn handle_resolution_choice(
                                     state.waiting_for.clone(),
                                 ));
                             }
+                            effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
                         }
                     }
                 }
@@ -1472,6 +1575,41 @@ pub(super) fn handle_resolution_choice(
                 events,
             )
             .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+            // CR 614.12a: For an "enters with your choice of counter" replacement
+            // (Denry Klin), the entering permanent's battlefield-entry ZoneChanged
+            // event was deferred into `state.deferred_entry_events` by the ETB-
+            // replacement capture in `engine_replacement.rs` so observers don't
+            // fire before the choice is made. Now that `resolve_branch` has folded
+            // the chosen counter onto the still-entering permanent, replay the
+            // deferred entry through the trigger pipeline so ETB observers see the
+            // counter as the permanent enters (pre-entry per CR 614.12a, not a
+            // post-entry counter add). For a normal (non-entry) `ChooseOneOf`,
+            // `deferred_entry_events` is empty, so this is a no-op — the
+            // disambiguator. This is safe because `deferred_entry_events` is
+            // populated ONLY by the ETB-replacement capture (sole production
+            // write-site), and `CopyTargetChoice` drains it via its own
+            // `handle_copy_target_choice` handler, so it is never non-empty during
+            // an unrelated `ChooseBranch`.
+            let deferred = std::mem::take(&mut state.deferred_entry_events);
+            let source_still_on_bf = state
+                .objects
+                .get(&source_id)
+                .is_some_and(|o| o.zone == Zone::Battlefield);
+            if !deferred.is_empty() && source_still_on_bf {
+                super::triggers::process_triggers(state, &deferred);
+                let delayed = super::triggers::check_delayed_triggers(state, &deferred);
+                events.extend(delayed);
+            }
+            // CR 608.2c + CR 122.1: advance any paused resolution chain after the
+            // branch resolves. This is the standard post-resolution step every
+            // sibling choice handler runs. It no-ops when no `pending_continuation`
+            // / `pending_repeat_iteration` exists (each drain block is guarded by
+            // `if let Some(..) = ..take()`), so it is safe for existing `ChooseOneOf`
+            // consumers and for the deferred-entry replay above (mutually exclusive
+            // slots). Required so a `repeat_for: DistinctCounterKindsAmong` loop
+            // paused on `ChooseOneOfBranch` advances past the first counter kind to
+            // prompt for each remaining kind (Bribe Taker).
+            effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
@@ -1698,7 +1836,7 @@ pub(super) fn handle_resolution_choice(
                 destination,
                 enter_tapped,
                 enter_transformed,
-                under_your_control,
+                enters_under_player,
                 enters_attacking,
                 owner_library: _,
                 track_exiled_by_source,
@@ -1798,7 +1936,7 @@ pub(super) fn handle_resolution_choice(
                         destination: dest_zone,
                         enter_transformed,
                         enter_tapped,
-                        under_your_control,
+                        enters_under_player,
                         enters_attacking,
                         enter_with_counters: vec![],
                         duration: None,
@@ -1810,6 +1948,28 @@ pub(super) fn handle_resolution_choice(
                             state, &ctx, *card_id, events,
                         ) {
                             effects::change_zone::ZoneMoveResult::Done => {}
+                            effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                                state.pending_change_zone_iteration =
+                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                        remaining: chosen_ids[i + 1..].to_vec(),
+                                        source_id: ctx.source_id,
+                                        controller: ctx.controller,
+                                        origin: ctx.origin,
+                                        destination: ctx.destination,
+                                        enter_transformed: ctx.enter_transformed,
+                                        enter_tapped: ctx.enter_tapped,
+                                        enters_under_player: ctx.enters_under_player,
+                                        enters_attacking: ctx.enters_attacking,
+                                        enter_with_counters: ctx.enter_with_counters.clone(),
+                                        duration: ctx.duration.clone(),
+                                        track_exiled_by_source: ctx.track_exiled_by_source,
+                                        effect_kind,
+                                    });
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
                             effects::change_zone::ZoneMoveResult::NeedsChoice(choice_player) => {
                                 // CR 614.12b + CR 614.1c + CR 614.13: stash the
                                 // unprocessed cards so the drain in
@@ -1825,7 +1985,7 @@ pub(super) fn handle_resolution_choice(
                                         destination: ctx.destination,
                                         enter_transformed: ctx.enter_transformed,
                                         enter_tapped: ctx.enter_tapped,
-                                        under_your_control: ctx.under_your_control,
+                                        enters_under_player: ctx.enters_under_player,
                                         enters_attacking: ctx.enters_attacking,
                                         enter_with_counters: ctx.enter_with_counters.clone(),
                                         duration: ctx.duration.clone(),
@@ -1841,6 +2001,49 @@ pub(super) fn handle_resolution_choice(
                                     events,
                                     state.waiting_for.clone(),
                                 ));
+                            }
+                        }
+                    }
+                }
+                EffectKind::Tap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_tap(state, card_id, source_id, events)
+                        {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
+                            }
+                        }
+                    }
+                }
+                EffectKind::Untap => {
+                    for &card_id in &chosen {
+                        match effects::tap_untap::process_one_untap(state, card_id, events) {
+                            Ok(effects::tap_untap::TapUntapOutcome::Complete) => {}
+                            Ok(effects::tap_untap::TapUntapOutcome::NeedsChoice(choice_player)) => {
+                                state.waiting_for =
+                                    super::replacement::replacement_choice_waiting_for(
+                                        choice_player,
+                                        state,
+                                    );
+                                return Ok(action_result_outcome(
+                                    events,
+                                    state.waiting_for.clone(),
+                                ));
+                            }
+                            Err(error) => {
+                                return Err(EngineError::InvalidAction(error.to_string()));
                             }
                         }
                     }
@@ -1903,12 +2106,28 @@ pub(super) fn handle_resolution_choice(
             }
             if matches!(
                 effect_kind,
-                EffectKind::ChangeZone | EffectKind::BounceAll | EffectKind::PutAtLibraryPosition
+                EffectKind::Sacrifice
+                    | EffectKind::ChangeZone
+                    | EffectKind::BounceAll
+                    | EffectKind::Tap
+                    | EffectKind::Untap
+                    | EffectKind::PutAtLibraryPosition
             ) && state.pending_continuation.is_some()
             {
+                let tracked = if matches!(effect_kind, EffectKind::Sacrifice) {
+                    events[events_before_effect..]
+                        .iter()
+                        .filter_map(|event| match event {
+                            GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    chosen.clone()
+                };
                 let tracked_id = TrackedSetId(state.next_tracked_set_id);
                 state.next_tracked_set_id += 1;
-                state.tracked_object_sets.insert(tracked_id, chosen.clone());
+                state.tracked_object_sets.insert(tracked_id, tracked);
                 state.chain_tracked_set_id = Some(tracked_id);
             }
             state.last_effect_count = Some(chosen.len() as i32);
@@ -1938,6 +2157,17 @@ pub(super) fn handle_resolution_choice(
                 EffectKind::Sacrifice | EffectKind::ChangeZone | EffectKind::BounceAll
             );
             if moves_permanents {
+                // CR 603.10a: the chosen permanents left the battlefield together
+                // in this single resolution event, so co-departing
+                // leaves-the-battlefield observers among them (Blood Artist among
+                // the sacrificed group) observe each other. Stamp only the
+                // sub-slice this handler produced — never the whole events vector —
+                // so earlier sequential departures in this resolution aren't grouped
+                // with these.
+                super::zones::mark_simultaneous_departures(
+                    &mut events[events_before_effect..events_after_move],
+                    &super::zones::departed_subset(state, &chosen),
+                );
                 if let Some(wf) = batch_or_drain_observer_triggers(
                     state,
                     events,
@@ -2014,6 +2244,23 @@ pub(super) fn handle_resolution_choice(
                 if let Some(attr) = ChosenAttribute::from_choice(choice_type.clone(), &choice) {
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
                         obj.chosen_attributes.push(attr);
+                        // CR 607.2d + CR 613.1: Persisted ETB/modal choices (card
+                        // name, creature type, card type, color, etc.) can gate
+                        // source-dependent continuous or rule effects. Layer
+                        // evaluation may have run before the choice was made
+                        // (Morophon buffs, Pithing Needle prohibitions, Serra's
+                        // Emissary protection, …) — re-run.
+                        if matches!(
+                            choice_type,
+                            ChoiceType::CardName
+                                | ChoiceType::CreatureType
+                                | ChoiceType::CardType
+                                | ChoiceType::BasicLandType
+                                | ChoiceType::Color { .. }
+                                | ChoiceType::Keyword { .. }
+                        ) {
+                            crate::game::layers::mark_layers_full(state);
+                        }
                     }
                 }
             }
@@ -2103,6 +2350,7 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             state.ring_bearer.insert(player, Some(target));
+            crate::game::layers::mark_layers_full(state);
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (WaitingFor::ChooseDungeon { player, options }, GameAction::ChooseDungeon { dungeon }) => {
@@ -2196,8 +2444,12 @@ pub(super) fn handle_resolution_choice(
         (
             WaitingFor::CategoryChoice {
                 player,
-                target_player,
+                target_player: _,
                 categories,
+                chooser_scope,
+                choose_filter,
+                sacrifice_filter,
+                source_controller,
                 eligible_per_category,
                 source_id,
                 remaining_players,
@@ -2215,36 +2467,33 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
 
-            // Validate each choice is eligible for its category and no duplicates.
+            // Validate each choice is eligible for its category. A permanent can
+            // legally satisfy multiple category slots (artifact creature, etc.);
+            // dedupe only when building the final protected set.
             let mut chosen_this_round = Vec::new();
             for (i, choice) in choices.iter().enumerate() {
-                if let Some(obj_id) = choice {
-                    if !eligible_per_category[i].contains(obj_id) {
+                let Some(obj_id) = choice else {
+                    if !eligible_per_category[i].is_empty() {
                         return Err(EngineError::InvalidAction(format!(
-                            "Object {:?} is not eligible for category {:?}",
-                            obj_id, categories[i]
+                            "Must choose a permanent for category {:?}",
+                            categories[i]
                         )));
                     }
-                    if chosen_this_round.contains(obj_id) {
-                        return Err(EngineError::InvalidAction(format!(
-                            "Object {:?} chosen for multiple categories",
-                            obj_id
-                        )));
-                    }
+                    continue;
+                };
+                if !eligible_per_category[i].contains(obj_id) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Object {:?} is not eligible for category {:?}",
+                        obj_id, categories[i]
+                    )));
+                }
+                if !chosen_this_round.contains(obj_id) {
                     chosen_this_round.push(*obj_id);
                 }
             }
 
             // Accumulate kept permanents.
             all_kept.extend(chosen_this_round);
-
-            // Determine chooser_scope from context: if player == target_player, it's EachPlayerSelf.
-            // If player != target_player for a non-first player, it's ControllerForAll.
-            let chooser_scope = if player == target_player {
-                CategoryChooserScope::EachPlayerSelf
-            } else {
-                CategoryChooserScope::ControllerForAll
-            };
 
             // Issue #423 (Correction 1): `sacrifice_unchosen` moves permanents
             // to the graveyard via `sacrifice_permanent`. Mark where those
@@ -2266,17 +2515,21 @@ pub(super) fn handle_resolution_choice(
                     state,
                     &all_kept,
                     &scoped_players,
+                    &sacrifice_filter,
                     source_id,
+                    source_controller,
                     events,
                 );
             } else if let Err(e) = effects::choose_and_sacrifice_rest::advance_to_next_player(
                 state,
                 &categories,
                 chooser_scope,
-                player, // controller for ControllerForAll
+                source_controller,
                 source_id,
                 &remaining_players,
                 all_kept,
+                &choose_filter,
+                &sacrifice_filter,
                 &scoped_players,
                 events,
             ) {
@@ -2289,6 +2542,16 @@ pub(super) fn handle_resolution_choice(
             } else {
                 // The sacrifice (if any) is complete. Mark its event slice.
                 let events_after_sacrifice = events.len();
+                // CR 603.10a + CR 608.2f + CR 701.21a: the permanents sacrificed by
+                // `sacrifice_unchosen` (keep-one-sacrifice-rest: Cataclysm,
+                // Tragic Arrogance) left the battlefield together in this single
+                // resolution event, so a co-departing leaves-the-battlefield
+                // observer among them (Blood Artist) observes the rest. Stamp the
+                // sacrifice sub-slice before the B1/B2 trigger dispatch reads it.
+                super::zones::stamp_simultaneous_from_slice(
+                    state,
+                    &mut events[events_before_sacrifice..events_after_sacrifice],
+                );
                 // Step B: if the sacrifice did not itself pause (no replacement
                 // choice was raised by `sacrifice_unchosen`), resolve any
                 // reflexive continuation. `state.waiting_for` is the `Priority`

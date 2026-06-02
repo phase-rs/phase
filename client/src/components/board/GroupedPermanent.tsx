@@ -42,8 +42,7 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
     case "ReturnAsAuraTarget":
     case "TriggerTargetSelection":
     case "RetargetChoice":
-    case "TapCreaturesForManaAbility":
-    case "TapCreaturesForSpellCost":
+    case "PayCost":
       return waitingFor.data.player;
     default:
       return null;
@@ -118,11 +117,8 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
       return { mode: "target", eligibleIds: targetEligibleIds };
     }
 
-    if (
-      waitingFor?.type === "TapCreaturesForManaAbility"
-      || waitingFor?.type === "TapCreaturesForSpellCost"
-    ) {
-      const tappableIds = new Set(waitingFor.data.creatures);
+    if (waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures") {
+      const tappableIds = new Set(waitingFor.data.choices);
       const eligibleIds = group.ids.filter((id) => tappableIds.has(id));
       return eligibleIds.length > 0 ? { mode: "tap", eligibleIds } : null;
     }
@@ -167,10 +163,22 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
 
   if (renderMode === "expanded") {
     return (
-      <div className="flex flex-wrap items-end gap-1">
+      <div className="relative flex flex-wrap items-end gap-1">
         {group.ids.map((id) => (
           <PermanentCard key={id} objectId={id} />
         ))}
+        {/* Collapse affordance anchored to the same screen position the
+            expand badge occupied before expansion, so users return to a
+            stacked group via the spot they clicked to expand it. */}
+        <button
+          type="button"
+          onClick={onExpand}
+          className="absolute left-1 top-1 z-30 flex h-5 w-5 items-center justify-center rounded-full bg-black/80 text-[10px] font-bold text-white ring-1 ring-gray-500 transition-colors hover:bg-black"
+          aria-label={t("permanent.collapseGroup", { name: group.name })}
+          title={t("permanent.collapseGroup", { name: group.name })}
+        >
+          {group.count}
+        </button>
       </div>
     );
   }
@@ -181,6 +189,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
         <div className={`relative rounded-lg ${aggregateRingClass}`}>
           <PermanentCard
             objectId={group.ids[0]}
+            coveredIds={group.ids}
             onPrimaryClickOverride={canOpenPicker ? () => setPickerOpen(true) : undefined}
           />
           {aggregateRingClass && (
@@ -363,10 +372,7 @@ function CollapsedGroupPicker({
   };
 
   const tapLimit = useMemo(() => {
-    if (
-      waitingFor?.type !== "TapCreaturesForManaAbility"
-      && waitingFor?.type !== "TapCreaturesForSpellCost"
-    ) {
+    if (waitingFor?.type !== "PayCost" || waitingFor.data.kind.type !== "TapCreatures") {
       return 0;
     }
     const groupIdSet = new Set(group.ids);

@@ -218,7 +218,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 5 },
-                player: crate::types::ability::GainLifePlayer::Controller,
+                player: crate::types::ability::TargetFilter::Controller,
             },
         ));
         let lose_effect = Box::new(AbilityDefinition::new(
@@ -361,7 +361,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
-                player: crate::types::ability::GainLifePlayer::Controller,
+                player: crate::types::ability::TargetFilter::Controller,
             },
         ));
 
@@ -472,7 +472,7 @@ mod tests {
                     target: TargetFilter::SelfRef,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -499,7 +499,7 @@ mod tests {
                     target: TargetFilter::ParentTarget,
                     owner_library: false,
                     enter_transformed: true,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,

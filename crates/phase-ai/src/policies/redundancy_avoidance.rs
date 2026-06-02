@@ -57,8 +57,7 @@ use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords::has_keyword;
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{
-    ContinuousModification, Duration, Effect, GainLifePlayer, QuantityExpr, StaticDefinition,
-    TargetFilter,
+    ContinuousModification, Duration, Effect, QuantityExpr, StaticDefinition, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, TransientContinuousEffect};
@@ -300,6 +299,7 @@ fn redundancy_delta(
         Effect::Bounce {
             target,
             destination,
+            ..
         } => match destination {
             None | Some(Zone::Hand) => {
                 bounce_self_undo_redundancy(state, source_id, target, origin)
@@ -354,8 +354,10 @@ fn redundancy_delta(
         | Effect::SeparateIntoPiles { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
+        | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::Myriad
+        | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
@@ -434,6 +436,7 @@ fn redundancy_delta(
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
         | Effect::Monstrosity { .. }
+        | Effect::Renown { .. }
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }
         | Effect::Learn
@@ -492,6 +495,10 @@ fn redundancy_delta(
         // attach pick. Its redundancy is the new Aura's grants vs. the
         // existing static layer — out of scope for this policy.
         | Effect::ReturnAsAura { .. }
+        // CR 701.12a: ExchangeLifeWithStat's value depends on the live gap
+        // between a player's life and the source's stat — no static redundancy
+        // signal (it never "does nothing" the way a duplicate keyword grant does).
+        | Effect::ExchangeLifeWithStat { .. }
         | Effect::ProcessRadCounters => None,
     }
 }
@@ -717,15 +724,15 @@ fn tce_matches_pump(
 
 /// Gain-life-when-comfortable: controller's current life ≥
 /// `LIFE_DIMINISHING_RETURNS`, and the life gain is directed at the
-/// controller (the default `GainLifePlayer::Controller`).
+/// controller (the default `TargetFilter::Controller`).
 fn gain_life_redundancy(
     state: &GameState,
     source_id: ObjectId,
     ai_player: PlayerId,
     amount: &QuantityExpr,
-    player: &GainLifePlayer,
+    player: &TargetFilter,
 ) -> Option<(f64, i64, i64)> {
-    if !matches!(player, GainLifePlayer::Controller) {
+    if !matches!(player, TargetFilter::Controller) {
         return None;
     }
     let controller = state
@@ -860,7 +867,7 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, PtValue, QuantityExpr, TargetFilter,
+        AbilityDefinition, AbilityKind, BounceSelection, PtValue, QuantityExpr, TargetFilter,
     };
     use engine::types::card_type::CoreType;
     use engine::types::game_state::WaitingFor;
@@ -1084,7 +1091,7 @@ mod tests {
             "Lifegainer",
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 2 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
 
@@ -1109,7 +1116,7 @@ mod tests {
             "Lifegainer",
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 2 },
-                player: GainLifePlayer::Controller,
+                player: TargetFilter::Controller,
             },
         );
 
@@ -1370,6 +1377,7 @@ mod tests {
                     Effect::Bounce {
                         target: bounce_target,
                         destination,
+                        selection: BounceSelection::Targeted,
                     },
                 )),
         );
@@ -1474,6 +1482,7 @@ mod tests {
             Effect::Bounce {
                 target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
                 destination: None,
+                selection: BounceSelection::Targeted,
             },
         );
 

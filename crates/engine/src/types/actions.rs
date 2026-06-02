@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use super::ability::{LibraryPosition, TargetRef};
 use super::counter::CounterType;
 use super::game_state::{
-    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, ShardChoice,
+    AutoMayChoice, AutoPassRequest, CastPaymentMode, CombatDamageAssignmentMode, CounterMoveChoice,
+    ShardChoice,
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
@@ -24,9 +25,10 @@ use crate::game::game_object::AttachTarget;
 #[serde(tag = "type")]
 pub enum CastChoice {
     /// CR 701.57a + CR 702.85a: Cast the offered card without paying its mana
-    /// cost. The cast pipeline still enforces target legality, alternative
-    /// constraints (e.g., `CascadeResultingMvBelow`), and other CR 601.2
-    /// checks.
+    /// cost. The cast pipeline still enforces target legality, the
+    /// cast-during-resolution resulting-MV constraint (`ManaValue` carried on
+    /// the `ExileWithAltCost` permission with `resolution_cleanup`), and other
+    /// CR 601.2 checks.
     Cast,
     /// CR 701.57a + CR 702.85a: Decline the offer. For Discover the card goes
     /// to hand; for Cascade the card joins the misses on the bottom of the
@@ -145,6 +147,18 @@ pub enum GameAction {
     ChooseUntap {
         object_id: ObjectId,
         untap: bool,
+    },
+    /// CR 508.1g + CR 701.43d: The active player's decision whether to pay the
+    /// optional "exert this creature as it attacks" cost for the attacker named
+    /// in the pending `WaitingFor::ExertChoice`. `exert: false` declines.
+    ChooseExert {
+        exert: bool,
+    },
+    /// CR 701.30b: The clashing player's choice of which opponent to clash with,
+    /// answering a pending `WaitingFor::ClashChooseOpponent`. `opponent` must be
+    /// one of that prompt's `candidates`.
+    ChooseClashOpponent {
+        opponent: PlayerId,
     },
     /// CR 103.5 + 103.5b: A player's decision at a `WaitingFor::MulliganDecision`
     /// prompt. See [`MulliganChoice`] for the three branches.
@@ -385,7 +399,7 @@ pub enum GameAction {
         card_id: CardId,
         payment_mode: CastPaymentMode,
     },
-    /// CR 702.35a: Accept a pending `WaitingFor::MadnessCastOffer` and cast
+    /// CR 702.35a: Accept a pending `WaitingFor::CastOffer` (Madness) and cast
     /// `object_id` from exile for its madness cost. Decline is via the shared
     /// `DecideOptionalEffect { accept: false }`.
     CastSpellAsMadness {
@@ -517,6 +531,10 @@ pub enum GameAction {
     DistributeAmong {
         distribution: Vec<(TargetRef, u32)>,
     },
+    /// CR 122.5 + CR 608.2d: Submit resolution-time counter-move distribution.
+    ChooseCounterMoveDistribution {
+        selections: Vec<CounterMoveChoice>,
+    },
     /// CR 107.1c + CR 107.14: Submit the chosen amount for a
     /// `WaitingFor::PayAmountChoice` prompt ("pay any amount of {E}" and
     /// similar resource-choice patterns).
@@ -583,14 +601,14 @@ pub enum GameAction {
         source: ObjectId,
     },
     /// CR 702.xxx: Paradigm (Strixhaven) — accept the turn-based offer during
-    /// `WaitingFor::ParadigmCastOffer`, casting a token copy of the exiled
+    /// `WaitingFor::CastOffer` (Paradigm), casting a token copy of the exiled
     /// source spell without paying its mana cost. The exiled source stays in
     /// exile. Assign when WotC publishes SOS CR update.
     CastParadigmCopy {
         source: ObjectId,
     },
     /// CR 702.xxx: Paradigm (Strixhaven) — decline the turn-based offer during
-    /// `WaitingFor::ParadigmCastOffer`. The exiled source stays in exile and
+    /// `WaitingFor::CastOffer` (Paradigm). The exiled source stays in exile and
     /// may be offered again next turn. Assign when WotC publishes SOS CR
     /// update.
     PassParadigmOffer,
@@ -1103,6 +1121,7 @@ impl GameAction {
             GameAction::CastParadigmCopy { source } => Some(*source),
             // Actions with no per-permanent anchor.
             GameAction::PassPriority
+            | GameAction::ChooseExert { .. }
             | GameAction::DeclareAttackers { .. }
             | GameAction::DeclareBlockers { .. }
             | GameAction::MulliganDecision { .. }
@@ -1141,12 +1160,14 @@ impl GameAction {
             | GameAction::DiscoverChoice { .. }
             | GameAction::CascadeChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
+            | GameAction::ChooseClashOpponent { .. }
             | GameAction::ChooseBattleProtector { .. }
             | GameAction::SetAutoPass { .. }
             | GameAction::CancelAutoPass
             | GameAction::SetPhaseStops { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::DistributeAmong { .. }
+            | GameAction::ChooseCounterMoveDistribution { .. }
             | GameAction::SubmitPayAmount { .. }
             | GameAction::RetargetSpell { .. }
             | GameAction::LearnDecision { .. }

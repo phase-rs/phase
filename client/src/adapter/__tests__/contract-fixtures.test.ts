@@ -132,10 +132,22 @@ describe("shared adapter contract fixtures", () => {
   it("loads the curated action, waiting state, and object fixtures", () => {
     const gameAction = readFixture<GameAction>("game_action.json");
     const waitingFor = readFixture<WaitingFor>("waiting_for.json");
+    const categoryChoice = readFixture<WaitingFor>("waiting_for_category_choice.json");
     const gameObject = readFixture<GameObject>("game_object.json");
 
     expect(gameAction.type).toBe("ChooseLegend");
     expect(waitingFor.type).toBe("EffectZoneChoice");
+    expect(categoryChoice.type).toBe("CategoryChoice");
+    if (categoryChoice.type === "CategoryChoice") {
+      expect(categoryChoice.data.chooser_scope).toBe("ControllerForAll");
+      expect(categoryChoice.data.source_controller).toBe(0);
+      expect(categoryChoice.data.choose_filter?.type).toBe("Typed");
+      expect(categoryChoice.data.sacrifice_filter?.type).toBe("Typed");
+      expect(JSON.stringify(categoryChoice.data.choose_filter)).toContain('"Non":"Land"');
+      expect(JSON.stringify(categoryChoice.data.sacrifice_filter)).toContain('"Non":"Land"');
+      expect(categoryChoice.data.eligible_per_category[0]).toEqual([10]);
+      expect(categoryChoice.data.all_kept).toEqual([]);
+    }
     expect(gameObject.name).toBe("Fixture Bear");
     expect(gameObject.id).toBe(1);
   });

@@ -28,7 +28,7 @@ use engine::types::ability::{Effect, ObjectScope, QuantityExpr, QuantityRef, Tar
 use engine::types::actions::GameAction;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::WaitingFor;
+use engine::types::{PayCostKind, WaitingFor};
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::identifiers::ObjectId;
@@ -107,7 +107,11 @@ fn rite_of_consumption_deals_sacrificed_power_and_gains_life() {
     let mut targeted = false;
     for _ in 0..20 {
         match runner.state().waiting_for.clone() {
-            WaitingFor::SacrificeForCost { permanents, .. } => {
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                choices: permanents,
+                ..
+            } => {
                 assert!(
                     permanents.contains(&beast_id),
                     "the Beast must be a legal sacrifice for Rite's additional cost",

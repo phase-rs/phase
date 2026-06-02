@@ -304,6 +304,51 @@ impl FromStr for CastFrequency {
     }
 }
 
+/// CR 118.9 + CR 601.2a: The cost axis for `StaticMode::ExileCastPermission`.
+///
+/// Sibling to `CastFrequency` and `CardPlayMode` — each axis of the exile-cast
+/// permission is a typed enum rather than a `bool` so the design space stays
+/// open. `bool` fields cannot grow to accommodate future cost shapes (e.g. an
+/// alternative life cost analogous to Bolas's Citadel).
+///
+/// - `PayNormalCost` — cast at the spell's normal mana cost. No shipping
+///   printing uses this shape today, but it is the natural default; if a future
+///   card prints "Once each turn, you may cast a spell from among cards exiled
+///   with ~ this turn." (no "without paying" rider), this is the variant.
+/// - `WithoutPayingManaCost` — CR 118.9a: cast without paying the printed mana
+///   cost. Maralen, Fae Ascendant ("...without paying its mana cost.") is the
+///   type specimen and the only shipping printing today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ExileCastCost {
+    /// Cast at the spell's normal mana cost — no alternative cost applied.
+    PayNormalCost,
+    /// CR 118.9a: Cast without paying the spell's printed mana cost
+    /// (Maralen, Fae Ascendant).
+    #[default]
+    WithoutPayingManaCost,
+}
+
+impl fmt::Display for ExileCastCost {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExileCastCost::PayNormalCost => write!(f, "pay_normal_cost"),
+            ExileCastCost::WithoutPayingManaCost => write!(f, "without_paying_mana_cost"),
+        }
+    }
+}
+
+impl FromStr for ExileCastCost {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pay_normal_cost" => Ok(ExileCastCost::PayNormalCost),
+            "without_paying_mana_cost" => Ok(ExileCastCost::WithoutPayingManaCost),
+            other => Err(format!("unknown ExileCastCost: {other}")),
+        }
+    }
+}
+
 /// CR 603.2d: The cause-predicate axis for trigger-doubling static abilities.
 ///
 /// "An effect that states a triggered ability of an object triggers additional
@@ -369,6 +414,19 @@ impl fmt::Display for TriggerCause {
 pub enum BlockExceptionKind {
     Quality(TargetFilter),
     MinBlockers { min: u32 },
+}
+
+/// CR 601.2f: Direction/semantic axis for mana-cost modification statics.
+/// All three modes are applied in the CR 601.2f cost-locking step.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CostModifyMode {
+    /// Subtractive — reduce generic mana (floor: 0).
+    Reduce,
+    /// Additive — increase generic mana. Thalia, Guardian of Thraben class.
+    Raise,
+    /// Floor — cost cannot fall below `amount` after all Reduce/Raise settle.
+    /// CR 601.2f last-step floor. Trinisphere class.
+    Minimum,
 }
 
 /// All static ability modes from Forge's static ability registry.
@@ -453,11 +511,29 @@ pub enum StaticMode {
     CastWithKeyword {
         keyword: Keyword,
     },
-    /// CR 601.2f: Reduces the cost of spells matching the filter.
-    /// Permanent-based cost reduction applied during casting (not self-cost reduction).
-    ReduceCost {
+    /// CR 118.9 + CR 601.2f: A permanent grants its controller a wholesale
+    /// alternative MANA cost for spells matching `StaticDefinition::affected`
+    /// that the controller casts — they may pay `cost` rather than the spell's
+    /// mana cost. Parallel to `CastWithKeyword`. Distinct from
+    /// `ModifyCost { mode: Reduce, .. }` (subtractive, CR 601.2f) — this REPLACES
+    /// the mana cost wholesale
+    /// (CR 118.9) and is mutually exclusive with other alternative costs
+    /// (CR 118.9a). Rooftop Storm ({0}, Zombie creature spells), Fist of Suns
+    /// ({WUBRG}, any spell), Jodah (MV 5+).
+    CastWithAlternativeCost {
+        cost: ManaCost,
+    },
+    /// CR 601.2f: Modifies the mana cost of spells matching `spell_filter`
+    /// (or all spells when `None`) by `amount`, in the direction described by `mode`.
+    /// `Reduce` subtracts generic mana (floor: 0), `Raise` adds generic mana,
+    /// `Minimum` floors the total cost after all Reduce/Raise settle.
+    ModifyCost {
+        mode: CostModifyMode,
         amount: ManaCost,
         spell_filter: Option<TargetFilter>,
+        /// Dynamic multiplier (e.g. "for each [thing] you control").
+        /// Only meaningful for `Reduce` and `Raise` — always `None` for `Minimum`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         dynamic_count: Option<QuantityRef>,
     },
     /// CR 601.2f: Reduces the generic mana cost of activated abilities matching a keyword type.
@@ -491,40 +567,6 @@ pub enum StaticMode {
     /// Canonical class: The Wandering Emperor's same-turn loyalty permission.
     ActivateAsInstant {
         cost_category: CostCategory,
-    },
-    /// CR 601.2f: Increases the cost of spells matching the filter.
-    /// Permanent-based cost increase applied during casting (Thalia, etc.).
-    RaiseCost {
-        amount: ManaCost,
-        spell_filter: Option<TargetFilter>,
-        dynamic_count: Option<QuantityRef>,
-    },
-    /// CR 601.2f: Floors the total mana cost of matching spells. Per CR 601.2f,
-    /// this belongs to the "any effects that directly affect the total cost"
-    /// step that runs after all additive/subtractive cost modifiers and just
-    /// before the cost is "locked in." Trinisphere class: "each spell that
-    /// would cost less than three mana to cast costs three mana to cast."
-    ///
-    /// Per the Trinisphere ruling: "apply Trinisphere's effect if the mana
-    /// component of the spell's cost is less than three mana" — applied last,
-    /// after RaiseCost / ReduceCost / pending reductions / Affinity have all
-    /// settled. The floor never reduces a cost.
-    ///
-    /// `amount` is the floor expressed as a `ManaCost` (always pure-generic in
-    /// printed cards; shape-shared with `RaiseCost`/`ReduceCost` for uniform
-    /// serialization). The runtime compares `mana_cost.mana_value()` against
-    /// `amount.mana_value()` and tops up generic mana to reach the floor —
-    /// colored requirements are never modified, per the Trinisphere reminder
-    /// text "Additional mana ... may be paid with any color of mana or
-    /// colorless mana."
-    ///
-    /// `spell_filter` narrows which spells are floored. `None` = all spells
-    /// (Trinisphere). No `dynamic_count` field — printed cost-floor effects
-    /// are always a fixed amount, distinguishing this variant's shape from
-    /// its `RaiseCost`/`ReduceCost` siblings.
-    MinimumCost {
-        amount: ManaCost,
-        spell_filter: Option<TargetFilter>,
     },
     /// CR 118.3 + CR 601.2h + CR 602.2b: The scoped player can't pay a
     /// matching non-mana cost to cast spells or activate abilities.
@@ -623,6 +665,47 @@ pub enum StaticMode {
     CastFromHandFree {
         /// CR 601.2b: Per-turn cast frequency.
         frequency: CastFrequency,
+    },
+    /// CR 601.2a + CR 113.6b + CR 118.9: Static ability granting permission to
+    /// cast cards exiled with this source — restricted to cards exiled *this
+    /// turn* — typically without paying the mana cost. Maralen, Fae Ascendant
+    /// is the type specimen ("Once each turn, you may cast a spell with mana
+    /// value less than or equal to the number of Elves and Faeries you control
+    /// from among cards exiled with Maralen this turn without paying its mana
+    /// cost.").
+    ///
+    /// The source pool is the per-turn list
+    /// `GameState::cards_exiled_with_source_this_turn[source_id]`. The static's
+    /// `affected: TargetFilter` constrains the eligible cards (type, mana
+    /// value, etc.). Per-turn frequency tracking is keyed on `source_id` in
+    /// `GameState::exile_cast_permissions_used` for `OncePerTurn`; `Unlimited`
+    /// skips tracking.
+    ///
+    /// Distinct from `GraveyardCastPermission`: the source pool is exile
+    /// (per-turn-scoped), not the controller's graveyard. Distinct from
+    /// `TopOfLibraryCastPermission`: the eligible cards are a tracked exile
+    /// set carved out by a prior exile-with-source effect, not the live top
+    /// of library. Distinct from `Effect::CastFromZone` (Court of Locthwain,
+    /// Mizzix's Mastery): that is a one-shot effect that grants per-card
+    /// permissions; this is a continuous static that grants the controller a
+    /// recurring per-turn cast slot.
+    ExileCastPermission {
+        /// CR 601.2a: Per-turn cast frequency. `OncePerTurn` consumes a slot
+        /// in `exile_cast_permissions_used`; `Unlimited` does not.
+        frequency: CastFrequency,
+        /// CR 305.1: Play (lands + spells) vs Cast (spells only). All current
+        /// printings of this class are `Cast` (Maralen, Fae Ascendant); the
+        /// axis is retained for symmetry with the graveyard / top-of-library
+        /// permission classes.
+        play_mode: CardPlayMode,
+        /// CR 118.9a: How the spell's mana cost is paid when cast via this
+        /// permission. `WithoutPayingManaCost` zeroes the printed mana cost
+        /// (mirrors the Omniscience / `CastFromHandFree` flow — Maralen, Fae
+        /// Ascendant). `PayNormalCost` casts at the spell's normal cost (no
+        /// published printings today, but the axis keeps the static composable
+        /// with future patterns).
+        #[serde(default)]
+        cost: ExileCastCost,
     },
     /// CR 101.2: This spell/permanent can't be countered.
     CantBeCountered,
@@ -758,8 +841,15 @@ pub enum StaticMode {
     // -- Tier 2: Rule-modification statics --
     CantTap,
     CantUntap,
-    /// CR 509.1c: This creature must be blocked if able.
+    /// CR 509.1c: This creature must be blocked if able — the defending player
+    /// must assign at least one legal blocker to it.
     MustBeBlocked,
+    /// CR 509.1c: "All creatures able to block this creature do so" (Lure,
+    /// Prized Unicorn, Breaker of Armies, …). Unlike [`MustBeBlocked`], this
+    /// places a block requirement on *every* creature able to block it: each
+    /// such untapped defender must be declared as a blocker of this attacker,
+    /// not merely one.
+    MustBeBlockedByAll,
     /// CR 701.15b: This creature is goaded for as long as the static applies.
     /// The source controller is the goading player for the "attack another
     /// player if able" requirement.
@@ -797,6 +887,15 @@ pub enum StaticMode {
     CantWinTheGame,
     /// CR 104.3b: This player can't lose the game (Platinum Angel effect).
     CantLoseTheGame,
+    /// CR 704.5j: The "legend rule" doesn't apply to the affected permanents, so
+    /// they are excluded from the same-name legendary grouping in the legend-rule
+    /// SBA. Scope rides on `StaticDefinition::affected`: `None` = global (Mirror
+    /// Gallery, "the legend rule doesn't apply"); a controller-scoped filter =
+    /// "doesn't apply to [permanents/tokens/Slivers/commanders] you control"
+    /// (Sakashima of a Thousand Faces, Mirror Box, Cadric, Sliver Gravemother,
+    /// Try-My-Deck Elemental, ...). Enforced per-permanent in `sba.rs` via
+    /// `check_static_ability` with the candidate as the target object.
+    LegendRuleDoesntApply,
     /// Speed may increase beyond 4, and 4+ still counts as max speed for that player.
     SpeedCanIncreaseBeyondFour,
     /// CR 118.12a: Defiler cycle — "As an additional cost to cast [color] permanent
@@ -892,7 +991,7 @@ pub enum StaticMode {
     Other(String),
 }
 
-/// Manual Hash impl because `ReduceCost`/`RaiseCost` contain `TargetFilter` and `QuantityRef`
+/// Manual Hash impl because `ModifyCost` contains `TargetFilter` and `QuantityRef`
 /// which don't implement `Hash`. For data-carrying variants, we hash only the discriminant +
 /// simple fields. This is safe because data-carrying variants are never used as HashMap keys
 /// (they're handled by `is_data_carrying_static` in coverage.rs instead).
@@ -950,6 +1049,15 @@ impl Hash for StaticMode {
             StaticMode::CastFromHandFree { frequency } => {
                 frequency.hash(state);
             }
+            StaticMode::ExileCastPermission {
+                frequency,
+                play_mode,
+                cost,
+            } => {
+                frequency.hash(state);
+                play_mode.hash(state);
+                cost.hash(state);
+            }
             StaticMode::SkipStep { step } => step.hash(state),
             StaticMode::DoubleTriggers { cause } => cause.hash(state),
             // CR 107.4f: Parameterized by ManaColor — hash the color so distinct
@@ -957,9 +1065,7 @@ impl Hash for StaticMode {
             StaticMode::PayLifeAsColoredMana { color } => color.hash(state),
             // Data-carrying variants with non-Hash fields: discriminant only.
             // These are never used as HashMap keys (handled by is_data_carrying_static).
-            StaticMode::ReduceCost { .. }
-            | StaticMode::RaiseCost { .. }
-            | StaticMode::MinimumCost { .. }
+            StaticMode::ModifyCost { .. }
             | StaticMode::CantPayCost { .. }
             | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantDraw { .. }
@@ -967,6 +1073,7 @@ impl Hash for StaticMode {
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::CastWithKeyword { .. }
+            | StaticMode::CastWithAlternativeCost { .. }
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
@@ -1003,7 +1110,14 @@ impl fmt::Display for StaticMode {
             StaticMode::CastWithKeyword { keyword } => {
                 write!(f, "CastWithKeyword({keyword:?})")
             }
-            StaticMode::ReduceCost { .. } => write!(f, "ReduceCost"),
+            StaticMode::CastWithAlternativeCost { cost } => {
+                write!(f, "CastWithAlternativeCost({cost:?})")
+            }
+            StaticMode::ModifyCost { mode, .. } => match mode {
+                CostModifyMode::Reduce => write!(f, "ReduceCost"),
+                CostModifyMode::Raise => write!(f, "RaiseCost"),
+                CostModifyMode::Minimum => write!(f, "MinimumCost"),
+            },
             StaticMode::ReduceAbilityCost {
                 keyword,
                 amount,
@@ -1022,8 +1136,6 @@ impl fmt::Display for StaticMode {
             StaticMode::ActivateAsInstant { cost_category } => {
                 write!(f, "ActivateAsInstant({cost_category:?})")
             }
-            StaticMode::RaiseCost { .. } => write!(f, "RaiseCost"),
-            StaticMode::MinimumCost { .. } => write!(f, "MinimumCost"),
             StaticMode::CantPayCost { who, cost } => write!(f, "CantPayCost({who},{cost})"),
             StaticMode::CantGainLife => write!(f, "CantGainLife"),
             StaticMode::CantLoseLife => write!(f, "CantLoseLife"),
@@ -1062,6 +1174,18 @@ impl fmt::Display for StaticMode {
             StaticMode::CastFromHandFree { frequency } => {
                 write!(f, "CastFromHandFree({frequency})")
             }
+            StaticMode::ExileCastPermission {
+                frequency,
+                play_mode,
+                cost,
+            } => match cost {
+                ExileCastCost::WithoutPayingManaCost => {
+                    write!(f, "ExileCastPermission({play_mode},{frequency},free)")
+                }
+                ExileCastCost::PayNormalCost => {
+                    write!(f, "ExileCastPermission({play_mode},{frequency})")
+                }
+            },
             StaticMode::CantBeCountered => write!(f, "CantBeCountered"),
             StaticMode::CantBeCopied => write!(f, "CantBeCopied"),
             StaticMode::CantEnterBattlefieldFrom => write!(f, "CantEnterBattlefieldFrom"),
@@ -1124,6 +1248,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantTap => write!(f, "CantTap"),
             StaticMode::CantUntap => write!(f, "CantUntap"),
             StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
+            StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
             StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
@@ -1145,6 +1270,7 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::CantWinTheGame => write!(f, "CantWinTheGame"),
             StaticMode::CantLoseTheGame => write!(f, "CantLoseTheGame"),
+            StaticMode::LegendRuleDoesntApply => write!(f, "LegendRuleDoesntApply"),
             StaticMode::SpeedCanIncreaseBeyondFour => write!(f, "SpeedCanIncreaseBeyondFour"),
             StaticMode::DefilerCostReduction { color, .. } => {
                 write!(f, "DefilerCostReduction({color:?})")
@@ -1213,7 +1339,8 @@ impl FromStr for StaticMode {
                 exemption: ActivationExemption::None,
             },
             "CastWithFlash" => StaticMode::CastWithFlash,
-            "ReduceCost" => StaticMode::ReduceCost {
+            "ReduceCost" => StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
                 amount: ManaCost::zero(),
                 spell_filter: None,
                 dynamic_count: None,
@@ -1269,7 +1396,8 @@ impl FromStr for StaticMode {
                     _ => StaticMode::Other(s.to_string()),
                 }
             }
-            "RaiseCost" => StaticMode::RaiseCost {
+            "RaiseCost" => StaticMode::ModifyCost {
+                mode: CostModifyMode::Raise,
                 amount: ManaCost::zero(),
                 spell_filter: None,
                 dynamic_count: None,
@@ -1277,9 +1405,11 @@ impl FromStr for StaticMode {
             // CR 601.2f: Cost-floor static (Trinisphere class). Legacy unit-string
             // defaults to a zero floor — meaningful instances are constructed via
             // the parser with the printed amount.
-            "MinimumCost" => StaticMode::MinimumCost {
+            "MinimumCost" => StaticMode::ModifyCost {
+                mode: CostModifyMode::Minimum,
                 amount: ManaCost::zero(),
                 spell_filter: None,
+                dynamic_count: None,
             },
             "CantPayCost" => StaticMode::CantPayCost {
                 who: ProhibitionScope::AllPlayers,
@@ -1357,6 +1487,40 @@ impl FromStr for StaticMode {
                     frequency: freq.parse().unwrap_or(CastFrequency::Unlimited),
                 }
             }
+            "ExileCastPermission" => StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::PayNormalCost,
+            },
+            s if s.starts_with("ExileCastPermission(") => {
+                // Display form: "ExileCastPermission(<play_mode>,<frequency>)" or
+                // "ExileCastPermission(<play_mode>,<frequency>,free)" for the
+                // `WithoutPayingManaCost` shape. Parse positionally so a later
+                // 3-segment form survives lossless round-trip.
+                let inner = s
+                    .strip_prefix("ExileCastPermission(")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or("");
+                let mut parts = inner.split(',');
+                let play_mode = parts
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(CardPlayMode::Cast);
+                let frequency = parts
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(CastFrequency::Unlimited);
+                let cost = if matches!(parts.next(), Some("free")) {
+                    ExileCastCost::WithoutPayingManaCost
+                } else {
+                    ExileCastCost::PayNormalCost
+                };
+                StaticMode::ExileCastPermission {
+                    frequency,
+                    play_mode,
+                    cost,
+                }
+            }
             "CantBeCountered" => StaticMode::CantBeCountered,
             "CantBeCopied" => StaticMode::CantBeCopied,
             "CantEnterBattlefieldFrom" => StaticMode::CantEnterBattlefieldFrom,
@@ -1380,6 +1544,7 @@ impl FromStr for StaticMode {
             "CantTap" => StaticMode::CantTap,
             "CantUntap" => StaticMode::CantUntap,
             "MustBeBlocked" => StaticMode::MustBeBlocked,
+            "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
             "Goaded" => StaticMode::Goaded,
             "CantAttackAlone" => StaticMode::CantAttackAlone,
             "CantBlockAlone" => StaticMode::CantBlockAlone,
@@ -1398,6 +1563,7 @@ impl FromStr for StaticMode {
             "MayPlayAdditionalLand" => StaticMode::MayPlayAdditionalLand,
             "CantWinTheGame" => StaticMode::CantWinTheGame,
             "CantLoseTheGame" => StaticMode::CantLoseTheGame,
+            "LegendRuleDoesntApply" => StaticMode::LegendRuleDoesntApply,
             "CanAttackWithDefender" => StaticMode::CanAttackWithDefender,
             // CR 509.1b + CR 609.4 + CR 702.14c: bare form = all-landwalk canceller.
             "IgnoreLandwalkForBlocking" => {
@@ -1627,11 +1793,52 @@ where
             }
         }
         other => {
+            if let Some(mode) = deserialize_legacy_modify_cost_object(&other) {
+                return mode.map_err(serde::de::Error::custom);
+            }
             // Data-carrying variant path. Delegate to the derived Deserialize
             // which handles all struct/newtype variants correctly.
             serde_json::from_value::<StaticMode>(other).map_err(serde::de::Error::custom)
         }
     }
+}
+
+#[derive(Deserialize)]
+struct LegacyModifyCostPayload {
+    #[serde(default)]
+    amount: ManaCost,
+    #[serde(default)]
+    spell_filter: Option<TargetFilter>,
+    #[serde(default)]
+    dynamic_count: Option<QuantityRef>,
+}
+
+fn deserialize_legacy_modify_cost_object(
+    raw: &serde_json::Value,
+) -> Option<serde_json::Result<StaticMode>> {
+    let map = raw.as_object()?;
+    if map.len() != 1 {
+        return None;
+    }
+
+    let (name, payload) = map.iter().next()?;
+    let mode = match name.as_str() {
+        "ReduceCost" => CostModifyMode::Reduce,
+        "RaiseCost" => CostModifyMode::Raise,
+        "MinimumCost" => CostModifyMode::Minimum,
+        _ => return None,
+    };
+
+    Some(
+        serde_json::from_value::<LegacyModifyCostPayload>(payload.clone()).map(|payload| {
+            StaticMode::ModifyCost {
+                mode,
+                amount: payload.amount,
+                spell_filter: payload.spell_filter,
+                dynamic_count: payload.dynamic_count,
+            }
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -1753,6 +1960,17 @@ mod tests {
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
             },
+            // Exile-cast permission (Maralen, Fae Ascendant).
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::OncePerTurn,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::WithoutPayingManaCost,
+            },
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::PayNormalCost,
+            },
             // Casting prohibitions
             StaticMode::CantBeCast {
                 who: ProhibitionScope::Controller,
@@ -1807,6 +2025,22 @@ mod tests {
             StaticMode::Flying,
             StaticMode::MustBeBlocked,
             StaticMode::GrantsExtraVote,
+            // CR 118.9: data-carrying ManaCost — serde must preserve {0} and {WUBRG}.
+            StaticMode::CastWithAlternativeCost {
+                cost: ManaCost::zero(),
+            },
+            StaticMode::CastWithAlternativeCost {
+                cost: ManaCost::Cost {
+                    shards: vec![
+                        super::super::mana::ManaCostShard::White,
+                        super::super::mana::ManaCostShard::Blue,
+                        super::super::mana::ManaCostShard::Black,
+                        super::super::mana::ManaCostShard::Red,
+                        super::super::mana::ManaCostShard::Green,
+                    ],
+                    generic: 0,
+                },
+            },
             StaticMode::Other("Custom".to_string()),
         ];
         let json = serde_json::to_string(&modes).unwrap();
@@ -1839,6 +2073,37 @@ mod tests {
         let json2 = r#"{"mode":"GrantsExtraVote"}"#;
         let w2: Wrapper = serde_json::from_str(json2).unwrap();
         assert_eq!(w2.mode, StaticMode::GrantsExtraVote);
+    }
+
+    #[test]
+    fn fwd_compat_legacy_cost_modify_objects_map_to_modify_cost() {
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_static_mode_fwd")]
+            mode: StaticMode,
+        }
+
+        let cases = [
+            ("ReduceCost", CostModifyMode::Reduce),
+            ("RaiseCost", CostModifyMode::Raise),
+            ("MinimumCost", CostModifyMode::Minimum),
+        ];
+
+        for (legacy_name, expected_mode) in cases {
+            let json = format!(
+                r#"{{"mode":{{"{legacy_name}":{{"amount":{{"type":"Cost","shards":[],"generic":2}},"spell_filter":null,"dynamic_count":null}}}}}}"#
+            );
+            let wrapper: Wrapper = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                wrapper.mode,
+                StaticMode::ModifyCost {
+                    mode: expected_mode,
+                    amount: ManaCost::generic(2),
+                    spell_filter: None,
+                    dynamic_count: None,
+                }
+            );
+        }
     }
 
     #[test]

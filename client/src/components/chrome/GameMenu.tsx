@@ -5,10 +5,10 @@ import { useTranslation } from "react-i18next";
 import { ConnectionDot } from "../multiplayer/ConnectionDot.tsx";
 import { FullscreenButton } from "./FullscreenButton.tsx";
 import { VolumeControl } from "./VolumeControl.tsx";
-import { clearGame, useGameStore } from "../../stores/gameStore.ts";
+import { clearGame } from "../../stores/gameStore.ts";
 import { useDraftStore } from "../../stores/draftStore.ts";
-import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
+import { useConcedeHandler } from "../../hooks/useConcedeHandler.ts";
 
 interface GameMenuProps {
   gameId: string;
@@ -46,6 +46,14 @@ export function GameMenu({
   const cardDataMeta = useCardDataMeta();
   const isDraft = searchParams.get("source") === "draft" && !!searchParams.get("draftId");
   const isDraftPodMatch = searchParams.get("mode") === "draft-match";
+
+  const handleConcede = useConcedeHandler({
+    gameId,
+    isOnlineMode,
+    isDraft,
+    isDraftPodMatch,
+    onConcede,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -146,32 +154,15 @@ export function GameMenu({
             variant="danger"
             onClick={() => {
               setOpen(false);
+              // Online concedes route through the confirmation dialog
+              // (`onConcede` opens it). All other modes go straight through
+              // the unified concede hook, which dispatches `Concede` to the
+              // engine before clearing local state — see useConcedeHandler.
               if (isOnlineMode && onConcede) {
                 onConcede();
-              } else if (isDraft) {
-                useDraftStore.getState().recordMatchResult(gameId, "loss").then(() => {
-                  clearGame(gameId);
-                  navigate("/draft/quick?resume=1");
-                });
-              } else if (isDraftPodMatch) {
-                const adapter = useGameStore.getState().adapter as {
-                  sendConcede?: () => void | Promise<void>;
-                } | null;
-                void adapter?.sendConcede?.();
-                void useMultiplayerDraftStore
-                  .getState()
-                  .reportActiveMatchConcession()
-                  .then(() => {
-                    clearGame(gameId);
-                    navigate("/draft-pod");
-                  })
-                  .catch((err) => {
-                    console.error("[GameMenu] failed to report draft pod concession:", err);
-                  });
-              } else {
-                clearGame(gameId);
-                navigate("/");
+                return;
               }
+              handleConcede();
             }}
           />
           <MenuButton

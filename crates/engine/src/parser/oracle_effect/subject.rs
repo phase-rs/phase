@@ -5,13 +5,15 @@ use nom::combinator::{all_consuming, map, opt, value, verify};
 use nom::sequence::preceded;
 use nom::Parser;
 
-use super::animation::{animation_modifications, parse_animation_spec};
+use super::animation::{
+    animation_modifications_with_replacement, has_in_addition_to_other_types, parse_animation_spec,
+};
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, GainLifePlayer, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-    QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+    FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -23,6 +25,7 @@ use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_nom::target::parse_event_context_ref;
+use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
     parse_chosen_qualifier_subject, parse_continuous_modifications, parse_static_line_multi,
@@ -658,6 +661,14 @@ pub(super) fn parse_subject_application(
             return Some(application);
         }
     }
+    if let Some((count, target_text)) = super::strip_exact_target_prefix(lower.as_str()) {
+        let consumed = lower.len() - target_text.len();
+        let target_text = &subject[consumed..];
+        let (filter, _) = parse_target_with_ctx(target_text, ctx);
+        let mut application = subject_filter_application(filter, false)?;
+        application.multi_target = Some(MultiTargetSpec::exact(count));
+        return Some(application);
+    }
     // CR 115.1d: "any number of target creatures" — variable-count targeting.
     // Strip "any number of " prefix, delegate to parse_target for the filter,
     // and attach MultiTargetSpec { min: 0, max: None } (unlimited).
@@ -820,6 +831,19 @@ pub(super) fn parse_subject_application(
             inherits_parent: false,
             is_optional: false,
         });
+    }
+    // CR 102.1 + CR 103.1: "the player to your right/left" as subject — a
+    // seating-relative neighbor (Bucknard's Everfull Purse: "The player to your
+    // right gains control of this artifact"). Delegate to `parse_target`, which
+    // is the single authority for the `Neighbor` mapping. Must precede the bare
+    // "the player" anaphor arm below so the longer seating phrase wins, and the
+    // GainControl→GiveControl rewrite receives `recipient: Neighbor` rather than
+    // a generic `Any`/`TriggeringPlayer`.
+    {
+        let (neighbor_filter, rest) = parse_target(subject);
+        if rest.trim().is_empty() && matches!(neighbor_filter, TargetFilter::Neighbor { .. }) {
+            return subject_filter_application(neighbor_filter, false);
+        }
     }
     // CR 608.2c + CR 117.3a: "that player" / "the player" as subject,
     // optionally carrying a "may" modal ("that player may pay {2}").
@@ -1160,6 +1184,14 @@ pub(super) fn parse_subject_application(
     None
 }
 
+pub(super) fn parse_leading_subject_application(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<SubjectApplication> {
+    let subject_text = extract_subject_text(text)?;
+    parse_subject_application(&subject_text, ctx)
+}
+
 /// CR 608.2k: Resolve bare pronoun "they" based on parser context.
 /// In trigger effects where the subject is a player (e.g., "an opponent"),
 /// "they" refers to the triggering player (`TriggeringPlayer`). A player-type
@@ -1170,6 +1202,17 @@ pub(super) fn parse_subject_application(
 fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
         return TargetFilter::ScopedPlayer;
+    }
+    // CR 603.7c + CR 120.3 + CR 506.2: A "deals [combat] damage to a player" or
+    // "attacks a player" trigger introduces the damaged/attacked player as the
+    // event referent (the parser stamps `relative_player_scope = TargetPlayer`).
+    // "They" inside such an effect ("they lose half their life") refers to that
+    // event player, which auto-resolves from the triggering event
+    // (`TriggeringPlayer`) — NOT a chosen target. Without this, "they" fell
+    // through to `ParentTarget`, leaving the effect with no player to act on
+    // (Unstoppable Slasher's half-life loss silently resolved as "lose 0").
+    if matches!(ctx.relative_player_scope, Some(ControllerRef::TargetPlayer)) {
+        return TargetFilter::TriggeringPlayer;
     }
     // CR 608.2c + CR 109.4: "They" after a `Choose(Player)` clause refers to
     // the chosen player — a player-only `Typed` filter carrying the chosen
@@ -1614,8 +1657,10 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
         alt((
             value(Duration::UntilEndOfTurn, tag(" until end of turn")),
             value(Duration::UntilEndOfTurn, tag(" this turn")),
+            // CR 514.2: "until the end of your next turn" persists through
+            // that turn's cleanup step.
             value(
-                Duration::UntilNextTurnOf {
+                Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
                 tag(" until the end of your next turn"),
@@ -1626,8 +1671,10 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
                 },
                 tag(" until your next turn"),
             ),
+            // CR 514.2: third-person next-turn duration in granted-effect
+            // clauses follows the same controller/grantee binding.
             value(
-                Duration::UntilNextTurnOf {
+                Duration::UntilEndOfNextTurnOf {
                     player: PlayerScope::Controller,
                 },
                 tag(" until the end of their next turn"),
@@ -1792,7 +1839,12 @@ fn build_become_clause(
 
     let (become_text, name_override) = strip_become_name_override(become_text);
     let animation = parse_animation_spec(&become_text, ctx)?;
-    let mut modifications = animation_modifications(&animation);
+    // CR 205.1a vs CR 205.1b: a "becomes a [type]" effect REPLACES the creature's
+    // subtypes (so e.g. a Human Soldier that becomes a Frog is only a Frog) unless
+    // it says "in addition to its other types", which stays additive. Mirrors the
+    // static type-change path's suffix detection.
+    let is_additive = has_in_addition_to_other_types(&become_text);
+    let mut modifications = animation_modifications_with_replacement(&animation, is_additive);
     for modification in parse_continuous_modifications(predicate) {
         if !modifications.contains(&modification) {
             modifications.push(modification);
@@ -1865,7 +1917,9 @@ fn try_parse_become_and_attack_if_able(
     let (animation_text, animation_duration) = super::strip_trailing_duration(animation_text);
     let animation_duration = animation_duration?;
     let animation = parse_animation_spec(animation_text, ctx)?;
-    let modifications = animation_modifications(&animation);
+    // CR 205.1a: non-additive "becomes a [type]" replaces subtypes.
+    let is_additive = has_in_addition_to_other_types(animation_text);
+    let modifications = animation_modifications_with_replacement(&animation, is_additive);
     if modifications.is_empty() {
         return None;
     }
@@ -1902,30 +1956,27 @@ fn try_parse_become_and_attack_if_able(
 }
 
 fn parse_attack_if_able_duration(input: &str) -> OracleResult<'_, Duration> {
-    alt((
-        value(
-            Duration::UntilEndOfTurn,
-            alt((
-                tag("attacks this turn if able"),
-                tag("attack this turn if able"),
-            )),
-        ),
-        value(
-            Duration::UntilEndOfCombat,
-            alt((
-                tag("attacks this combat if able"),
-                tag("attack this combat if able"),
-                tag("attacks that combat if able"),
-                tag("attack that combat if able"),
-            )),
-        ),
-    ))
-    .parse(input)
+    // verb axis × phase axis (PATTERNS.md §8b): factor "attack(s)" out front,
+    // then map the phase clause to its duration ("this turn" → end of turn,
+    // "this/that combat" → end of combat).
+    let (rest, _) = alt((tag("attacks"), tag("attack"))).parse(input)?;
+    preceded(
+        tag(" "),
+        alt((
+            value(Duration::UntilEndOfTurn, tag("this turn if able")),
+            value(
+                Duration::UntilEndOfCombat,
+                alt((tag("this combat if able"), tag("that combat if able"))),
+            ),
+        )),
+    )
+    .parse(rest)
 }
 
 /// CR 119.5: Parse "life total becomes N" into SetLifeTotal effect.
 /// Handles: "half that player's starting life total", numeric amounts,
-/// "their starting life total", and other quantity expressions.
+/// "their starting life total", and any other quantity the general quantity
+/// parser recognizes (e.g. "the highest/lowest life total among all players").
 fn try_parse_set_life_total(
     become_text: &str,
     application: &SubjectApplication,
@@ -1950,7 +2001,14 @@ fn try_parse_set_life_total(
         }
         QuantityExpr::Fixed { value: n as i32 }
     } else {
-        return None;
+        // CR 119.5: the new life total may be a dynamic quantity rather than a
+        // fixed number — e.g. "the highest/lowest life total among all players"
+        // (Repay in Kind, Arbiter of Knollridge, Mortal Flesh Is Weak). Route
+        // the whole RHS through the general quantity parser so every
+        // "life total becomes <quantity>" card composes. `parse_cda_quantity`
+        // returns `Some` only when it fully consumes the phrase, so an
+        // unrecognized trailer yields `None` here — no false positives.
+        oracle_quantity::parse_cda_quantity(&lower)?
     };
 
     // CR 119.5: Use the parsed target if targeted ("target player's life total"),
@@ -2540,7 +2598,7 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
     };
     Some(parsed_clause(Effect::GainLife {
         amount,
-        player: GainLifePlayer::TargetedController,
+        player: TargetFilter::ParentTargetController,
     }))
 }
 
@@ -2866,6 +2924,62 @@ mod tests {
         ));
     }
 
+    /// CR 119.5: "<player>'s life total becomes <dynamic>" routes the RHS through
+    /// the general quantity parser, so a cross-player life extremum (CR 119.1 /
+    /// CR 102.1, parsed by `parse_cross_player_life_extremum`) resolves to a
+    /// dynamic `QuantityExpr::Ref(LifeTotal{..})` rather than collapsing to
+    /// `Effect::Unimplemented`. Covers the class shared by Repay in Kind,
+    /// Arbiter of Knollridge, and Mortal Flesh Is Weak.
+    #[test]
+    fn life_total_becomes_cross_player_extremum() {
+        use crate::types::ability::AggregateFunction;
+
+        for (text, expected_player) in [
+            (
+                "each player's life total becomes the highest life total among all players",
+                PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                    exclude: None,
+                },
+            ),
+            (
+                "each player's life total becomes the lowest life total among all players",
+                PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Min,
+                    exclude: None,
+                },
+            ),
+            (
+                "each opponent's life total becomes the lowest life total among your opponents",
+                PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Min,
+                },
+            ),
+        ] {
+            let mut ctx = ParseContext::default();
+            let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+                text,
+                AbilityKind::Spell,
+                &mut ctx,
+            );
+            let Effect::SetLifeTotal { amount, .. } = &*ability.effect else {
+                panic!(
+                    "expected SetLifeTotal for {text:?}, got {:?}",
+                    ability.effect
+                );
+            };
+            assert_eq!(
+                amount,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: expected_player,
+                    },
+                },
+                "wrong amount for {text:?}",
+            );
+        }
+    }
+
     #[test]
     fn have_card_name_become_named_equipment_and_lose_other_abilities() {
         let mut ctx = ParseContext {
@@ -3051,6 +3165,28 @@ mod tests {
         )));
     }
 
+    /// CR 102.1 + CR 103.1: "the player to your right" as a subject resolves to
+    /// the seating-relative `Neighbor` filter (untargeted), so the
+    /// GainControl→GiveControl rewrite gets `recipient: Neighbor { Right }`
+    /// rather than a generic `Any`. Regression for Bucknard's Everfull Purse.
+    #[test]
+    fn parse_subject_the_player_to_your_right_is_neighbor() {
+        use crate::types::ability::SeatDirection;
+        let mut ctx = ParseContext::default();
+        let app = parse_subject_application("the player to your right", &mut ctx)
+            .expect("seating-neighbor subject should parse");
+        assert_eq!(
+            app.affected,
+            TargetFilter::Neighbor {
+                direction: SeatDirection::Right
+            }
+        );
+        assert!(
+            app.target.is_none(),
+            "neighbor recipient is computed, not a chosen target slot"
+        );
+    }
+
     #[test]
     fn parse_subject_an_opponent() {
         let mut ctx = ParseContext::default();
@@ -3193,7 +3329,7 @@ mod tests {
                         scope: crate::types::ability::ObjectScope::Target
                     }
                 },
-                player: GainLifePlayer::TargetedController
+                player: TargetFilter::ParentTargetController
             }
         ));
     }
@@ -3213,7 +3349,7 @@ mod tests {
                         scope: crate::types::ability::ObjectScope::Target
                     }
                 },
-                player: GainLifePlayer::TargetedController
+                player: TargetFilter::ParentTargetController
             }
         ));
     }
@@ -3233,7 +3369,7 @@ mod tests {
                         scope: crate::types::ability::ObjectScope::Target
                     }
                 },
-                player: GainLifePlayer::TargetedController
+                player: TargetFilter::ParentTargetController
             }
         ));
     }
@@ -3247,7 +3383,7 @@ mod tests {
             clause.effect,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: GainLifePlayer::TargetedController
+                player: TargetFilter::ParentTargetController
             }
         ));
     }

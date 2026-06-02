@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { AdditionalCost, GameAction, GameObject, Keyword } from "../../adapter/types.ts";
-import { abilityChoiceLabel, additionalCostChoices, formatAbilityCost } from "../costLabel.ts";
+import {
+  abilityChoiceLabel,
+  abilityLabel,
+  additionalCostChoices,
+  formatAbilityCost,
+  formatCost,
+} from "../costLabel.ts";
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
   return {
@@ -108,6 +114,19 @@ describe("abilityChoiceLabel per-variant formatting", () => {
     const result = abilityChoiceLabel(action, object);
     expect(result.label).toBe("Equip");
     expect(result.description).toContain("target creature you control");
+  });
+
+  it("labels ReturnToHand costs from ability description (Quirion Ranger)", () => {
+    const ability = {
+      cost: { type: "ReturnToHand", count: 1 },
+      description:
+        "Return a Forest you control to its owner's hand: Untap target creature.",
+      effect: { type: "Untap" },
+    } as unknown as GameObject["abilities"][number];
+    expect(abilityLabel(ability)).toBe(
+      "Return a Forest you control to its owner's hand",
+    );
+    expect(formatCost({ type: "ReturnToHand", count: 1 })).toBe("Return 1 permanent");
   });
 
   it("labels an ActivateAbility with its serialized cost", () => {
@@ -242,6 +261,33 @@ describe("additionalCostChoices — multikicker (issue #454)", () => {
     expect(decline.label).toContain("finish casting");
     expect(decline.label).toContain("(kicked 2×)");
     expect(decline.label.toLowerCase()).not.toContain("cancel");
+  });
+});
+
+describe("additionalCostChoices — repeatable additional cost", () => {
+  const repeatableCost: AdditionalCost = {
+    type: "Optional",
+    data: {
+      cost: { type: "Mana", cost: { type: "Cost", shards: [], generic: 1 } },
+      repeatable: true,
+    },
+  };
+
+  it("first prompt offers a non-cancel decline", () => {
+    const { title, options } = additionalCostChoices(repeatableCost, 0);
+
+    expect(title).toContain("Pay additional cost");
+    expect(options.find((o) => o.id === "pay")?.label).toBe("Pay {1}");
+    expect(options.find((o) => o.id === "decline")?.label).toBe("Cast without paying");
+  });
+
+  it("re-prompt shows the payment count and finish-casting decline", () => {
+    const { title, options } = additionalCostChoices(repeatableCost, 2);
+
+    expect(title).toContain("paid 2");
+    const decline = options.find((o) => o.id === "decline")!;
+    expect(decline.label).toContain("finish casting");
+    expect(decline.label).toContain("(paid 2×)");
   });
 });
 

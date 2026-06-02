@@ -2,11 +2,11 @@ use serde::Serialize;
 
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission,
-    CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction, ManaSpendRestriction,
-    ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost, PlayerFilter, PtValue,
-    QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint, StaticDefinition,
-    TargetFilter,
+    AbilityCondition, AbilityDefinition, ActivationRestriction, BounceSelection, CastingPermission,
+    ControllerRef, CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction,
+    ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost,
+    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
@@ -121,6 +121,10 @@ pub(crate) struct SearchLibraryDetails {
     /// destinations (cultivate-class "put one onto the battlefield tapped and
     /// the other into your hand"). Lowered to `Effect::SearchLibrary.split`.
     pub(crate) split: Option<SearchDestinationSplit>,
+    /// CR 701.23a: Zones the search looks through. Defaults to `[Library]`;
+    /// God-Pharaoh's-Gift-class cards set `[Graveyard, Hand, Library]`. Lowered
+    /// to `Effect::SearchLibrary.source_zones`.
+    pub(crate) source_zones: Vec<Zone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -235,6 +239,10 @@ pub(crate) enum ContinuationAst {
     /// library-to-hand search continuation are already represented by the intrinsic
     /// SearchDestination + reveal flag and should be absorbed.
     SearchResultClauseHandled,
+    /// "reveal it" immediately after a SearchLibrary whose destination is handled
+    /// by a later conditional branch. Patches SearchLibrary.reveal without adding
+    /// a default ChangeZone.
+    SearchRevealResult,
     /// "Put the rest on the bottom of your library ..." after a tracked-set choice that
     /// already moved chosen cards out of the library. Appends a library-bottom placement
     /// step onto the preceding ChangeZone so the unchosen cards are handled by that chain.
@@ -296,6 +304,9 @@ pub(crate) enum ContinuationAst {
     RevealUntilKept {
         destination: Zone,
         enter_tapped: bool,
+        /// CR 508.4: the kept card enters the battlefield attacking
+        /// ("tapped and attacking"). Absorbs into `enters_attacking`.
+        enters_attacking: bool,
         rest_destination: Option<Zone>,
         /// CR 701.20a + CR 608.2c: `Some(decline_zone)` when the kept clause is
         /// optional ("you may put that card onto the battlefield"). `destination`
@@ -312,6 +323,26 @@ pub(crate) enum ContinuationAst {
     /// and Destroy the Evidence where "those cards" refers to all cards revealed
     /// during the RevealUntil resolution, not only the non-matching ones.
     RevealUntilAllToZone { destination: Zone },
+    /// CR 406.3 + CR 701.16a: "[then] exile it/them [face down]" after a private
+    /// `Dig` (the "look at the top N cards of <player>'s library" look step).
+    /// Rewrites the preceding `Dig` into an `Effect::ExileTop` so the looked-at
+    /// card(s) actually leave the library — the Gonti, Canny Acquisitor impulse
+    /// idiom ("look at the top card of that player's library, then exile it face
+    /// down. You may play that card ..."). `player`/`count` are lifted from the
+    /// `Dig` (with `ParentTarget` re-bound to the triggering player via
+    /// `that_player_library_filter`); `face_down` reflects the explicit
+    /// hidden-information suffix.
+    ExileLookedAtCard {
+        player: TargetFilter,
+        count: QuantityExpr,
+        face_down: bool,
+    },
+    /// CR 608.2c + CR 701.21a: absorbs the explicit/bare sacrifice-rest clause
+    /// following a choose-and-sacrifice-rest effect, optionally narrowing the
+    /// final sacrifice sweep ("all other nonland permanents they control").
+    ChooseAndSacrificeRestFilter {
+        sacrifice_filter: Option<TargetFilter>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -343,6 +374,14 @@ pub(crate) enum ImperativeFamilyAst {
     ExchangeControl {
         target_a: TargetFilter,
         target_b: TargetFilter,
+    },
+    /// CR 701.12a: Exchange a player's life total with the source's power or
+    /// toughness (Tree of Perdition, Tree of Redemption, Evra). `player` is the
+    /// player whose life is exchanged (`Controller` for "your", an opponent
+    /// filter for "target opponent's"); `stat` selects which source stat.
+    ExchangeLifeWithStat {
+        player: TargetFilter,
+        stat: PtStat,
     },
     /// CR 509.1c: Must be blocked this turn if able.
     MustBeBlocked,
@@ -377,8 +416,12 @@ pub(crate) enum ImperativeFamilyAst {
     /// CR 104.3a: "[you/target player] win(s) the game"
     WinTheGame,
     /// CR 706: Roll a die with N sides.
+    /// CR 706.2: Optional additive/subtractive modifier applied to the natural
+    /// result before result-table lookup ("Roll a d20 and add the number of
+    /// cards in your hand").
     RollDie {
         sides: u8,
+        modifier: Option<crate::types::ability::DieRollModifier>,
     },
     /// CR 705: Flip a coin.
     FlipCoin,
@@ -598,6 +641,13 @@ pub(crate) enum TargetedImperativeAst {
     /// CR 701.3: Return to hand (bounce).
     Return {
         target: TargetFilter,
+        /// CR 115.1 + Whitemane Lion ruling: Captured at parse time from the
+        /// `TargetSyntax` discriminator. `Descriptor` Oracle text without
+        /// "target" (e.g. "return a creature you control to its owner's hand")
+        /// becomes `BounceSelection::AtResolution`; the resolver picks the
+        /// eligible permanent at resolution via `EffectZoneChoice` rather than
+        /// the targeting pipeline.
+        selection: BounceSelection,
     },
     /// CR 400.7 + CR 611.2c: Mass return-to-hand. Mirrors `TapAll`/`UntapAll`
     /// for "return all/each [filter] to their owners' hands" Oracle text.
@@ -616,10 +666,14 @@ pub(crate) enum TargetedImperativeAst {
         origin: Option<Zone>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
-        /// CR 110.2: "under your control" — controller override.
-        under_your_control: bool,
+        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
+        /// to the player resolved from `ref`. `None` leaves the object under
+        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
+        enters_under: Option<ControllerRef>,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
+        /// CR 508.4: "tapped and attacking" — enters attacking.
+        enters_attacking: bool,
         /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
         /// enters the battlefield.
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
@@ -637,6 +691,9 @@ pub(crate) enum TargetedImperativeAst {
         target: TargetFilter,
         origin: Option<Zone>,
         destination: Zone,
+        /// CR 110.2a: Controller override for mass returns to the battlefield.
+        /// `None` preserves default controller assignment.
+        enters_under: Option<ControllerRef>,
         enter_tapped: bool,
     },
     Fight {
@@ -695,6 +752,9 @@ pub(crate) enum SearchCreationImperativeAst {
         /// onto the battlefield tapped and the other into your hand"). Lowered
         /// to `Effect::SearchLibrary.split`.
         split: Option<SearchDestinationSplit>,
+        /// CR 701.23a: Zones searched. `[Library]` for ordinary tutors;
+        /// `[Graveyard, Hand, Library]` for God-Pharaoh's-Gift-class cards.
+        source_zones: Vec<Zone>,
     },
     SearchOutsideGame {
         filter: TargetFilter,
@@ -840,6 +900,8 @@ pub(crate) enum ChooseImperativeAst {
     CategoryAndSacrificeRest {
         categories: Vec<crate::types::card_type::CoreType>,
         chooser_scope: crate::types::ability::CategoryChooserScope,
+        choose_filter: crate::types::ability::TargetFilter,
+        sacrifice_filter: crate::types::ability::TargetFilter,
     },
     /// CR 115.1c + CR 601.2c: "choose target X and target Y" — two independent
     /// target slots declared in a single targeting clause (Goblin Welder shape).
@@ -863,8 +925,10 @@ pub(crate) enum PutImperativeAst {
         origin: Option<Zone>,
         destination: Zone,
         target: TargetFilter,
-        /// CR 110.2: "under your control" — controller override on ETB.
-        under_your_control: bool,
+        /// CR 110.2a: Controller override on ETB. `Some(ref)` routes the object
+        /// to the player resolved from `ref`. `None` leaves the object under
+        /// its owner's control. Lowered 1:1 onto `Effect::ChangeZone.enters_under`.
+        enters_under: Option<ControllerRef>,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
         /// CR 701.28c: "transformed" — enters with its back face up.
@@ -874,6 +938,12 @@ pub(crate) enum PutImperativeAst {
         /// having been declared as one). Set by the inline-tail patcher in
         /// `try_parse_put_zone_change` for the Kaalia / Ilharg class.
         enters_attacking: bool,
+        /// "Up to one" resolution-choice zone changes may move zero matching objects.
+        up_to: bool,
+        /// CR 107.1c + CR 608.2c: Cardinality for non-targeted zone-change
+        /// choices made during resolution, e.g. "put any number of creature
+        /// cards from your hand onto the battlefield."
+        choice_count: Option<Box<MultiTargetSpec>>,
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.
@@ -1028,6 +1098,7 @@ pub(crate) enum ZoneCounterImperativeAst {
         counter_type: Option<CounterType>,
         count: Option<QuantityExpr>,
         mode: crate::types::ability::CounterTransferMode,
+        selection: crate::types::ability::CounterMoveSelection,
         target: TargetFilter,
     },
 }

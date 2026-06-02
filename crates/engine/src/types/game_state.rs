@@ -6,11 +6,12 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    AbilityCost, AbilityDefinition, AdditionalCost, BeholdCostAction, ChoiceType, ChoiceValue,
-    ChooseFromZoneConstraint, ContinuousModification, CostPaidObjectSnapshot,
-    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
-    ModalChoice, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
-    StaticCondition, TargetFilter, TargetRef, TriggerCondition,
+    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
+    BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
+    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, DelayedTriggerCondition,
+    Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant, ModalChoice,
+    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
+    TargetFilter, TargetRef, TriggerCondition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -27,6 +28,7 @@ use super::player::{Player, PlayerId};
 use super::proposed_event::{ProposedEvent, ReplacementId};
 use super::zones::{ExileCostSourceZone, Zone};
 
+use crate::game::bracket_estimate::CommanderBracketTier;
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
 
@@ -166,6 +168,11 @@ pub struct LKISnapshot {
     /// CR 400.7: Colors as they last existed in the public zone.
     #[serde(default)]
     pub colors: Vec<ManaColor>,
+    /// CR 400.7: Persisted choices as they last existed in the public zone.
+    /// Source-linked abilities use this after the source leaves before a
+    /// linked "the chosen player" instruction resolves.
+    #[serde(default)]
+    pub chosen_attributes: Vec<ChosenAttribute>,
     /// CR 400.7: Counters as they last existed on the object.
     /// Used by `TriggerCondition::HadCounters` for "if it had counters on it" patterns.
     #[serde(default)]
@@ -371,6 +378,20 @@ pub struct ZoneChangeRecord {
     /// snapshot rather than current combat state.
     #[serde(default)]
     pub combat_status: ZoneChangeCombatStatus,
+    /// CR 603.10a: ObjectIds that left the battlefield in the SAME simultaneous
+    /// event as this object (every permanent destroyed by one board wipe, every
+    /// creature destroyed together by a single state-based-action check, etc.),
+    /// excluding this object. Populated only by producers of a simultaneous
+    /// departure batch via `zones::mark_simultaneous_departures`; empty for a
+    /// lone departure or for departures that are separate sequential instructions
+    /// of one resolution. A leaves-the-battlefield / dies observer listed here
+    /// observes this departure via last-known information (CR 603.10a's worked
+    /// example); a creature that left in an earlier, separate event is not listed
+    /// and therefore does not cross-observe. This is the authority for
+    /// simultaneity — trigger collection must not infer it from the shape of the
+    /// accumulated event vector.
+    #[serde(default)]
+    pub co_departed: Vec<ObjectId>,
 }
 
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
@@ -437,6 +458,7 @@ impl ZoneChangeRecord {
             linked_exile_snapshot: Vec::new(),
             is_token: false,
             combat_status: ZoneChangeCombatStatus::default(),
+            co_departed: Vec::new(),
         }
     }
 }
@@ -493,6 +515,14 @@ pub struct ChosenDamageSource {
 }
 
 /// CR 120.1: Snapshot of a damage event for "was dealt damage by" queries.
+///
+/// CR 608.2i + CR 608.2h: source characteristics snapshot at damage time
+/// (look-back; criteria need not still hold). Queries such as "opponents who
+/// were dealt combat damage by ~ or a Dragon this turn" (Estinien Varlineau)
+/// must match the source's qualities *as they were when damage was dealt* — the
+/// source may have since changed type, left the battlefield, or been removed.
+/// The `source_*` snapshot fields mirror `CounterAddedRecord`'s event-time
+/// characteristic capture and feed `matches_target_filter_on_damage_record_source`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageRecord {
     pub source_id: ObjectId,
@@ -504,6 +534,74 @@ pub struct DamageRecord {
     pub amount: u32,
     #[serde(default)]
     pub is_combat: bool,
+    // CR 608.2i + CR 608.2h: source characteristics snapshot at damage time
+    // (look-back; criteria need not still hold).
+    #[serde(default)]
+    pub source_name: String,
+    #[serde(default)]
+    pub source_core_types: Vec<CoreType>,
+    #[serde(default)]
+    pub source_subtypes: Vec<String>,
+    #[serde(default)]
+    pub source_supertypes: Vec<Supertype>,
+    #[serde(default)]
+    pub source_keywords: Vec<Keyword>,
+    #[serde(default)]
+    pub source_power: Option<i32>,
+    #[serde(default)]
+    pub source_toughness: Option<i32>,
+    #[serde(default)]
+    pub source_colors: Vec<ManaColor>,
+    #[serde(default)]
+    pub source_mana_value: u32,
+    #[serde(default)]
+    pub source_controller_snapshot: PlayerId,
+    #[serde(default)]
+    pub source_owner: PlayerId,
+    /// CR 608.2i + CR 608.2h: the source's zone at damage time. Non-combat
+    /// damage from a spell originates from the Stack, so a zone-discriminating
+    /// look-back source filter ("by a permanent") must evaluate against the
+    /// recorded zone, not an assumed battlefield. Defaults to `Battlefield`
+    /// (the common combat-damage case) for legacy records and test fixtures.
+    #[serde(default = "default_source_zone")]
+    pub source_zone: Zone,
+}
+
+/// CR 608.2i: Default damage-source zone. Combat damage — the overwhelmingly
+/// common recorded case — comes from the battlefield, so legacy serialized
+/// records and `..Default::default()` test fixtures default to it.
+fn default_source_zone() -> Zone {
+    Zone::Battlefield
+}
+
+impl Default for DamageRecord {
+    /// A non-combat, zero-amount record from/to player 0 with an empty source
+    /// snapshot. Production damage recording (`deal_damage.rs`) always fills
+    /// every field explicitly; this default exists so test and synthesis
+    /// fixtures that only care about a few fields can spread `..Default::default()`
+    /// for the CR 608.2i source-snapshot fields they don't exercise.
+    fn default() -> Self {
+        Self {
+            source_id: ObjectId(0),
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(0)),
+            target_controller: PlayerId(0),
+            amount: 0,
+            is_combat: false,
+            source_name: String::new(),
+            source_core_types: Vec::new(),
+            source_subtypes: Vec::new(),
+            source_supertypes: Vec::new(),
+            source_keywords: Vec::new(),
+            source_power: None,
+            source_toughness: None,
+            source_colors: Vec::new(),
+            source_mana_value: 0,
+            source_controller_snapshot: PlayerId(0),
+            source_owner: PlayerId(0),
+            source_zone: Zone::Battlefield,
+        }
+    }
 }
 
 /// CR 122.1 + CR 122.6: Snapshot of counters put on an object this turn.
@@ -664,6 +762,13 @@ pub struct PendingRepeatIteration {
     pub ability: Box<crate::types::ability::ResolvedAbility>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracked_members: Vec<ObjectId>,
+    /// CR 122.1 + CR 608.2c: the per-iteration counter kinds snapshotted at
+    /// loop entry for a `repeat_for: DistinctCounterKindsAmong` loop. Indexed
+    /// by iteration number; each resumed iteration rebinds its tagged
+    /// `ChooseOneOf` branch to `iterated_counter_kinds[iteration]`. Empty when
+    /// the loop is not counter-kind-driven.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iterated_counter_kinds: Vec<crate::types::counter::CounterType>,
     pub next_iteration: usize,
     pub total_iterations: usize,
 }
@@ -701,7 +806,25 @@ pub struct PendingChangeZoneIteration {
     pub destination: crate::types::zones::Zone,
     pub enter_transformed: bool,
     pub enter_tapped: bool,
-    pub under_your_control: bool,
+    /// CR 110.2a: Resolved-once controller override on ETB. `Some(pid)`
+    /// routes the object to `pid`. `None` leaves the object under its
+    /// owner's control. Resolved from `Effect::ChangeZone.enters_under`
+    /// at resolver entry, so the carrier never re-evaluates a `ControllerRef`
+    /// across an interactive pause.
+    ///
+    /// Legacy on-disk shape (boolean `under_your_control`) deserializes via
+    /// `deserialize_enters_under_player_compat` (best-effort: legacy `true`
+    /// is mapped to `None` because PlayerId cannot be reconstructed without
+    /// ability context at deser time; a `tracing::warn` flags the audit
+    /// trail). Emission is always the modern shape. The compat path is
+    /// guarded by `_LEGACY_DESER_ETB_CONTROLLER_2026Q2` (removed past 0.1.53).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "under_your_control",
+        deserialize_with = "crate::types::ability::deserialize_enters_under_player_compat"
+    )]
+    pub enters_under_player: Option<PlayerId>,
     pub enters_attacking: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enter_with_counters: Vec<(crate::types::counter::CounterType, u32)>,
@@ -739,6 +862,30 @@ pub struct PendingChooseOneOf {
     #[serde(default)]
     pub context: super::ability::SpellContext,
     pub remaining_players: Vec<PlayerId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CounterMoveChoice {
+    pub destination_id: ObjectId,
+    pub counter_type: CounterType,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCounterMove {
+    pub actor: PlayerId,
+    pub source_id: ObjectId,
+    pub destination_id: ObjectId,
+    pub counter_type: CounterType,
+    pub remove_count: u32,
+    pub add_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCounterMoveQueue {
+    pub remaining: Vec<PendingCounterMove>,
+    pub effect_kind: EffectKind,
+    pub source_id: ObjectId,
 }
 
 /// CR 603.7: A delayed triggered ability created during resolution of a spell or ability.
@@ -813,6 +960,13 @@ pub struct PendingCast {
     /// during the normal cost-payment step after targets are chosen.
     #[serde(default)]
     pub deferred_target_selection: bool,
+    /// CR 700.2 + CR 601.2b: Indices of the modes chosen during the cast's
+    /// modal step, sorted ascending to match `build_chained_resolved` /
+    /// `build_target_slots_labelled`. Persisted so a deferred target-selection
+    /// step (after X or an additional cost) can re-build per-slot mode labels
+    /// for the targeting UI. Empty for non-modal casts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_modes: Vec<usize>,
     /// CR 601.2b: Set to `true` once an optional additional cost (e.g. Casualty)
     /// that was deferred before target selection has been decided (paid or declined).
     /// Guards `finish_pending_cast_cost_or_pay` from re-presenting the same cost
@@ -833,6 +987,11 @@ pub struct PendingCast {
     /// quantities can resolve later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convoked_creatures: Vec<ObjectId>,
+    /// CR 601.2i + CR 722.3c: Optional source permanent to re-mark as
+    /// prepared if this cast is cancelled and rolled back. Used by the
+    /// prepared-copy special action to restore pre-cast state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_restore_prepared_source: Option<ObjectId>,
     #[serde(default)]
     pub payment_mode: CastPaymentMode,
 }
@@ -863,10 +1022,12 @@ impl PendingCast {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
         }
     }
@@ -995,13 +1156,14 @@ pub struct PendingManaAbility {
     /// surfaces `WaitingFor::PayManaAbilityMana` for a genuine choice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_mana_payment: Option<Vec<ManaType>>,
-    /// CR 117.1 + CR 118.3: Pre-selected battlefield permanents to exile as
-    /// part of an `AbilityCost::Exile { zone: None|Battlefield, filter: !SelfRef }`.
-    /// Used by Food Chain ("Exile a creature you control: …"). Empty means
-    /// the choice has not been made yet; the activation flow surfaces
-    /// `WaitingFor::ExileFromBattlefieldForManaAbility` for the player to pick.
+    /// CR 117.1 + CR 118.3: Pre-selected objects to exile as part of an
+    /// `AbilityCost::Exile { filter: !SelfRef, .. }` mana ability cost. Used
+    /// by Food Chain's battlefield exile cost and Titans' Nest's graveyard
+    /// exile cost. Empty means the choice has not been made yet; the activation
+    /// flow either surfaces `WaitingFor::ExileForManaAbility` or fills this for
+    /// deterministic top-of-library costs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub chosen_exiled_battlefield: Vec<ObjectId>,
+    pub chosen_exiled: Vec<ObjectId>,
     /// CR 117.1 + CR 118.3: Pre-selected battlefield permanents to sacrifice
     /// as part of an `AbilityCost::Sacrifice { target: !SelfRef }`. Used by
     /// Phyrexian Altar and the broader sacrifice-for-mana-by-property class.
@@ -1039,6 +1201,79 @@ pub struct TargetSelectionProgress {
     pub selected_slots: Vec<Option<TargetRef>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub current_legal_targets: Vec<TargetRef>,
+}
+
+/// Lattice tracking which battlefield objects need layer (continuous-effect)
+/// re-evaluation. Replaces the old `bool` flag so that a token / conjure / copy
+/// entry can request an INCREMENTAL re-derive of only the entering object(s)
+/// instead of a full battlefield reset+reapply.
+///
+/// CR 613.1: continuous effects are evaluated in layer order over the whole
+/// board. A full evaluation is always correct; the incremental path is a
+/// performance optimization that `flush_layers` only takes when it can prove
+/// (per-entered preconditions + a board-wide escalation scan) that re-deriving
+/// just the entered objects produces a board state identical to a full pass.
+/// `mark_full()` is the conservative escalation any non-entry mutation uses.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum LayersDirty {
+    /// Layers are up to date; nothing to flush.
+    #[default]
+    Clean,
+    /// Only these objects entered the battlefield since the last flush and no
+    /// other layer-affecting mutation occurred. Candidate for the incremental
+    /// fast path.
+    EnteredObjects(HashSet<ObjectId>),
+    /// A full battlefield re-evaluation is required.
+    Full,
+}
+
+impl LayersDirty {
+    /// Constructor used as the `#[serde(default)]` for the field: deserialized
+    /// snapshots conservatively rebuild fully on first flush.
+    pub fn full() -> Self {
+        Self::Full
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        !matches!(self, Self::Clean)
+    }
+
+    pub fn mark_full(&mut self) {
+        *self = Self::Full;
+    }
+
+    pub fn mark_entered(&mut self, id: ObjectId) {
+        match self {
+            Self::Full => {}
+            Self::Clean => *self = Self::EnteredObjects(HashSet::from([id])),
+            Self::EnteredObjects(s) => {
+                s.insert(id);
+            }
+        }
+    }
+}
+
+/// Cache key for the source-level enabling-condition truth of a single
+/// CONTINUOUS static ability, used by the incremental layer-flush
+/// truth-delta short-circuit (`game/layers.rs`).
+///
+/// CR 611.3a + CR 611.3b: a static-ability continuous effect isn't "locked
+/// in"; it applies at all times the source is on the battlefield, re-evaluated
+/// against whatever its text indicates. When an object enters, an incremental
+/// flush re-derives only the entered objects. If a pre-existing source's
+/// population-sensitive, SOURCE-LEVEL (non-recipient-context) enabling
+/// condition would change truth, pre-existing recipients must be re-derived —
+/// so the flush must escalate to a full pass. This key indexes the recorded
+/// BEFORE truth so the consult can compare against a freshly-recomputed AFTER.
+///
+/// `def_index` indexes the LIVE post-layer `static_definitions` vec
+/// (`iter_all().enumerate()`), NOT `base_static_definitions`. The refresh and
+/// the consult both observe the identical live vec for pre-existing sources, so
+/// the index aligns (see invariant 5 in the plan / the consult below).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StaticGateKey {
+    pub source: ObjectId,
+    pub def_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1098,12 +1333,16 @@ pub enum CombatTaxPending {
     },
 }
 
-/// CR 107.4f + CR 601.2f: Which legal payments a single Phyrexian shard offers to the
+/// CR 107.4f + CR 601.2h: Which legal payments a single Phyrexian shard offers to the
 /// caster. Computed from the mana pool state (Phyrexian color availability) combined with
 /// the caster's life total and CantLoseLife status (CR 118.3 + CR 119.8).
 ///
-/// The engine only pauses for a `WaitingFor::PhyrexianPayment` when at least one shard
-/// carries `ManaOrLife` — otherwise the choice is trivial and auto-resolves.
+/// The engine pauses at `WaitingFor::PhyrexianPayment` whenever any shard would deduct
+/// life — both `ManaOrLife` (player explicitly picks mana vs life) and `LifeOnly` (life
+/// is the only remaining payment route; player confirms or cancels via `CancelCast`).
+/// Only `ManaOnly` shards auto-resolve without surfacing the prompt, since they have no
+/// life consequence (issue #704: silent life deduction violated CR 601.2h's right to
+/// refuse the cast).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ShardOptions {
@@ -1159,6 +1398,12 @@ pub struct PlayerDeckPool {
     pub registered_commander: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub current_commander: std::sync::Arc<Vec<DeckEntry>>,
+    /// The declared bracket tier for this player's deck. Used by the AI to
+    /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
+    /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward
+    /// compatibility with saved states and test fixtures that omit the field.
+    #[serde(default)]
+    pub bracket_tier: CommanderBracketTier,
 }
 
 /// CR 400.11/400.11a/400.11b: Tracks sideboard cards brought into this game
@@ -1364,6 +1609,16 @@ pub enum AlternativeCastKeyword {
     Overload,
     /// CR 702.103a: Spell becomes an Aura with enchant creature (CR 702.103b).
     Bestow,
+    /// CR 702.113a: "If this spell's awaken cost was paid, put N +1/+1 counters
+    /// on target land you control. That land becomes a 0/0 Elemental creature
+    /// with haste. It's still a land." Paying the awaken cost adds the land
+    /// target (CR 702.113b); casting normally adds no target and no rider.
+    Awaken,
+    /// CR 702.148a-b + CR 612: Paying the cleave cost removes every
+    /// square-bracketed span from the spell's text (a text-changing effect).
+    Cleave,
+    /// CR 702.162a: Cast converted (back face up, CR 712.14a) for the MTMTE cost.
+    MoreThanMeetsTheEye,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -1373,6 +1628,91 @@ pub enum AlternativeCastKeyword {
 pub struct CastingVariantChoiceOption {
     pub variant: CastingVariant,
     pub mana_cost: ManaCost,
+}
+
+/// CR 118.3 + CR 601.2b + CR 605.3b: Identifies the specific action to take
+/// on the objects a player selects while paying a cost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PayCostKind {
+    Discard,
+    Sacrifice,
+    ReturnToHand,
+    /// Exile objects from the specified zone.
+    ExileFromZone {
+        zone: ExileCostSourceZone,
+    },
+    /// Exile objects from any zone (mana-ability exile costs).
+    ExileFromManaZone {
+        zone: Zone,
+    },
+    RemoveCounter {
+        counter_type: CounterMatch,
+    },
+    TapCreatures,
+    Behold {
+        action: BeholdCostAction,
+    },
+}
+
+/// CR 601.2b + CR 605.3b: Resumption context after a PayCost choice completes.
+/// Determines whether the engine re-enters the spell-casting pipeline or the
+/// mana-ability pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CostResume {
+    Spell {
+        #[serde(rename = "Spell")]
+        spell: Box<PendingCast>,
+    },
+    ManaAbility {
+        #[serde(rename = "ManaAbility")]
+        mana_ability: Box<PendingManaAbility>,
+    },
+}
+
+/// The specific kind of cast offer being presented to the player.
+/// Parameterizes `WaitingFor::CastOffer` — all variants share `player: PlayerId`
+/// at the outer level; the kind-specific payload lives here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CastOfferKind {
+    /// CR 715.3a: Player chooses creature face vs Adventure half.
+    Adventure {
+        object_id: ObjectId,
+        card_id: CardId,
+        #[serde(default)]
+        payment_mode: CastPaymentMode,
+    },
+    /// CR 702.94a: Miracle triggered ability resolved — cast for miracle cost.
+    Miracle {
+        object_id: ObjectId,
+        cost: super::mana::ManaCost,
+    },
+    /// CR 702.35a: Madness triggered ability resolved — cast from exile or go to graveyard.
+    Madness {
+        object_id: ObjectId,
+        cost: super::mana::ManaCost,
+    },
+    /// CR 702.xxx: Paradigm (Strixhaven) — turn-based offer to cast a copy.
+    Paradigm { offers: Vec<ObjectId> },
+    /// CR 702.85a: Cascade — cast the hit card without paying mana cost or decline.
+    Cascade {
+        hit_card: ObjectId,
+        exiled_misses: Vec<ObjectId>,
+        source_mv: u32,
+    },
+    /// CR 701.57a: Discover — cast the discovered card or put it to hand.
+    Discover {
+        hit_card: ObjectId,
+        exiled_misses: Vec<ObjectId>,
+        /// CR 701.57a: "Discover N" — the resulting spell's mana value must be
+        /// less than or equal to N for the cast to proceed. Carried on the
+        /// offer so the cast-during-resolution path can build the `ManaValue`
+        /// gate. `serde(default)` because this is live serialized pause-state.
+        #[serde(default)]
+        discover_value: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1425,9 +1765,11 @@ pub enum WaitingFor {
         convoke_mode: Option<ConvokeMode>,
     },
     /// CR 107.1b + CR 601.2f: Caster chooses the value of X for a pending cast
-    /// whose cost contains `ManaCostShard::X`. Fires after target selection and
-    /// before `ManaPayment`. `max` is the engine-computed upper bound for UI
-    /// display and AI enumeration (see `casting_costs::max_x_value`).
+    /// whose cost contains `ManaCostShard::X`. Usually fires after target
+    /// selection and before `ManaPayment`; fires before target selection when a
+    /// selected mode's target legality depends on X. `max` is the
+    /// engine-computed upper bound for UI display and AI enumeration (see
+    /// `casting_costs::max_x_value`).
     /// `min` defaults to zero and is raised by parser-stamped restrictions such
     /// as "X can't be 0."
     /// `convoke_mode` passes through to the subsequent `ManaPayment` step.
@@ -1446,6 +1788,15 @@ pub enum WaitingFor {
         player: PlayerId,
         pending_cast: Box<PendingCast>,
         target_slots: Vec<TargetSelectionSlot>,
+        /// CR 700.2 / CR 601.2b: For a modal spell whose chosen modes each
+        /// require targets, this carries a per-slot display label naming the
+        /// mode each target belongs to. `mode_labels[i]` ↔ `target_slots[i]`
+        /// (same length when present); `None` for slots without a mode
+        /// context (non-modal spells, or modes whose description is missing).
+        /// Display-only — the engine owns the slot→mode mapping; the UI just
+        /// surfaces it in the targeting banner.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mode_labels: Vec<Option<String>>,
         #[serde(default)]
         selection: TargetSelectionProgress,
     },
@@ -1476,6 +1827,18 @@ pub enum WaitingFor {
         candidates: Vec<ObjectId>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         chosen_not_to_untap: Vec<ObjectId>,
+    },
+    /// CR 508.1g + CR 701.43d: As attackers are declared, the active player may
+    /// pay the optional "exert this creature as it attacks" cost on each
+    /// attacker that has an exert-as-attack ability and hasn't been exerted this
+    /// turn. `attacker` is the creature currently being decided; `remaining` is
+    /// the queue of further exert candidates this declaration. Mirrors the
+    /// one-at-a-time loop of `UntapChoice`.
+    ExertChoice {
+        player: PlayerId,
+        attacker: ObjectId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remaining: Vec<ObjectId>,
     },
     GameOver {
         winner: Option<PlayerId>,
@@ -1516,13 +1879,13 @@ pub enum WaitingFor {
         remaining: Vec<ObjectId>,
         pending_effect: Box<ResolvedAbility>,
     },
-    /// CR 303.4 + CR 303.4a + CR 303.4g + CR 614.12 + CR 115.1b: After a
-    /// return-as-Aura sub-effect resolves and finds 2+ legal objects matching
-    /// the parsed enchant filter, the controller picks which permanent the
-    /// returned object attaches to. This is a CHOICE (CR 303.4f / 303.4g), not
-    /// a target (CR 115.1b applies to Aura spells being cast — return-as-Aura
-    /// is a sub-effect of a different ability), so hexproof / shroud /
-    /// protection do NOT filter `legal_targets`.
+    /// CR 303.4 + CR 303.4a + CR 303.4f + CR 303.4g + CR 614.12 + CR 115.1b:
+    /// After a return-as-Aura sub-effect or a non-spell Aura battlefield entry
+    /// finds 2+ legal objects or players matching the parsed enchant filter,
+    /// the controller picks which host the Aura attaches to. This is a CHOICE
+    /// (CR 303.4f / CR 303.4g), not a target (CR 115.1b applies to Aura spells
+    /// being cast), so hexproof / shroud / protection do NOT filter
+    /// `legal_targets`.
     ///
     /// **Forward-looking note (per add-engine-variant gate):** if a fourth
     /// resolution-time-pick `WaitingFor` variant is added (e.g., a future
@@ -1534,18 +1897,18 @@ pub enum WaitingFor {
     ReturnAsAuraTarget {
         player: PlayerId,
         source_id: ObjectId,
-        /// The host object that was just returned to the battlefield by the
-        /// preceding `Effect::ChangeZone` and that this `Effect::ReturnAsAura`
-        /// is converting into an Aura.
+        /// The Aura object on the battlefield awaiting a controller-selected
+        /// enchant host.
         returned_id: ObjectId,
-        /// Battlefield objects (excluding `returned_id`) that satisfy the
-        /// parsed `enchant_filter`. Built via `filter::matches_target_filter`
-        /// — hexproof / shroud / protection are intentionally NOT applied
-        /// here (CR 303.4 / CR 115.1b distinction).
-        legal_targets: Vec<ObjectId>,
+        /// Battlefield objects (excluding `returned_id`) or players that
+        /// satisfy the parsed `enchant_filter`. Built via
+        /// `filter::matches_target_filter` / `player_matches_target_filter` —
+        /// hexproof / shroud / protection are intentionally NOT applied here
+        /// (CR 303.4 / CR 115.1b distinction).
+        legal_targets: Vec<TargetRef>,
         /// The `ResolvedAbility` that emitted this picker; cloned so
-        /// `finalize_attach` can re-read `effect.enchant_filter` and
-        /// `effect.grants` after the pick lands.
+        /// return-as-Aura can re-read `effect.enchant_filter` / `effect.grants`,
+        /// and generic Aura entry can preserve source metadata for completion.
         pending_effect: Box<ResolvedAbility>,
     },
     EquipTarget {
@@ -1770,8 +2133,25 @@ pub enum WaitingFor {
         enter_tapped: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enter_transformed: bool,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        under_your_control: bool,
+        /// CR 110.2a: Resolved-once controller override carried through the
+        /// `EffectZoneChoice` round-trip. `Some(pid)` routes the chosen
+        /// object(s) to `pid` on battlefield entry; `None` leaves them
+        /// under their owner's control.
+        ///
+        /// Legacy on-disk shape (boolean `under_your_control`) deserializes
+        /// via `deserialize_enters_under_player_compat` (best-effort: legacy
+        /// `true` is mapped to `None` because PlayerId cannot be reconstructed
+        /// without ability context at deser time; a `tracing::warn` flags the
+        /// audit trail). Emission is always the modern shape. The compat path
+        /// is guarded by `_LEGACY_DESER_ETB_CONTROLLER_2026Q2` (removed past
+        /// 0.1.53).
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            alias = "under_your_control",
+            deserialize_with = "crate::types::ability::deserialize_enters_under_player_compat"
+        )]
+        enters_under_player: Option<PlayerId>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         enters_attacking: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1808,6 +2188,12 @@ pub enum WaitingFor {
     TriggerTargetSelection {
         player: PlayerId,
         target_slots: Vec<TargetSelectionSlot>,
+        /// CR 700.2 / CR 601.2b: Per-slot mode display label, parallel to
+        /// `target_slots` (`mode_labels[i]` ↔ `target_slots[i]`). Populated for
+        /// modal triggered abilities (CR 700.2b) whose chosen modes target;
+        /// `None` per slot otherwise. Display-only — see `TargetSelection`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mode_labels: Vec<Option<String>>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         target_constraints: Vec<TargetSelectionConstraint>,
         #[serde(default)]
@@ -1880,14 +2266,11 @@ pub enum WaitingFor {
         mana_reduction: ManaCost,
         pending_cast: Box<PendingCast>,
     },
-    /// CR 715.3a: Player chooses creature face vs Adventure half when casting
-    /// an Adventure card from hand (or exile with permission).
-    AdventureCastChoice {
+    /// CR 715.3a + CR 702.94a + CR 702.35a + CR 702.85a + CR 701.57a + CR 702.xxx:
+    /// A player is offered a card to cast via a special rule.
+    CastOffer {
         player: PlayerId,
-        object_id: ObjectId,
-        card_id: CardId,
-        #[serde(default)]
-        payment_mode: CastPaymentMode,
+        kind: CastOfferKind,
     },
     /// CR 712.12 / CR 712.11b: Player chooses which face of an MDFC to
     /// play/cast. Two cases reach this prompt: (a) both faces are lands (CR
@@ -2050,25 +2433,6 @@ pub enum WaitingFor {
         object_id: ObjectId,
         cost: super::mana::ManaCost,
     },
-    /// CR 702.94a: The miracle triggered ability has resolved — the player may now
-    /// cast the revealed card for its miracle cost. This happens during trigger
-    /// resolution per CR 608.2g (timing restrictions do not apply).
-    /// `GameAction::CastSpellAsMiracle` accepts; `GameAction::DecideOptionalEffect
-    /// { accept: false }` declines.
-    MiracleCastOffer {
-        player: PlayerId,
-        object_id: ObjectId,
-        cost: super::mana::ManaCost,
-    },
-    /// CR 702.35a: The madness triggered ability has resolved — the player may
-    /// cast the exiled discarded card for its madness cost or put it into their
-    /// graveyard. `GameAction::CastSpellAsMadness` accepts; `DecideOptionalEffect
-    /// { accept: false }` declines.
-    MadnessCastOffer {
-        player: PlayerId,
-        object_id: ObjectId,
-        cost: super::mana::ManaCost,
-    },
     /// CR 608.2d + CR 101.4: An opponent may choose to perform an optional effect.
     /// Prompts opponents in APNAP order. First accept wins; remaining are not prompted.
     OpponentMayChoice {
@@ -2191,52 +2555,29 @@ pub enum WaitingFor {
         options: Vec<u8>,
         option_names: Vec<String>,
     },
-    /// CR 601.2b: Player must choose a card to discard as part of an additional casting cost.
-    /// After selection, the card is discarded and casting continues via `pay_and_push`.
-    DiscardForCost {
+    /// CR 118.3 + CR 601.2b + CR 605.3b: Player must select `count` objects
+    /// from `choices` to pay a cost, then the engine resumes via `resume`.
+    /// Replaces: DiscardForCost, SacrificeForCost, ReturnToHandForCost,
+    /// ExileForCost, RemoveCounterForCost, TapCreaturesForSpellCost,
+    /// BeholdForCost, TapCreaturesForManaAbility, DiscardForManaAbility,
+    /// ExileForManaAbility, SacrificeForManaAbility.
+    PayCost {
         player: PlayerId,
-        /// How many cards to discard.
+        kind: PayCostKind,
+        /// Pre-filtered eligible objects. The player chooses `count` of these.
+        choices: Vec<ObjectId>,
         count: usize,
-        /// Eligible cards in hand (excludes the spell being cast).
-        cards: Vec<ObjectId>,
-        /// The pending cast to resume after the discard is complete.
-        pending_cast: Box<PendingCast>,
-    },
-    /// CR 118.3 / CR 601.2b: Player must choose permanent(s) to sacrifice as cost.
-    SacrificeForCost {
-        player: PlayerId,
-        /// How many permanents to sacrifice (usually 1; covers "sacrifice two creatures").
-        count: usize,
-        /// Pre-filtered eligible permanents on the battlefield.
-        permanents: Vec<ObjectId>,
-        /// The pending cast to resume after the sacrifice is complete.
-        pending_cast: Box<PendingCast>,
-    },
-    /// CR 118.3 / CR 601.2b: Player must choose permanent(s) to return to hand as cost.
-    ReturnToHandForCost {
-        player: PlayerId,
-        count: usize,
-        /// Pre-filtered eligible permanents on the battlefield.
-        permanents: Vec<ObjectId>,
-        /// The pending cast to resume after the return is complete.
-        pending_cast: Box<PendingCast>,
+        /// Minimum to choose (0 for exact-count costs; > 0 for at-least-N costs
+        /// like SacrificeForCost's `min_count`).
+        #[serde(default)]
+        min_count: usize,
+        resume: CostResume,
     },
     /// CR 118.12a: Player must choose which branch of a disjunctive activation cost
     /// (`AbilityCost::OneOf`) to pay.
     ActivationCostOneOfChoice {
         player: PlayerId,
         costs: Vec<AbilityCost>,
-        pending_cast: Box<PendingCast>,
-    },
-    /// CR 118.3 / CR 122.1 / CR 601.2b: Player must choose a permanent to
-    /// remove counters from as a cost.
-    RemoveCounterForCost {
-        player: PlayerId,
-        count: u32,
-        counter_type: CounterMatch,
-        /// Pre-filtered eligible permanents on the battlefield.
-        permanents: Vec<ObjectId>,
-        /// The pending cast or activated ability to resume after the counter is removed.
         pending_cast: Box<PendingCast>,
     },
     /// Blight N — player must choose one creature to put N -1/-1 counters on as cost.
@@ -2248,60 +2589,6 @@ pub enum WaitingFor {
         creatures: Vec<ObjectId>,
         /// The pending cast to resume after blight is complete.
         pending_cast: Box<PendingCast>,
-    },
-    /// CR 702.34a / CR 601.2b: Player must choose untapped creatures to tap as a spell cost
-    /// (e.g., "Flashback—Tap three untapped white creatures you control").
-    TapCreaturesForSpellCost {
-        player: PlayerId,
-        count: usize,
-        creatures: Vec<ObjectId>,
-        pending_cast: Box<PendingCast>,
-    },
-    /// Player must choose a matching permanent they control or matching card
-    /// from hand to pay a behold casting cost.
-    BeholdForCost {
-        player: PlayerId,
-        count: usize,
-        choices: Vec<ObjectId>,
-        action: BeholdCostAction,
-        pending_cast: Box<PendingCast>,
-    },
-    /// CR 118.3 / CR 605.3b: Player must choose untapped creatures to pay a mana ability cost.
-    TapCreaturesForManaAbility {
-        player: PlayerId,
-        count: usize,
-        creatures: Vec<ObjectId>,
-        pending_mana_ability: Box<PendingManaAbility>,
-    },
-    /// CR 118.3 / CR 605.3b: Player must choose cards to discard to pay a mana ability cost.
-    DiscardForManaAbility {
-        player: PlayerId,
-        count: usize,
-        /// Eligible cards in hand (excludes the mana ability source).
-        cards: Vec<ObjectId>,
-        pending_mana_ability: Box<PendingManaAbility>,
-    },
-    /// CR 117.1 + CR 118.3 + CR 605.3b: Player must choose battlefield permanent(s) to
-    /// exile to pay a mana ability cost. Used by Food Chain ("Exile a creature you
-    /// control: Add X mana of any one color, where X is 1 plus the exiled creature's
-    /// mana value.") and the broader exile-for-mana-by-property class.
-    ExileFromBattlefieldForManaAbility {
-        player: PlayerId,
-        count: usize,
-        /// Pre-filtered eligible battlefield permanents (excludes the mana ability source).
-        permanents: Vec<ObjectId>,
-        pending_mana_ability: Box<PendingManaAbility>,
-    },
-    /// CR 117.1 + CR 118.3 + CR 605.3b: Player must choose battlefield
-    /// permanent(s) to sacrifice to pay a mana ability cost. Used by
-    /// Phyrexian Altar ("Sacrifice a creature: Add one mana of any color.")
-    /// and the broader sacrifice-for-mana-by-property class.
-    SacrificeForManaAbility {
-        player: PlayerId,
-        count: usize,
-        /// Pre-filtered eligible battlefield permanents (excludes the mana ability source).
-        permanents: Vec<ObjectId>,
-        pending_mana_ability: Box<PendingManaAbility>,
     },
     /// CR 605.3a + CR 601.2h + CR 107.4e: A mana ability whose cost is
     /// `Composite { Mana(..), Tap, .. }` (filter lands, Cabal Coffers-style
@@ -2327,27 +2614,6 @@ pub enum WaitingFor {
         choice: ManaChoicePrompt,
         context: ManaChoiceContext,
     },
-    /// CR 118.9a + CR 601.2b + CR 601.2h: Player must choose cards to exile from
-    /// `zone` as part of an alternative or additional casting cost. Used by both
-    /// escape (CR 702.138a, `zone = Graveyard`) and pitch spells such as Force
-    /// of Will, Force of Negation, Force of Vigor, Misdirection, Unmask, and
-    /// Mindbreak Trap (CR 118.9a, `zone = Hand`). CR 118.9a authorizes
-    /// alternative costs; CR 601.2b covers cost announcement; CR 601.2h covers
-    /// payment. Eligibility is pre-filtered against the cost's `TargetFilter`;
-    /// the spell being cast is excluded.
-    ExileForCost {
-        player: PlayerId,
-        /// Source zone for the exile cost — `Hand` (pitch spells) or
-        /// `Graveyard` (escape). Narrow type makes invalid zones
-        /// unrepresentable; see `ExileCostSourceZone`.
-        zone: ExileCostSourceZone,
-        /// How many cards to exile.
-        count: usize,
-        /// Eligible cards in `zone` — excludes the spell being cast.
-        cards: Vec<ObjectId>,
-        /// The pending cast to resume after the exile is complete.
-        pending_cast: Box<PendingCast>,
-    },
     /// CR 701.59a / CR 702.163a: Choose graveyard cards with combined mana value
     /// at least the required threshold, then resume casting or effect resolution.
     CollectEvidenceChoice {
@@ -2366,14 +2632,6 @@ pub enum WaitingFor {
         /// The pending cast to resume after the tap choice.
         pending_cast: Box<PendingCast>,
     },
-    /// CR 701.57a: Player chooses to cast the discovered card or put it to hand.
-    DiscoverChoice {
-        player: PlayerId,
-        /// The nonland card that was hit.
-        hit_card: ObjectId,
-        /// Cards exiled as misses (go to bottom in random order).
-        exiled_misses: Vec<ObjectId>,
-    },
     /// CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" — the
     /// controller chooses the kept card's destination after `RevealUntil` finds a
     /// hit. Accept → `accept_zone`; decline → `decline_zone`. The misses (and, on
@@ -2382,9 +2640,17 @@ pub enum WaitingFor {
     RevealUntilKeptChoice {
         player: PlayerId,
         hit_card: ObjectId,
+        /// CR 508.4: The ability source (e.g. the attacking creature whose
+        /// trigger revealed this card). Supplies the defending player when the
+        /// accepted card enters the battlefield attacking.
+        source_id: ObjectId,
         accept_zone: Zone,
         decline_zone: Zone,
         enter_tapped: bool,
+        /// CR 508.4: When the accepted card goes to the battlefield, it enters
+        /// attacking ("tapped and attacking"). Carried from `Effect::RevealUntil`.
+        #[serde(default)]
+        enters_attacking: bool,
         revealed_misses: Vec<ObjectId>,
         rest_destination: Zone,
     },
@@ -2398,44 +2664,26 @@ pub enum WaitingFor {
         /// `repeat_until` is retained so the next iteration re-prompts.
         ability: Box<crate::types::ability::ResolvedAbility>,
     },
-    /// CR 702.85a: Player chooses to cast the cascaded card without paying its
-    /// mana cost or decline. Unlike `DiscoverChoice`, the declined card goes to
-    /// the bottom of the library in a random order together with the misses
-    /// (cascade has no put-to-hand branch).
-    CascadeChoice {
-        player: PlayerId,
-        /// The nonland card with MV < source MV that was hit.
-        hit_card: ObjectId,
-        /// Cards exiled as misses (go to bottom in random order alongside the
-        /// hit card if it is not cast).
-        exiled_misses: Vec<ObjectId>,
-        /// CR 702.85a: Source cascade spell's mana value, snapshotted at the
-        /// moment the trigger resolved. Needed at accept time to construct the
-        /// `CascadeResultingMvBelow` cast-time predicate so the resulting
-        /// spell's MV can be compared after X is chosen. Walking the stack
-        /// for the source would be fragile — nested cascades, copies, and
-        /// reordering would all misidentify the owning spell.
-        source_mv: u32,
-    },
     /// CR 401.4: Owner chooses to put a permanent on top or bottom of their library.
     TopOrBottomChoice {
         player: PlayerId,
         object_id: ObjectId,
-    },
-    /// CR 702.xxx: Paradigm (Strixhaven) — turn-based offer at the beginning of
-    /// the player's first precombat main phase. `offers` is the list of
-    /// exiled paradigm sources belonging to `player`; each may be cast as a
-    /// token copy without paying its mana cost, or passed. Assign when WotC
-    /// publishes SOS CR update.
-    ParadigmCastOffer {
-        player: PlayerId,
-        offers: Vec<ObjectId>,
     },
     /// CR 701.36a: Choose a creature token you control to create a copy of.
     PopulateChoice {
         player: PlayerId,
         source_id: ObjectId,
         valid_tokens: Vec<ObjectId>,
+    },
+    /// CR 701.30b: "Clash with an opponent" lets the clashing player choose
+    /// which opponent to clash with. Only entered when two or more opponents
+    /// are available (with one opponent there is no decision). `candidates`
+    /// is the set of legal opponents; `ability` is the resolving clash ability,
+    /// carried so the clash can be performed against the chosen opponent.
+    ClashChooseOpponent {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+        ability: Box<crate::types::ability::ResolvedAbility>,
     },
     /// CR 701.30c: After a clash, each player puts their revealed card on top or
     /// bottom of their library. Choices are made in APNAP order. `remaining` holds
@@ -2618,6 +2866,20 @@ pub enum WaitingFor {
         target_player: PlayerId,
         /// Type categories to fill (e.g., [Artifact, Creature, Enchantment, Land]).
         categories: Vec<CoreType>,
+        /// CR 101.4: Whether each player chooses independently or one player decides for all.
+        #[serde(default)]
+        chooser_scope: CategoryChooserScope,
+        /// Permanents eligible to be chosen for the category slots.
+        #[serde(default = "default_target_filter_permanent")]
+        choose_filter: TargetFilter,
+        /// Permanents in scope for the final sacrifice sweep.
+        #[serde(default = "default_target_filter_permanent")]
+        sacrifice_filter: TargetFilter,
+        /// Controller of the source ability. Needed after a save/reload or any
+        /// paused choice because `player` is the chooser, not necessarily the
+        /// source controller.
+        #[serde(default)]
+        source_controller: PlayerId,
         /// For each category, the eligible permanent IDs (battlefield objects matching that type).
         eligible_per_category: Vec<Vec<ObjectId>>,
         source_id: ObjectId,
@@ -2644,7 +2906,7 @@ pub enum WaitingFor {
         current_slot: usize,
     },
     /// CR 510.1c: Attacker with multiple blockers — controller divides damage as they choose.
-    /// CR 702.19b/c: Trample requires lethal to each blocker before excess to defending player.
+    /// CR 702.19b/c: Trample requires lethal to each blocker before assigning excess.
     AssignCombatDamage {
         player: PlayerId,
         attacker_id: ObjectId,
@@ -2674,6 +2936,17 @@ pub enum WaitingFor {
         total: u32,
         targets: Vec<TargetRef>,
         unit: DistributionUnit,
+    },
+    /// CR 122.5 + CR 608.2d: "Move any number of counters ... onto [set]"
+    /// chooses destinations and counts as the ability resolves.
+    MoveCountersDistribution {
+        player: PlayerId,
+        source_id: ObjectId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counter_type: Option<CounterType>,
+        available: Vec<(CounterType, u32)>,
+        destinations: Vec<ObjectId>,
+        pending_effect: Box<ResolvedAbility>,
     },
     /// CR 107.1c + CR 107.14: "Pay any amount of {E}" — mid-resolution prompt.
     /// Player picks any integer between `min` and `max` inclusive; the chosen
@@ -2722,10 +2995,13 @@ pub enum WaitingFor {
         per_creature: Vec<(ObjectId, crate::types::mana::ManaCost)>,
         pending: CombatTaxPending,
     },
-    /// CR 107.4f + CR 601.2f + CR 601.2h: Caster must choose mana-or-2-life for each
-    /// Phyrexian shard that has both options viable. Only pauses when the choice is
-    /// meaningful — if every shard resolves to `ShardOptions::ManaOnly` or
-    /// `ShardOptions::LifeOnly`, the engine auto-decides and skips this state.
+    /// CR 107.4f + CR 601.2f + CR 601.2h: Caster must approve every Phyrexian shard
+    /// that would deduct life — either by choosing between mana and 2 life
+    /// (`ShardOptions::ManaOrLife`) or by confirming the life-only payment
+    /// (`ShardOptions::LifeOnly`). Only `ShardOptions::ManaOnly` shards auto-resolve
+    /// and skip this state, since they carry no life consequence. The player may
+    /// always submit `CancelCast` here to abandon the cast rather than pay life
+    /// (issue #704).
     ///
     /// The `PendingCast` still lives in `GameState::pending_cast` (same ManaPayment
     /// convention), so multiplayer visibility filtering continues to clear inner detail
@@ -2761,12 +3037,12 @@ pub enum CombatDamageAssignmentMode {
 }
 
 /// CR 510.1c: A blocker with its lethal damage threshold for UI display.
-/// `lethal_minimum` is only enforced as a hard constraint for trample (CR 702.19b).
+/// `lethal_minimum` is only enforced as a hard constraint before trample excess (CR 702.19b).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageSlot {
     pub blocker_id: ObjectId,
     /// Lethal damage threshold. CR 702.2c: With deathtouch, lethal = 1.
-    /// Informational for non-trample; enforced for trample (CR 702.19b).
+    /// Informational for non-trample; enforced before trample excess (CR 702.19b).
     pub lethal_minimum: u32,
 }
 
@@ -2847,6 +3123,7 @@ impl WaitingFor {
             | WaitingFor::DeclareAttackers { player, .. }
             | WaitingFor::DeclareBlockers { player, .. }
             | WaitingFor::UntapChoice { player, .. }
+            | WaitingFor::ExertChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
             | WaitingFor::OrderTriggers { player, .. }
             | WaitingFor::CopyTargetChoice { player, .. }
@@ -2880,7 +3157,7 @@ impl WaitingFor {
             | WaitingFor::DefilerPayment { player, .. }
             | WaitingFor::AbilityModeChoice { player, .. }
             | WaitingFor::MultiTargetSelection { player, .. }
-            | WaitingFor::AdventureCastChoice { player, .. }
+            | WaitingFor::CastOffer { player, .. }
             | WaitingFor::ModalFaceChoice { player, .. }
             | WaitingFor::AlternativeCastChoice { player, .. }
             | WaitingFor::CastingVariantChoice { player, .. }
@@ -2888,21 +3165,11 @@ impl WaitingFor {
             | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }
             | WaitingFor::ChooseDungeonRoom { player, .. }
-            | WaitingFor::DiscardForCost { player, .. }
-            | WaitingFor::SacrificeForCost { player, .. }
-            | WaitingFor::ReturnToHandForCost { player, .. }
+            | WaitingFor::PayCost { player, .. }
             | WaitingFor::ActivationCostOneOfChoice { player, .. }
-            | WaitingFor::RemoveCounterForCost { player, .. }
             | WaitingFor::BlightChoice { player, .. }
-            | WaitingFor::TapCreaturesForSpellCost { player, .. }
-            | WaitingFor::BeholdForCost { player, .. }
-            | WaitingFor::TapCreaturesForManaAbility { player, .. }
-            | WaitingFor::DiscardForManaAbility { player, .. }
-            | WaitingFor::ExileFromBattlefieldForManaAbility { player, .. }
-            | WaitingFor::SacrificeForManaAbility { player, .. }
             | WaitingFor::PayManaAbilityMana { player, .. }
             | WaitingFor::ChooseManaColor { player, .. }
-            | WaitingFor::ExileForCost { player, .. }
             | WaitingFor::CollectEvidenceChoice { player, .. }
             | WaitingFor::HarmonizeTapChoice { player, .. }
             | WaitingFor::OptionalEffectChoice { player, .. }
@@ -2911,13 +3178,11 @@ impl WaitingFor {
             | WaitingFor::TributeChoice { player, .. }
             | WaitingFor::UnlessPayment { player, .. }
             | WaitingFor::UnlessPaymentChooseCost { player, .. }
-            | WaitingFor::DiscoverChoice { player, .. }
             | WaitingFor::RevealUntilKeptChoice { player, .. }
             | WaitingFor::RepeatDecision { player, .. }
-            | WaitingFor::CascadeChoice { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }
-            | WaitingFor::ParadigmCastOffer { player, .. }
             | WaitingFor::PopulateChoice { player, .. }
+            | WaitingFor::ClashChooseOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
             | WaitingFor::CompanionReveal { player, .. }
             | WaitingFor::ChooseLegend { player, .. }
@@ -2928,6 +3193,7 @@ impl WaitingFor {
             | WaitingFor::CopyRetarget { player, .. }
             | WaitingFor::AssignCombatDamage { player, .. }
             | WaitingFor::DistributeAmong { player, .. }
+            | WaitingFor::MoveCountersDistribution { player, .. }
             | WaitingFor::PayAmountChoice { player, .. }
             | WaitingFor::RetargetChoice { player, .. }
             | WaitingFor::WardDiscardChoice { player, .. }
@@ -2938,8 +3204,6 @@ impl WaitingFor {
             | WaitingFor::PhyrexianPayment { player, .. }
             | WaitingFor::DiscardChoice { player, .. }
             | WaitingFor::MiracleReveal { player, .. }
-            | WaitingFor::MiracleCastOffer { player, .. }
-            | WaitingFor::MadnessCastOffer { player, .. }
             | WaitingFor::CommanderZoneChoice { player, .. }
             | WaitingFor::SeparatePilesPartition { player, .. }
             | WaitingFor::SeparatePilesChoice { player, .. } => Some(*player),
@@ -2999,17 +3263,42 @@ impl WaitingFor {
             | WaitingFor::ModeChoice { pending_cast, .. }
             | WaitingFor::OptionalCostChoice { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
-            | WaitingFor::DiscardForCost { pending_cast, .. }
-            | WaitingFor::SacrificeForCost { pending_cast, .. }
-            | WaitingFor::ReturnToHandForCost { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
-            | WaitingFor::RemoveCounterForCost { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
-            | WaitingFor::TapCreaturesForSpellCost { pending_cast, .. }
-            | WaitingFor::BeholdForCost { pending_cast, .. }
-            | WaitingFor::ExileForCost { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
+            WaitingFor::PayCost { resume, .. } => match resume {
+                CostResume::Spell {
+                    spell: pending_cast,
+                } => Some(pending_cast),
+                CostResume::ManaAbility { .. } => None,
+            },
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
+                CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
+                CollectEvidenceResume::Effect { .. } => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Mutable variant of `pending_cast_ref()` for call sites that need to
+    /// annotate in-flight cast metadata (for example rollback markers).
+    pub fn pending_cast_mut(&mut self) -> Option<&mut PendingCast> {
+        match self {
+            WaitingFor::ChooseXValue { pending_cast, .. }
+            | WaitingFor::TargetSelection { pending_cast, .. }
+            | WaitingFor::ModeChoice { pending_cast, .. }
+            | WaitingFor::OptionalCostChoice { pending_cast, .. }
+            | WaitingFor::DefilerPayment { pending_cast, .. }
+            | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
+            | WaitingFor::BlightChoice { pending_cast, .. }
+            | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
+            WaitingFor::PayCost { resume, .. } => match resume {
+                CostResume::Spell {
+                    spell: pending_cast,
+                } => Some(pending_cast),
+                CostResume::ManaAbility { .. } => None,
+            },
+            WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
                 CollectEvidenceResume::Effect { .. } => None,
             },
@@ -3058,6 +3347,25 @@ impl WaitingFor {
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
         )
+    }
+
+    pub fn accepts_freeform_counter_move_distribution(&self) -> bool {
+        matches!(self, WaitingFor::MoveCountersDistribution { .. })
+    }
+
+    /// Combat-damage assignment whose legal divisions cannot be captured by the
+    /// candidate enumerator. `candidates.rs` lists exactly one
+    /// `AssignCombatDamage` candidate (the greedy trample-through split), so the
+    /// multiplayer legality gate would wrongly reject every other legal division
+    /// — e.g. keeping excess on the blocker instead of trampling it through
+    /// (CR 702.19b), or any of the freely-chosen splits across multiple blockers
+    /// (CR 510.1c/d). The combinatorial space of legal divisions is too large to
+    /// enumerate, so `apply()` (handle_assign_combat_damage) is the real
+    /// validation boundary: it enforces total conservation, blocker membership,
+    /// and the CR 702.19b lethal-before-excess precondition, and rejects illegal
+    /// submissions. The server bypasses its enumeration gate for these.
+    pub fn accepts_freeform_combat_damage_assignment(&self) -> bool {
+        matches!(self, WaitingFor::AssignCombatDamage { .. })
     }
 }
 
@@ -3225,6 +3533,22 @@ pub enum CastingVariant {
         /// `hand_cast_free_permissions_used`.
         frequency: super::statics::CastFrequency,
     },
+    /// CR 601.2a + CR 113.6b + CR 118.9a: Cast from exile via a
+    /// `StaticMode::ExileCastPermission` source (Maralen, Fae Ascendant).
+    /// Stores the granting permanent's ObjectId for per-turn tracking; the
+    /// finalize-cast step zeroes the spell's mana cost when the static carries
+    /// `without_paying_mana_cost: true` (the only published shape today). The
+    /// resolution-time routing matches a normal cast — no on-resolve exile
+    /// behavior — so this is treated as a casting-context tag, not as an
+    /// alternative cost.
+    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
+    /// resetting the per-turn slot when the source leaves and re-enters play.
+    ExilePermission {
+        source: ObjectId,
+        /// CR 601.2a: When `OncePerTurn`, casting consumes this source's slot
+        /// in `exile_cast_permissions_used`. `Unlimited` skips tracking.
+        frequency: super::statics::CastFrequency,
+    },
     /// CR 702.190a: Cast from HAND via the Sneak alternative cost. Legal only
     /// during the declare-blockers step. The returned unblocked attacker you
     /// control is part of the cost, bounced to its owner's hand at
@@ -3306,6 +3630,35 @@ pub enum CastingVariant {
     /// battlefield, the type-changing effect ends — it remains as an
     /// enchantment creature (overrides CR 704.5m for bestow Auras).
     Bestow,
+    /// CR 702.113a: Cast from hand via Awaken's alternative cost. The printed
+    /// mana cost is replaced by `Keyword::Awaken { cost }` at cast preparation
+    /// (mirrors `Overload`). A resolution rider is appended to the tail of the
+    /// spell's ability tree (`effects::awaken::append_awaken_rider`): the
+    /// printed effect resolves first, then "put N +1/+1 counters on target land
+    /// you control; that land becomes a 0/0 Elemental creature with haste; it's
+    /// still a land." Per CR 702.113b, the land target only exists on the awaken
+    /// variant — a normal cast appends no rider and requests no land target.
+    /// CR 702.113a: the spell goes to the graveyard normally, so this variant is
+    /// deliberately absent from `exiles_when_leaving_stack_for_any_reason`.
+    Awaken,
+    /// CR 702.148a-b + CR 612: Cast from hand via Cleave's alternative cost
+    /// (CR 118.9). The printed mana cost is replaced by `Keyword::Cleave(cost)`
+    /// at cast preparation (mirrors `Evoke`/`Overload`). Per CR 702.148a, paying
+    /// the cleave cost is a text-changing effect (CR 612) that removes every
+    /// square-bracketed span from the spell's rules text. The bracket-removed
+    /// ability set is parsed at build time into `CardFace::cleave_variant` and
+    /// swapped onto the stack object before preparation (mirroring the Bestow
+    /// object-mutation-before-prepare seam). Resolution routing matches a normal
+    /// spell — there is no on-resolve special behavior, so the spell goes to its
+    /// owner's graveyard like any instant/sorcery.
+    Cleave,
+    /// CR 702.162a + CR 712.14a: Cast from any castable zone via the More Than
+    /// Meets the Eye alternative cost. The printed mana cost is replaced by the
+    /// `Keyword::MoreThanMeetsTheEye(cost)` payload at cast preparation (mirrors
+    /// Overload). On resolution the spell is cast CONVERTED — the resulting
+    /// permanent enters the battlefield transformed (back face up) via the
+    /// existing `enter_transformed` ZoneChange seed. CR 701.28 (Convert).
+    MoreThanMeetsTheEye,
 }
 
 impl CastingVariant {
@@ -3336,6 +3689,16 @@ impl CastingVariant {
 
     pub fn replaces_stack_to_graveyard_with_exile(self) -> bool {
         matches!(self.stack_to_graveyard_replacement(), Some(Zone::Exile))
+    }
+
+    /// CR 400.7 + CR 712.11a: these variants put a non-front face on the
+    /// stack. If the spell leaves the stack without becoming that face on the
+    /// battlefield, restore the object's normal front-face characteristics.
+    pub fn restores_front_face_after_stack_exit(self) -> bool {
+        matches!(
+            self,
+            CastingVariant::Adventure | CastingVariant::Omen | CastingVariant::MoreThanMeetsTheEye
+        )
     }
 }
 
@@ -3464,12 +3827,76 @@ pub struct StackPaidSnapshot {
     pub distinct_colors_spent: u32,
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub kickers_paid: usize,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub additional_cost_payment_count: u32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub additional_cost_paid: bool,
     #[serde(default, skip_serializing_if = "CastingVariant::is_normal")]
     pub casting_variant: CastingVariant,
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub convoked_creatures: usize,
+}
+
+/// CR 603.2: Maintained index from `TriggerEventKey` to the candidate set of
+/// battlefield permanents whose triggers could match an event with that key.
+/// Consulted by `collect_pending_triggers` to skip the full battlefield scan
+/// that previously asked every permanent on every event whether it cared.
+///
+/// CR 603.2 invariant: every battlefield object whose trigger could match
+/// event E must appear in the union of buckets `keys_from_event(E)` looks up
+/// OR in `unclassified`. Over-approximation is correctness-preserving; under-
+/// approximation is a silent trigger drop.
+///
+/// CR 603.6a + CR 611.2e: Granted triggers (sliver lords, Cairn Wanderer,
+/// Bramble Sovereign) are materialized by `evaluate_layers` into
+/// `obj.trigger_definitions`. The index's battlefield-scoped portion is
+/// rebuilt at the end of `evaluate_layers` so it always reflects post-layer
+/// trigger sets. That rebuild is the **authoritative correctness path**; the
+/// `move_to_zone` hooks (`game::zones`) are incremental optimization only.
+///
+/// Backed by `im::HashMap` so `GameState::clone()` (hot path through AI
+/// search, casting affordability simulation, restriction probes) stays O(1)
+/// structural share rather than O(buckets × ObjectIds) deep copy.
+#[derive(Debug, Clone, Default)]
+pub struct TriggerIndex {
+    /// Buckets keyed by event shape. `SmallVec` keeps allocation off the heap
+    /// for the typical bucket size (≤ 4 candidates for most keys on most
+    /// battlefields).
+    pub by_key: im::HashMap<super::triggers::TriggerEventKey, smallvec::SmallVec<[ObjectId; 4]>>,
+    /// Catch-all bucket: any battlefield object whose trigger definitions
+    /// could not be statically classified by `keys_from_trigger_def`.
+    /// Consulted on every event regardless of `keys_from_event` output.
+    /// Empty for the common case where every trigger's mode is known.
+    pub unclassified: smallvec::SmallVec<[ObjectId; 4]>,
+}
+
+/// CR 611.2 + CR 613.1: Candidate pre-filter for `for_each_static_effect_source`.
+/// Holds the ids of objects that GENERATE ≥1 continuous effect for the TWO
+/// `layers_dirty`-covered source categories: battlefield permanents with a
+/// continuous `static_definitions` entry (including `GrantStaticAbility` hosts)
+/// and command-zone emblems. The opt-in-zone / off-zone arm (Incarnation cycle —
+/// Anger/Brawn/Filth/Wonder/Valor, `active_zones`-gated statics functioning from
+/// the graveyard) is INTENTIONALLY NOT indexed: its generator-set changes (e.g.
+/// self-milling an Anger into the graveyard) do not all mark `layers_dirty`
+/// (`zones.rs` marks dirty only on battlefield/hand transitions; mill/effect
+/// movers add no mark), so a `layers_dirty`-gated cache of off-zone generators
+/// would go stale. That arm keeps its live `state.objects` scan in
+/// `for_each_static_effect_source`.
+///
+/// Backed by `im::Vector` so `GameState::clone()` stays O(1) structural share
+/// (and `GameState: Send` is preserved — no `Rc`). Rebuilt at the TOP of
+/// `evaluate_layers` / `apply_layers_incremental` (after the Step-1 base reset,
+/// before the first gather — unlike `TriggerIndex`, this index is consulted
+/// MID-pass, so it must be fresh before the gather) and lazily on first consult
+/// after deserialize via the empty-index direct-scan fallback.
+#[derive(Debug, Clone, Default)]
+pub struct StaticSourceIndex {
+    /// Battlefield generators, in `state.battlefield` order (preserves the
+    /// current gather order; phased-out objects are included here and skipped
+    /// at consult via `is_phased_out()`).
+    pub battlefield_sources: im::Vector<ObjectId>,
+    /// Command-zone emblem generators, in `state.command_zone` order.
+    pub command_sources: im::Vector<ObjectId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3482,8 +3909,11 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_decision_controller: Option<PlayerId>,
 
-    // Central object store
-    pub objects: im::HashMap<ObjectId, GameObject>,
+    // Central object store. Uses FxBuildHasher (fast, deterministic) instead of
+    // the default SipHash RandomState: ObjectId is a thin integer key and this
+    // map is looked up millions of times per large-board resolution — profiling
+    // showed SipHash hashing + HAMT lookup was ~35% of resolution CPU.
+    pub objects: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher>,
     pub next_object_id: u64,
 
     // Shared zones
@@ -3594,7 +4024,43 @@ pub struct GameState {
     pub deferred_entry_events: Vec<GameEvent>,
 
     // Layer system
-    pub layers_dirty: bool,
+    // CONSERVATIVE: deserialized snapshots (e.g. the WASM-export repro) rebuild
+    // fully on first flush. The previous `bool` field serialized as `true`
+    // initially; skipping + defaulting to `Full` preserves that intent without
+    // serializing the (derived) entered-object set.
+    #[serde(skip, default = "LayersDirty::full")]
+    pub layers_dirty: LayersDirty,
+    /// CR 611.3a + CR 611.3b: truth of each CONTINUOUS static's SOURCE-LEVEL
+    /// (non-recipient-context) enabling condition as of the last full
+    /// `evaluate_layers`. Read by the incremental-flush truth-delta
+    /// short-circuit to skip escalation when an entry perturbs the gate but
+    /// does not flip it. Recipient-context conditions are NEVER stored here
+    /// (their truth is per-recipient; `source_condition_gate_passes` is only an
+    /// over-approximation for them) and always escalate. Refreshed wholesale
+    /// every full eval (`refresh_static_gate_truth`). `#[serde(skip)]` derived
+    /// state, like `layers_dirty`/`trigger_index`. NOTE: a plain
+    /// `std::collections::HashMap` (not `im`-backed), so it deep-clones on every
+    /// `GameState::clone()` — kept small by storing only source-level-gated
+    /// continuous statics (a small fraction of the board).
+    #[serde(skip)]
+    pub static_gate_truth: std::collections::HashMap<StaticGateKey, bool>,
+    /// CR 603.2: Candidate pre-filter for `collect_pending_triggers`. Rebuilt
+    /// lazily after deserialize via a sentinel check at the top of the consult
+    /// site; rebuilt eagerly at the end of `evaluate_layers` (CR 611.2e) so the
+    /// post-layer trigger set is reflected. `#[serde(skip)]` because the index
+    /// is derived state — reconstructed from `state.battlefield` + per-object
+    /// `trigger_definitions` whenever needed.
+    #[serde(skip)]
+    pub trigger_index: TriggerIndex,
+    /// CR 611.2 + CR 613.1: Derived generator index for the layer gather.
+    /// `#[serde(skip)]` derived state (like `trigger_index`/`layers_dirty`);
+    /// reconstructed from `state.battlefield` + `state.command_zone` +
+    /// per-object `static_definitions` at the top of every layer pass, and
+    /// lazily on first consult after deserialize via the empty-index fallback.
+    /// INTENTIONALLY omitted from `impl PartialEq for GameState` — derived state
+    /// must not break AI-search dedup on semantically-identical positions.
+    #[serde(skip)]
+    pub static_source_index: StaticSourceIndex,
     pub next_timestamp: u64,
     #[serde(skip, default = "PublicStateDirty::all_dirty")]
     pub public_state_dirty: PublicStateDirty,
@@ -3651,6 +4117,16 @@ pub struct GameState {
     /// trigger context, consumed when the pending trigger is put on the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_trigger_event_batch: Vec<GameEvent>,
+    /// CR 603.3c + CR 603.3d: ObjectId of the stack entry currently being
+    /// constructed (mode / target / division still being chosen by the
+    /// controller). `Some` only while a pause-path `WaitingFor` is outstanding.
+    ///
+    /// "Push first, choose second" invariant: when this is `Some(id)`, the top
+    /// of `state.stack` is the trigger entry with that id, and its
+    /// `ResolvedAbility` has unfilled slots that the active `WaitingFor` is
+    /// gathering. `stack::resolve_top` refuses to fire on this id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_trigger_entry: Option<ObjectId>,
     /// CR 113.2c + CR 603.2 + CR 603.3b: Queue of triggers that fired in the
     /// same pass but were deferred because an earlier trigger needed player
     /// input (modal choice, target selection, or division). Each instance of a
@@ -3709,6 +4185,12 @@ pub struct GameState {
     // Commander support
     #[serde(default)]
     pub commander_cast_count: HashMap<ObjectId, u32>,
+
+    /// Owner stamped when a commander cast from the command zone is recorded.
+    /// CR 903.8: `commander_casts_from_command_zone` must count committed casts
+    /// even when the recorded `ObjectId` no longer has `is_commander` set.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub commander_cast_owners: HashMap<ObjectId, PlayerId>,
 
     /// CR 903.9a: Commanders whose owner declined the zone-return choice this
     /// SBA cycle. Cleared when the commander changes zones again (giving the
@@ -3870,6 +4352,25 @@ pub struct GameState {
     /// `planeswalker::can_activate_loyalty_ability`. Cleared at turn start.
     #[serde(default)]
     pub extra_loyalty_activations_this_turn: HashMap<PlayerId, u32>,
+    /// CR 701.43d: Permanents exerted this turn via the "you may exert it as it
+    /// attacks" optional attack cost (Combat Celebrant, Glory-Bound Initiate,
+    /// Exemplar of Strength, ...). Gates the linked "when you do" trigger to
+    /// fire at most once per turn ("if this creature hasn't been exerted this
+    /// turn") and prevents re-prompting in extra combat phases. Cleared at turn
+    /// start. Distinct from the exert *cost* path (a `CantUntap` transient), this
+    /// set is the authoritative "was exerted this turn" record.
+    #[serde(default)]
+    pub exerted_this_turn: std::collections::HashSet<ObjectId>,
+    /// CR 508.1g + CR 508.2: Declaration events (e.g. `AttackersDeclared`) held
+    /// while the active player resolves the optional "exert as it attacks"
+    /// sub-step. Because triggers are matched against the per-action event slice
+    /// (which does not persist across the interactive exert prompts), the
+    /// declaration events are buffered here and processed together with the
+    /// `CreatureExerted` events once the exert queue drains — so all
+    /// declaration/exert triggers go on the stack simultaneously per CR 508.2.
+    /// Empty except mid-declaration; drained by `finish_declare_attackers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_attack_trigger_events: Vec<crate::types::events::GameEvent>,
     /// CR 603.4: Per-ability per-turn resolution counter.
     /// Keyed by `(source_id, ability_index)` — identifies a specific printed
     /// ability on a specific source object. Incremented at the top of
@@ -3916,6 +4417,32 @@ pub struct GameState {
     /// consumed this turn. Keyed by the granting source's ObjectId.
     #[serde(default)]
     pub exile_play_permissions_used: HashSet<ObjectId>,
+    /// CR 601.2a + CR 113.6b: Tracks `OncePerTurn` `StaticMode::ExileCastPermission`
+    /// sources that have already had a spell cast through them this turn
+    /// (Maralen, Fae Ascendant — "Once each turn, you may cast …"). Keyed by
+    /// the granting permanent's ObjectId. `Unlimited` frequency permissions
+    /// never populate this set. Cleared at the start of each turn alongside
+    /// the other per-turn cast-permission slots.
+    /// CR 400.7: Zone change creates a new source `ObjectId`, naturally
+    /// resetting the slot when the source leaves and re-enters play.
+    #[serde(default)]
+    pub exile_cast_permissions_used: HashSet<ObjectId>,
+    /// CR 113.6b + CR 601.2a: Per-turn rolling list of cards that have been
+    /// exiled "with" each linked-exile source during the current turn. Keyed
+    /// by the source's `ObjectId`; the `Vec` is the list of card `ObjectId`s
+    /// exiled this turn by that source, in exile order. Populated by
+    /// `exile_links::push_exiled_with_source_this_turn` whenever a tracked
+    /// exile happens; cleared at the start of each turn so "cards exiled with
+    /// ~ this turn" cast permissions (Maralen, Fae Ascendant) only see the
+    /// current turn's pool.
+    ///
+    /// Distinct from `exile_links`: those persist for the lifetime of the
+    /// source-link contract (CR 610.3) and back the open-ended "cards exiled
+    /// with ~" filter. This map is the turn-scoped slice and is consulted
+    /// only by `StaticMode::ExileCastPermission` and similar per-turn
+    /// permissions.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub cards_exiled_with_source_this_turn: HashMap<ObjectId, Vec<ObjectId>>,
     /// CR 702.94a + CR 603.11: Per-player first-card-drawn-this-turn tracking for
     /// miracle's linked triggered ability. Populated by the draw pipeline on the
     /// first `CardDrawn` event each turn per player; reset at turn start. The
@@ -3969,6 +4496,20 @@ pub struct GameState {
     pub players_attacked_this_turn: HashSet<PlayerId>,
     #[serde(default)]
     pub attacking_creatures_this_turn: HashMap<PlayerId, u32>,
+    /// CR 508.6 + CR 508.1b: For each attacking player, the set of defending
+    /// players they attacked this turn, accumulated across every combat's
+    /// declare-attackers step (CR 508.5 "defending player": planeswalker/battle
+    /// attacks resolve to controller/protector). Counted by
+    /// `PlayerFilter::OpponentAttackedThisTurn` for "opponents you attacked this
+    /// turn" (Militant Angel).
+    #[serde(default)]
+    pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
+    /// CR 508.6 + CR 508.1b: For each creature declared as an attacker this
+    /// turn, the defending players it attacked. This is the source-specific
+    /// counterpart to `attacked_defenders_this_turn` for text like "each player
+    /// this creature attacked this turn" (Angel of Destiny).
+    #[serde(default)]
+    pub creature_attacked_defenders_this_turn: HashMap<ObjectId, HashSet<PlayerId>>,
     /// CR 500.8 + CR 506.1: Number of combat phases that have begun this turn.
     /// Used by intervening-if triggers that only fire during the first combat phase.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -4007,8 +4548,11 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub battlefield_entries_this_turn: Vec<BattlefieldEntryRecord>,
     /// CR 120.1: Damage records this turn for "was dealt damage by" condition queries.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub damage_dealt_this_turn: Vec<DamageRecord>,
+    /// Backed by `im::Vector` so `GameState::clone()` structurally shares the
+    /// `DamageRecord` snapshots (each holds a `String` + several `Vec`s) instead
+    /// of deep-copying them on the AI-search hot path.
+    #[serde(default)]
+    pub damage_dealt_this_turn: im::Vector<DamageRecord>,
     /// CR 700.14: Cumulative mana spent on spells this turn per player (for Expend triggers).
     #[serde(default)]
     pub mana_spent_on_spells_this_turn: HashMap<PlayerId, u32>,
@@ -4086,6 +4630,12 @@ pub struct GameState {
     /// selected branch has finished resolving, including any nested choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_choose_one_of: Option<PendingChooseOneOf>,
+
+    /// CR 122.5: Pending atomic counter moves selected during a resolution-time
+    /// distribution prompt. Drained before normal pending continuations so
+    /// replacement choices inside a move resume the remaining selected moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_counter_moves: Option<PendingCounterMoveQueue>,
 
     /// Pending optional effect ability chain, awaiting player accept/decline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4207,6 +4757,19 @@ pub struct GameState {
     /// damage, counter removal). Read by QuantityRef::PreviousEffectAmount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_amount: Option<i32>,
+
+    /// CR 706.2: The actual result (natural + modifiers, clamped at 0) of the
+    /// most recent die roll within the current ability resolution. Set by
+    /// `roll_die::resolve` immediately after emitting `GameEvent::DieRolled`, read by
+    /// `QuantityRef::EventContextAmount` so an inline "equal to the result" sub_ability
+    /// (CR 706.4 — no results table) consumes the rolled value rather than the
+    /// numeric amount of the triggering event (e.g. combat damage). Resolution-scoped:
+    /// cleared at `apply()` entry and at every depth-0 chain entry, so it is `Some`
+    /// only between the roll and the sub_ability that reads it. Follows the
+    /// `last_effect_amount` PartialEq-OMISSION pattern: NOT compared in the
+    /// hand-written `PartialEq` (safe — always cleared at comparison boundaries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub die_result_this_resolution: Option<u8>,
 
     /// Count from the most recent interactive effect resolution (e.g., number of cards
     /// actually discarded in a DiscardChoice). Used as fallback for EventContextAmount
@@ -4453,6 +5016,11 @@ pub struct PendingSpellResolution {
     /// path in `stack.rs`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<crate::types::ability::KickerVariant>,
+    /// CR 601.2b/f/h + CR 702.157a: Carry non-kicker additional-cost payment
+    /// count through the replacement-choice detour, matching the direct
+    /// stack-resolution path.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub additional_cost_payment_count: u32,
     /// CR 702.51c: Carry convoked-creature data through the replacement-choice
     /// detour so ETB triggers/replacements see the same cast history as the
     /// direct resolution path.
@@ -4510,6 +5078,25 @@ impl GameState {
             .collect()
     }
 
+    /// CR 508.6: True if `attacker` declared one or more creatures attacking
+    /// `defender` this turn (reads the per-turn attacked-defenders ledger).
+    pub fn has_attacked(&self, attacker: PlayerId, defender: PlayerId) -> bool {
+        self.attacked_defenders_this_turn
+            .get(&attacker)
+            .is_some_and(|defenders| defenders.contains(&defender))
+    }
+
+    /// CR 508.6: True if `attacker` was declared attacking `defender` this turn.
+    pub fn creature_attacked_player_this_turn(
+        &self,
+        attacker: ObjectId,
+        defender: PlayerId,
+    ) -> bool {
+        self.creature_attacked_defenders_this_turn
+            .get(&attacker)
+            .is_some_and(|defenders| defenders.contains(&defender))
+    }
+
     /// Create a new game with the given format configuration and player count.
     pub fn new(config: FormatConfig, player_count: u8, seed: u64) -> Self {
         let players: Vec<Player> = (0..player_count)
@@ -4528,7 +5115,7 @@ impl GameState {
             players,
             priority_player: PlayerId(0),
             turn_decision_controller: None,
-            objects: im::HashMap::new(),
+            objects: im::HashMap::default(),
             next_object_id: 1,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
@@ -4554,7 +5141,10 @@ impl GameState {
             post_replacement_event_target: None,
             pending_spell_resolution: None,
             deferred_entry_events: Vec::new(),
-            layers_dirty: true,
+            layers_dirty: LayersDirty::full(),
+            static_gate_truth: std::collections::HashMap::new(),
+            trigger_index: TriggerIndex::default(),
+            static_source_index: StaticSourceIndex::default(),
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
             state_revision: 0,
@@ -4566,6 +5156,7 @@ impl GameState {
             spells_cast_last_turn: None,
             pending_trigger: None,
             pending_trigger_event_batch: Vec::new(),
+            pending_trigger_entry: None,
             deferred_triggers: Vec::new(),
             pending_trigger_order: None,
             exile_links: Vec::new(),
@@ -4575,6 +5166,7 @@ impl GameState {
             next_tracked_set_id: 1,
             chain_tracked_set_id: None,
             commander_cast_count: HashMap::new(),
+            commander_cast_owners: HashMap::new(),
             extra_turns: Vec::new(),
             turns_to_skip: vec![0; player_count as usize],
             steps_to_skip: vec![HashMap::new(); player_count as usize],
@@ -4607,12 +5199,16 @@ impl GameState {
             crew_activated_this_turn: HashSet::new(),
             loyalty_abilities_activated_this_turn: HashMap::new(),
             extra_loyalty_activations_this_turn: HashMap::new(),
+            exerted_this_turn: std::collections::HashSet::new(),
+            pending_attack_trigger_events: Vec::new(),
             ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
             graveyard_cast_permissions_used_per_type: HashSet::new(),
             pending_permanent_type_slot: None,
             hand_cast_free_permissions_used: HashSet::new(),
             exile_play_permissions_used: HashSet::new(),
+            exile_cast_permissions_used: HashSet::new(),
+            cards_exiled_with_source_this_turn: HashMap::new(),
             first_card_drawn_this_turn: HashMap::new(),
             cards_drawn_this_turn: HashMap::new(),
             pending_miracle_offers: Vec::new(),
@@ -4624,6 +5220,8 @@ impl GameState {
             players_attacked_this_step: HashSet::new(),
             players_attacked_this_turn: HashSet::new(),
             attacking_creatures_this_turn: HashMap::new(),
+            attacked_defenders_this_turn: HashMap::new(),
+            creature_attacked_defenders_this_turn: HashMap::new(),
             combat_phases_started_this_turn: 0,
             creatures_attacked_this_turn: HashSet::new(),
             creatures_blocked_this_turn: HashSet::new(),
@@ -4636,7 +5234,7 @@ impl GameState {
             sacrificed_permanents_this_turn: Vec::new(),
             zone_changes_this_turn: Vec::new(),
             battlefield_entries_this_turn: Vec::new(),
-            damage_dealt_this_turn: Vec::new(),
+            damage_dealt_this_turn: im::Vector::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             pending_spell_cost_reductions: Vec::new(),
             pending_next_spell_modifiers: Vec::new(),
@@ -4650,6 +5248,7 @@ impl GameState {
             pending_change_zone_iteration: None,
             pending_repeat_until: None,
             pending_choose_one_of: None,
+            pending_counter_moves: None,
             pending_optional_effect: None,
             pending_optional_trigger_event: None,
             pending_optional_trigger_match_count: None,
@@ -4668,6 +5267,7 @@ impl GameState {
             last_vote_ballots: im::Vector::new(),
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
+            die_result_this_resolution: None,
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
             clause_minimum_snapshot: None,
@@ -4773,7 +5373,7 @@ impl GameState {
                 condition,
                 source_name,
             });
-        self.layers_dirty = true;
+        self.layers_dirty.mark_full();
         id
     }
 
@@ -4836,6 +5436,13 @@ impl PartialEq for GameState {
             && self.pending_spell_resolution == other.pending_spell_resolution
             && self.deferred_entry_events == other.deferred_entry_events
             && self.layers_dirty == other.layers_dirty
+            // `static_gate_truth` is INTENTIONALLY excluded: unlike
+            // `layers_dirty`/`public_state_dirty` (which encode pending work),
+            // it is pure derived/self-healing state (reconstructed at the next
+            // full eval; implied entirely by objects + battlefield +
+            // static_definitions). Including it would break AI-search dedup on
+            // semantically-identical positions whose caches differ only in
+            // freshness.
             && self.next_timestamp == other.next_timestamp
             && self.public_state_dirty == other.public_state_dirty
             && self.state_revision == other.state_revision
@@ -4843,6 +5450,7 @@ impl PartialEq for GameState {
             && self.spells_cast_this_turn == other.spells_cast_this_turn
             && self.spells_cast_last_turn == other.spells_cast_last_turn
             && self.pending_trigger == other.pending_trigger
+            && self.pending_trigger_entry == other.pending_trigger_entry
             && self.deferred_triggers == other.deferred_triggers
             && self.pending_trigger_order == other.pending_trigger_order
             && self.exile_links == other.exile_links
@@ -4852,6 +5460,7 @@ impl PartialEq for GameState {
             && self.next_tracked_set_id == other.next_tracked_set_id
             && self.chain_tracked_set_id == other.chain_tracked_set_id
             && self.commander_cast_count == other.commander_cast_count
+            && self.commander_cast_owners == other.commander_cast_owners
             && self.commander_declined_zone_return == other.commander_declined_zone_return
             && self.extra_turns == other.extra_turns
             && self.turns_to_skip == other.turns_to_skip
@@ -4891,6 +5500,8 @@ impl PartialEq for GameState {
             && self.pending_permanent_type_slot == other.pending_permanent_type_slot
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.exile_play_permissions_used == other.exile_play_permissions_used
+            && self.exile_cast_permissions_used == other.exile_cast_permissions_used
+            && self.cards_exiled_with_source_this_turn == other.cards_exiled_with_source_this_turn
             && self.first_card_drawn_this_turn == other.first_card_drawn_this_turn
             && self.cards_drawn_this_turn == other.cards_drawn_this_turn
             && self.pending_miracle_offers == other.pending_miracle_offers
@@ -4903,6 +5514,9 @@ impl PartialEq for GameState {
             && self.players_attacked_this_step == other.players_attacked_this_step
             && self.players_attacked_this_turn == other.players_attacked_this_turn
             && self.attacking_creatures_this_turn == other.attacking_creatures_this_turn
+            && self.attacked_defenders_this_turn == other.attacked_defenders_this_turn
+            && self.creature_attacked_defenders_this_turn
+                == other.creature_attacked_defenders_this_turn
             && self.combat_phases_started_this_turn == other.combat_phases_started_this_turn
             && self.creatures_attacked_this_turn == other.creatures_attacked_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn
@@ -4930,6 +5544,7 @@ impl PartialEq for GameState {
             && self.pending_change_zone_iteration == other.pending_change_zone_iteration
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of
+            && self.pending_counter_moves == other.pending_counter_moves
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities
             && self.resolving_begin_game_abilities == other.resolving_begin_game_abilities
@@ -5013,6 +5628,39 @@ mod tests {
             cards: vec![],
         }
         .accepts_freeform_card_selection());
+    }
+
+    #[test]
+    fn accepts_freeform_combat_damage_assignment_for_assign_combat_damage() {
+        // CR 510.1c/d + CR 702.19b: legal damage divisions (e.g. keeping excess
+        // on the blocker rather than trampling through) cannot be enumerated as
+        // candidate actions, so the multiplayer gate must bypass exact-match and
+        // let apply() validate the submitted division.
+        assert!(WaitingFor::AssignCombatDamage {
+            player: PlayerId(0),
+            attacker_id: ObjectId(1),
+            total_damage: 3,
+            blockers: vec![],
+            assignment_modes: vec![],
+            trample: None,
+            defending_player: PlayerId(1),
+            attack_target: crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            pw_loyalty: None,
+            pw_controller: None,
+        }
+        .accepts_freeform_combat_damage_assignment());
+
+        // Other states must NOT be freeform for combat damage — they remain
+        // validated by candidate enumeration.
+        assert!(!WaitingFor::Priority {
+            player: PlayerId(0),
+        }
+        .accepts_freeform_combat_damage_assignment());
+        assert!(!WaitingFor::ScryChoice {
+            player: PlayerId(0),
+            cards: vec![],
+        }
+        .accepts_freeform_combat_damage_assignment());
     }
 
     #[test]
@@ -5126,10 +5774,12 @@ mod tests {
                 additional_cost_flow: None,
                 deferred_modal_choice: None,
                 deferred_target_selection: false,
+                chosen_modes: Vec::new(),
                 additional_cost_decided: false,
                 declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
                 convoked_creatures: Vec::new(),
+                cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
             })
         }
@@ -5251,6 +5901,7 @@ mod tests {
                 legal_targets: vec![TargetRef::Object(ObjectId(1))],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: vec![],
             selection: TargetSelectionProgress::default(),
             source_id: None,
@@ -5273,7 +5924,10 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::OptionalCostChoice {
             player: PlayerId(0),
-            cost: AdditionalCost::Optional(crate::types::ability::AbilityCost::Blight { count: 1 }),
+            cost: AdditionalCost::Optional {
+                cost: crate::types::ability::AbilityCost::Blight { count: 1 },
+                repeatable: false,
+            },
             times_kicked: 0,
             pending_cast: dummy_pending(),
         }));
@@ -5292,37 +5946,59 @@ mod tests {
             ability_cost: None,
             unavailable_modes: vec![],
         }));
-        variants.push(Box::new(WaitingFor::DiscardForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::Discard,
+            choices: vec![ObjectId(1)],
             count: 1,
-            cards: vec![ObjectId(1)],
-            pending_cast: dummy_pending(),
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
-        variants.push(Box::new(WaitingFor::ExileForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
-            zone: ExileCostSourceZone::Hand,
+            kind: PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Hand,
+            },
+            choices: vec![ObjectId(1)],
             count: 1,
-            cards: vec![ObjectId(1)],
-            pending_cast: dummy_pending(),
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
-        variants.push(Box::new(WaitingFor::ExileForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
-            zone: ExileCostSourceZone::Graveyard,
+            kind: PayCostKind::ExileFromZone {
+                zone: ExileCostSourceZone::Graveyard,
+            },
+            choices: vec![ObjectId(1)],
             count: 1,
-            cards: vec![ObjectId(1)],
-            pending_cast: dummy_pending(),
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
-        variants.push(Box::new(WaitingFor::SacrificeForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::Sacrifice,
+            choices: vec![ObjectId(1)],
             count: 1,
-            permanents: vec![ObjectId(1)],
-            pending_cast: dummy_pending(),
+            min_count: 1,
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
-        variants.push(Box::new(WaitingFor::ReturnToHandForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::ReturnToHand,
+            choices: vec![ObjectId(1)],
             count: 1,
-            permanents: vec![ObjectId(1)],
-            pending_cast: dummy_pending(),
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
         variants.push(Box::new(WaitingFor::BlightChoice {
             player: PlayerId(0),
@@ -5335,12 +6011,17 @@ mod tests {
             eligible_creatures: vec![ObjectId(1)],
             pending_cast: dummy_pending(),
         }));
-        variants.push(Box::new(WaitingFor::BeholdForCost {
+        variants.push(Box::new(WaitingFor::PayCost {
             player: PlayerId(0),
-            count: 1,
+            kind: PayCostKind::Behold {
+                action: BeholdCostAction::ChooseOrReveal,
+            },
             choices: vec![ObjectId(1)],
-            action: BeholdCostAction::ChooseOrReveal,
-            pending_cast: dummy_pending(),
+            count: 1,
+            min_count: 0,
+            resume: CostResume::Spell {
+                spell: dummy_pending(),
+            },
         }));
         variants.push(Box::new(WaitingFor::ConniveDiscard {
             player: PlayerId(0),
@@ -5370,7 +6051,7 @@ mod tests {
             destination: None,
             enter_tapped: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under_player: None,
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
@@ -5417,10 +6098,12 @@ mod tests {
             additional_cost_flow: None,
             deferred_modal_choice: None,
             deferred_target_selection: false,
+            chosen_modes: Vec::new(),
             additional_cost_decided: false,
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
         });
         let choose_x = WaitingFor::ChooseXValue {
@@ -5456,28 +6139,32 @@ mod tests {
         assert!(!priority.has_pending_cast());
         assert!(priority.pending_cast_ref().is_none());
 
-        // TapCreaturesForManaAbility carries PendingManaAbility, not PendingCast.
-        // A mana ability activated inside a spell cast still routes the cast
-        // through the outer ManaPayment state, so excluding this variant here
-        // does not lose mid-cast tracking.
-        let tap_mana = WaitingFor::TapCreaturesForManaAbility {
+        // A PayCost with a ManaAbility resume carries PendingManaAbility, not
+        // PendingCast. A mana ability activated inside a spell cast still routes
+        // the cast through the outer ManaPayment state, so excluding this
+        // variant here does not lose mid-cast tracking.
+        let tap_mana = WaitingFor::PayCost {
             player: PlayerId(0),
+            kind: PayCostKind::TapCreatures,
+            choices: vec![ObjectId(1)],
             count: 1,
-            creatures: vec![ObjectId(1)],
-            pending_mana_ability: Box::new(PendingManaAbility {
-                player: PlayerId(0),
-                source_id: ObjectId(1),
-                ability_index: 0,
-                color_override: None,
-                resume: ManaAbilityResume::Priority,
-                chosen_tappers: Vec::new(),
-                chosen_discards: Vec::new(),
-                chosen_mana_payment: None,
-                chosen_exiled_battlefield: Vec::new(),
-                chosen_sacrificed_battlefield: Vec::new(),
-                cost_paid_object: None,
-                batch_siblings: Vec::new(),
-            }),
+            min_count: 0,
+            resume: CostResume::ManaAbility {
+                mana_ability: Box::new(PendingManaAbility {
+                    player: PlayerId(0),
+                    source_id: ObjectId(1),
+                    ability_index: 0,
+                    color_override: None,
+                    resume: ManaAbilityResume::Priority,
+                    chosen_tappers: Vec::new(),
+                    chosen_discards: Vec::new(),
+                    chosen_mana_payment: None,
+                    chosen_exiled: Vec::new(),
+                    chosen_sacrificed_battlefield: Vec::new(),
+                    cost_paid_object: None,
+                    batch_siblings: Vec::new(),
+                }),
+            },
         };
         assert!(!tap_mana.has_pending_cast());
         assert!(tap_mana.pending_cast_ref().is_none());
@@ -5576,6 +6263,7 @@ mod tests {
                 ],
                 optional: false,
             }],
+            mode_labels: Vec::new(),
             target_constraints: vec![],
             selection: TargetSelectionProgress::default(),
             source_id: Some(ObjectId(10)),
@@ -5602,7 +6290,7 @@ mod tests {
             destination: Some(Zone::Battlefield),
             enter_tapped: true,
             enter_transformed: false,
-            under_your_control: true,
+            enters_under_player: Some(PlayerId(0)),
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
@@ -5612,6 +6300,170 @@ mod tests {
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
         assert_eq!(wf, deserialized);
         assert!(json.contains("\"EffectZoneChoice\""));
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 110.2a: serde-compat coverage for the resolved-once runtime carriers
+    // (`PendingChangeZoneIteration` and `WaitingFor::EffectZoneChoice`).
+    // Modern shape is `Option<PlayerId>` on `enters_under_player`; the
+    // legacy on-disk shape is the boolean `under_your_control`. Routed via
+    // `#[serde(alias)]` + `deserialize_enters_under_player_compat`. Legacy
+    // `true` collapses to `None` (+ tracing::warn) because PlayerId cannot
+    // be reconstructed at deser time without ability context. See
+    // `LEGACY_DESER_ETB_CONTROLLER_2026Q2`.
+    // ---------------------------------------------------------------------
+
+    /// Minimal JSON payload for a `PendingChangeZoneIteration` carrying a
+    /// custom `enters_under_player` slot (passed through verbatim).
+    fn pending_change_zone_iteration_json(enters_under_slot: &str) -> String {
+        format!(
+            r#"{{
+                "remaining": [],
+                "source_id": 7,
+                "controller": 0,
+                "origin": null,
+                "destination": "Battlefield",
+                "enter_transformed": false,
+                "enter_tapped": false,
+                {enters_under_slot}
+                "enters_attacking": false,
+                "track_exiled_by_source": false,
+                "effect_kind": "ChangeZone"
+            }}"#
+        )
+    }
+
+    #[test]
+    fn pending_change_zone_iteration_legacy_bool_true_deserializes_to_none() {
+        let json = pending_change_zone_iteration_json(r#""under_your_control": true,"#);
+        let parsed: PendingChangeZoneIteration =
+            serde_json::from_str(&json).expect("legacy true should deserialize");
+        assert_eq!(parsed.enters_under_player, None);
+    }
+
+    #[test]
+    fn pending_change_zone_iteration_legacy_bool_false_deserializes_to_none() {
+        let json = pending_change_zone_iteration_json(r#""under_your_control": false,"#);
+        let parsed: PendingChangeZoneIteration =
+            serde_json::from_str(&json).expect("legacy false should deserialize");
+        assert_eq!(parsed.enters_under_player, None);
+    }
+
+    #[test]
+    fn pending_change_zone_iteration_modern_shape_roundtrips() {
+        let original = PendingChangeZoneIteration {
+            remaining: vec![],
+            source_id: ObjectId(7),
+            controller: PlayerId(0),
+            origin: None,
+            destination: Zone::Battlefield,
+            enter_transformed: false,
+            enter_tapped: false,
+            enters_under_player: Some(PlayerId(1)),
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            duration: None,
+            track_exiled_by_source: false,
+            effect_kind: crate::types::ability::EffectKind::ChangeZone,
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        // Modern shape must be emitted, NOT the legacy bool field.
+        assert!(
+            json.contains("\"enters_under_player\""),
+            "expected modern field name in: {json}"
+        );
+        assert!(
+            !json.contains("\"under_your_control\""),
+            "legacy field must not be emitted: {json}"
+        );
+        let parsed: PendingChangeZoneIteration = serde_json::from_str(&json).expect("roundtrip");
+        assert_eq!(parsed.enters_under_player, Some(PlayerId(1)));
+        assert_eq!(parsed, original);
+    }
+
+    /// Minimal JSON payload for `WaitingFor::EffectZoneChoice` carrying a
+    /// custom `enters_under_player` slot (passed through verbatim).
+    /// `WaitingFor` uses `#[serde(tag = "type", content = "data")]`, so the
+    /// variant body is wrapped in `"data": { ... }`.
+    fn effect_zone_choice_json(enters_under_slot: &str) -> String {
+        format!(
+            r#"{{
+                "type": "EffectZoneChoice",
+                "data": {{
+                    "player": 0,
+                    "cards": [],
+                    "count": 1,
+                    "source_id": 10,
+                    "effect_kind": "ChangeZone",
+                    "zone": "Hand",
+                    "destination": "Battlefield",
+                    {enters_under_slot}
+                    "count_param": 0
+                }}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn effect_zone_choice_legacy_bool_true_deserializes_to_none() {
+        let json = effect_zone_choice_json(r#""under_your_control": true,"#);
+        let parsed: WaitingFor =
+            serde_json::from_str(&json).expect("legacy true should deserialize");
+        match parsed {
+            WaitingFor::EffectZoneChoice {
+                enters_under_player,
+                ..
+            } => assert_eq!(enters_under_player, None),
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_zone_choice_legacy_bool_false_deserializes_to_none() {
+        let json = effect_zone_choice_json(r#""under_your_control": false,"#);
+        let parsed: WaitingFor =
+            serde_json::from_str(&json).expect("legacy false should deserialize");
+        match parsed {
+            WaitingFor::EffectZoneChoice {
+                enters_under_player,
+                ..
+            } => assert_eq!(enters_under_player, None),
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_zone_choice_modern_shape_roundtrips_with_player_id() {
+        let wf = WaitingFor::EffectZoneChoice {
+            player: PlayerId(0),
+            cards: vec![],
+            count: 1,
+            min_count: 0,
+            up_to: false,
+            source_id: ObjectId(10),
+            effect_kind: crate::types::ability::EffectKind::ChangeZone,
+            zone: Zone::Hand,
+            destination: Some(Zone::Battlefield),
+            enter_tapped: false,
+            enter_transformed: false,
+            enters_under_player: Some(PlayerId(1)),
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            count_param: 0,
+        };
+        let json = serde_json::to_string(&wf).expect("serialize");
+        // Modern shape must be emitted, NOT the legacy bool field.
+        assert!(
+            json.contains("\"enters_under_player\""),
+            "expected modern field name in: {json}"
+        );
+        assert!(
+            !json.contains("\"under_your_control\""),
+            "legacy field must not be emitted: {json}"
+        );
+        let parsed: WaitingFor = serde_json::from_str(&json).expect("roundtrip");
+        assert_eq!(parsed, wf);
     }
 
     #[test]

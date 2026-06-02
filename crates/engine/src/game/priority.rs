@@ -40,18 +40,43 @@ pub fn handle_priority_pass(
         state.priority_pass_count = 0;
 
         if state.stack.is_empty() {
-            // CR 117.4: Empty stack — advance to next phase.
-            turns::advance_phase(state, events);
-            turns::auto_advance(state, events)
+            // CR 510.4: The combat damage step's turn-based action runs in two
+            // sub-steps when a first-strike/double-strike creature is present. If
+            // the first-strike sub-step paused on a CR 603.3b trigger-ordering
+            // prompt (combat_damage.rs), `resolve_combat_damage` returned before
+            // the MANDATORY second (regular) sub-step ran (`regular_damage_done ==
+            // false`). Those ordered triggers have now resolved and all players
+            // passed with an empty stack, but combat damage is INCOMPLETE — re-enter
+            // the combat-damage turn-based action (auto_advance re-calls
+            // resolve_combat_damage, which runs only the regular sub-step) instead
+            // of advancing to end of combat (which would silently skip the regular
+            // damage, violating CR 510.4). `regular_damage_done` is set true before
+            // the regular sub-step's own trigger processing, so the gate fires at
+            // most once and then advances normally — no infinite loop.
+            let combat_damage_incomplete = state.phase == crate::types::phase::Phase::CombatDamage
+                && state
+                    .combat
+                    .as_ref()
+                    .is_some_and(|c| !c.regular_damage_done);
+            if combat_damage_incomplete {
+                turns::auto_advance(state, events)
+            } else {
+                // CR 117.4: Empty stack — advance to next phase.
+                turns::advance_phase(state, events);
+                turns::auto_advance(state, events)
+            }
         } else {
-            // CR 117.4: Non-empty stack — resolve top object.
-            super::stack::resolve_top(state, events);
+            // CR 117.4: Non-empty stack — resolve the next object. A batch-safe
+            // run of identical token triggers collapses into one step that
+            // consumes K entries (Tier 3); otherwise exactly one entry resolves.
+            let consumed = super::stack::resolve_next(state, events);
 
-            // After resolve_top: the stack should have shrunk by 1.
-            // Update auto-pass baselines so trigger-growth detection works across apply() calls.
+            // After resolve_next: the stack shrank by `consumed` entries.
+            // Update auto-pass baselines by the SAME amount so trigger-growth
+            // detection stays accurate across apply() calls (§7.2 / R6).
             for mode in state.auto_pass.values_mut() {
                 if let AutoPassMode::UntilStackEmpty { initial_stack_len } = mode {
-                    *initial_stack_len = initial_stack_len.saturating_sub(1);
+                    *initial_stack_len = initial_stack_len.saturating_sub(consumed as usize);
                 }
             }
 

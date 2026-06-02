@@ -1,9 +1,13 @@
 {
+  "resolutionProgress": {
+    "label": "Rozwiązywanie {{resolved}} / {{total}}"
+  },
   "card": {
     "faceDownName": "Karta zakryta",
     "loading": "Wczytywanie {{name}}",
     "unimplemented": "Niezaimplementowane: {{mechanics}}",
-    "dfc": "DFC"
+    "dfc": "DFC",
+    "tapped": "Obrócona"
   },
   "preview": {
     "holdCtrlBack": "Przytrzymaj Ctrl, aby zobaczyć tylną stronę",
@@ -25,9 +29,32 @@
     "fromSource": "(od {{source}})",
     "basePT": "(bazowo {{power}}/{{toughness}})",
     "damage": "Obrażenia: {{amount}}",
+    "activateCost": "Aktywuj — {{cost}}",
     "ptDeltaFrom": "{{delta}} od {{source}}",
     "colors": "Kolory: {{colors}}",
-    "colorless": "Bezbarwny"
+    "colorless": "Bezbarwny",
+    "chosen": {
+      "title": "Wybrane",
+      "entry": "{{kind}}: {{value}}",
+      "playerValue": "Gracz {{id}}",
+      "twoColorsValue": "{{first}}, {{second}}",
+      "unknown": "Nieznane",
+      "kind": {
+        "color": "Kolor",
+        "creatureType": "Typ stwora",
+        "basicLandType": "Typ podstawowego lądu",
+        "cardType": "Typ karty",
+        "oddOrEven": "Parzyste lub nieparzyste",
+        "cardName": "Nazwa karty",
+        "number": "Liczba",
+        "player": "Gracz",
+        "twoColors": "Dwa kolory",
+        "tributeOutcome": "Tribute",
+        "keyword": "Słowo kluczowe",
+        "label": "Etykieta",
+        "fallback": "Wybór"
+      }
+    }
   },
   "actionButton": {
     "clearAttackers": "Wyczyść atakujących",
@@ -62,6 +89,7 @@
   },
   "permanent": {
     "expandGroup": "Rozwiń grupę {{name}}",
+    "collapseGroup": "Zwiń grupę {{name}}",
     "chooseToken": "Wybierz token {{name}}",
     "pick": "Wybierz",
     "close": "zamknij",
@@ -74,7 +102,9 @@
     "underAttack_other": "Atakowany przez {{count}} stworów",
     "target": "Cel",
     "copy": "Kopia",
-    "copyTooltip": "Kopia tokenowa prawdziwej karty"
+    "copyTooltip": "Kopia tokenowa prawdziwej karty",
+    "ringBearer": "Pierścień",
+    "ringBearerTooltip": "Powiernik Pierścienia"
   },
   "player": {
     "opponent": "Przec {{seat}}",
@@ -196,11 +226,21 @@
     "energyAriaLabel_one": "{{count}} znacznik energii",
     "energyAriaLabel_other": "{{count}} znaczników energii",
     "energyTooltip": "Energia: {{count}}",
-    "ringAriaLabel": "Pierścień cię kusi (poziom {{level}})",
+    "ringAriaLabel": "Pierścień cię kusi (poziom {{level}}), powiernik Pierścienia: {{bearer}}",
     "ringTooltip": "Pierścień cię kusi — poziom {{level}}",
+    "ringBearerTooltip": "Powiernik Pierścienia: {{name}}",
+    "noRingBearer": "brak",
+    "noRingBearerTooltip": "Brak powiernika Pierścienia",
+    "ringLevel1": "1. Powiernik Pierścienia jest legendarny i nie może być blokowany przez stwory o większej sile.",
+    "ringLevel2": "2. Kiedy atakuje, dobierz kartę, a następnie odrzuć kartę.",
+    "ringLevel3": "3. Kiedy zostaje zablokowany przez stwora, kontroler tego stwora poświęca go na końcu walki.",
+    "ringLevel4": "4. Kiedy zada graczowi obrażenia bojowe, każdy przeciwnik traci 3 życia.",
     "radAriaLabel_one": "{{count}} znacznik promieniowania",
     "radAriaLabel_other": "{{count}} znaczników promieniowania",
     "radTooltip": "Znaczniki promieniowania: {{count}}",
+    "experienceAriaLabel_one": "{{count}} znacznik doświadczenia",
+    "experienceAriaLabel_other": "{{count}} znaczniki doświadczenia",
+    "experienceTooltip": "Znaczniki doświadczenia: {{count}}",
     "speedAriaLabel": "Prędkość {{value}}",
     "speedTooltip": "Prędkość: {{value}}",
     "companion": "Towarzysz"
@@ -377,6 +417,7 @@
     "chooseTargetOf": "Wybierz cel {{current}} z {{total}}",
     "chooseTarget": "Wybierz cel",
     "noLegalTargets": "Brak dostępnych dozwolonych celów",
+    "modeContext": "{{mode}} — {{prompt}}",
     "upToOne": "do jednego {{target}}",
     "one": "{{target}}",
     "nounPlayer": "gracz",
@@ -434,6 +475,7 @@
     "blockersDeclared_one": "{{count}} blokujący przydzielony",
     "blockersDeclared_other": "{{count}} blokujących przydzielonych",
     "becomesTarget": "Obiekt {{objectId}} obrany za cel przez {{sourceId}}",
+    "becomesTargetPlayer": "{{player}} obrany za cel przez {{sourceId}}",
     "replacementApplied": "Zastosowano efekt zastępujący: {{eventType}}",
     "companionRevealed": "{{player}} ujawnił towarzysza: {{cardName}}",
     "companionMovedToHand": "{{player}} wziął towarzysza {{cardName}} do ręki",
@@ -633,6 +675,15 @@
       "keepTapped": "Zostaw obrócony",
       "keepTappedDescription": "{{name}} pozostaje obrócony w tym kroku odwracania."
     },
+    "exert": {
+      "creatureFallback": "Stworzenie",
+      "title": "Wysilić {{name}}?",
+      "subtitle": "Wybierz, czy chcesz wysilić tego atakującego. Wysilone stworzenie nie odwraca się w trakcie twojego następnego kroku odwracania.",
+      "exert": "Wysil",
+      "exertDescription": "{{name}} nie odwróci się w następnej turze, wyzwalając swoją zdolność wysilenia.",
+      "decline": "Nie wysilaj",
+      "declineDescription": "{{name}} atakuje normalnie i odwraca się jak zwykle."
+    },
     "cost": {
       "discardCard": "odrzuć kartę",
       "life": "{{amount}} życia",
@@ -685,6 +736,13 @@
     "startMatch": "Rozpocznij mecz",
     "startMatchWithOpponents": "Rozpocznij mecz ({{count}} przec.)",
     "deckNotLegal": "Talia nie jest dozwolona w formacie {{format}}.",
+    "cedhWarning": "Twoja talia to bracket {{bracket}} przeciwko SI cEDH — spodziewaj się szybkiej porażki.",
+    "cedhWarningUntagged": "bez bracketu",
+    "bracketViolation": {
+      "title": "Blokada bracketu cEDH",
+      "body": "Wszystkie talie przy stole cEDH muszą być zadeklarowane jako bracket 5. Zaktualizuj bracket swojej talii w kreatorze talii i spróbuj ponownie.",
+      "returnToSetup": "Powrót do ustawień"
+    },
     "selectDeckPrompt": "Wybierz talię",
     "commanderNote": "Commander: 100 kart singleton, obrażenia od dowódcy przy {{threshold}}",
     "formatChip": {
@@ -876,6 +934,20 @@
       "subtitle_one": "Wybierz {{count}} trwałego do wygnania",
       "subtitle_other": "Wybierz {{count}} trwałych do wygnania"
     },
+    "exileForManaAbility": {
+      "title": "Exile",
+      "subtitle_one": "Choose {{count}} card from {{source}} to exile",
+      "subtitle_other": "Choose {{count}} cards from {{source}} to exile",
+      "sources": {
+        "Library": "your library",
+        "Hand": "your hand",
+        "Battlefield": "the battlefield",
+        "Graveyard": "your graveyard",
+        "Stack": "the stack",
+        "Exile": "exile",
+        "Command": "the command zone"
+      }
+    },
     "multiTarget": {
       "title": "Wybierz cele",
       "subtitleExact_one": "Wybierz {{count}} cel",
@@ -1064,6 +1136,18 @@
     "bestowNormalLabel": "Rzuć jako stwora",
     "bestowAltLabel": "Rzuć z Bestow",
     "bestowSubtitle": "Rzuć {{name}} normalnie jako stwora lub zapłać jego koszt Bestow, aby rzucić go jako Aurę.",
+    "awakenEyebrow": "Awaken",
+    "awakenNormalLabel": "Rzuć normalnie",
+    "awakenAltLabel": "Rzuć z Awaken",
+    "awakenSubtitle": "Rzuć {{name}} normalnie lub zapłać jego koszt Awaken, aby dodatkowo umieścić znaczniki +1/+1 na ziemi, którą kontrolujesz, i zmienić ją w stwora Elementala 0/0 z pośpiechem.",
+    "cleaveEyebrow": "Cleave",
+    "cleaveNormalLabel": "Rzuć normalnie",
+    "cleaveAltLabel": "Rzuć z Cleave",
+    "cleaveSubtitle": "Rzuć {{name}} normalnie, lub zapłać jego koszt Cleave, aby usunąć tekst w nawiasach kwadratowych.",
+    "mtmteEyebrow": "More Than Meets the Eye",
+    "mtmteNormalLabel": "Cast Normally",
+    "mtmteAltLabel": "Cast Converted",
+    "mtmteSubtitle": "Cast {{name}} normally, or pay its More Than Meets the Eye cost to cast it converted (transformed, back face up).",
     "additionalExile": "+ Wygnaj kartę",
     "additionalSacrifice": "+ Poświęć trwałego",
     "additionalPayLife": "+ Zapłać życie",
@@ -1075,6 +1159,10 @@
     "title": "Wybierz obrońcę",
     "battleFallback": "Bitwa",
     "subtitle": "{{name}} potrzebuje nowego obrońcy. Wybierz, który przeciwnik będzie jej bronił."
+  },
+  "clashOpponent": {
+    "title": "Wybierz przeciwnika do starcia",
+    "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."
   },
   "cardDataMissing": {
     "title": "Brak danych kart",
@@ -1122,8 +1210,8 @@
   },
   "categoryChoice": {
     "title": "Wybierz trwałe do zatrzymania",
-    "subtitleOpponent": "Wybierz po jednym trwałym każdego typu spośród trwałych niebędących ziemiami, które kontroluje {{name}}; reszta zostaje poświęcona.",
-    "subtitleSelf": "Wybierz po jednym trwałym każdego typu spośród trwałych niebędących ziemiami, które kontrolujesz; reszta zostaje poświęcona.",
+    "subtitleOpponent": "Wybierz trwały dla każdej kategorii dla {{name}}.",
+    "subtitleSelf": "Wybierz trwały dla każdej kategorii.",
     "noneToKeep": "Brak {{category}} — nic do zatrzymania",
     "objectFallback": "Obiekt {{id}}"
   },
@@ -1227,7 +1315,9 @@
     "searchSubtitle": "Pisz, aby przeszukać wszystkie karty",
     "searchPlaceholder": "Szukaj po nazwie...",
     "noCardsFound": "Nie znaleziono kart",
-    "buttonSubtitle": "Wybierz jedną opcję"
+    "buttonSubtitle": "Wybierz jedną opcję",
+    "filterPlaceholder": "Filtruj opcje...",
+    "noOptionsMatch": "Brak pasujących opcji"
   },
   "nonFatalPanic": {
     "heading": "Ostrzeżenie silnika (niekrytyczne)",
@@ -1360,5 +1450,9 @@
     "PostCombatMain": "Główna faza 2",
     "End": "Krok końcowy",
     "Cleanup": "Sprzątanie"
+  },
+  "counterMoveDistribution": {
+    "title": "Move {{counter}} counters",
+    "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
   }
 }

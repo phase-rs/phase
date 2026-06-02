@@ -11,6 +11,7 @@ import {
   buildPlayerBattlefieldView,
   getWaitingForObjectChoiceIds,
   getOpponentIds,
+  isOneOnOne,
 } from "../../viewmodel/gameStateView.ts";
 import { BoardInteractionContext } from "./BoardInteractionContext.tsx";
 import { CombatLine } from "./CombatLine.tsx";
@@ -85,7 +86,22 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
       }
     }
 
-    if (gameState?.lands_tapped_for_mana?.[localPlayerId]) {
+    // The undo (UntapLandForMana) is legal only in the three WaitingFor states
+    // whose `apply` match arms accept it: Priority (engine.rs:1345), ManaPayment
+    // (engine.rs:2705 — un-tap a land mid-cost-payment to change the mana mix),
+    // and UnlessPayment (engine.rs:2359 — same, during a "pay unless" choice).
+    // Note UnlessPaymentChooseCost is NOT accepted, so it stays excluded. When a
+    // mana ability instead pauses mid-resolution for a mandatory choice (e.g.
+    // ChooseManaColor for an AnyOneColor land), the source is already in
+    // `lands_tapped_for_mana` but the engine is in none of those states —
+    // surfacing the undo affordance there produces a rejected dispatch when the
+    // tapped land is clicked. Gate the affordance on these states so it matches
+    // engine legality exactly.
+    const undoLegal =
+      waitingFor?.type === "Priority"
+      || waitingFor?.type === "ManaPayment"
+      || waitingFor?.type === "UnlessPayment";
+    if (undoLegal && gameState?.lands_tapped_for_mana?.[localPlayerId]) {
       for (const objectId of gameState.lands_tapped_for_mana[localPlayerId]) {
         undoableTapObjectIds.add(objectId);
       }
@@ -107,8 +123,8 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
       }
     }
 
-    if (waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost") {
-      for (const objectId of waitingFor.data.creatures) {
+    if (waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures") {
+      for (const objectId of waitingFor.data.choices) {
         selectableManaCostCreatureIds.add(objectId);
       }
     }
@@ -186,7 +202,11 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
     );
   }
 
-  const is1v1 = opponents.length === 1;
+  // 1v1 layout is a property of the game's seat count, not of how many
+  // opponents are currently alive — eliminations would otherwise flip a
+  // 3+ player game into the 1v1 inline-pill layout and cram the multi-tab
+  // OpponentHud rail into PlayerArea's small `hud` slot.
+  const is1v1 = isOneOnOne(gameState);
 
   // Undo button for the player's land column
   const undoButton = canUndo ? (
@@ -206,12 +226,20 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Opponent area */}
         {is1v1 ? (
-          <PlayerArea
-            battlefieldView={focusedBattlefieldView ?? undefined}
-            playerId={opponents[0]}
-            mode="focused"
-            hud={oppHud}
-          />
+          opponents[0] != null ? (
+            <PlayerArea
+              battlefieldView={focusedBattlefieldView ?? undefined}
+              playerId={opponents[0]}
+              mode="focused"
+              hud={oppHud}
+            />
+          ) : (
+            // 1v1 game where the sole opponent has been eliminated. The
+            // GameOver modal mounts on the same state, but renders one
+            // tick later; guard so we don't index `gameState.players`
+            // with `undefined` in the interim.
+            <div className="flex flex-1 items-center justify-center" />
+          )
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
             {/* Keep opponent controls above overflowing command-zone cards. */}

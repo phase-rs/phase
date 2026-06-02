@@ -22,6 +22,8 @@ import { audioManager } from "../audio/AudioManager.ts";
 import { useAudioContext } from "../audio/useAudioContext.ts";
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
+import { DiceRollOverlay } from "../components/animation/DiceRollOverlay.tsx";
+import { flashStartingPlayerContest } from "../game/diceContest.ts";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
 import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
 import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
@@ -45,6 +47,7 @@ import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
+import { RichLabel } from "../components/mana/RichLabel.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { UnhandledWaitingForModal } from "../components/modal/UnhandledWaitingForModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
@@ -62,10 +65,11 @@ import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
+import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
-import { CLICK_THROUGH_WAITING_FOR_TYPES, DialogHost } from "../components/modal/DialogHost.tsx";
+import { DialogHost, isClickThroughWaitingFor } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
@@ -87,6 +91,7 @@ import { GameMenu } from "../components/chrome/GameMenu.tsx";
 import { ConcedeDialog } from "../components/multiplayer/ConcedeDialog.tsx";
 import { ConnectionToast } from "../components/multiplayer/ConnectionToast.tsx";
 import { EmoteOverlay } from "../components/multiplayer/EmoteOverlay.tsx";
+import { ResolutionProgressOverlay } from "../components/board/ResolutionProgressOverlay.tsx";
 import { LobbyProgress } from "../components/multiplayer/LobbyProgress.tsx";
 import { DisconnectChoiceDialog } from "../components/hud/DisconnectChoiceDialog.tsx";
 import { PlayerEnchantmentsDialog } from "../components/hud/PlayerEnchantmentsDialog.tsx";
@@ -209,6 +214,10 @@ export function GamePage() {
               : "local";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
+
+  // cEDH bracket-violation blocking modal: set when the engine rejects a game
+  // init because one or more decks are not declared cEDH at a cEDH table.
+  const [bracketViolationError, setBracketViolationError] = useState<string | null>(null);
 
   // Online multiplayer state
   const [hostGameCode, setHostGameCode] = useState<string | null>(null);
@@ -531,8 +540,16 @@ export function GamePage() {
     setWaitingForOpponent(false);
   }, []);
 
-  const handleNoDeck = useCallback((reason?: string) => {
+  const handleNoDeck = useCallback((reason?: string, bracketViolation?: boolean) => {
     if (reason) {
+      // cEDH bracket lock: surface as a blocking modal rather than navigating
+      // away, so the user can read the explanation before going back to setup.
+      // Match by the typed flag from GameProvider — not by string substring —
+      // so a reformatted error message can never silently break this modal.
+      if (bracketViolation) {
+        setBracketViolationError(reason);
+        return;
+      }
       navigate("/setup", { state: { setupError: reason } });
       return;
     }
@@ -599,6 +616,11 @@ export function GamePage() {
         onDismissDisconnectChoice={() => setDisconnectChoice(null)}
         pauseReason={pauseReason}
         isP2PHost={mode === "p2p-host"}
+        bracketViolationError={bracketViolationError}
+        onDismissBracketViolation={() => {
+          setBracketViolationError(null);
+          navigate("/setup");
+        }}
       />
     </GameProvider>
   );
@@ -630,6 +652,10 @@ interface GamePageContentProps {
   onDismissDisconnectChoice: () => void;
   pauseReason: string | null;
   isP2PHost: boolean;
+  /** Set when the engine rejected game init because a deck is not declared cEDH at a cEDH table. */
+  bracketViolationError: string | null;
+  /** Navigate back to setup and clear the bracket-violation modal. */
+  onDismissBracketViolation: () => void;
 }
 
 function GamePageContent({
@@ -654,6 +680,8 @@ function GamePageContent({
   onDismissDisconnectChoice,
   pauseReason,
   isP2PHost,
+  bracketViolationError,
+  onDismissBracketViolation,
 }: GamePageContentProps) {
   const { t } = useTranslation("game");
   const navigate = useNavigate();
@@ -676,6 +704,30 @@ function GamePageContent({
   const isSandboxGame = useGameStore(
     (s) => s.gameState?.format_config?.allow_debug_actions === true,
   );
+
+  // CR 103.1: present the starting-player d20 contest once on game load. The
+  // store holds it as pure data; this presentation-layer effect drives the dice
+  // overlay with the engine's authoritative winner and clears the carrier. The
+  // identity-ref latch makes the consume idempotent under React StrictMode's
+  // double-invoke and after the clear (the re-run sees `null`).
+  const startingContest = useGameStore((s) => s.startingContest);
+  const consumedContestRef = useRef<typeof startingContest>(null);
+  useEffect(() => {
+    if (!startingContest || consumedContestRef.current === startingContest) return;
+    consumedContestRef.current = startingContest;
+    flashStartingPlayerContest(startingContest.events, startingContest.startingPlayer);
+    useGameStore.getState().clearStartingContest();
+  }, [startingContest]);
+  // CR 103.1 before CR 103.5: the starting-player contest must finish before the
+  // mulligan UI appears (the roll determines who's on the play, which precedes
+  // drawing opening hands). True from `initGame` setting the carrier through the
+  // dice overlay's full life — the store hands `startingContest` off to
+  // `uiStore.diceRoll` atomically, so there's no gap. Degrades to `false`
+  // immediately for instant speed and explicit play/draw (no contest).
+  const startingContestDiceActive = useUiStore(
+    (s) => s.diceRoll?.context === "startingPlayer",
+  );
+  const startingContestActive = startingContest !== null || startingContestDiceActive;
   const [showAiHand, setShowAiHand] = useState(false);
   const [showDebugBounds, setShowDebugBounds] = useState(false);
   const [viewingZone, setViewingZone] = useState<{
@@ -754,6 +806,12 @@ function GamePageContent({
 
   const isDragging = useUiStore((s) => s.isDragging);
   const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
+  // Card-preview behavior preference (item: hover preview side/Shift). In
+  // "shift" mode the preview only renders while Shift is held; in "side" mode
+  // it docks to the screen edge instead of following the cursor.
+  const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode);
+  const shiftHeld = useUiStore((s) => s.shiftHeld);
+  const previewSuppressed = cardPreviewMode === "shift" && !shiftHeld;
   const inspectedObj =
     !isDragging && inspectedObjectId != null && objects
       ? (objects[inspectedObjectId] ?? null)
@@ -1198,6 +1256,37 @@ function GamePageContent({
         <CardDataMissingModal onContinue={onDismissCardDataMissing} />
       )}
 
+      {/* cEDH bracket-violation blocking modal.
+          Shown when the engine refuses game init because one or more decks
+          are not declared cEDH (bracket 5) at a cEDH table.
+          Covers the entire page — no game state is accessible behind it
+          because the engine never initialised. */}
+      {bracketViolationError && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("gameSetup.bracketViolation.title")}
+          data-testid="bracket-violation-modal"
+        >
+          <div className="mx-4 max-w-md rounded-xl bg-gray-900 p-6 shadow-2xl ring-1 ring-rose-700/60">
+            <h2 className="mb-2 text-lg font-bold text-rose-400">
+              {t("gameSetup.bracketViolation.title")}
+            </h2>
+            <p className="mb-4 text-sm text-gray-300">{bracketViolationError}</p>
+            <p className="mb-6 text-xs text-gray-500">
+              {t("gameSetup.bracketViolation.body")}
+            </p>
+            <button
+              onClick={onDismissBracketViolation}
+              className="w-full rounded-lg bg-rose-700 py-2 text-sm font-semibold text-white transition hover:bg-rose-600"
+            >
+              {t("gameSetup.bracketViolation.returnToSetup")}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Resume-failed banner */}
       <AnimatePresence>
         {resumeResetReason && (
@@ -1223,6 +1312,7 @@ function GamePageContent({
 
       {/* Overlay layers */}
       <DebugPanel />
+      <ResolutionProgressOverlay />
 
       {viewingZone && (
         <ZoneViewer
@@ -1258,6 +1348,7 @@ function GamePageContent({
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay containerRef={containerRef} />
       <TurnBanner />
+      <DiceRollOverlay />
 
       {/* Combat SVG overlays: blocker assignments + attack target arrows */}
       <BlockAssignmentLines />
@@ -1268,7 +1359,11 @@ function GamePageContent({
       <BlockRequirementBadges />
 
       {/* Card preview overlay */}
-      <CardPreview cardName={inspectedCardName} backFaceName={inspectedOtherFaceName} />
+      <CardPreview
+        cardName={previewSuppressed ? null : inspectedCardName}
+        backFaceName={previewSuppressed ? null : inspectedOtherFaceName}
+        dockSide={cardPreviewMode === "side"}
+      />
 
       {/* WaitingFor-driven prompt overlays (only for human player).
           Wrapped in DialogHost so any active dialog can be peeked away to
@@ -1276,7 +1371,7 @@ function GamePageContent({
           new WaitingFor so a fresh prompt is always visible. */}
       <DialogHost>
         {waitingFor != null &&
-          CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type) &&
+          isClickThroughWaitingFor(waitingFor) &&
           canActForWaitingState && <TargetingOverlay />}
         {waitingFor != null &&
           MANA_PAYMENT_WAITING_FOR_TYPES.has(waitingFor.type) &&
@@ -1290,6 +1385,7 @@ function GamePageContent({
         {waitingFor?.type === "OrderTriggers" &&
           canActForWaitingState && <TriggerOrderModal />}
         <BattleProtectorModal />
+        <ClashOpponentModal />
         <TributeModal />
         <CombatTaxModal />
         <AlternativeCostModal />
@@ -1343,10 +1439,16 @@ function GamePageContent({
             <UntapChoiceModal />
           )}
 
+        {/* CR 701.43d: Optional "exert as it attacks" choice (Combat Celebrant). */}
+        {waitingFor?.type === "ExertChoice" &&
+          canActForWaitingState && (
+            <ExertChoiceModal />
+          )}
+
         {/* Unless payment choice ("Counter unless you pay {X}") */}
         {waitingFor?.type === "UnlessPayment" &&
           canActForWaitingState && (
-            <UnlessPaymentModal />
+            <UnlessPaymentPanel />
           )}
 
         {/* CR 118.12a: Disjunctive unless-cost choice (Tergrid's Lantern). */}
@@ -1369,8 +1471,11 @@ function GamePageContent({
         )}
 
       {/* CR 103.5: Simultaneous mulligan — render this player's modal iff
-          they are in the pending set. Each player decides independently. */}
+          they are in the pending set. Each player decides independently.
+          Held back until the CR 103.1 starting-player contest finishes so the
+          dice aren't hidden behind this modal. */}
       {waitingFor?.type === "MulliganDecision" &&
+        !startingContestActive &&
         (() => {
           const entry = waitingFor.data.pending.find(
             (e) => e.player === playerId,
@@ -1387,6 +1492,7 @@ function GamePageContent({
         })()}
 
       {waitingFor?.type === "MulliganDecision" &&
+        !startingContestActive &&
         !waitingFor.data.pending.some((e) => e.player === playerId) && (
           <div className="fixed inset-0 z-50 flex items-center justify-center">
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
@@ -1859,8 +1965,20 @@ function MulliganBottomCardsPrompt({
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
-  const addSelectedCard = useUiStore((s) => s.addSelectedCard);
+  const cycleSelectedCard = useUiStore((s) => s.cycleSelectedCard);
+  const clearSelectedCards = useUiStore((s) => s.clearSelectedCards);
   const hoverProps = useInspectHoverProps();
+
+  // Issue #1546: `selectedCardIds` is a single store array shared with targeting,
+  // convoke, and tap-for-mana overlays. If a prior overlay left a stale selection
+  // (e.g. an Opening-Hand bottom prompt immediately followed by a Mulligan bottom
+  // prompt, or game 2+ of a match), the bottoming selection starts already at the
+  // cap and clicks appear unresponsive. Clear the shared selection on mount and
+  // unmount, mirroring `TargetingOverlay`, so bottoming always begins empty.
+  useEffect(() => {
+    clearSelectedCards();
+    return () => clearSelectedCards();
+  }, [clearSelectedCards]);
 
   if (!player || !objects) return null;
 
@@ -1927,11 +2045,7 @@ function MulliganBottomCardsPrompt({
               return (
                 <motion.button
                   key={obj.id}
-                  onClick={() => {
-                    if (!isSelected && selectedCardIds.length < count) {
-                      addSelectedCard(obj.id);
-                    }
-                  }}
+                  onClick={() => cycleSelectedCard(obj.id, count)}
                   className={`flex-shrink-0 rounded-[18px] p-1 transition hover:z-50 ${
                     isSelected
                       ? "z-40 ring-2 ring-cyan-300 shadow-[0_0_0_1px_rgba(103,232,249,0.55)] opacity-75"
@@ -2261,6 +2375,9 @@ function AbilityChoiceModal() {
     pending ? s.gameState?.objects[pending.objectId] : undefined,
   );
   const objects = useGameStore((s) => s.gameState?.objects);
+  const webSlingingCosts = useGameStore(
+    (s) => s.gameState?.derived?.web_slinging_costs,
+  );
 
   if (!pending || !obj) return null;
 
@@ -2304,6 +2421,7 @@ function AbilityChoiceModal() {
           action,
           obj,
           objects,
+          webSlingingCosts,
         );
         return { id: String(i), label, description };
       })}
@@ -2422,6 +2540,49 @@ function UntapChoiceModal() {
   );
 }
 
+// ── Exert Choice Modal (CR 701.43d: exert as it attacks) ────────────────
+
+function ExertChoiceModal() {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "ExertChoice") return null;
+
+  const objectId = waitingFor.data.attacker;
+  const object = objects?.[objectId];
+  const name = object?.name ?? t("gamePage.exert.creatureFallback");
+
+  return (
+    <ChoiceModal
+      title={t("gamePage.exert.title", { name })}
+      subtitle={t("gamePage.exert.subtitle")}
+      previewCardName={object?.name}
+      previewCardTypes={object?.card_types}
+      previewObjectId={objectId}
+      options={[
+        {
+          id: "exert",
+          label: t("gamePage.exert.exert"),
+          description: t("gamePage.exert.exertDescription", { name }),
+        },
+        {
+          id: "decline",
+          label: t("gamePage.exert.decline"),
+          description: t("gamePage.exert.declineDescription", { name }),
+        },
+      ]}
+      onChoose={(id) =>
+        dispatch({
+          type: "ChooseExert",
+          data: { exert: id === "exert" },
+        })
+      }
+    />
+  );
+}
+
 // ── Unless Payment Modal (CR 118.12) ────────────────────────────────────
 
 function formatManaCost(cost: { type: string; shards?: string[]; generic?: number }): string {
@@ -2472,7 +2633,7 @@ function formatUnlessCost(
   }
 }
 
-function UnlessPaymentModal() {
+function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
@@ -2484,16 +2645,45 @@ function UnlessPaymentModal() {
   const effect = description.charAt(0).toUpperCase() + description.slice(1);
 
   return (
-    <ChoiceModal
-      title={t("gamePage.unlessPayment.title", { effect })}
-      options={[
-        { id: "pay", label: t("gamePage.cost.pay", { cost: costDisplay }) },
-        { id: "decline", label: t("gamePage.unlessPayment.dontPay") },
-      ]}
-      onChoose={(id) =>
-        dispatch({ type: "PayUnlessCost", data: { pay: id === "pay" } })
-      }
-    />
+    <AnimatePresence>
+      <motion.div
+        className="fixed inset-x-0 bottom-0 z-40 flex justify-center px-2 pb-4"
+        initial={{ y: 80, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        exit={{ y: 80, opacity: 0 }}
+        transition={{ duration: 0.25 }}
+      >
+        <div className="w-full max-w-md rounded-xl border border-white/10 bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700">
+          <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
+            <RichLabel
+              text={t("gamePage.unlessPayment.title", { effect })}
+              size="sm"
+            />
+          </h3>
+          <div className="flex justify-center gap-3">
+            <button
+              onClick={() =>
+                dispatch({ type: "PayUnlessCost", data: { pay: true } })
+              }
+              className={gameButtonClass({ tone: "emerald", size: "md" })}
+            >
+              <RichLabel
+                text={t("gamePage.cost.pay", { cost: costDisplay })}
+                size="sm"
+              />
+            </button>
+            <button
+              onClick={() =>
+                dispatch({ type: "PayUnlessCost", data: { pay: false } })
+              }
+              className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+            >
+              {t("gamePage.unlessPayment.dontPay")}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </AnimatePresence>
   );
 }
 

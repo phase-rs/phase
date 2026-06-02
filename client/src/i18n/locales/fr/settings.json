@@ -9,8 +9,7 @@
     "combat": "Rythme",
     "audio": "Audio",
     "multiplayer": "Multijoueur",
-    "data": "Données",
-    "experimental": "Expérimental"
+    "data": "Données"
   },
   "gameplay": {
     "title": "Jouabilité",
@@ -50,6 +49,21 @@
     "showKeywords": "Afficher les mots-clés sur les cartes du champ de bataille",
     "opponentHoverPreview": "Aperçu au survol de l'adversaire",
     "showOpponentBoard": "Afficher le plateau de l'adversaire au survol du HUD",
+    "cardPreviewDelay": "Délai de survol",
+    "cardPreviewDelayInstant": "Instantané",
+    "cardPreviewDelayValue": "{{ms}} ms",
+    "cardPreviewDelayHint": "Attendre ce délai après le survol d'une carte avant d'afficher l'aperçu.",
+    "cardPreview": "Aperçu de la carte au survol",
+    "cardPreviewOptions": {
+      "follow": "Suivre le curseur",
+      "side": "Ancrer sur le côté",
+      "shift": "Maintenir Maj"
+    },
+    "cardPreviewHint": {
+      "follow": "L'aperçu agrandi suit votre curseur lorsque vous survolez une carte.",
+      "side": "L'aperçu s'ancre au bord de l'écran afin de ne jamais masquer le plateau.",
+      "shift": "L'aperçu n'apparaît que tant que vous maintenez la touche Maj, comme dans Tabletop Simulator."
+    },
     "cardArtPreferences": "Préférences d'illustration des cartes",
     "clearArtOverrides_one": "Effacer tous les remplacements d'illustration ({{count}})",
     "clearArtOverrides_other": "Effacer tous les remplacements d'illustration ({{count}})",
@@ -84,13 +98,6 @@
     "displayName": "Nom affiché",
     "displayNamePlaceholder": "Saisissez votre nom",
     "serverSelectionNote": "La sélection du serveur a été déplacée vers le salon — ouvrez Multijoueur et utilisez la puce du serveur (ou « Choisir un serveur » en mode P2P) pour changer de région, configurer une instance auto-hébergée ou tester la connectivité."
-  },
-  "experimental": {
-    "title": "Expérimental",
-    "description": "Ces fonctionnalités sont encore en développement. Elles peuvent être incomplètes, comporter des bugs ou changer sans préavis. Activez-les pour les essayer en avance.",
-    "draftExperiments": "Expériences de draft",
-    "enableDraftFeatures": "Activer les fonctionnalités de draft expérimentales",
-    "draftFeaturesDescription": "Débloque le Cube Draft et le Pod Draft. Le Quick Draft contre l'IA est toujours disponible."
   },
   "sync": {
     "title": "Synchronisation cloud",

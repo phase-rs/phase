@@ -338,7 +338,7 @@ fn dies_trigger_fires_from_combat_damage() {
             AbilityKind::Spell,
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 3 },
-                player: engine::types::ability::GainLifePlayer::Controller,
+                player: engine::types::ability::TargetFilter::Controller,
             },
         ))
         .valid_card(TargetFilter::SelfRef)

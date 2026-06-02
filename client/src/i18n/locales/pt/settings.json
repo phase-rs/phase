@@ -9,8 +9,7 @@
     "combat": "Ritmo",
     "audio": "Áudio",
     "multiplayer": "Multijogador",
-    "data": "Dados",
-    "experimental": "Experimental"
+    "data": "Dados"
   },
   "gameplay": {
     "title": "Jogabilidade",
@@ -50,6 +49,21 @@
     "showKeywords": "Mostrar palavras-chave nas cartas do campo de batalha",
     "opponentHoverPreview": "Pré-visualização ao Passar o Mouse sobre o Oponente",
     "showOpponentBoard": "Mostrar o tabuleiro do oponente ao passar o mouse sobre o HUD",
+    "cardPreviewDelay": "Atraso ao passar o cursor",
+    "cardPreviewDelayInstant": "Instantâneo",
+    "cardPreviewDelayValue": "{{ms}} ms",
+    "cardPreviewDelayHint": "Aguarde este tempo após passar o cursor sobre uma carta antes de mostrar a pré-visualização.",
+    "cardPreview": "Pré-visualização da Carta ao Passar o Mouse",
+    "cardPreviewOptions": {
+      "follow": "Seguir o cursor",
+      "side": "Fixar na lateral",
+      "shift": "Segure Shift"
+    },
+    "cardPreviewHint": {
+      "follow": "A pré-visualização ampliada segue o cursor enquanto você passa o mouse sobre uma carta.",
+      "side": "A pré-visualização fixa-se na borda da tela para nunca cobrir o tabuleiro.",
+      "shift": "A pré-visualização só aparece enquanto você segura a tecla Shift, como no Tabletop Simulator."
+    },
     "cardArtPreferences": "Preferências de Arte das Cartas",
     "clearArtOverrides_one": "Limpar Todas as Substituições de Arte ({{count}})",
     "clearArtOverrides_other": "Limpar Todas as Substituições de Arte ({{count}})",
@@ -84,13 +98,6 @@
     "displayName": "Nome de Exibição",
     "displayNamePlaceholder": "Digite seu nome",
     "serverSelectionNote": "A seleção de servidor foi movida para o lobby — abra o Multijogador e use o chip de servidor (ou \"Escolher servidor\" no modo P2P) para trocar de região, configurar uma instância auto-hospedada ou testar a conectividade."
-  },
-  "experimental": {
-    "title": "Experimental",
-    "description": "Esses recursos ainda estão em desenvolvimento. Eles podem estar incompletos, ter bugs ou mudar sem aviso. Ative-os para experimentar as novidades antecipadamente.",
-    "draftExperiments": "Experimentos de Draft",
-    "enableDraftFeatures": "Ativar recursos experimentais de draft",
-    "draftFeaturesDescription": "Desbloqueia o Cube Draft e o Pod Draft. O Quick Draft contra IA está sempre disponível."
   },
   "sync": {
     "title": "Sincronização na nuvem",

@@ -202,8 +202,8 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction, QuantityExpr,
-        TargetFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution, ManaProduction,
+        QuantityExpr, TargetFilter, TypedFilter,
     };
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::game_state::{GameState, WaitingFor};
@@ -298,6 +298,7 @@ mod tests {
                 target_player: None,
                 selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
                 split: None,
+                source_zones: vec![engine::types::zones::Zone::Library],
             },
         );
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
@@ -308,7 +309,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::land()),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: false,

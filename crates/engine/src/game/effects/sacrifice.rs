@@ -217,7 +217,7 @@ pub fn resolve(
         // this rather than round-tripping through EffectZoneChoice.
         if !up_to && eligible.len() <= count {
             let mut sacrificed: i32 = 0;
-            for obj_id in eligible {
+            for &obj_id in &eligible {
                 match sacrifice::sacrifice_permanent(state, obj_id, chooser, events) {
                     Ok(SacrificeOutcome::Complete) => sacrificed += 1,
                     Ok(SacrificeOutcome::NeedsReplacementChoice(player)) => {
@@ -228,6 +228,15 @@ pub fn resolve(
                     Err(_) => {}
                 }
             }
+            // CR 701.21a + CR 603.10a + CR 608.2f: every eligible permanent was
+            // sacrificed as part of the same resolution event, so co-departing
+            // sacrifice/LTB observers (Blood Artist) observe each other.
+            // `departed_subset` drops any permanent that didn't actually leave
+            // (e.g. CantBeSacrificed members excluded upstream).
+            crate::game::zones::mark_simultaneous_departures(
+                events,
+                &crate::game::zones::departed_subset(state, &eligible),
+            );
             state.last_effect_count = Some(sacrificed);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
@@ -252,7 +261,7 @@ pub fn resolve(
             destination: None,
             enter_tapped: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under_player: None,
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
@@ -318,7 +327,12 @@ mod tests {
     use super::*;
     use crate::game::effects::resolve_ability_chain;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, QuantityRef, TargetFilter};
+    use crate::types::ability::{
+        AbilityKind, AggregateFunction, Comparator, ControllerRef, Effect, FilterProp,
+        ObjectProperty, PtStat, PtValueScope, QuantityRef, TargetFilter, TypedFilter,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -577,6 +591,88 @@ mod tests {
         assert!(!state.battlefield.contains(&obj_id));
         assert!(state.players[0].graveyard.contains(&obj_id));
         assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
+    fn interactive_sacrifice_publishes_tracked_set_for_this_way_draw() {
+        let mut state = GameState::new_two_player(42);
+        let sacrifice_a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Permanent A".to_string(),
+            Zone::Battlefield,
+        );
+        let sacrifice_b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Permanent B".to_string(),
+            Zone::Battlefield,
+        );
+        for index in 0..2 {
+            create_object(
+                &mut state,
+                CardId(10 + index),
+                PlayerId(0),
+                format!("Library Card {index}"),
+                Zone::Library,
+            );
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Any,
+                count: QuantityExpr::up_to(QuantityExpr::Fixed { value: 2 }),
+                min_count: 0,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+        ability.kind = AbilityKind::Spell;
+
+        let hand_before = state.players[0].hand.len();
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                effect_kind: EffectKind::Sacrifice,
+                up_to: true,
+                ..
+            }
+        ));
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectCards {
+                cards: vec![sacrifice_a, sacrifice_b],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.last_effect_count, Some(2));
+        assert!(state.players[0].graveyard.contains(&sacrifice_a));
+        assert!(state.players[0].graveyard.contains(&sacrifice_b));
+        assert_eq!(
+            state.players[0].hand.len() - hand_before,
+            2,
+            "draw should read TrackedSetSize from permanents sacrificed this way"
+        );
     }
 
     #[test]
@@ -1427,5 +1523,75 @@ mod tests {
             state_p2.battlefield.contains(&p1_mv5a) && state_p2.battlefield.contains(&p1_mv5b),
             "P1's permanents are untouched when P2 is the sacrificing opponent"
         );
+    }
+
+    #[test]
+    fn sacrifice_greatest_power_offers_only_tied_highest_power_creatures() {
+        let mut state = GameState::new_two_player(42);
+        let place = |state: &mut GameState, controller: PlayerId, power: i32| {
+            let id = create_object(
+                state,
+                CardId(state.next_object_id),
+                controller,
+                format!("P{} Power {power}", controller.0),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).expect("object exists");
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(power);
+            id
+        };
+
+        let caster_creature = place(&mut state, PlayerId(0), 9);
+        let lower = place(&mut state, PlayerId(1), 2);
+        let tied_a = place(&mut state, PlayerId(1), 5);
+        let tied_b = place(&mut state, PlayerId(1), 5);
+
+        let eligible_set =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::ScopedPlayer));
+        let greatest_power = FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Aggregate {
+                    function: AggregateFunction::Max,
+                    property: ObjectProperty::Power,
+                    filter: eligible_set,
+                },
+            },
+        };
+        let target = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![greatest_power]),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                let mut got = cards.clone();
+                got.sort_by_key(|id| id.0);
+                let mut want = vec![tied_a, tied_b];
+                want.sort_by_key(|id| id.0);
+                assert_eq!(got, want);
+                assert!(!cards.contains(&lower));
+                assert!(!cards.contains(&caster_creature));
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
     }
 }

@@ -45,6 +45,26 @@ export function manaCostToShards(cost: ManaCost): string[] {
   return shards;
 }
 
+/** Extract the mana component of an activation/additional ability cost for payment UI. */
+export function abilityCostToManaShards(cost: SerializedAbilityCost | undefined): string[] | null {
+  if (!cost) return null;
+  const serialized = cost as SerializedCost;
+  switch (serialized.type) {
+    case "Mana":
+      return serialized.cost ? manaCostToShards(serialized.cost as ManaCost) : [];
+    case "Composite":
+    case "OneOf": {
+      for (const part of serialized.costs ?? []) {
+        const shards = abilityCostToManaShards(part);
+        if (shards != null && shards.length > 0) return shards;
+      }
+      return [];
+    }
+    default:
+      return [];
+  }
+}
+
 // Mirrors Rust AbilityCost serialization shape (serde tag = "type").
 // `amount`/`count` on PayLife/Discard are `QuantityExpr` (a typed enum), not
 // raw numbers — the engine serializes `{ type: "Fixed", value: N }` etc.
@@ -185,6 +205,11 @@ export function formatCost(cost: SerializedCost): string {
     case "Blight": return `Blight ${cost.count ?? 1}`;
     case "CollectEvidence":
       return `Collect evidence ${cost.amount ?? 0}`;
+    case "ReturnToHand": {
+      const count = formatQuantity(cost.count, 1);
+      const noun = quantityIsPlural(cost.count) ? "permanents" : "permanent";
+      return `Return ${count} ${noun}`;
+    }
     case "Composite":
       return (cost.costs ?? []).map(formatCost).join(", ");
     case "OneOf":
@@ -195,8 +220,14 @@ export function formatCost(cost: SerializedCost): string {
 }
 
 export function abilityLabel(ability: SerializedAbility | null | undefined): string {
-  const cost = ability?.cost;
-  return cost ? formatCost(cost) : "0";
+  if (!ability) return "0";
+  if (ability.description) {
+    const colon = ability.description.indexOf(":");
+    const costText = colon > 0 ? ability.description.slice(0, colon).trim() : ability.description;
+    if (costText) return costText;
+  }
+  const cost = ability.cost;
+  return cost ? formatCost(cost as SerializedCost) : "0";
 }
 
 // Maps ManaColor names to MTG mana symbol abbreviations.
@@ -208,6 +239,7 @@ export function abilityChoiceLabel(
   action: GameAction,
   object: GameObject,
   objects?: Record<ObjectId, GameObject>,
+  webSlingingCosts?: Record<string, ManaCost>,
 ): { label: string; description?: string } {
   // CR 702.190a: Sneak — label identifies which unblocked attacker is
   // returned to pay the Sneak cost. Include the Sneak mana cost from the
@@ -245,11 +277,16 @@ export function abilityChoiceLabel(
   if (action.type === "CastSpellAsWebSlinging") {
     const returnedId = action.data.creature_to_return;
     const returnedName = objects?.[returnedId]?.name ?? `creature #${returnedId}`;
+    // Prefer the engine-derived cost (covers statically-GRANTED web-slinging,
+    // e.g. Amazing Spider-Man); fall back to the printed keyword. The engine
+    // decides which cards qualify — the frontend only formats the ManaCost.
+    const derivedCost = webSlingingCosts?.[String(object.id)];
     const webSlingingKeyword = object.keywords.find(
       (k): k is { WebSlinging: ManaCost } => typeof k === "object" && "WebSlinging" in k,
     );
-    const costSymbols = webSlingingKeyword
-      ? manaCostToShards(webSlingingKeyword.WebSlinging).map((s) => `{${s}}`).join("")
+    const cost = derivedCost ?? webSlingingKeyword?.WebSlinging;
+    const costSymbols = cost
+      ? manaCostToShards(cost).map((s) => `{${s}}`).join("")
       : "";
     const costSuffix = costSymbols ? ` (${costSymbols})` : "";
     return {
@@ -377,10 +414,9 @@ export interface AdditionalCostOption {
 /**
  * Build the title + pay/decline options for the OptionalCostChoice modal.
  *
- * `timesKicked` is the engine-provided count of kicks already paid for this
- * spell (`WaitingFor::OptionalCostChoice::times_kicked`). It only affects the
- * `Kicker` branch: at `0` this is the first prompt; at `> 0` it is a
- * repeatable multikicker re-prompt and the copy reflects the running count.
+ * `timesKicked` is the engine-provided count of repeatable payments already
+ * paid for this spell (`WaitingFor::OptionalCostChoice::times_kicked`). It
+ * affects multikicker and repeatable optional additional-cost prompts.
  * The decline copy never says "skip"/"cancel" — declining the kicker
  * *completes* the cast (CR 601.2h), it does not abort it.
  */
@@ -389,14 +425,46 @@ export function additionalCostChoices(
   timesKicked = 0,
 ): { title: string; options: AdditionalCostOption[] } {
   switch (cost.type) {
-    case "Optional":
+    case "Optional": {
+      const label = formatAbilityCost(cost.data.cost);
+      if (cost.data.repeatable) {
+        if (timesKicked > 0) {
+          return {
+            title: `Additional cost — paid ${timesKicked}×. Pay ${label} again?`,
+            options: [
+              { id: "pay", label: `Pay ${label} again` },
+              {
+                id: "decline",
+                label: `Done — finish casting (paid ${timesKicked}×)`,
+                description: "Stop paying this additional cost and pay the total cost.",
+              },
+            ],
+          };
+        }
+        return {
+          title: `Pay additional cost: ${label}?`,
+          options: [
+            {
+              id: "pay",
+              label: `Pay ${label}`,
+              description: "You'll be asked again so you can pay it multiple times.",
+            },
+            {
+              id: "decline",
+              label: "Cast without paying",
+              description: "Finish casting now with 0 payments.",
+            },
+          ],
+        };
+      }
       return {
-        title: `Pay additional cost: ${formatAbilityCost(cost.data)}?`,
+        title: `Pay additional cost: ${label}?`,
         options: [
-          { id: "pay", label: `Pay ${formatAbilityCost(cost.data)}` },
+          { id: "pay", label: `Pay ${label}` },
           { id: "decline", label: "Skip" },
         ],
       };
+    }
     case "Kicker": {
       const first = cost.data.costs[0];
       const label = first ? formatAbilityCost(first) : "kicker";

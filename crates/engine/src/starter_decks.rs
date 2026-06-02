@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::game::bracket_estimate::CommanderBracketTier;
+
 /// A deck specified as card name strings — the wire format used by clients
 /// and the starter deck module. Distinct from `PlayerDeckPayload` which
 /// contains fully-parsed `CardFace` data resolved against the card database.
@@ -10,6 +12,10 @@ pub struct DeckData {
     pub sideboard: Vec<String>,
     #[serde(default)]
     pub commander: Vec<String>,
+    /// Declared bracket tier for this deck. Defaults to `Core` when omitted,
+    /// preserving backward compatibility with older wire payloads.
+    #[serde(default)]
+    pub bracket_tier: CommanderBracketTier,
 }
 
 /// A named starter deck with its card list.
@@ -128,6 +134,7 @@ fn starter_to_deck_data(deck: &StarterDeck) -> DeckData {
         main_deck,
         sideboard: Vec::new(),
         commander: Vec::new(),
+        bracket_tier: CommanderBracketTier::default(),
     }
 }
 

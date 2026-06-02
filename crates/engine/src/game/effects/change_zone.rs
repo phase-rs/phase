@@ -3,13 +3,14 @@ use rand::Rng;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Duration, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility, TargetFilter,
-    TargetSelectionMode, TypedFilter,
+    ControllerRef, Duration, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility,
+    TargetChoiceTiming, TargetFilter, TargetRef, TargetSelectionMode, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ExileLink, ExileLinkKind, GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
+use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
@@ -55,12 +56,120 @@ fn tracked_set_member_zone(state: &GameState, filter: &TargetFilter) -> Option<Z
         .find_map(|obj_id| state.objects.get(obj_id).map(|obj| obj.zone))
 }
 
+fn resolve_enters_under_player(
+    effect_name: &str,
+    enters_under: Option<&ControllerRef>,
+    controller: PlayerId,
+) -> Result<Option<PlayerId>, EffectError> {
+    // CR 110.2a: Resolve controller-override references exactly once at the
+    // resolver boundary, then carry a concrete PlayerId through zone movement.
+    match enters_under {
+        None => Ok(None),
+        Some(ControllerRef::You) => Ok(Some(controller)),
+        Some(other) => Err(EffectError::InvalidParam(format!(
+            "CR 110.2a: {effect_name}.enters_under = {other:?} is not yet \
+             supported by the resolver; only ControllerRef::You maps to a \
+             concrete PlayerId today"
+        ))),
+    }
+}
+
+fn resolution_choice_cardinality(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    eligible_count: usize,
+    up_to: bool,
+) -> (usize, usize, bool) {
+    let Some(spec) = ability
+        .multi_target
+        .as_ref()
+        .filter(|_| matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution))
+    else {
+        return (1, 0, up_to);
+    };
+
+    match crate::game::ability_utils::resolve_multi_target_bounds(
+        state,
+        ability,
+        spec,
+        eligible_count,
+    ) {
+        Ok(bounds) => (bounds.max, bounds.min, bounds.min != bounds.max),
+        Err(_) => (0, 0, up_to),
+    }
+}
+
 /// Result of a single zone-move attempt through the replacement pipeline.
 pub(crate) enum ZoneMoveResult {
     /// Object was moved (or prevented). Continue processing.
     Done,
     /// A replacement effect needs a player choice before continuing.
     NeedsChoice(PlayerId),
+    /// An Aura entered via a non-spell effect and needs an enchant-host choice.
+    NeedsAuraAttachmentChoice,
+}
+
+fn aura_enchant_filter(state: &GameState, object_id: ObjectId) -> Option<TargetFilter> {
+    let obj = state.objects.get(&object_id)?;
+    if !obj.card_types.subtypes.iter().any(|s| s == "Aura") {
+        return None;
+    }
+    // CR 303.4d: An Aura that's also a creature can't enchant anything.
+    if obj
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Creature)
+    {
+        return None;
+    }
+    let filters: Vec<TargetFilter> = obj
+        .keywords
+        .iter()
+        .filter_map(|keyword| match keyword {
+            Keyword::Enchant(filter) => Some(filter.clone()),
+            _ => None,
+        })
+        .collect();
+    match filters.as_slice() {
+        [] => None,
+        [filter] => Some(filter.clone()),
+        _ => Some(TargetFilter::And { filters }),
+    }
+}
+
+fn legal_aura_attachment_targets(
+    state: &GameState,
+    aura_id: ObjectId,
+    controller: PlayerId,
+    enchant_filter: &TargetFilter,
+) -> Vec<TargetRef> {
+    let ctx = crate::game::filter::FilterContext::from_source_with_controller(aura_id, controller);
+    let mut targets: Vec<TargetRef> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| *id != aura_id)
+        .filter(|id| crate::game::filter::matches_target_filter(state, *id, enchant_filter, &ctx))
+        .filter(|id| crate::game::effects::attach::can_attach_to_object(state, aura_id, *id))
+        .map(TargetRef::Object)
+        .collect();
+
+    targets.extend(state.players.iter().filter_map(|player| {
+        if player.is_eliminated || player.is_phased_out() {
+            return None;
+        }
+        if crate::game::filter::player_matches_target_filter(
+            enchant_filter,
+            player.id,
+            Some(controller),
+        ) {
+            Some(TargetRef::Player(player.id))
+        } else {
+            None
+        }
+    }));
+
+    targets
 }
 
 /// Deliver a zone-change event that has already passed through replacement.
@@ -77,6 +186,7 @@ pub(crate) fn deliver_replaced_zone_change(
         from,
         to,
         cause,
+        attach_to,
         enter_transformed: should_transform,
         enter_tapped: should_tap,
         enter_with_counters,
@@ -86,7 +196,7 @@ pub(crate) fn deliver_replaced_zone_change(
     {
         zones::move_to_zone(state, object_id, to, events);
         if to == Zone::Battlefield || from == Zone::Battlefield {
-            state.layers_dirty = true;
+            crate::game::layers::mark_layers_full(state);
         }
         // CR 712.14a: Apply transformation if entering the battlefield transformed.
         if should_transform && to == Zone::Battlefield {
@@ -102,6 +212,20 @@ pub(crate) fn deliver_replaced_zone_change(
                 obj.tapped = true;
             }
         }
+        // CR 603.6a + CR 400.7: Record which ability placed this permanent so
+        // anti-recursion intervening-ifs ("if it wasn't put onto the battlefield
+        // with this ability") can exclude permanents this very ability placed.
+        // `move_to_zone` already ran `reset_for_battlefield_entry` (clearing the
+        // field to None); set it only for ability-effect-driven entries. This is
+        // synchronous and lands before `process_triggers`, so the field is
+        // visible at ETB trigger fire-time (CR 603.4).
+        if to == Zone::Battlefield {
+            if let Some(src) = source_id {
+                if let Some(obj) = state.objects.get_mut(&object_id) {
+                    obj.entered_via_ability_source = Some(src);
+                }
+            }
+        }
         // CR 110.2a: Apply controller override if the effect specifies
         // "under your control" — set before triggers fire.
         if let Some(new_controller) = ctrl_override {
@@ -112,6 +236,24 @@ pub(crate) fn deliver_replaced_zone_change(
                     object_id,
                     new_controller,
                 );
+            }
+        }
+        // CR 303.4f + CR 701.3a: A non-spell Aura entry carries its chosen
+        // enchant host through the ZoneChange event so it is attached before
+        // the effect finishes resolving.
+        if to == Zone::Battlefield {
+            if let Some(target) = attach_to {
+                match target {
+                    crate::game::game_object::AttachTarget::Object(target_id) => {
+                        let _ =
+                            crate::game::effects::attach::attach_to(state, object_id, target_id);
+                    }
+                    crate::game::game_object::AttachTarget::Player(player_id) => {
+                        let _ = crate::game::effects::attach::attach_to_player(
+                            state, object_id, player_id,
+                        );
+                    }
+                }
             }
         }
         // CR 614.1c: Apply counters from replacement pipeline (e.g., saga lore counters,
@@ -302,7 +444,70 @@ pub(crate) fn execute_zone_move(
     }
 
     match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => {
+        ReplacementResult::Execute(mut event) => {
+            let mut pending_aura_choice: Option<(PlayerId, ObjectId, Vec<TargetRef>)> = None;
+            if let ProposedEvent::ZoneChange {
+                object_id,
+                to: Zone::Battlefield,
+                attach_to,
+                controller_override,
+                ..
+            } = &mut event
+            {
+                if attach_to.is_none() {
+                    if let Some(enchant_filter) = aura_enchant_filter(state, *object_id) {
+                        let controller = (*controller_override)
+                            .or_else(|| state.objects.get(object_id).map(|obj| obj.controller))
+                            .unwrap_or(PlayerId(0));
+                        let legal_targets = legal_aura_attachment_targets(
+                            state,
+                            *object_id,
+                            controller,
+                            &enchant_filter,
+                        );
+                        match legal_targets.as_slice() {
+                            [] => return ZoneMoveResult::Done,
+                            [TargetRef::Object(id)] => {
+                                *attach_to =
+                                    Some(crate::game::game_object::AttachTarget::Object(*id));
+                            }
+                            [TargetRef::Player(id)] => {
+                                *attach_to =
+                                    Some(crate::game::game_object::AttachTarget::Player(*id));
+                            }
+                            _ => {
+                                pending_aura_choice = Some((controller, *object_id, legal_targets))
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((controller, aura_id, legal_targets)) = pending_aura_choice {
+                deliver_replaced_zone_change(
+                    state,
+                    event,
+                    Some(source_id),
+                    duration,
+                    track_exiled_by_source,
+                    events,
+                );
+                state.waiting_for = WaitingFor::ReturnAsAuraTarget {
+                    player: controller,
+                    source_id,
+                    returned_id: aura_id,
+                    legal_targets,
+                    pending_effect: Box::new(ResolvedAbility::new(
+                        Effect::Attach {
+                            attachment: TargetFilter::SelfRef,
+                            target: TargetFilter::Any,
+                        },
+                        Vec::new(),
+                        source_id,
+                        controller,
+                    )),
+                };
+                return ZoneMoveResult::NeedsAuraAttachmentChoice;
+            }
             deliver_replaced_zone_change(
                 state,
                 event,
@@ -329,7 +534,7 @@ pub fn resolve(
         dest_zone,
         owner_library,
         effect_enter_transformed,
-        under_your_control,
+        enters_under_player,
         effect_enter_tapped,
         effect_enters_attacking,
         up_to,
@@ -340,7 +545,7 @@ pub fn resolve(
             destination,
             owner_library,
             enter_transformed,
-            under_your_control,
+            enters_under,
             enter_tapped,
             enters_attacking,
             up_to,
@@ -360,12 +565,25 @@ pub fn resolve(
                     (ct.clone(), n)
                 })
                 .collect();
+            // CR 110.2a: Resolve the controller-override `ControllerRef` to a
+            // concrete `PlayerId` exactly once at resolver entry, then carry
+            // the resolved `Option<PlayerId>` through the iteration ctx and
+            // the `EffectZoneChoice` round-trip. This keeps the runtime
+            // carrier immune to re-evaluation across an interactive pause
+            // and concentrates the `ControllerRef` semantics in one place.
+            // Only `ControllerRef::You` is supported today — any other
+            // variant is a parser bug or an unimplemented engine extension.
+            let enters_under_player = resolve_enters_under_player(
+                "ChangeZone",
+                enters_under.as_ref(),
+                ability.controller,
+            )?;
             (
                 *origin,
                 *destination,
                 *owner_library,
                 *enter_transformed,
-                *under_your_control,
+                enters_under_player,
                 *enter_tapped,
                 *enters_attacking,
                 *up_to,
@@ -417,7 +635,16 @@ pub fn resolve(
         // targeting, the effect resolves doing nothing. Don't fall through to the
         // untargeted zone-scan path (which is for genuinely untargeted effects like
         // "sacrifice a creature" where the choice happens at resolution).
-        if ability.optional_targeting {
+        // CR 608.2b: Use `targeting_is_optional()` not `optional_targeting`: "up to one"
+        // expressed via `multi_target.min = 0` (per-opponent fanout) must also
+        // short-circuit here, not reach the zone-scan and spuriously set
+        // `cost_payment_failed_flag`.
+        // Exception: when `target_choice_timing == Resolution` the player has not
+        // yet had a chance to choose — targets are empty by design and the zone-scan
+        // path must be reached so `EffectZoneChoice` can be issued.
+        if ability.targeting_is_optional()
+            && !matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution)
+        {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -445,7 +672,17 @@ pub fn resolve(
         // across every library in the game and let the player pick any card.
         // Hand/Graveyard/Exile zone-scan semantics (Show-and-Tell, Regrowth,
         // etc.) are unaffected.
-        if origin == Some(Zone::Library) && matches!(target_filter, TargetFilter::Any) {
+        //
+        // CR 701.23a: A multi-zone tutor's put-step carries `origin: None`
+        // (the found card may come from graveyard/hand/library, so the move
+        // reads the card's actual zone) with `target: Any`. The same fail-to-find
+        // no-op applies: empty targets means the search found nothing, so the
+        // put-step must do nothing rather than fall through to an `origin=None,
+        // Any` battlefield wildcard scan. Untargeted `None + Any` is never a
+        // real standalone effect — it only arises as this continuation artifact.
+        if (origin == Some(Zone::Library) || origin.is_none())
+            && matches!(target_filter, TargetFilter::Any)
+        {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -495,14 +732,17 @@ pub fn resolve(
             return Ok(());
         }
 
-        if matches!(ability.target_selection_mode, TargetSelectionMode::Random) && !up_to {
+        let (choice_count, min_count, choice_up_to) =
+            resolution_choice_cardinality(state, ability, eligible.len(), up_to);
+
+        if matches!(ability.target_selection_mode, TargetSelectionMode::Random)
+            && !choice_up_to
+            && choice_count == 1
+        {
             let index = state.rng.random_range(0..eligible.len());
             let chosen = eligible[index];
-            let ctrl_override = if under_your_control {
-                Some(ability.controller)
-            } else {
-                None
-            };
+            // CR 110.2a: `enters_under_player` was resolved once at resolver
+            // entry — pass it straight through (no per-branch re-resolution).
             match execute_zone_move(
                 state,
                 chosen,
@@ -512,7 +752,7 @@ pub fn resolve(
                 ability.duration.as_ref(),
                 effect_enter_transformed,
                 effect_enter_tapped,
-                ctrl_override,
+                enters_under_player,
                 &effect_enter_with_counters,
                 track_exiled_by_source,
                 events,
@@ -538,6 +778,7 @@ pub fn resolve(
                         crate::game::replacement::replacement_choice_waiting_for(player, state);
                     return Ok(());
                 }
+                ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
             }
 
             events.push(GameEvent::EffectResolved {
@@ -547,12 +788,9 @@ pub fn resolve(
             return Ok(());
         }
 
-        if eligible.len() == 1 && !up_to {
-            let ctrl_override = if under_your_control {
-                Some(ability.controller)
-            } else {
-                None
-            };
+        if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
+            // CR 110.2a: pre-resolved controller override (single-eligible
+            // branch). No per-branch re-resolution.
             match execute_zone_move(
                 state,
                 eligible[0],
@@ -562,7 +800,7 @@ pub fn resolve(
                 ability.duration.as_ref(),
                 effect_enter_transformed,
                 effect_enter_tapped,
-                ctrl_override,
+                enters_under_player,
                 &effect_enter_with_counters,
                 track_exiled_by_source,
                 events,
@@ -588,6 +826,7 @@ pub fn resolve(
                         crate::game::replacement::replacement_choice_waiting_for(player, state);
                     return Ok(());
                 }
+                ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
             }
 
             events.push(GameEvent::EffectResolved {
@@ -600,16 +839,16 @@ pub fn resolve(
         state.waiting_for = WaitingFor::EffectZoneChoice {
             player: filter_controller,
             cards: eligible,
-            count: 1,
-            min_count: 0,
-            up_to,
+            count: choice_count,
+            min_count,
+            up_to: choice_up_to,
             source_id: ability.source_id,
             effect_kind: EffectKind::ChangeZone,
             zone: scan_zone,
             destination: Some(dest_zone),
             enter_tapped: effect_enter_tapped,
             enter_transformed: effect_enter_transformed,
-            under_your_control,
+            enters_under_player,
             enters_attacking: effect_enters_attacking,
             owner_library,
             track_exiled_by_source,
@@ -627,7 +866,7 @@ pub fn resolve(
         destination: dest_zone,
         enter_transformed: effect_enter_transformed,
         enter_tapped: effect_enter_tapped,
-        under_your_control,
+        enters_under_player,
         enters_attacking: effect_enters_attacking,
         enter_with_counters: effect_enter_with_counters,
         duration: ability.duration.clone(),
@@ -638,6 +877,25 @@ pub fn resolve(
     for (i, obj_id) in targeted_objects.iter().enumerate() {
         match process_one_zone_move(state, &ctx, *obj_id, events) {
             ZoneMoveResult::Done => {}
+            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                state.pending_change_zone_iteration =
+                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                        remaining: targeted_objects[i + 1..].to_vec(),
+                        source_id: ctx.source_id,
+                        controller: ctx.controller,
+                        origin: ctx.origin,
+                        destination: ctx.destination,
+                        enter_transformed: ctx.enter_transformed,
+                        enter_tapped: ctx.enter_tapped,
+                        enters_under_player: ctx.enters_under_player,
+                        enters_attacking: ctx.enters_attacking,
+                        enter_with_counters: ctx.enter_with_counters.clone(),
+                        duration: ctx.duration.clone(),
+                        track_exiled_by_source: ctx.track_exiled_by_source,
+                        effect_kind: EffectKind::from(&ability.effect),
+                    });
+                return Ok(());
+            }
             ZoneMoveResult::NeedsChoice(player) => {
                 // CR 614.12b + CR 614.1c + CR 614.13: stash the unprocessed targets
                 // so `drain_pending_change_zone_iteration` resumes the loop after
@@ -653,7 +911,7 @@ pub fn resolve(
                         destination: ctx.destination,
                         enter_transformed: ctx.enter_transformed,
                         enter_tapped: ctx.enter_tapped,
-                        under_your_control: ctx.under_your_control,
+                        enters_under_player: ctx.enters_under_player,
                         enters_attacking: ctx.enters_attacking,
                         enter_with_counters: ctx.enter_with_counters.clone(),
                         duration: ctx.duration.clone(),
@@ -689,7 +947,11 @@ pub(crate) struct ChangeZoneIterationCtx {
     pub destination: Zone,
     pub enter_transformed: bool,
     pub enter_tapped: bool,
-    pub under_your_control: bool,
+    /// CR 110.2a: Resolved-once controller override. `Some(pid)` routes the
+    /// moved object to `pid` on battlefield entry; `None` keeps the object
+    /// under its owner's control. Pre-resolved from
+    /// `Effect::ChangeZone.enters_under` at resolver entry.
+    pub enters_under_player: Option<PlayerId>,
     pub enters_attacking: bool,
     pub enter_with_counters: Vec<(CounterType, u32)>,
     pub duration: Option<Duration>,
@@ -729,14 +991,9 @@ pub(crate) fn process_one_zone_move(
         }
     }
 
-    // CR 110.2a: When `under_your_control` is true, pass the controller override
-    // into the zone-move pipeline so replacement effects see the correct controller.
-    let ctrl_override = if ctx.under_your_control {
-        Some(ctx.controller)
-    } else {
-        None
-    };
-
+    // CR 110.2a: `enters_under_player` was pre-resolved at resolver entry;
+    // pass it straight to the zone-move pipeline so replacement effects see
+    // the correct controller without re-evaluating the `ControllerRef`.
     let result = execute_zone_move(
         state,
         obj_id,
@@ -746,7 +1003,7 @@ pub(crate) fn process_one_zone_move(
         ctx.duration.as_ref(),
         ctx.enter_transformed,
         ctx.enter_tapped,
-        ctrl_override,
+        ctx.enters_under_player,
         &ctx.enter_with_counters,
         ctx.track_exiled_by_source,
         events,
@@ -781,6 +1038,7 @@ pub fn resolve_all(
             origin,
             destination,
             target,
+            enters_under: _,
             enter_tapped,
         } => {
             let extracted = target.extract_zones();
@@ -841,6 +1099,13 @@ pub fn resolve_all(
 
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
+
+    let enters_under_player: Option<PlayerId> = match &ability.effect {
+        Effect::ChangeZoneAll { enters_under, .. } => {
+            resolve_enters_under_player("ChangeZoneAll", enters_under.as_ref(), ability.controller)?
+        }
+        _ => None,
+    };
 
     // Collect matching object IDs from the origin zone.
     // Explicit filter-controller override (e.g., "creature that player controls")
@@ -903,6 +1168,7 @@ pub fn resolve_all(
     }
 
     let mut moved_count: i32 = 0;
+    let mut departed: Vec<ObjectId> = Vec::new();
     for obj_id in matching {
         // CR 400.3: Each object's actual current zone is the source zone for the
         // move. Single-zone callers pass `origin_zones = [zone]`; multi-zone
@@ -913,8 +1179,9 @@ pub fn resolve_all(
             .get(&obj_id)
             .map(|o| o.zone)
             .unwrap_or(origin_zone);
-        // Mass zone moves don't use enter_transformed or controller_override;
-        // enter_tapped is carried for "return ... tapped" effects.
+        // Mass zone moves don't use enter_transformed; enter_tapped and
+        // controller override are carried for "return ... tapped/under your
+        // control" effects.
         match execute_zone_move(
             state,
             obj_id,
@@ -924,13 +1191,26 @@ pub fn resolve_all(
             ability.duration.as_ref(),
             false,
             enter_tapped,
-            None,
+            enters_under_player,
             &[],
             track_exiled_by_source,
             events,
         ) {
             ZoneMoveResult::Done => {
                 moved_count += 1;
+                // CR 603.10a + CR 608.2f: Collect battlefield-origin objects that
+                // actually left (post-move zone != Battlefield). `execute_zone_move`
+                // returns `Done` even when a replacement Prevented the move, so the
+                // post-move zone check excludes prevented members from the
+                // co-departed group.
+                if per_object_origin == Zone::Battlefield
+                    && state
+                        .objects
+                        .get(&obj_id)
+                        .is_some_and(|o| o.zone != Zone::Battlefield)
+                {
+                    departed.push(obj_id);
+                }
                 // CR 400.7 + CR 608.2c: Track hand-origin exiles separately so
                 // QuantityRef::ExiledFromHandThisResolution can resolve "draws a
                 // card for each card exiled from their hand this way".
@@ -949,8 +1229,14 @@ pub fn resolve_all(
                     crate::game::replacement::replacement_choice_waiting_for(player, state);
                 return Ok(());
             }
+            ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
         }
     }
+
+    // CR 603.10a + CR 608.2f: Every battlefield-origin object that left did so as
+    // part of the same mass zone-change event, so leaves-the-battlefield observers
+    // among the departed group observe each other via last-known information.
+    zones::mark_simultaneous_departures(events, &departed);
 
     // CR 608.2c: "that many" in a later instruction refers back to the prior
     // action's count. Record the number of objects moved so downstream
@@ -1014,15 +1300,19 @@ fn owner_scoped_nonbattlefield_mass_filter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, FilterProp, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetFilter,
-        TargetRef,
+        ControllerRef, FilterProp, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr,
+        QuantityRef, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::ZoneChangeRecord;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
+    use crate::types::statics::StaticMode;
 
     fn make_hand_choice_ability(up_to: bool) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -1032,7 +1322,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to,
@@ -1061,7 +1351,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1077,6 +1367,519 @@ mod tests {
 
         assert!(state.battlefield.contains(&obj_id));
         assert!(!state.players[0].hand.contains(&obj_id));
+    }
+
+    #[test]
+    fn aura_put_onto_battlefield_by_effect_attaches_to_single_legal_host() {
+        let mut state = GameState::new_two_player(42);
+        let aura_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Returned Aura".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords
+                .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Creature,
+                ))));
+        }
+
+        let host_id = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Legal Host".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&host_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SpecificObject { id: aura_id },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&aura_id].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&aura_id]
+                .attached_to
+                .and_then(|target| target.as_object()),
+            Some(host_id)
+        );
+        assert!(state.objects[&host_id].attachments.contains(&aura_id));
+    }
+
+    #[test]
+    fn aura_put_onto_battlefield_by_effect_stays_put_without_legal_host() {
+        let mut state = GameState::new_two_player(42);
+        let aura_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Returned Aura".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords
+                .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Creature,
+                ))));
+        }
+
+        let host_id = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Illegal Host".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let host = state.objects.get_mut(&host_id).unwrap();
+            host.card_types.core_types.push(CoreType::Creature);
+            host.static_definitions.push(
+                StaticDefinition::new(StaticMode::Other("CantBeEnchanted".to_string()))
+                    .affected(TargetFilter::SelfRef),
+            );
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SpecificObject { id: aura_id },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&aura_id].zone, Zone::Graveyard);
+        assert!(state.objects[&aura_id].attached_to.is_none());
+        assert!(!state.objects[&host_id].attachments.contains(&aura_id));
+    }
+
+    #[test]
+    fn aura_put_onto_battlefield_by_effect_prompts_for_multiple_legal_hosts() {
+        let mut state = GameState::new_two_player(42);
+        let aura_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Returned Aura".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords
+                .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Creature,
+                ))));
+        }
+
+        let first_host = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "First Host".to_string(),
+            Zone::Battlefield,
+        );
+        let second_host = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Second Host".to_string(),
+            Zone::Battlefield,
+        );
+        for host_id in [first_host, second_host] {
+            state
+                .objects
+                .get_mut(&host_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SpecificObject { id: aura_id },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ReturnAsAuraTarget {
+                player,
+                returned_id,
+                legal_targets,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*returned_id, aura_id);
+                assert_eq!(
+                    legal_targets,
+                    &vec![
+                        TargetRef::Object(first_host),
+                        TargetRef::Object(second_host)
+                    ]
+                );
+            }
+            other => panic!("expected Aura host choice, got {other:?}"),
+        }
+        assert_eq!(state.objects[&aura_id].zone, Zone::Battlefield);
+        assert!(state.objects[&aura_id].attached_to.is_none());
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(second_host)),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects[&aura_id]
+                .attached_to
+                .and_then(|target| target.as_object()),
+            Some(second_host)
+        );
+        assert!(state.objects[&second_host].attachments.contains(&aura_id));
+        assert!(!state.objects[&first_host].attachments.contains(&aura_id));
+    }
+
+    #[test]
+    fn aura_put_onto_battlefield_by_effect_resumes_multi_target_move_after_choice() {
+        let mut state = GameState::new_two_player(42);
+        let aura_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Returned Aura".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords
+                .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                    TypeFilter::Creature,
+                ))));
+        }
+
+        let other_card = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Other Permanent".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&other_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let first_host = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "First Host".to_string(),
+            Zone::Battlefield,
+        );
+        let second_host = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Second Host".to_string(),
+            Zone::Battlefield,
+        );
+        for host_id in [first_host, second_host] {
+            state
+                .objects
+                .get_mut(&host_id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(aura_id), TargetRef::Object(other_card)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReturnAsAuraTarget { .. }
+        ));
+        assert!(state.pending_change_zone_iteration.is_some());
+        assert_eq!(state.objects[&other_card].zone, Zone::Graveyard);
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(second_host)),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects[&aura_id]
+                .attached_to
+                .and_then(|target| target.as_object()),
+            Some(second_host)
+        );
+        assert!(state.objects[&second_host].attachments.contains(&aura_id));
+        assert_eq!(state.objects[&other_card].zone, Zone::Battlefield);
+        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        let change_zone_resolutions = result
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::ChangeZone,
+                        source_id: ObjectId(100),
+                    }
+                )
+            })
+            .count();
+        assert_eq!(change_zone_resolutions, 1);
+    }
+
+    #[test]
+    fn aura_put_onto_battlefield_by_effect_prompts_for_multiple_player_hosts() {
+        let mut state = GameState::new_two_player(42);
+        let aura_id = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Returned Curse".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let aura = state.objects.get_mut(&aura_id).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords.push(Keyword::Enchant(TargetFilter::Player));
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SpecificObject { id: aura_id },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ReturnAsAuraTarget {
+                player,
+                returned_id,
+                legal_targets,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*returned_id, aura_id);
+                assert_eq!(
+                    legal_targets,
+                    &vec![
+                        TargetRef::Player(PlayerId(0)),
+                        TargetRef::Player(PlayerId(1))
+                    ]
+                );
+            }
+            other => panic!("expected Aura host choice, got {other:?}"),
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects[&aura_id].attached_to,
+            Some(crate::game::game_object::AttachTarget::Player(PlayerId(1)))
+        );
+    }
+
+    #[test]
+    fn change_zone_any_number_from_hand_prompts_for_all_eligible_cards() {
+        let mut state = GameState::new_two_player(42);
+        let bear = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Hand,
+        );
+        let wolf = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Wolf".to_string(),
+            Zone::Hand,
+        );
+        let island = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Hand,
+        );
+        for id in [bear, wolf] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::InZone { zone: Zone::Hand }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
+        ability.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 2);
+                assert_eq!(*min_count, 0);
+                assert!(*up_to);
+                assert!(cards.contains(&bear));
+                assert!(cards.contains(&wolf));
+                assert!(!cards.contains(&island));
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1107,7 +1910,7 @@ mod tests {
                 target: TargetFilter::TriggeringSource,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: false,
@@ -1151,7 +1954,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1197,7 +2000,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1232,7 +2035,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1276,7 +2079,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1311,7 +2114,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1388,7 +2191,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1432,7 +2235,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: true,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1476,7 +2279,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 owner_library: true,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -1498,6 +2301,63 @@ mod tests {
         assert!(
             !state.battlefield.contains(&source_id),
             "SelfRef source should no longer be on battlefield"
+        );
+    }
+
+    /// CR 603.6a + CR 400.7: An ability-effect-driven battlefield entry through
+    /// `execute_zone_move` stamps `entered_via_ability_source` with the resolving
+    /// ability's source. Building-block coverage for the Kodama anti-recursion
+    /// provenance field — independent of any single card.
+    #[test]
+    fn ability_driven_entry_records_placing_source() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Placer".to_string(),
+            Zone::Battlefield,
+        );
+        let moved = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Placed Card".to_string(),
+            Zone::Hand,
+        );
+        let mut events = Vec::new();
+
+        let result = execute_zone_move(
+            &mut state,
+            moved,
+            Zone::Hand,
+            Zone::Battlefield,
+            source_id,
+            None,
+            false,
+            false,
+            None,
+            &[],
+            false,
+            &mut events,
+        );
+        assert!(matches!(result, ZoneMoveResult::Done));
+
+        let obj = &state.objects[&moved];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(
+            obj.entered_via_ability_source,
+            Some(source_id),
+            "an ability-effect-driven entry must record the placing ability's source",
+        );
+
+        // CR 400.7: moving the permanent off the battlefield clears the
+        // provenance — a re-entering permanent is a new object.
+        let mut events2 = Vec::new();
+        zones::move_to_zone(&mut state, moved, Zone::Graveyard, &mut events2);
+        assert_eq!(
+            state.objects[&moved].entered_via_ability_source, None,
+            "battlefield exit must clear the ability-placement provenance (CR 400.7)",
         );
     }
 
@@ -1555,6 +2415,7 @@ mod tests {
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Hand,
                 target: TargetFilter::None,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -1602,6 +2463,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -1666,6 +2528,7 @@ mod tests {
                     properties: vec![FilterProp::IsCommander],
                     ..Default::default()
                 }),
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -1726,6 +2589,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -1796,6 +2660,7 @@ mod tests {
                             zone: Zone::Graveyard,
                         }]),
                 ),
+                enters_under: None,
                 enter_tapped: true,
             },
             vec![],
@@ -1825,6 +2690,7 @@ mod tests {
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Player,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
@@ -1895,6 +2761,7 @@ mod tests {
                     controller: Some(crate::types::ability::ControllerRef::Opponent),
                     properties: vec![],
                 }),
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -1995,6 +2862,7 @@ mod tests {
                 origin: Some(Zone::Exile),
                 destination: Zone::Graveyard,
                 target: TargetFilter::ExiledBySource,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -2043,7 +2911,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2097,7 +2965,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: false,
                 enters_attacking: true,
                 up_to: false,
@@ -2147,7 +3015,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2203,7 +3071,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: true,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: true,
@@ -2228,7 +3096,7 @@ mod tests {
                 destination,
                 enter_tapped,
                 enter_transformed,
-                under_your_control,
+                enters_under_player,
                 ..
             } => {
                 assert_eq!(*player, PlayerId(0));
@@ -2241,7 +3109,9 @@ mod tests {
                 assert!(cards.contains(&b));
                 assert!(*enter_tapped);
                 assert!(*enter_transformed);
-                assert!(*under_your_control);
+                // CR 110.2a: WaitingFor carries the resolved player id, not a
+                // boolean. Ability controller in this test is PlayerId(0).
+                assert_eq!(*enters_under_player, Some(PlayerId(0)));
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
@@ -2326,7 +3196,7 @@ mod tests {
                     ),
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -2347,6 +3217,7 @@ mod tests {
                         }],
                         ..Default::default()
                     }),
+                    enters_under: None,
                     enter_tapped: false,
                 },
                 vec![],
@@ -2429,7 +3300,7 @@ mod tests {
                     target: TargetFilter::ParentTargetSlot { index: 1 },
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -2481,7 +3352,7 @@ mod tests {
                 ),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2501,6 +3372,91 @@ mod tests {
             Zone::Battlefield
         );
         assert_eq!(state.objects.get(&opponent_card).unwrap().zone, Zone::Hand);
+    }
+
+    #[test]
+    fn scoped_player_hand_change_zone_choice_uses_scoped_player() {
+        let mut state = GameState::new_two_player(42);
+        let controller_card = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Controller Hand Creature".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&controller_card)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let opponent_a = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(1),
+            "Opponent Hand Creature A".to_string(),
+            Zone::Hand,
+        );
+        let opponent_b = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Opponent Hand Creature B".to_string(),
+            Zone::Hand,
+        );
+        for id in [opponent_a, opponent_b] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                ),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(200),
+            PlayerId(0),
+        );
+        ability.set_scoped_player_recursive(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                let mut actual = cards.clone();
+                actual.sort_by_key(|id| id.0);
+                let mut expected = vec![opponent_a, opponent_b];
+                expected.sort_by_key(|id| id.0);
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(
+                    actual, expected,
+                    "scoped-player hand choice must exclude controller hand cards"
+                );
+            }
+            other => panic!("expected EffectZoneChoice for scoped player, got {other:?}"),
+        }
+        assert_eq!(
+            state.objects.get(&controller_card).unwrap().zone,
+            Zone::Hand
+        );
     }
 
     #[test]
@@ -2530,7 +3486,7 @@ mod tests {
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2553,6 +3509,63 @@ mod tests {
         assert!(
             !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
             "should not prompt for zone choice when optional targeting chose 0"
+        );
+    }
+
+    #[test]
+    fn multi_target_min_zero_with_zero_targets_resolves_as_noop() {
+        // CR 115.6: `multi_target.min = 0` is the same zero-target choice as
+        // `optional_targeting`; it must not fall through to resolution-time
+        // zone scanning after the player chooses no targets.
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bystander".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![], // zero targets chosen
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(MultiTargetSpec::fixed(0, 1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&creature).unwrap().zone,
+            Zone::Battlefield
+        );
+        assert!(
+            !state.cost_payment_failed_flag,
+            "zero chosen targets for min=0 targeting must not signal payment failure"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "should not prompt for zone choice when multi-target min=0 chose 0"
         );
     }
 
@@ -2579,7 +3592,7 @@ mod tests {
                 }),
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2801,7 +3814,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2846,7 +3859,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2894,7 +3907,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -2983,7 +3996,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped,
                 enters_attacking: false,
                 up_to: false,
@@ -3230,7 +4243,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: true,
+                enters_under: Some(ControllerRef::You),
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: false,
@@ -3304,6 +4317,7 @@ mod tests {
                 origin: Some(Zone::Hand),
                 destination: Zone::Library,
                 target: TargetFilter::Controller,
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -3323,6 +4337,129 @@ mod tests {
             Some(3),
             "ChangeZoneAll must record moved-object count for EventContextAmount consumers"
         );
+    }
+
+    /// CR 110.2a + CR 400.7: Mass graveyard-to-battlefield effects that state
+    /// "under your control" must override the default controller for every
+    /// entering permanent, including cards owned by opponents. Rise of the Dark
+    /// Realms class: "Return all creature cards from all graveyards to the
+    /// battlefield under your control."
+    #[test]
+    fn change_zone_all_graveyard_to_battlefield_enters_under_controller() {
+        let mut state = GameState::new_two_player(42);
+        let caster_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Caster Corpse".into(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&caster_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Corpse".into(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&opponent_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let opponent_noncreature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Spell".into(),
+            Zone::Graveyard,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        for id in [caster_creature, opponent_creature] {
+            let obj = &state.objects[&id];
+            assert_eq!(obj.zone, Zone::Battlefield);
+            assert_eq!(
+                obj.controller,
+                PlayerId(0),
+                "returned creature {id:?} should enter under the spell controller"
+            );
+        }
+        assert_eq!(state.objects[&opponent_noncreature].zone, Zone::Graveyard);
+    }
+
+    /// CR 110.2a: `ChangeZoneAll.enters_under` currently supports only
+    /// `ControllerRef::You`; unsupported variants must strict-fail before any
+    /// member moves, matching the single-object `ChangeZone` resolver.
+    #[test]
+    fn change_zone_all_strict_fails_on_unsupported_enters_under_controller_ref() {
+        let mut state = GameState::new_two_player(42);
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Corpse".into(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&opponent_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                enters_under: Some(ControllerRef::Opponent),
+                enter_tapped: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        let err = resolve_all(&mut state, &ability, &mut events)
+            .expect_err("unsupported ControllerRef must strict-fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("CR 110.2a"),
+            "error must cite CR 110.2a, got {msg}"
+        );
+        assert!(
+            msg.contains("ChangeZoneAll") && msg.contains("Opponent"),
+            "error must name the effect and offending variant, got {msg}"
+        );
+        assert_eq!(state.objects[&opponent_creature].zone, Zone::Graveyard);
     }
 
     /// CR 400.7 + CR 701.23 + CR 701.24: Multi-zone same-name exile.
@@ -3398,6 +4535,7 @@ mod tests {
                         FilterProp::SameNameAsParentTarget,
                     ]),
                 ),
+                enters_under: None,
                 enter_tapped: false,
             },
             // Parent target supplies the "that name" referent.
@@ -3541,6 +4679,7 @@ mod tests {
                         },
                         FilterProp::SameNameAsParentTarget,
                     ])),
+                    enters_under: None,
                     enter_tapped: false,
                 },
                 vec![TargetRef::Object(seed)],
@@ -3556,7 +4695,7 @@ mod tests {
                     target: TargetFilter::Any,
                     owner_library: false,
                     enter_transformed: false,
-                    under_your_control: false,
+                    enters_under: None,
                     enter_tapped: false,
                     enters_attacking: false,
                     up_to: false,
@@ -3666,7 +4805,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: true,
                 enters_attacking: false,
                 up_to: false,
@@ -3738,6 +4877,7 @@ mod tests {
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
                 },
+                enters_under: None,
                 enter_tapped: false,
             },
             vec![],
@@ -3820,7 +4960,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: true,
@@ -3951,7 +5091,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: true,
@@ -4009,7 +5149,7 @@ mod tests {
                 target: TargetFilter::Any,
                 owner_library: false,
                 enter_transformed: false,
-                under_your_control: false,
+                enters_under: None,
                 enter_tapped: false,
                 enters_attacking: false,
                 up_to: true,
@@ -4144,7 +5284,7 @@ mod tests {
             destination: Some(Zone::Battlefield),
             enter_tapped: false,
             enter_transformed: false,
-            under_your_control: false,
+            enters_under_player: None,
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
@@ -4181,5 +5321,193 @@ mod tests {
         assert_eq!(state.objects[&shock_a].zone, Zone::Battlefield);
         assert_eq!(state.objects[&shock_b].zone, Zone::Battlefield);
         assert!(state.pending_change_zone_iteration.is_none());
+    }
+
+    /// CR 110.2a: Only `ControllerRef::You` is supported at runtime today.
+    /// Any other variant on `enters_under` must surface as `EffectError::
+    /// InvalidParam` from the resolver entry — the resolver MUST NOT silently
+    /// pick a `PlayerId` for an unsupported variant. This guards the strict-
+    /// fail branch added when the field was lifted from `bool` to
+    /// `Option<ControllerRef>`. The test drives the engine through the
+    /// resolver (not a shape-only construction) so a future regression that
+    /// short-circuits the match is caught.
+    #[test]
+    fn resolver_strict_fails_on_opponent_controller_ref_with_cr_110_2a_annotation() {
+        let mut state = GameState::new_two_player(7);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Stolen Creature".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                // CR 110.2a: deliberately use an unsupported variant to drive
+                // the strict-fail branch.
+                enters_under: Some(ControllerRef::Opponent),
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        let err = resolve(&mut state, &ability, &mut events)
+            .expect_err("resolver must reject unsupported ControllerRef variants");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("CR 110.2a"),
+            "error must cite CR 110.2a, got {msg}"
+        );
+        assert!(
+            msg.contains("Opponent"),
+            "error must name the offending variant, got {msg}"
+        );
+        // Object must not have moved.
+        assert_eq!(state.objects[&obj_id].zone, Zone::Graveyard);
+    }
+
+    /// CR 701.17c + CR 608.2c: Issue #1298 — Terra, Magical Adept's
+    /// "Put up to one enchantment card milled this way into your hand" must
+    /// scope `EffectZoneChoice` to the milled cards, not battlefield
+    /// enchantments.
+    #[test]
+    fn tracked_set_filtered_milled_enchantment_offers_only_milled_cards() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::game_state::WaitingFor;
+
+        fn mark_enchantment(state: &mut GameState, id: ObjectId) {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Enchantment);
+        }
+
+        let mut state = GameState::new_two_player(42);
+
+        // Library top-first: one enchantment + four instants within the milled top-5.
+        let milled_enchantment = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Milled Aura".to_string(),
+            Zone::Library,
+        );
+        mark_enchantment(&mut state, milled_enchantment);
+        for i in 0..4 {
+            create_object(
+                &mut state,
+                CardId(i + 2),
+                PlayerId(0),
+                format!("Instant {i}"),
+                Zone::Library,
+            );
+        }
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 10),
+                PlayerId(0),
+                format!("Padding {i}"),
+                Zone::Library,
+            );
+        }
+
+        // Trap: a battlefield enchantment matches the inner type filter but
+        // is NOT among the milled cards.
+        let battlefield_enchantment = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Battlefield Aura".to_string(),
+            Zone::Battlefield,
+        );
+        mark_enchantment(&mut state, battlefield_enchantment);
+
+        let put_sub = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::new(
+                        TypeFilter::Enchantment,
+                    ))),
+                },
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::Mill {
+                count: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(put_sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let WaitingFor::EffectZoneChoice {
+            cards, destination, ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "expected EffectZoneChoice for the put-from-milled clause, got {:?}",
+                state.waiting_for
+            );
+        };
+
+        assert!(
+            cards.contains(&milled_enchantment),
+            "the milled enchantment must be offered; offered = {cards:?}"
+        );
+        assert!(
+            !cards.contains(&battlefield_enchantment),
+            "a battlefield enchantment must NEVER be offered — selection is \
+             scoped to the milled tracked set (issue #1298); offered = {cards:?}"
+        );
+        assert_eq!(
+            *destination,
+            Some(Zone::Hand),
+            "the chosen milled card moves to hand"
+        );
     }
 }

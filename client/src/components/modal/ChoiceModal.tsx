@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { CardType } from "../../adapter/types.ts";
+import type { CardType, ObjectId } from "../../adapter/types.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
 import { DialogShell } from "./DialogShell.tsx";
@@ -22,6 +22,9 @@ interface ChoiceModalProps {
   /** Card type info for the preview. The preview uses this to pick the right
    * rules-text band for non-standard frames (saga, planeswalker, battle, etc.). */
   previewCardTypes?: CardType;
+  /** When provided alongside previewCardName, hovering the inline preview fires
+   * inspectObject for the floating full-card view. */
+  previewObjectId?: ObjectId;
   footer?: ReactNode;
 }
 
@@ -33,6 +36,7 @@ export function ChoiceModal({
   onClose,
   previewCardName,
   previewCardTypes,
+  previewObjectId,
   footer,
 }: ChoiceModalProps) {
   return (
@@ -40,6 +44,7 @@ export function ChoiceModal({
       title={<RichLabel text={title} size="md" />}
       subtitle={subtitle ? <RichLabel text={subtitle} size="xs" /> : undefined}
       onClose={onClose}
+      previewObjectId={previewObjectId}
     >
       {previewCardName && (
         <div className="px-3 pt-3 lg:px-5 lg:pt-4">

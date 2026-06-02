@@ -14,8 +14,8 @@ use crate::types::zones::Zone;
 use super::casting;
 use super::effects;
 use super::engine::{
-    handle_tap_land_for_mana, handle_untap_land_for_mana, resume_pending_continuation_if_priority,
-    EngineError,
+    check_exile_returns, handle_tap_land_for_mana, handle_untap_land_for_mana,
+    resume_pending_continuation_if_priority, EngineError,
 };
 use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::mana_abilities;
@@ -716,6 +716,15 @@ pub(super) fn handle_unless_payment(
         let result = effects::resolve_ability_chain(state, &ability, events, 0);
         state.current_trigger_event = previous_trigger_event;
         result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+        // CR 610.3 + #783: The unless-payment resume bypasses
+        // `run_post_action_pipeline` (see the inline-scan note in
+        // engine.rs), so the standard exile-return scan never runs. When the
+        // resolved effect makes a source leave the battlefield — e.g. Static
+        // Prison sacrificing itself via "sacrifice unless you pay {E}" — the
+        // permanent it exiled "until it leaves the battlefield" must return.
+        // Idempotent and event-scoped: a no-op when no source left this way.
+        check_exile_returns(state, events);
     }
 
     if matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }) {
@@ -931,6 +940,13 @@ pub(super) fn handle_ward_sacrifice_choice(
         ));
     }
 
+    // CR 603.10a + CR 118.8: NOTE — sequential Ward multi-sacrifice is a separate
+    // co-departed gap. Each Ward sacrifice is taken in its own action's `events`
+    // (one permanent per round-trip, re-prompting for `remaining - 1`), so the
+    // permanents paying one Ward cost are never stamped as a simultaneous departure
+    // group; the `handle_sacrifice_for_cost` co-departed stamp does not apply here.
+    // A co-departing observer therefore under-observes. Closing this would batch all
+    // Ward sacrifices into one action (like `handle_sacrifice_for_cost`) — out of scope.
     crate::game::sacrifice::sacrifice_permanent(state, chosen[0], player, events)?;
 
     // If more sacrifices remain, re-prompt with updated eligible permanents
@@ -1027,17 +1043,19 @@ fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> Action
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, GainLifePlayer, QuantityExpr, ResolvedAbility, SubAbilityLink,
+        AbilityCondition, ControllerRef, QuantityExpr, ResolvedAbility, SubAbilityLink, TypedFilter,
     };
+    use crate::types::card_type::CoreType;
     use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
     fn gain_life(value: i32) -> Effect {
         Effect::GainLife {
             amount: QuantityExpr::Fixed { value },
-            player: GainLifePlayer::Controller,
+            player: TargetFilter::Controller,
         }
     }
 
@@ -1293,6 +1311,55 @@ mod tests {
             .expect("unless-pay-life should resolve");
         // Player paid 3 life — life total drops by 3, gain-life effect skipped.
         assert_eq!(state.players[0].life, 17);
+    }
+
+    /// CR 118.12a + CR 701.21: Unless-sacrifice costs are payer-relative.
+    /// A parser-emitted `ControllerRef::You` filter must resolve against the
+    /// player paying the cost, not against the ability controller or a chosen
+    /// target player.
+    #[test]
+    fn unless_sacrifice_cost_uses_payer_relative_filter() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Payer Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                count: 1,
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        handle_unless_payment(&mut state, waiting_for, true, &mut events)
+            .expect("unless-sacrifice should surface choice");
+        match &state.waiting_for {
+            WaitingFor::WardSacrificeChoice {
+                player, permanents, ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(permanents, &vec![creature]);
+            }
+            other => panic!("expected WardSacrificeChoice, got {other:?}"),
+        }
     }
 
     /// CR 118.12a: "unless any player pays" poll — when the prompted player

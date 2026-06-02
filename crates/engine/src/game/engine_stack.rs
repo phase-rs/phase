@@ -9,7 +9,7 @@ use super::ability_utils::{
     assign_selected_slots_in_chain, assign_targets_in_chain, choose_target_for_ability,
     flatten_targets_in_chain, validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
-use super::casting_targets::extract_fixed_distribution_total;
+use super::casting_targets::extract_distribution_total;
 use super::effects;
 use super::engine::{resume_pending_continuation_if_priority, EngineError};
 use super::triggers::PendingTrigger;
@@ -39,10 +39,17 @@ pub(super) fn finalize_trigger_target_selection(
     // counters among its targets, the controller announces that division while
     // putting the ability on the stack, after targets have been chosen.
     if let Some(unit) = distribute {
-        if let Some(total) = extract_fixed_distribution_total(&trigger.ability.effect) {
+        if let Some(total) =
+            extract_distribution_total(state, &trigger.ability, &trigger.ability.effect)
+        {
             if assigned_targets.len() == 1 {
                 trigger.ability.distribution = Some(vec![(assigned_targets[0].clone(), total)]);
             } else {
+                // CR 601.2d: Distribution still outstanding. Entry is already
+                // on the stack with empty `distribution`; mutate the on-stack
+                // ability's targets (so they match what was just chosen) and
+                // keep `pending_trigger_entry` set until division completes.
+                triggers::mutate_pending_trigger_entry(state, &trigger.ability);
                 state.pending_trigger = Some(trigger);
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
@@ -56,7 +63,12 @@ pub(super) fn finalize_trigger_target_selection(
         }
     }
 
-    triggers::push_pending_trigger_to_stack(state, trigger, events);
+    // CR 603.3c + CR 603.3d: Construction complete. The entry is already on
+    // the stack (pushed by the pause-path that started selection); mutate its
+    // ability with the resolved targets/distribution and clear
+    // `pending_trigger_entry` so the resolver may now fire this entry.
+    triggers::finalize_pending_trigger_entry(state, &trigger.ability);
+
     state.priority_passes.clear();
     state.priority_pass_count = 0;
     // CR 113.2c + CR 603.2 + CR 603.3b: After the active trigger is on the
@@ -64,6 +76,10 @@ pub(super) fn finalize_trigger_target_selection(
     // input (e.g., the second Boggart Prankster's "you attack" trigger waiting
     // behind the first). If a deferred trigger itself needs input, hand back
     // its WaitingFor; otherwise continue to Priority.
+    debug_assert!(
+        !triggers::is_pending_trigger_construction_active(state),
+        "deferred-trigger drain entered with construction still active",
+    );
     if let Some(waiting_for) = triggers::drain_deferred_trigger_queue(state, events) {
         return waiting_for;
     }
@@ -107,11 +123,12 @@ pub(super) fn handle_trigger_target_selection_choose_target(
     target: Option<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (player, target_slots, target_constraints, selection, source_id, description) =
+    let (player, target_slots, mode_labels, target_constraints, selection, source_id, description) =
         match waiting_for {
             WaitingFor::TriggerTargetSelection {
                 player,
                 target_slots,
+                mode_labels,
                 target_constraints,
                 selection,
                 source_id,
@@ -119,6 +136,7 @@ pub(super) fn handle_trigger_target_selection_choose_target(
             } => (
                 player,
                 target_slots,
+                mode_labels,
                 target_constraints,
                 selection,
                 source_id,
@@ -143,9 +161,12 @@ pub(super) fn handle_trigger_target_selection_choose_target(
         &selection,
         target,
     )? {
+        // CR 700.2b: preserve the inbound mode labels unchanged across the
+        // step-by-step walk — the slot→mode mapping does not change.
         TargetSelectionAdvance::InProgress(selection) => Ok(WaitingFor::TriggerTargetSelection {
             player,
             target_slots,
+            mode_labels,
             target_constraints,
             selection,
             source_id,

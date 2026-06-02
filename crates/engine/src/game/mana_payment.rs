@@ -1002,7 +1002,7 @@ pub fn pay_cost_with_demand_and_choices(
 /// Returns `Vec<PhyrexianShard>` aligned with the order of Phyrexian shards in `cost`.
 /// Each shard records the colored mana availability (`ManaOnly`, `LifeOnly`, or `ManaOrLife`)
 /// so the UI can render only legal choices and the engine can decide whether to pause at
-/// `WaitingFor::PhyrexianPayment` (pause iff any shard has `ShardOptions::ManaOrLife`).
+/// `WaitingFor::PhyrexianPayment` before life would be deducted.
 ///
 /// The computation is a simulated dry-run: we spend mana from a cloned pool in order,
 /// checking each Phyrexian shard's mana option against the pool state *after* previous

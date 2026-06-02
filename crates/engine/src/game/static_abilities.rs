@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::{battlefield_active_statics, game_functioning_statics};
@@ -30,6 +31,20 @@ pub struct StaticCheckContext {
     pub target_id: Option<ObjectId>,
     pub player_id: Option<PlayerId>,
     pub card_name: Option<String>,
+}
+
+/// Process-wide cached static-ability registry.
+///
+/// Mirrors [`crate::game::trigger_matchers::trigger_registry`]: the registry
+/// is a pure constant (`StaticMode` → fn-pointer), so it is built once.
+/// `unimplemented_mechanics` consults it per battlefield object per `apply()`;
+/// rebuilding it per call was a display-derivation hot-path cost.
+static STATIC_REGISTRY: LazyLock<HashMap<StaticMode, StaticAbilityHandler>> =
+    LazyLock::new(build_static_registry);
+
+/// Cached accessor for the static-ability registry. Built once on first use.
+pub fn static_registry() -> &'static HashMap<StaticMode, StaticAbilityHandler> {
+    &STATIC_REGISTRY
 }
 
 /// CR 604.1: Static ability registry — maps StaticMode keys to handlers.
@@ -64,7 +79,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // triggered and are unaffected by this variant.
     // CR 702.8a: CastWithFlash — card may be cast at instant speed.
     registry.insert(StaticMode::CastWithFlash, handle_rule_mod);
-    // CR 601.2f: ReduceCost/RaiseCost are data-carrying variants — runtime checks are
+    // CR 601.2f: ModifyCost (Reduce/Raise modes) is a data-carrying variant — runtime checks are
     // in game/casting.rs::apply_battlefield_cost_modifiers(). Coverage support is via
     // is_data_carrying_static() in game/coverage.rs.
     // Note: ReduceAbilityCost runtime checks are in game/keywords.rs::apply_ability_cost_reduction().
@@ -128,6 +143,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantUntap, handle_rule_mod);
     // CR 509.1c: MustBeBlocked — this creature must be blocked if able.
     registry.insert(StaticMode::MustBeBlocked, handle_rule_mod);
+    // CR 509.1c: MustBeBlockedByAll — every creature able to block this creature
+    // must do so ("All creatures able to block ~ do so"; enforced in combat.rs).
+    registry.insert(StaticMode::MustBeBlockedByAll, handle_rule_mod);
     // CR 701.15b: Goaded — this creature must attack and avoid the goading
     // player if able. Runtime enforcement lives in combat.rs.
     registry.insert(StaticMode::Goaded, handle_rule_mod);
@@ -142,6 +160,9 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // via player_has_cant_win(). Per CR 104.2a, the last-player-standing case
     // is not blocked by this static and is enforced by elimination::check_game_over.
     registry.insert(StaticMode::CantWinTheGame, handle_rule_mod);
+    // CR 704.5j: LegendRuleDoesntApply — affected permanents are excluded from
+    // the legend-rule SBA. Runtime enforcement is in sba.rs::legend_rule_exempt().
+    registry.insert(StaticMode::LegendRuleDoesntApply, handle_rule_mod);
     // CR 702.179e: Card-specific rule modification allowing speed to exceed 4.
     registry.insert(StaticMode::SpeedCanIncreaseBeyondFour, handle_rule_mod);
     // CR 609.4b: "You may spend mana as though it were mana of any color."
@@ -241,7 +262,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     //   - ChangesZoneAll            → `TriggerMode::ChangesZoneAll`
     //   - PreventDamage             → `Effect::PreventDamage`
     //   - DamageReduction / cost-mod variants → typed `StaticMode` variants
-    //     (`ReduceCost`, `RaiseCost`, `DefilerCostReduction`, etc.)
+    //     (`ModifyCost`, `DefilerCostReduction`, etc.)
     //   - ETBReplacement / LeavesPlay → `ReplacementDefinition`
     //     (ChangeZone / Moved events)
     //
