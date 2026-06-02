@@ -5636,16 +5636,23 @@ pub(super) fn parse_imperative_family_ast(
             if nom_primitives::scan_contains(lower, "control of") {
                 parse_targeted_action_ast(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
+            } else if let Some(effect) =
+                try_parse_gain_keyword(text).or_else(|| try_parse_gain_quoted_ability(text))
+            {
+                // CR 702.1b: keyword-ability grant (CR 113.3 + CR 604.1: or
+                // quoted-ability grant). Checked BEFORE the life-gain branch because the bare
+                // `scan_contains(lower, "life")` guard below also matches
+                // keywords whose name contains "life" — e.g. "gain lifelink",
+                // which otherwise misrouted to the numeric life-gain parser and
+                // fell through to Unimplemented. `try_parse_gain_keyword`
+                // returns `None` unless it actually finds a keyword, so genuine
+                // life-gain clauses ("gain 3 life") still fall through below.
+                Some(ImperativeFamilyAst::GainKeyword(effect))
             } else if nom_primitives::scan_contains(lower, "life") {
                 parse_numeric_imperative_ast(text, lower)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
             } else {
-                // CR 702: bare keyword grant first; CR 113.3 + CR 604.1: fall
-                // back to quoted-ability grant when the gain clause carries an
-                // inline ability ('gain "When this creature dies, draw a card."').
-                try_parse_gain_keyword(text)
-                    .or_else(|| try_parse_gain_quoted_ability(text))
-                    .map(ImperativeFamilyAst::GainKeyword)
+                None
             }
         }
 
@@ -10214,7 +10221,7 @@ mod tests {
         else {
             panic!("expected GenericEffect, got something else");
         };
-        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(duration.as_ref(), Some(&Duration::UntilEndOfTurn));
         let static_def = static_abilities
             .first()
             .expect("static_abilities must contain the granted modification");
@@ -10323,6 +10330,80 @@ mod tests {
             }
             other => panic!("expected GenericEffect, got {other:?}"),
         }
+    }
+
+    /// "lifelink" contains the substring "life", so the `gain` dispatch must
+    /// route "gain lifelink" to the keyword-grant parser, not the numeric
+    /// life-gain branch (which would fail and fall through to Unimplemented).
+    /// Reaches cards like Blessing of Belzenlok ("…it also gains lifelink…").
+    #[test]
+    fn gain_lifelink_dispatches_to_keyword_grant_not_life() {
+        let ast = parse_imperative_family_ast(
+            "gain lifelink",
+            "gain lifelink",
+            &mut ParseContext::default(),
+        )
+        .expect("'gain lifelink' should parse");
+        match ast {
+            ImperativeFamilyAst::GainKeyword(effect) => assert!(
+                generic_has_keyword(&effect, crate::types::keywords::Keyword::Lifelink),
+                "expected a Lifelink keyword grant"
+            ),
+            _ => panic!("expected GainKeyword(Lifelink)"),
+        }
+    }
+
+    /// Regression: a genuine life-gain clause must still reach the numeric
+    /// life-gain parser, not be captured by the keyword-grant branch.
+    #[test]
+    fn gain_life_still_dispatches_to_numeric_life_gain() {
+        let ast =
+            parse_imperative_family_ast("gain 3 life", "gain 3 life", &mut ParseContext::default())
+                .expect("'gain 3 life' should parse");
+        assert!(
+            matches!(
+                ast,
+                ImperativeFamilyAst::Structured(ImperativeAst::Numeric(_))
+            ),
+            "expected numeric life-gain dispatch"
+        );
+    }
+
+    /// Production-path regression for the same lifelink/life substring
+    /// ambiguity, including default duration and SelfRef scope.
+    #[test]
+    fn effect_gain_lifelink_dispatches_to_keyword_grant() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "gain lifelink until end of turn",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*def.effect
+        else {
+            panic!(
+                "expected GenericEffect for lifelink grant, got {:?}",
+                def.effect
+            );
+        };
+        assert_eq!(duration.as_ref(), Some(&Duration::UntilEndOfTurn));
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::SelfRef),
+            "bare creature-scoped keyword grant must remain SelfRef"
+        );
+        assert!(
+            static_abilities[0].modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Lifelink
+                }
+            )),
+            "expected AddKeyword(Lifelink), got {:?}",
+            static_abilities[0].modifications
+        );
     }
 
     /// Pure pump body → None (falls through to the bare numeric Pump arm).
