@@ -27389,6 +27389,48 @@ mod tests {
         assert!(*tapped);
     }
 
+    /// Issue #1696 — Myrkul, Lord of Bones full chain: an exile that publishes a
+    /// tracked set, followed by "create a token that's a copy of that card,
+    /// except it's an enchantment and loses all other card types." The copy
+    /// clause must (a) rebind its `that card` anaphor to the tracked set
+    /// (CR 603.7) and (b) carry the `SetCardTypes` exception so the token is an
+    /// enchantment, not a creature (CR 205.1a + CR 707.9d). Uses an explicit
+    /// exile target so the chain stitches without trigger-subject context.
+    #[test]
+    fn exile_then_copy_that_card_as_enchantment_uses_tracked_set_and_set_card_types() {
+        let def = parse_effect_chain(
+            "Exile target creature card from a graveyard, then create a token that's a copy of that card, except it's an enchantment and loses all other card types.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChangeZone { destination, .. } = def.effect.as_ref() else {
+            panic!("expected ChangeZone, got {:?}", def.effect);
+        };
+        assert_eq!(*destination, Zone::Exile);
+
+        let copy = def.sub_ability.as_deref().expect("copy sub-ability");
+        let Effect::CopyTokenOf {
+            target,
+            additional_modifications,
+            ..
+        } = copy.effect.as_ref()
+        else {
+            panic!("expected CopyTokenOf, got {:?}", copy.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(
+            *additional_modifications,
+            vec![ContinuousModification::SetCardTypes {
+                core_types: vec![CoreType::Enchantment],
+            }]
+        );
+    }
+
     /// CR 105.2 + CR 205.1a + CR 613.1d-e: Rise from the Grave reanimation —
     /// "Put target creature card from a graveyard onto the battlefield under your
     /// control. It's a black Zombie in addition to its other colors and types."

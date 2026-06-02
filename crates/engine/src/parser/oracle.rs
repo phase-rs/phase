@@ -4413,6 +4413,82 @@ mod tests {
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
     }
 
+    /// Issue #1696 — Myrkul, Lord of Bones end-to-end: the death trigger exiles
+    /// the dying creature and creates an enchantment token copy of it. Verifies
+    /// the full parse pipeline produces (a) an exile effect (which publishes the
+    /// tracked set the copy reads) and (b) a `CopyTokenOf` carrying the
+    /// `SetCardTypes { [Enchantment] }` exception (CR 205.1a + CR 707.9d) — the
+    /// card-type override that was previously dropped, so the token came out as
+    /// a creature copy instead of the intended enchantment.
+    #[test]
+    fn myrkul_full_ability_exiles_and_creates_enchantment_copy() {
+        let r = parse(
+            "Whenever another nontoken creature you control dies, you may exile it. \
+             If you do, create a token that's a copy of that card, except it's an \
+             enchantment and loses all other card types.",
+            "Myrkul, Lord of Bones",
+            &[],
+            &["Creature"],
+            &["God"],
+        );
+
+        // Recursively collect every effect reachable from a triggered ability,
+        // descending through delayed-trigger wrappers and sub/else branches.
+        fn collect<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+            out.push(&def.effect);
+            if let Effect::CreateDelayedTrigger { effect, .. } = def.effect.as_ref() {
+                collect(effect, out);
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect(sub, out);
+            }
+            if let Some(els) = def.else_ability.as_deref() {
+                collect(els, out);
+            }
+        }
+
+        // A pure triggered-ability card lands in `triggers`, not `abilities`;
+        // the trigger's effect tree hangs off `execute`.
+        let mut effects = Vec::new();
+        for ability in r.abilities.iter() {
+            collect(ability, &mut effects);
+        }
+        for trigger in r.triggers.iter() {
+            if let Some(exec) = trigger.execute.as_deref() {
+                collect(exec, &mut effects);
+            }
+        }
+
+        let expected_override = ContinuousModification::SetCardTypes {
+            core_types: vec![crate::types::card_type::CoreType::Enchantment],
+        };
+        let has_enchantment_copy = effects.iter().any(|e| match e {
+            Effect::CopyTokenOf {
+                additional_modifications,
+                ..
+            } => additional_modifications.contains(&expected_override),
+            _ => false,
+        });
+        assert!(
+            has_enchantment_copy,
+            "expected a CopyTokenOf carrying SetCardTypes([Enchantment]); effects = {effects:#?}"
+        );
+
+        let has_exile = effects.iter().any(|e| {
+            matches!(
+                e,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            )
+        });
+        assert!(
+            has_exile,
+            "expected an Exile (ChangeZone to Exile) effect; effects = {effects:#?}"
+        );
+    }
+
     #[test]
     fn ghostfire_has_self_color_cda_and_spell_damage() {
         let r = parse(
