@@ -384,7 +384,7 @@ fn classify_hello_gate(
 /// assume the message reached it legitimately.
 ///
 /// **Exhaustive by design.** Every `ClientMessage` variant is explicitly
-/// listed so adding a new variant is a compile error until the a  hor
+/// listed so adding a new variant is a compile error until the author
 /// decides its mode policy. A catch-all `_ => None` would default-allow
 /// future variants in both modes, which is the wrong default for a
 /// security-relevant gate.
@@ -445,7 +445,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
 /// over the WebSocket draft protocol, or `None` if it is a valid client action.
 ///
 /// **Exhaustive by design.** Every `DraftAction` variant is explicitly listed
-/// so adding a new variant is a compile error until the a  hor decides its
+/// so adding a new variant is a compile error until the author decides its
 /// client-trust policy. A catch-all `_ => None` would default-allow future
 /// variants, which is the wrong default for a security-relevant gate.
 ///
@@ -455,9 +455,9 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
 /// - `SetSeatConnected`: engine state plumbing. The server-internal runtime in
 ///   `server-core/src/draft_session.rs` broadcasts connection state via
 ///   `draft_core::session::apply` directly. Accepting it from a client would
-///   let a malicious a  henticated player forge another seat's connection
+///   let a malicious authenticated player forge another seat's connection
 ///   state (GH #1254). Caller-binding at `draft_session.rs:247-249` resolves
-///   the a  henticated seat from the token but discards it (`let _seat = ...`),
+///   the authenticated seat from the token but discards it (`let _seat = ...`),
 ///   so the payload's `seat: u8` is otherwise unchecked.
 fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction) -> Option<String> {
     use draft_core::types::DraftAction;
