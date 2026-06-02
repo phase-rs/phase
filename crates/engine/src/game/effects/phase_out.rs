@@ -11,6 +11,8 @@
 //! permanent path (CR 702.26 proper). Player phasing has no formal CR rule
 //! and follows the small set of card Oracle text that says "you phase out".
 
+use std::collections::HashSet;
+
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::PhaseOutCause;
 use crate::game::phasing::{phase_in_object, phase_in_player, phase_out_object, phase_out_player};
@@ -51,7 +53,13 @@ pub fn resolve(
     }
 
     let object_targets = collect_object_targets(state, ability, &target);
+    let target_set: HashSet<ObjectId> = object_targets.iter().copied().collect();
     for oid in object_targets {
+        // CR 702.26h: attachments whose host is also in this mass set phase out
+        // only indirectly via the host's CR 702.26g cascade, not as direct targets.
+        if attachment_host_in_set(state, oid, &target_set) {
+            continue;
+        }
         phase_out_object(state, oid, PhaseOutCause::Directly, events);
     }
 
@@ -164,6 +172,16 @@ fn collect_player_targets(
         }
         _ => Vec::new(),
     }
+}
+
+/// True when `oid` is attached to another permanent that is also in `targets`.
+fn attachment_host_in_set(state: &GameState, oid: ObjectId, targets: &HashSet<ObjectId>) -> bool {
+    state
+        .objects
+        .get(&oid)
+        .and_then(|obj| obj.attached_to.as_ref())
+        .and_then(|t| t.as_object())
+        .is_some_and(|host| targets.contains(&host))
 }
 
 /// Resolve the target object set for a `PhaseOut` effect. Explicit

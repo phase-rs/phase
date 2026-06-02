@@ -168,6 +168,51 @@ pub(crate) fn animation_modifications(
     modifications
 }
 
+/// CR 205.1a + CR 613.1d (Layer 4): Build the layer-4 modifications for a
+/// "[subject] becomes a [type]" animation, applying SUBTYPE **replacement** (not
+/// addition) unless the effect is "in addition to its other types".
+///
+/// `animation_modifications` is the purely-additive base (the CR 205.1b
+/// "in addition" reading). When `is_additive` is false, CR 205.1a applies: a
+/// granted subtype replaces the existing subtypes from the same set — so a
+/// creature that "becomes a Frog" ends up with subtypes exactly `[Frog]` rather
+/// than retaining its prior creature types (Human, Soldier, …). This injects a
+/// `RemoveAllSubtypes` for each affected subtype set before its first
+/// `AddSubtype`.
+///
+/// Card TYPES stay additive (`AddType`): an animated permanent keeps its other
+/// card types (e.g. an animated land remains a land, a creature stays a
+/// creature) — only the subtype dimension is replaced. This matches the
+/// behavior the combined pump+become path already produces.
+pub(crate) fn animation_modifications_with_replacement(
+    spec: &AnimationSpec,
+    is_additive: bool,
+) -> Vec<crate::types::ability::ContinuousModification> {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::card_type::{noncreature_subtype_set, SubtypeSet};
+
+    let base = animation_modifications(spec);
+    if is_additive {
+        return base;
+    }
+
+    let mut out = Vec::with_capacity(base.len() + 1);
+    let mut removed_sets: Vec<SubtypeSet> = Vec::new();
+    for modification in base {
+        // CR 205.1a: a granted subtype replaces existing subtypes from its set —
+        // inject `RemoveAllSubtypes` once per affected set before the AddSubtype.
+        if let ContinuousModification::AddSubtype { subtype } = &modification {
+            let set = noncreature_subtype_set(subtype).unwrap_or(SubtypeSet::Creature);
+            if !removed_sets.contains(&set) {
+                out.push(ContinuousModification::RemoveAllSubtypes { set });
+                removed_sets.push(set);
+            }
+        }
+        out.push(modification);
+    }
+    out
+}
+
 /// Parse a color word prefix from animation text, handling "colorless" and
 /// the five MTG colors.
 ///
@@ -473,8 +518,8 @@ fn parse_animation_type_sequence_loose(input: &str) -> OracleResult<'_, Vec<Anim
 }
 
 /// Run the strict (CR 205.3 capitalized) type-sequence parser; fall back to the
-/// case-insensitive `_loose` variant when the input is terminated by the
-/// "in addition to its other [creature ]types" structural signal. The tail
+/// case-insensitive `_loose` variant when the input is terminated by an
+/// "in addition to {its/their/his/her} other [creature ]types" structural signal. The tail
 /// guarantees the preceding phrase is a type expression, so lowercase subtype
 /// words are safe to classify. Shared by [`parse_becomes_type_modifications`]
 /// and [`parse_animation_types`] so both the static-ability and effect-
@@ -484,13 +529,7 @@ fn try_parse_type_sequence_with_suffix(input: &str) -> Option<Vec<AnimationTypeT
     // capitalization is present (native effect text, static abilities). The
     // terminator-halt grammar (capitalized subtype required) naturally stops
     // the sequence at lowercase connective words like "in".
-    let suffix_parser = opt(preceded(
-        multispace0,
-        alt((
-            tag("in addition to its other creature types"),
-            tag("in addition to its other types"),
-        )),
-    ));
+    let suffix_parser = opt(preceded(multispace0, parse_in_addition_other_types_marker));
     if let Ok((_, (tokens, _))) = (parse_animation_type_sequence, suffix_parser).parse(input) {
         return Some(tokens);
     }
@@ -513,26 +552,56 @@ fn try_parse_type_sequence_with_suffix(input: &str) -> Option<Vec<AnimationTypeT
     None
 }
 
-/// Split `input` on the " in addition to its other [creature ]types" marker,
-/// returning the prefix and the matched marker variant. Returns `None` if the
-/// marker is absent. Uses `take_until` to locate the marker, then a nom `alt`
-/// to select between the two CR 205.3 variants (creature-types form is the
-/// longer alternative and listed first per nom short-circuit semantics).
+/// Split `input` on the " in addition to {its/their/his/her} other
+/// [creature ]types" marker, returning the prefix and the matched marker
+/// variant. Returns `None` if the marker is absent. Uses `take_until` to
+/// locate the marker, then [`parse_in_addition_other_types_marker`] to consume
+/// and recognize the variant.
 fn split_in_addition_tail(input: &str) -> Option<(&str, &str)> {
     type VE<'a> = OracleError<'a>;
-    // Longer alternative first (nom short-circuit).
     let (_, prefix) =
-        nom::bytes::complete::take_until::<_, _, VE<'_>>(" in addition to its other")(input)
-            .ok()?;
+        nom::bytes::complete::take_until::<_, _, VE<'_>>(" in addition to ")(input).ok()?;
     let pos = prefix.len();
     let rest = input[pos..].trim_start();
-    let (_, matched) = alt((
-        tag::<_, _, VE<'_>>("in addition to its other creature types"),
-        tag::<_, _, VE<'_>>("in addition to its other types"),
-    ))
-    .parse(rest)
-    .ok()?;
+    let (_, matched) = parse_in_addition_other_types_marker(rest).ok()?;
     Some((prefix, matched))
+}
+
+/// nom combinator: match the full "in addition to {its/their/his/her} other
+/// [creature ]types" marker. The two independent axes — possessive pronoun and
+/// type scope (all "types" vs only "creature types") — are composed as a single
+/// `alt` and a single `opt`, not enumerated as the 4×2 = 8 `tag` cross product.
+/// See `oracle_nom/PATTERNS.md` §8 ("compose, don't enumerate permutations").
+/// `recognize` returns the consumed slice, preserving the matched-marker
+/// semantics callers rely on. `opt(tag("creature "))` makes the scope axis
+/// order-independent — no "longest alternative first" ordering footgun.
+fn parse_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
+    recognize((
+        tag("in addition to "),
+        alt((tag("its"), tag("their"), tag("his"), tag("her"))),
+        tag(" other "),
+        opt(tag("creature ")),
+        tag("types"),
+    ))
+    .parse(input)
+}
+
+/// nom combinator: locate the marker anywhere in `input`, skipping preceding
+/// text. Named rather than inlined into [`has_in_addition_to_other_types`] so
+/// lifetime elision binds the parser's borrow to the `input` parameter;
+/// inlining the combinator over a local `String` tripped E0597 on the
+/// temporary parser's drop.
+fn locate_in_addition_other_types_marker(input: &str) -> OracleResult<'_, &str> {
+    preceded(
+        take_until("in addition to "),
+        parse_in_addition_other_types_marker,
+    )
+    .parse(input)
+}
+
+pub(crate) fn has_in_addition_to_other_types(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    locate_in_addition_other_types_marker(&lower).is_ok()
 }
 
 /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: Decompose a "becomes a
@@ -771,6 +840,91 @@ mod test_den_bugbear {
         assert!(mods.contains(
             &crate::types::ability::ContinuousModification::SetToughnessDynamic { value: expected }
         ));
+    }
+
+    #[test]
+    fn become_subtype_replaces_when_not_additive() {
+        // CR 205.1a: "becomes a Frog" replaces creature subtypes — a Human
+        // Soldier becomes ONLY a Frog — so the granted subtype is preceded by a
+        // RemoveAllSubtypes{Creature} wipe (not appended additively).
+        use crate::types::ability::ContinuousModification as CM;
+        use crate::types::card_type::SubtypeSet;
+
+        let spec = parse_animation_spec("a green Frog", &mut ParseContext::default())
+            .expect("Frog animation should parse");
+        let mods = animation_modifications_with_replacement(&spec, false);
+
+        let wipe = mods.iter().position(|m| {
+            matches!(
+                m,
+                CM::RemoveAllSubtypes {
+                    set: SubtypeSet::Creature
+                }
+            )
+        });
+        let add = mods
+            .iter()
+            .position(|m| matches!(m, CM::AddSubtype { subtype } if subtype == "Frog"));
+        assert!(
+            wipe.is_some(),
+            "non-additive become must wipe creature subtypes, got {mods:?}"
+        );
+        assert!(add.is_some(), "expected AddSubtype(Frog), got {mods:?}");
+        assert!(
+            wipe.unwrap() < add.unwrap(),
+            "the RemoveAllSubtypes wipe must precede the granted subtype, got {mods:?}"
+        );
+    }
+
+    #[test]
+    fn become_additive_keeps_existing_subtypes() {
+        // CR 205.1b: "in addition to its other types" stays additive — no wipe.
+        use crate::types::ability::ContinuousModification as CM;
+
+        let spec = parse_animation_spec("a green Frog", &mut ParseContext::default())
+            .expect("Frog animation should parse");
+        let mods = animation_modifications_with_replacement(&spec, true);
+
+        assert!(
+            !mods
+                .iter()
+                .any(|m| matches!(m, CM::RemoveAllSubtypes { .. })),
+            "additive become must not wipe subtypes, got {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, CM::AddSubtype { subtype } if subtype == "Frog")),
+            "expected AddSubtype(Frog), got {mods:?}"
+        );
+    }
+
+    #[test]
+    fn become_artifact_creature_stays_additive() {
+        // CR 205.1b: "becomes an artifact creature" is additive (gains artifact,
+        // stays a creature) — keep AddType, never collapse to SetCardTypes.
+        use crate::types::ability::ContinuousModification as CM;
+        use crate::types::card_type::CoreType;
+
+        let spec = parse_animation_spec("an artifact creature", &mut ParseContext::default())
+            .expect("artifact creature animation should parse");
+        let mods = animation_modifications_with_replacement(&spec, false);
+
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            CM::AddType {
+                core_type: CoreType::Artifact
+            }
+        )));
+        assert!(mods.iter().any(|m| matches!(
+            m,
+            CM::AddType {
+                core_type: CoreType::Creature
+            }
+        )));
+        assert!(
+            !mods.iter().any(|m| matches!(m, CM::SetCardTypes { .. })),
+            "artifact creature must stay additive, got {mods:?}"
+        );
     }
 
     #[test]
