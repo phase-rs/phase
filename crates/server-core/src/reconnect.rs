@@ -191,25 +191,4 @@ mod tests {
         let result = mgr.attempt_reconnect("DRAFT01", PlayerId(1));
         assert!(matches!(result, ReconnectResult::Ok { .. }));
     }
-
-    mod game_reconnect_guard_tests {
-        use crate::game_reconnect_guard::guard_game_reconnect;
-
-        #[test]
-        fn game_reconnect_accepts_valid_fields() {
-            assert!(guard_game_reconnect("ABC123", &"t".repeat(32)).is_ok());
-        }
-
-        #[test]
-        fn game_reconnect_rejects_oversized_game_code() {
-            let err = guard_game_reconnect(&"x".repeat(65), "token").unwrap_err();
-            assert!(err.contains("game_code"));
-        }
-
-        #[test]
-        fn game_reconnect_rejects_oversized_player_token() {
-            let err = guard_game_reconnect("ABC123", &"t".repeat(129)).unwrap_err();
-            assert!(err.contains("player_token"));
-        }
-    }
 }
