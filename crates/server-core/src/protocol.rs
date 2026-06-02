@@ -1098,6 +1098,44 @@ mod tests {
         }
     }
 
+    mod seat_mutation_wire_guard_tests {
+        use crate::seat_mutation_wire_guard::guard_seat_mutation;
+
+        use super::*;
+
+        #[test]
+        fn seat_mutation_guard_accepts_valid_ai_named_deck() {
+            let mutation = SeatMutation::SetKind {
+                seat_index: 1,
+                kind: SeatKind::Ai {
+                    difficulty: AiDifficulty::Medium,
+                    deck: DeckChoice::Named("Mono Green".to_string()),
+                },
+            };
+            assert!(guard_seat_mutation(&mutation).is_ok());
+        }
+
+        #[test]
+        fn seat_mutation_guard_rejects_oversized_named_deck() {
+            let mutation = SeatMutation::SetKind {
+                seat_index: 1,
+                kind: SeatKind::Ai {
+                    difficulty: AiDifficulty::Medium,
+                    deck: DeckChoice::Named("x".repeat(129)),
+                },
+            };
+            let err = guard_seat_mutation(&mutation).unwrap_err();
+            assert!(err.contains("name"));
+        }
+
+        #[test]
+        fn seat_mutation_guard_rejects_oversized_seat_index() {
+            let mutation = SeatMutation::Remove { seat_index: 200 };
+            let err = guard_seat_mutation(&mutation).unwrap_err();
+            assert!(err.contains("seat_index"));
+        }
+    }
+
     #[test]
     fn client_message_ping_roundtrips() {
         let msg = ClientMessage::Ping {
