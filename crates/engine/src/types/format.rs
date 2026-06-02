@@ -47,6 +47,7 @@ pub enum GameFormat {
     PauperCommander,
     DuelCommander,
     TinyLeaders,
+    Oathbreaker,
     Brawl,
     HistoricBrawl,
     FreeForAll,
@@ -139,6 +140,7 @@ impl GameFormat {
             GameFormat::Brawl => Some(LegalityFormat::StandardBrawl),
             GameFormat::HistoricBrawl => Some(LegalityFormat::Brawl),
             GameFormat::TinyLeaders
+            | GameFormat::Oathbreaker
             | GameFormat::FreeForAll
             | GameFormat::TwoHeadedGiant
             | GameFormat::Limited => None,
@@ -164,6 +166,7 @@ impl GameFormat {
             GameFormat::Commander
             | GameFormat::PauperCommander
             | GameFormat::DuelCommander
+            | GameFormat::Oathbreaker
             | GameFormat::Brawl
             | GameFormat::HistoricBrawl => SideboardPolicy::Forbidden,
             GameFormat::TinyLeaders => SideboardPolicy::Limited(10),
@@ -186,6 +189,7 @@ impl GameFormat {
             GameFormat::Commander
                 | GameFormat::PauperCommander
                 | GameFormat::DuelCommander
+                | GameFormat::Oathbreaker
                 | GameFormat::Brawl
                 | GameFormat::HistoricBrawl,
         )
@@ -226,6 +230,7 @@ impl GameFormat {
             GameFormat::PauperCommander => "Pauper Commander",
             GameFormat::DuelCommander => "Duel Commander",
             GameFormat::TinyLeaders => "Tiny Leaders: Reborn",
+            GameFormat::Oathbreaker => "Oathbreaker",
             GameFormat::Brawl => "Brawl",
             GameFormat::HistoricBrawl => "Historic Brawl",
             GameFormat::FreeForAll => "Free-for-All",
@@ -343,6 +348,14 @@ impl GameFormat {
                 description: "50-card Tiny singleton",
                 group: FormatGroup::Commander,
                 default_config: FormatConfig::tiny_leaders(),
+            },
+            FormatMetadata {
+                format: GameFormat::Oathbreaker,
+                label: "Oathbreaker",
+                short_label: "OBK",
+                description: "60-card singleton, Planeswalker + signature spell",
+                group: FormatGroup::Commander,
+                default_config: FormatConfig::oathbreaker(),
             },
             FormatMetadata {
                 format: GameFormat::Brawl,
@@ -504,6 +517,27 @@ impl FormatConfig {
         }
     }
 
+    /// Oathbreaker RC: 60-card singleton, one legendary Planeswalker as the
+    /// Oathbreaker commander plus one signature spell (instant/sorcery within
+    /// color identity), both in the command zone. 20 life, 2–4 players,
+    /// no commander-damage threshold.
+    pub fn oathbreaker() -> Self {
+        FormatConfig {
+            format: GameFormat::Oathbreaker,
+            starting_life: 20,
+            min_players: 2,
+            max_players: 4,
+            deck_size: 60,
+            singleton: true,
+            command_zone: true,
+            commander_damage_threshold: None,
+            range_of_influence: None,
+            team_based: false,
+            uses_commander: false,
+            allow_debug_actions: false,
+        }
+    }
+
     /// Historic: non-rotating constructed using the Arena Historic card pool.
     pub fn historic() -> Self {
         FormatConfig {
@@ -630,6 +664,7 @@ impl FormatConfig {
             GameFormat::PauperCommander => Self::pauper_commander(),
             GameFormat::DuelCommander => Self::duel_commander(),
             GameFormat::TinyLeaders => Self::tiny_leaders(),
+            GameFormat::Oathbreaker => Self::oathbreaker(),
             GameFormat::Brawl => Self::brawl(),
             GameFormat::HistoricBrawl => Self::historic_brawl(),
             GameFormat::FreeForAll => Self::free_for_all(),
@@ -793,6 +828,28 @@ mod tests {
     }
 
     #[test]
+    fn format_config_oathbreaker() {
+        let config = FormatConfig::oathbreaker();
+        assert_eq!(config.format, GameFormat::Oathbreaker);
+        assert_eq!(config.starting_life, 20);
+        assert_eq!(config.min_players, 2);
+        assert_eq!(config.max_players, 4);
+        assert_eq!(config.deck_size, 60);
+        assert!(config.singleton);
+        assert!(config.command_zone);
+        assert_eq!(config.commander_damage_threshold, None);
+        assert!(!config.uses_commander);
+        assert!(!config.team_based);
+        assert_eq!(
+            GameFormat::Oathbreaker.sideboard_policy(),
+            SideboardPolicy::Forbidden
+        );
+        assert!(GameFormat::Oathbreaker.grants_free_first_mulligan());
+        assert!(!GameFormat::Oathbreaker.uses_commander());
+        assert_eq!(GameFormat::Oathbreaker.legality_format(), None);
+    }
+
+    #[test]
     fn format_config_serde_roundtrip() {
         let configs = vec![
             FormatConfig::standard(),
@@ -802,6 +859,7 @@ mod tests {
             FormatConfig::historic(),
             FormatConfig::pauper(),
             FormatConfig::tiny_leaders(),
+            FormatConfig::oathbreaker(),
             FormatConfig::brawl(),
             FormatConfig::historic_brawl(),
             FormatConfig::free_for_all(),

@@ -251,13 +251,13 @@ fn build_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPayload, S
             main_deck: p0,
             sideboard: Vec::new(),
             commander: Vec::new(),
-            bracket_tier: Default::default(),
+            ..Default::default()
         },
         opponent: PlayerDeckList {
             main_deck: p1,
             sideboard: Vec::new(),
             commander: Vec::new(),
-            bracket_tier: Default::default(),
+            ..Default::default()
         },
         ..Default::default()
     };

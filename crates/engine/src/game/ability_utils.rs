@@ -74,6 +74,12 @@ pub fn build_resolved_from_def_with_targets(
     resolved.optional = def.optional;
     resolved.optional_for = def.optional_for;
     resolved.multi_target = def.multi_target.clone();
+    // CR 115.1 + CR 601.2c: Carry the target-set constraints (e.g. combined
+    // mana-value cap) through so the resolution-time validator can enforce them
+    // against the announced/selected targets. Without this copy the parsed
+    // `AbilityDefinition.target_constraints` never reaches the resolved sub and
+    // the validator reads an empty constraint list.
+    resolved.target_constraints = def.target_constraints.clone();
     resolved.target_choice_timing = def.target_choice_timing;
     resolved.repeat_for = def.repeat_for.clone();
     // CR 608.2c + CR 107.1c: Carry the loop-continuation predicate through so the
@@ -116,8 +122,8 @@ pub fn build_resolved_from_def_with_targets(
 ///
 /// Fields from `sub`: effect, duration, sub_ability, else_ability,
 /// player_scope, optional, optional_for, optional_targeting, multi_target,
-/// target_choice_timing, description, repeat_for, min_x_value, forward_result,
-/// unless_pay, distribution, target_selection_mode.
+/// target_constraints, target_choice_timing, description, repeat_for,
+/// min_x_value, forward_result, unless_pay, distribution, target_selection_mode.
 ///
 /// Fields preserved from `parent`: controller, source_id, kind, context,
 /// original_controller, scoped_player, targets, chosen_x, cost_paid_object,
@@ -153,6 +159,9 @@ pub(crate) fn apply_instead_swap(
     overridden.optional_for = sub.optional_for;
     overridden.optional_targeting = sub.optional_targeting;
     overridden.multi_target = sub.multi_target.clone();
+    // CR 115.1 + CR 601.2c: Target-set constraints are an effect-shape attribute
+    // of the swapped clause, so they follow the swap (no field silently dropped).
+    overridden.target_constraints = sub.target_constraints.clone();
     overridden.target_choice_timing = sub.target_choice_timing;
     overridden.description = sub.description.clone();
     overridden.repeat_for = sub.repeat_for.clone();
@@ -893,7 +902,7 @@ pub fn random_select_targets_for_ability(
     // Multi-slot constraints (e.g., DifferentTargetPlayers) — reuse the same
     // validator the controller-choice path uses so random selection respects
     // every constraint declared on the ability.
-    validate_target_constraints(Some(state), &chosen, constraints)?;
+    validate_target_constraints(Some(state), &chosen, constraints, None)?;
     Ok(chosen)
 }
 
@@ -959,7 +968,7 @@ fn validate_target_prefix(
         }
     }
 
-    validate_target_constraints(None, targets, constraints)
+    validate_target_constraints(None, targets, constraints, None)
 }
 
 pub fn generate_target_assignments(
@@ -3041,7 +3050,7 @@ fn validate_selected_slot_prefix(
         }
     }
 
-    validate_target_constraints(None, &compact_targets, constraints)
+    validate_target_constraints(None, &compact_targets, constraints, None)
 }
 
 fn validate_target_prefix_for_ability(
@@ -3145,7 +3154,7 @@ fn validate_selected_slots_with_specs(
         }
     }
 
-    validate_target_constraints(Some(state), &compact_targets, constraints)
+    validate_target_constraints(Some(state), &compact_targets, constraints, Some(ability))
 }
 
 fn assign_targets_recursive(
@@ -3616,10 +3625,17 @@ fn assign_selected_slots_after_deferred_effect(
 }
 
 /// CR 115.3: Validate targeting constraints — e.g., different target players must be distinct.
+///
+/// `ability` is `Some` only on the `_for_ability` validation family (resolution-time
+/// selection), where source-relative dynamic constraints can be resolved against
+/// game state using the ability's controller/source provenance. Fixed caps only
+/// need `state`, so stack-announcement/random-selection callsites still enforce
+/// those when a stateful validation path is available.
 fn validate_target_constraints(
     state: Option<&GameState>,
     targets: &[TargetRef],
     constraints: &[TargetSelectionConstraint],
+    ability: Option<&ResolvedAbility>,
 ) -> Result<(), EngineError> {
     for constraint in constraints {
         match constraint {
@@ -3663,6 +3679,47 @@ fn validate_target_constraints(
                                 .to_string(),
                         ));
                     }
+                }
+            }
+            TargetSelectionConstraint::TotalManaValue { comparator, value } => {
+                let Some(state) = state else {
+                    continue;
+                };
+                let cap = match value {
+                    QuantityExpr::Fixed { value } => *value,
+                    _ => {
+                        // Skip dynamic caps when source/controller provenance is
+                        // unavailable. For the where-X die-result cap
+                        // (`EventContextAmount`), `resolve_quantity` reads
+                        // `state.die_result_this_resolution` (CR 706.2 + CR 706.4).
+                        let Some(ability) = ability else {
+                            continue;
+                        };
+                        crate::game::quantity::resolve_quantity(
+                            state,
+                            value,
+                            ability.controller,
+                            ability.source_id,
+                        )
+                    }
+                };
+                // CR 202.3: combined mana value of the chosen object targets.
+                let sum: i32 = targets
+                    .iter()
+                    .filter_map(|t| match t {
+                        TargetRef::Object(id) => state
+                            .objects
+                            .get(id)
+                            .map(|o| o.mana_cost.mana_value() as i32),
+                        TargetRef::Player(_) => None,
+                    })
+                    .sum();
+                // CR 601.2c + CR 608.2c + CR 109.5: enforce the cap against the
+                // chosen set.
+                if !comparator.evaluate(sum, cap) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected targets exceed the allowed total mana value".to_string(),
+                    ));
                 }
             }
         }
@@ -5207,6 +5264,147 @@ mod tests {
         assert!(!progress
             .current_legal_targets
             .contains(&TargetRef::Object(p0_b)));
+    }
+
+    /// CR 202.3 + CR 601.2c: `validate_target_constraints` enforces the
+    /// `TotalManaValue` cap against the combined mana value of the chosen object
+    /// targets. Helper that seeds graveyard creatures with explicit mana values
+    /// and returns a `(state, ability)` pair plus their object ids.
+    fn total_mv_fixture(mvs: &[u32]) -> (GameState, ResolvedAbility, Vec<ObjectId>) {
+        let mut state = GameState::new_two_player(42);
+        let mut ids = Vec::new();
+        for (i, mv) in mvs.iter().enumerate() {
+            let id = create_object(
+                &mut state,
+                CardId(i as u64 + 1),
+                PlayerId(0),
+                format!("MV {mv}"),
+                Zone::Graveyard,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(*mv);
+            ids.push(id);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            Vec::new(),
+            ObjectId(100),
+            PlayerId(0),
+        );
+        (state, ability, ids)
+    }
+
+    #[test]
+    fn total_mana_value_constraint_rejects_over_cap_and_accepts_at_cap() {
+        let (state, ability, ids) = total_mv_fixture(&[2, 3, 4]);
+        let constraint = TargetSelectionConstraint::TotalManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 5 },
+        };
+        // 2 + 4 = 6 > 5 → rejected.
+        let over = vec![TargetRef::Object(ids[0]), TargetRef::Object(ids[2])];
+        assert!(validate_target_constraints(
+            Some(&state),
+            &over,
+            std::slice::from_ref(&constraint),
+            Some(&ability),
+        )
+        .is_err());
+        // 2 + 3 = 5 == 5 → accepted (LE is inclusive).
+        let at = vec![TargetRef::Object(ids[0]), TargetRef::Object(ids[1])];
+        assert!(validate_target_constraints(
+            Some(&state),
+            &at,
+            std::slice::from_ref(&constraint),
+            Some(&ability),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn total_mana_value_constraint_enforces_fixed_cap_without_ability() {
+        let (state, _ability, ids) = total_mv_fixture(&[2]);
+        let constraint = TargetSelectionConstraint::TotalManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 1 },
+        };
+        let targets = vec![TargetRef::Object(ids[0])];
+        // Fixed caps do not need ability provenance; stateful stack/random
+        // selection paths must still reject over-cap choices.
+        assert!(validate_target_constraints(
+            Some(&state),
+            &targets,
+            std::slice::from_ref(&constraint),
+            None
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn total_mana_value_constraint_resolves_event_context_amount_from_die_result() {
+        let (mut state, ability, ids) = total_mv_fixture(&[3, 4]);
+        // CR 706.2: the cap is the rolled die result.
+        state.die_result_this_resolution = Some(7);
+        let constraint = TargetSelectionConstraint::TotalManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        };
+        // 3 + 4 = 7 <= 7 → accepted against the seeded die result.
+        let both = vec![TargetRef::Object(ids[0]), TargetRef::Object(ids[1])];
+        assert!(validate_target_constraints(
+            Some(&state),
+            &both,
+            std::slice::from_ref(&constraint),
+            Some(&ability),
+        )
+        .is_ok());
+        // Lower the roll → same selection now exceeds the cap.
+        state.die_result_this_resolution = Some(6);
+        assert!(validate_target_constraints(
+            Some(&state),
+            &both,
+            std::slice::from_ref(&constraint),
+            Some(&ability),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn total_mana_value_constraint_prunes_over_cap_prefix_in_enumeration() {
+        // CR 601.2c: "up to three target creature cards, total mana value 5 or
+        // less" — auto-selection must prune the over-cap partial set (so a valid
+        // under-cap completion is still reachable). With three MV-3 cards and a
+        // cap of 5, no two cards fit (3+3=6 > 5), but a single card (3 <= 5) is
+        // a legal completion.
+        let (state, mut ability, ids) = total_mv_fixture(&[3, 3, 3]);
+        ability.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 }));
+        let constraint = TargetSelectionConstraint::TotalManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 5 },
+        };
+        // A single card is under cap → Ok.
+        let single = vec![TargetRef::Object(ids[0])];
+        assert!(validate_target_constraints(
+            Some(&state),
+            &single,
+            std::slice::from_ref(&constraint),
+            Some(&ability),
+        )
+        .is_ok());
+        // Any two cards is over cap → Err (prefix pruned during enumeration).
+        let pair = vec![TargetRef::Object(ids[0]), TargetRef::Object(ids[1])];
+        assert!(validate_target_constraints(
+            Some(&state),
+            &pair,
+            std::slice::from_ref(&constraint),
+            Some(&ability),
+        )
+        .is_err());
     }
 
     #[test]

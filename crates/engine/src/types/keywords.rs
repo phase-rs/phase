@@ -1094,6 +1094,36 @@ impl Keyword {
             | Keyword::WebSlinging(_) => KeywordKind::Unknown,
         }
     }
+
+    /// CR 113.2c: keywords whose multiple instances each function separately AND
+    /// are printed in Oracle text as repeated bare words, so every printed
+    /// occurrence must survive as a distinct `Keyword` on the card face (MTGJSON
+    /// dedupes them to one). Two distinct runtime consumption shapes both rely on
+    /// the surviving instance count:
+    ///
+    /// - Cascade (CR 702.85c: each instance triggers separately) / Storm
+    ///   (CR 702.40b: each instance triggers separately) — stack-functioning
+    ///   triggered abilities whose instance count is consumed by `for _ in 0..count`
+    ///   loops in `game/triggers.rs`.
+    /// - Myriad (CR 702.116a: a triggered ability; CR 702.116b: each instance
+    ///   triggers separately) / Exalted (CR 702.83a: a triggered ability;
+    ///   per-instance multiplicity grounded in the general CR 113.2c rule, since
+    ///   CR 702.83 has no card-specific multiplicity clause) — one trigger is
+    ///   installed per face `Keyword` instance by
+    ///   `KeywordTriggerInstaller::install_matching`, invoked from `synthesize_all`.
+    ///
+    /// Returns `false` for everything else, including:
+    /// - CR 702.44d Sunburst — also "works separately" per instance, but is a
+    ///   STATIC ability never printed as a repeated bare word and not
+    ///   instance-counted, so it is out of this class.
+    /// - Prowess — runtime presence is a boolean `has_prowess` check, so counting
+    ///   instances would be inert (separate deeper bug, not addressed here).
+    pub fn instances_function_separately(&self) -> bool {
+        matches!(
+            self,
+            Keyword::Cascade | Keyword::Storm | Keyword::Myriad | Keyword::Exalted
+        )
+    }
 }
 
 /// Capitalize the first character of a string (for type name normalization).

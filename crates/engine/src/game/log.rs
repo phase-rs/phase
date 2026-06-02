@@ -195,6 +195,9 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::RoomDoorUnlocked { .. }
         | GameEvent::DungeonCompleted { .. }
         | GameEvent::InitiativeTaken { .. }
+        | GameEvent::AttractionOpened { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::AttractionVisited { .. }
         | GameEvent::Clash { .. }
         | GameEvent::VoteCast { .. }
         | GameEvent::VoteResolved { .. }
@@ -968,6 +971,29 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::RoomDoorUnlocked { .. } => vec![text("Room door unlocked")],
         GameEvent::DungeonCompleted { .. } => vec![text("Dungeon completed")],
         GameEvent::InitiativeTaken { .. } => vec![text("Initiative taken")],
+        GameEvent::AttractionOpened { object_id, .. } => {
+            vec![text("Opened Attraction "), card_seg(state, *object_id)]
+        }
+        GameEvent::AttractionsRolledToVisit { roll, .. } => {
+            vec![
+                text("Rolled "),
+                text(&roll.to_string()),
+                text(" to visit Attractions"),
+            ]
+        }
+        GameEvent::AttractionVisited {
+            attraction_id,
+            roll,
+            ..
+        } => {
+            vec![
+                text("Visited Attraction "),
+                card_seg(state, *attraction_id),
+                text(" (rolled "),
+                text(&roll.to_string()),
+                text(")"),
+            ]
+        }
         GameEvent::Clash { .. } => vec![text("Clash")],
         GameEvent::VoteCast { voter, choice, .. } => {
             vec![player_seg(state, *voter), text(" voted "), text(choice)]

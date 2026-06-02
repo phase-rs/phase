@@ -1449,6 +1449,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // to each Saga the active player controls (turn-based action).
                 if state.phase == Phase::PreCombatMain {
                     add_lore_counters_to_sagas(state, events);
+                    super::attractions::perform_roll_to_visit_turn_based_action(state, events);
                     // CR 702.xxx: Paradigm (Strixhaven) — turn-based action at
                     // the start of the active player's first precombat main
                     // phase: offer to cast a copy of each exiled paradigm

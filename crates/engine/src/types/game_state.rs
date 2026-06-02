@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, DelayedTriggerCondition,
-    Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant, ModalChoice,
-    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
-    TargetFilter, TargetRef, TriggerCondition,
+    ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
+    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
+    ModalChoice, QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
+    StaticCondition, TargetFilter, TargetRef, TriggerCondition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -1333,6 +1333,17 @@ pub enum TargetSelectionConstraint {
     DifferentTargetPlayers,
     /// CR 115.1 + CR 601.2c: Object targets must be controlled by different players.
     DifferentObjectControllers,
+    /// CR 202.3 + CR 601.2c: the chosen target set's combined mana value must
+    /// satisfy `comparator` against `value`. `value` is a `QuantityExpr` (not
+    /// `i32` like `SearchSelectionConstraint::TotalManaValue`) because the bound
+    /// is the dynamic where-X die result (`EventContextAmount`). NOT unified with
+    /// `SearchSelectionConstraint::TotalManaValue` — different CR section
+    /// (CR 115.1 / CR 601.2c target declaration vs CR 701.23 search-set) and a
+    /// different value type.
+    TotalManaValue {
+        comparator: Comparator,
+        value: QuantityExpr,
+    },
 }
 
 /// CR 508.1d + CR 509.1c: Which combat step a `WaitingFor::CombatTaxPayment` belongs to.
@@ -1426,6 +1437,13 @@ pub struct PlayerDeckPool {
     pub registered_commander: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub current_commander: std::sync::Arc<Vec<DeckEntry>>,
+    /// Oathbreaker RC: registered and current signature spell entries.
+    /// Empty for all non-Oathbreaker formats. Mirrors the commander Arc pair
+    /// so between-games persistence works correctly.
+    #[serde(default)]
+    pub registered_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
+    #[serde(default)]
+    pub current_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
     /// The declared bracket tier for this player's deck. Used by the AI to
     /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
     /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward
@@ -3799,6 +3817,13 @@ pub enum StackEntryKind {
         /// `valid_card` filter.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject_match_count: Option<u32>,
+        /// CR 706.2 + CR 706.4 + CR 603.12: die-roll result captured at trigger
+        /// push so a reflexive "When you do … the result" sub-ability that
+        /// resolves on its own stack entry (in a later apply(), after the
+        /// original resolution scope cleared) can re-stamp
+        /// `die_result_this_resolution`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        die_result: Option<u8>,
     },
     /// CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     /// enter the stack after cost-payment + target selection and resolve with
@@ -6549,6 +6574,7 @@ mod tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: PendingTrigger = serde_json::from_str(&json).unwrap();
@@ -6614,6 +6640,7 @@ mod tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         });
 
         let json = serde_json::to_string(&state).unwrap();

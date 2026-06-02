@@ -3376,6 +3376,7 @@ fn apply_action(
                 description: Some("Miracle — you may cast this card".to_string()),
                 may_trigger_origin: None,
                 subject_match_count: None,
+                die_result: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
 
@@ -12377,6 +12378,7 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -12480,6 +12482,7 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -12562,6 +12565,7 @@ mod trigger_target_tests {
             description: Some("Choose two target players".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -12684,6 +12688,7 @@ mod trigger_target_tests {
             description: Some("Whenever you cast your second spell each turn".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -12811,6 +12816,7 @@ mod trigger_target_tests {
             description: Some("Choose one or both with commander".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -12891,6 +12897,7 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -13021,6 +13028,7 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -13125,6 +13133,7 @@ mod trigger_target_tests {
             description: Some("Choose different target players".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -13236,6 +13245,7 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let stack_before = state.stack.len();
@@ -13929,6 +13939,7 @@ mod exile_return_tests {
                 trigger_event: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 
@@ -14075,6 +14086,7 @@ mod exile_return_tests {
                 trigger_event: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 
@@ -14189,6 +14201,7 @@ mod exile_return_tests {
                 trigger_event: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 

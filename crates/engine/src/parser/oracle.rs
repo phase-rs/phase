@@ -29,6 +29,7 @@ use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::primitives::parse_number as nom_parse_number;
 use super::oracle_nom::primitives::scan_contains;
 
+use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
 };
@@ -1609,8 +1610,8 @@ pub(crate) fn parse_oracle_ir(
     let oracle_text_owned = normalize_card_name_refs(oracle_text, card_name);
     let lines: Vec<&str> = oracle_text_owned.split('\n').collect();
 
-    // CR 714: Pre-parse Saga chapter lines into triggers + ETB replacement.
-    let saga_consumed = if subtypes.iter().any(|s| s == "Saga") {
+    // CR 714 / CR 717: Pre-parse Saga chapters and Attraction visit lines.
+    let mut preparsed_consumed = if subtypes.iter().any(|s| s == "Saga") {
         let (chapter_triggers, etb_replacement, consumed) = parse_saga_chapters(&lines, card_name);
         result.triggers.extend(chapter_triggers);
         result.replacements.push(etb_replacement);
@@ -1618,6 +1619,14 @@ pub(crate) fn parse_oracle_ir(
     } else {
         std::collections::HashSet::new()
     };
+    if subtypes
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("Attraction"))
+    {
+        let (visit_triggers, consumed) = parse_attraction_visit_triggers(&lines, card_name);
+        result.triggers.extend(visit_triggers);
+        preparsed_consumed.extend(consumed);
+    }
 
     // CR 716: Pre-parse Class level sections into level-gated abilities.
     if subtypes.iter().any(|s| s == "Class") {
@@ -1759,8 +1768,8 @@ pub(crate) fn parse_oracle_ir(
             i += 1;
             continue;
         }
-        // CR 714: Skip lines already consumed by the saga pre-parser.
-        if saga_consumed.contains(&i) {
+        // CR 714 / CR 717: Skip lines consumed by saga/attraction pre-parsers.
+        if preparsed_consumed.contains(&i) {
             i += 1;
             continue;
         }
@@ -2844,7 +2853,7 @@ pub(crate) fn parse_oracle_ir(
             let mut next_i = i + 1;
             while next_i < lines.len() {
                 if level_consumed.contains(&next_i)
-                    || saga_consumed.contains(&next_i)
+                    || preparsed_consumed.contains(&next_i)
                     || spacecraft_consumed.contains(&next_i)
                     || parse_oracle_block(&lines, next_i).is_some()
                 {
@@ -10133,6 +10142,171 @@ mod tests {
                 assert_eq!(cost.mana_value(), 7);
             }
             _ => unreachable!(),
+        }
+    }
+
+    /// CR 110.2a + CR 202.3 + CR 603.12: Ancient Brass Dragon's reflexive "put
+    /// any number of target creature cards with total mana value X or less from
+    /// graveyards onto the battlefield under your control, where X is the
+    /// result" must parse into a `ChangeZone` whose target is a graveyard
+    /// creature filter, with an unlimited multi-target spec and a
+    /// `TotalManaValue` constraint bound to the die result (issue #1602,
+    /// Deliverable 2).
+    #[test]
+    fn ancient_brass_dragon_reflexive_graveyard_reanimation() {
+        use crate::types::ability::{
+            AbilityDefinition, Effect, MultiTargetSpec, QuantityExpr, QuantityRef, TargetFilter,
+        };
+        use crate::types::game_state::TargetSelectionConstraint;
+        use crate::types::zones::Zone;
+
+        // Find the AbilityDefinition node whose effect is the reanimation
+        // `ChangeZone`, walking the RollDie result branches and sub/else chains.
+        fn find_change_zone_def(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            if matches!(def.effect.as_ref(), Effect::ChangeZone { .. }) {
+                return Some(def);
+            }
+            if let Effect::RollDie { results, .. } = def.effect.as_ref() {
+                for branch in results {
+                    if let Some(found) = find_change_zone_def(&branch.effect) {
+                        return Some(found);
+                    }
+                }
+            }
+            if let Some(found) = def.sub_ability.as_deref().and_then(find_change_zone_def) {
+                return Some(found);
+            }
+            def.else_ability.as_deref().and_then(find_change_zone_def)
+        }
+
+        let r = parse(
+            "Flying\nWhenever this creature deals combat damage to a player, roll a \
+             d20. When you do, put any number of target creature cards with total \
+             mana value X or less from graveyards onto the battlefield under your \
+             control, where X is the result.",
+            "Ancient Brass Dragon",
+            &[],
+            &["Creature"],
+            &["Elder", "Dragon"],
+        );
+
+        let trigger = r
+            .triggers
+            .iter()
+            .find(|t| t.execute.is_some())
+            .expect("Ancient Brass Dragon should produce a combat-damage trigger");
+        let execute = trigger.execute.as_deref().unwrap();
+        let cz_def =
+            find_change_zone_def(execute).expect("reflexive ChangeZone reanimation must parse");
+
+        let Effect::ChangeZone {
+            destination,
+            target,
+            enters_under,
+            up_to,
+            ..
+        } = cz_def.effect.as_ref()
+        else {
+            panic!("expected ChangeZone, got {:?}", cz_def.effect);
+        };
+
+        // CR 110.2a: onto the battlefield under your control.
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(
+            *enters_under,
+            Some(crate::types::ability::ControllerRef::You)
+        );
+        // The MV phrase strip must not have eaten the zone suffix: the filter
+        // still resolves the graveyard origin.
+        assert_eq!(
+            target.extract_in_zone(),
+            Some(Zone::Graveyard),
+            "target must carry InZone(Graveyard) after the MV-phrase strip; got {target:?}"
+        );
+        assert!(
+            matches!(target, TargetFilter::Typed(_)),
+            "target should be a Typed creature filter, got {target:?}"
+        );
+        // "any number of target" → unlimited multi-target.
+        assert_eq!(cz_def.multi_target, Some(MultiTargetSpec::unlimited(0)));
+        // "up to / any number of" makes the selection optional.
+        assert!(*up_to);
+        // CR 202.3: TotalManaValue cap bound to the die result.
+        assert_eq!(
+            cz_def.target_constraints,
+            vec![TargetSelectionConstraint::TotalManaValue {
+                comparator: crate::types::ability::Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            }],
+            "target_constraints must carry the where-X-bound MV cap"
+        );
+    }
+
+    /// CR 706.2 + CR 706.4 + CR 603.12: Ancient Bronze Dragon's reflexive
+    /// "put X +1/+1 counters on each of up to two target creatures, where X is
+    /// the result" must bind X to the die roll via `EventContextAmount`, NOT to
+    /// a `Variable("the result")` that resolves to 0 (issue #1602, Deliverable 1).
+    #[test]
+    fn ancient_bronze_dragon_reflexive_counts_die_result() {
+        use crate::types::ability::{AbilityDefinition, Effect, QuantityExpr, QuantityRef};
+
+        // Walk an ability-definition chain (effect + sub_ability + else_ability)
+        // collecting every `PutCounter.count` it contains.
+        fn collect_put_counter_counts<'a>(
+            def: &'a AbilityDefinition,
+            out: &mut Vec<&'a QuantityExpr>,
+        ) {
+            if let Effect::PutCounter { count, .. } = def.effect.as_ref() {
+                out.push(count);
+            }
+            if let Effect::RollDie { results, .. } = def.effect.as_ref() {
+                for branch in results {
+                    collect_put_counter_counts(&branch.effect, out);
+                }
+            }
+            if let Some(sub) = def.sub_ability.as_deref() {
+                collect_put_counter_counts(sub, out);
+            }
+            if let Some(else_def) = def.else_ability.as_deref() {
+                collect_put_counter_counts(else_def, out);
+            }
+        }
+
+        let r = parse(
+            "Flying\nWhenever this creature deals combat damage to a player, roll a \
+             d20. When you do, put X +1/+1 counters on each of up to two target \
+             creatures, where X is the result.",
+            "Ancient Bronze Dragon",
+            &[],
+            &["Creature"],
+            &["Dragon"],
+        );
+
+        let trigger = r
+            .triggers
+            .iter()
+            .find(|t| t.execute.is_some())
+            .expect("Ancient Bronze Dragon should produce a combat-damage trigger");
+        let execute = trigger.execute.as_deref().unwrap();
+        let mut counts = Vec::new();
+        collect_put_counter_counts(execute, &mut counts);
+
+        assert!(
+            !counts.is_empty(),
+            "expected a PutCounter in the reflexive sub-ability chain"
+        );
+        for count in counts {
+            assert_eq!(
+                count,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                "PutCounter.count must bind X to the die result via \
+                 EventContextAmount, not Variable(\"the result\") (which would \
+                 resolve to 0)"
+            );
         }
     }
 

@@ -39,6 +39,7 @@ export type GameFormat =
   | "PauperCommander"
   | "DuelCommander"
   | "TinyLeaders"
+  | "Oathbreaker"
   | "Brawl"
   | "HistoricBrawl"
   | "FreeForAll"
@@ -960,7 +961,18 @@ export interface TargetSelectionProgress {
 }
 
 export type TargetSelectionConstraint =
-  | { type: "DifferentTargetPlayers" };
+  | { type: "DifferentTargetPlayers" }
+  // CR 115.1 + CR 601.2c: object targets must be controlled by different players.
+  | { type: "DifferentObjectControllers" }
+  // CR 202.3 + CR 601.2c: the chosen target set's combined mana value must satisfy
+  // `comparator` against `value`. `value` is an engine `QuantityExpr` (internally
+  // tagged); the frontend never evaluates it — legality is delivered via
+  // `current_legal_targets` — so the value shape is left structural.
+  | {
+      type: "TotalManaValue";
+      comparator: "GT" | "LT" | "GE" | "LE" | "EQ" | "NE";
+      value: { type: string; [key: string]: unknown };
+    };
 
 // ── Combat Tax (CR 508.1d + 508.1h + 509.1c + 509.1d) ────────────────────
 

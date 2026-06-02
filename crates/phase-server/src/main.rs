@@ -2064,6 +2064,8 @@ impl DeckResolver for ServerDeckResolver<'_> {
             main_deck: deck.main_deck,
             sideboard: deck.sideboard,
             commander: deck.commander,
+            attraction_deck: deck.attraction_deck,
+            signature_spell: deck.signature_spell,
             bracket_tier: deck.bracket_tier,
         })
     }
@@ -4886,9 +4888,7 @@ mod mode_gate_tests {
     fn deck() -> DeckData {
         DeckData {
             main_deck: vec!["Forest".into()],
-            sideboard: vec![],
-            commander: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -5056,9 +5056,7 @@ mod handshake_tests {
     fn empty_deck() -> DeckData {
         DeckData {
             main_deck: vec!["Forest".into()],
-            sideboard: vec![],
-            commander: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         }
     }
 

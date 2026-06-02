@@ -6547,6 +6547,13 @@ pub enum Effect {
     /// CR 726.1 + CR 726.2: Take the initiative. Grants the initiative
     /// designation and triggers venture into Undercity.
     TakeTheInitiative,
+    /// CR 701.51b: Open N Attractions by putting cards from the top of your
+    /// Attraction deck onto the battlefield.
+    OpenAttractions {
+        count: u32,
+    },
+    /// CR 701.52: Roll to visit your Attractions.
+    RollToVisitAttractions,
     /// CR 728.1: Process rad counters — mill cards equal to rad counter count,
     /// lose 1 life and remove one rad counter per nonland card milled.
     ProcessRadCounters,
@@ -7873,6 +7880,8 @@ impl Effect {
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
             | Effect::TakeTheInitiative
+            | Effect::OpenAttractions { .. }
+            | Effect::RollToVisitAttractions
             | Effect::ProcessRadCounters
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
@@ -8038,6 +8047,8 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::VentureIntoDungeon => "VentureIntoDungeon",
         Effect::VentureInto { .. } => "VentureInto",
         Effect::TakeTheInitiative => "TakeTheInitiative",
+        Effect::OpenAttractions { .. } => "OpenAttractions",
+        Effect::RollToVisitAttractions => "RollToVisitAttractions",
         Effect::ProcessRadCounters => "ProcessRadCounters",
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
@@ -8218,6 +8229,8 @@ pub enum EffectKind {
     VentureIntoDungeon,
     VentureInto,
     TakeTheInitiative,
+    OpenAttractions,
+    RollToVisitAttractions,
     ProcessRadCounters,
     GrantCastingPermission,
     ChooseFromZone,
@@ -8404,6 +8417,8 @@ impl From<&Effect> for EffectKind {
             Effect::VentureIntoDungeon => EffectKind::VentureIntoDungeon,
             Effect::VentureInto { .. } => EffectKind::VentureInto,
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
+            Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
+            Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
             Effect::ProcessRadCounters => EffectKind::ProcessRadCounters,
             Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
@@ -9875,6 +9890,9 @@ pub enum TriggerCondition {
     /// CR 716.2a: True when the source Class enchantment is at or above the given level.
     /// Used to gate continuous triggers that only become active at higher class levels.
     ClassLevelGE { level: u8 },
+    /// CR 701.52a + CR 702.159a: Visit ability on a numbered attraction line —
+    /// the roll from `AttractionVisited` must fall within the printed range.
+    AttractionVisitRoll { min: u8, max: u8 },
 
     /// CR 601.2 + CR 603.4: reads the ENTERING object's `cast_from_zone`, never the source.
     WasCast {
@@ -11704,6 +11722,12 @@ pub struct ResolvedAbility {
     /// Variable-count targeting preserved from the originating ability definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_target: Option<MultiTargetSpec>,
+    /// CR 115.1 + CR 601.2c: Constraints the chosen target set must satisfy
+    /// (e.g. combined mana value cap). Carried through from the originating
+    /// `AbilityDefinition` so the resolution-time validator can enforce them
+    /// against the announced/selected targets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_constraints: Vec<TargetSelectionConstraint>,
     /// CR 601.2c + CR 608.2d: Whether target-like filters are announced on the
     /// stack or selected during resolution.
     #[serde(default, skip_serializing_if = "TargetChoiceTiming::is_stack")]
@@ -11835,6 +11859,7 @@ impl ResolvedAbility {
             optional: false,
             optional_for: None,
             multi_target: None,
+            target_constraints: Vec::new(),
             target_choice_timing: TargetChoiceTiming::Stack,
             description: None,
             repeat_for: None,

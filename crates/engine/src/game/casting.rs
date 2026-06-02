@@ -369,6 +369,17 @@ fn is_blocked_by_cant_activate_abilities(
     })
 }
 
+/// Oathbreaker RC: true when `player` has their Oathbreaker on the battlefield
+/// under their control. Used to gate signature-spell casting from the command zone.
+fn oathbreaker_on_battlefield(state: &GameState, player: PlayerId) -> bool {
+    state.battlefield.iter().any(|id| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(|obj| obj.is_commander && obj.owner == player && obj.controller == player)
+    })
+}
+
 pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
     let player_data = state
         .players
@@ -378,11 +389,16 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
 
     let mut objects: Vec<ObjectId> = player_data.hand.iter().copied().collect();
     if state.format_config.command_zone {
+        let ob_in_play = oathbreaker_on_battlefield(state, player);
         objects.extend(
             state
                 .objects
                 .values()
-                .filter(|obj| obj.owner == player && obj.zone == Zone::Command && obj.is_commander)
+                .filter(|obj| {
+                    obj.owner == player
+                        && obj.zone == Zone::Command
+                        && (obj.is_commander || (obj.is_signature_spell() && ob_in_play))
+                })
                 .map(|obj| obj.id),
         );
     }
@@ -2155,6 +2171,10 @@ fn prepare_spell_cast_with_variant_override_inner(
                 || (state.format_config.command_zone
                     && obj.zone == Zone::Command
                     && obj.is_commander)
+                || (state.format_config.command_zone
+                    && obj.zone == Zone::Command
+                    && obj.is_signature_spell()
+                    && oathbreaker_on_battlefield(state, player))
                 || has_madness
                 || has_graveyard_cast_keyword
                 || has_graveyard_permission
@@ -5187,7 +5207,7 @@ pub fn handle_cast_spell_with_payment_mode(
                 )));
             }
         }
-        Zone::Command if state.format_config.command_zone && obj.is_commander => {}
+        Zone::Command if state.format_config.command_zone && obj.uses_command_zone_rules() => {}
         Zone::Exile | Zone::Graveyard | Zone::Library => {
             // These zones are allowed only with permission — defer the
             // full permission check to `prepare_spell_cast` which already

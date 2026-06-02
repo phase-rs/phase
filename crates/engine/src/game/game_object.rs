@@ -65,6 +65,16 @@ pub struct PreparedState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BestowFormState;
 
+/// Oathbreaker RC: command-zone role marker for a signature spell.
+///
+/// A signature spell is an instant or sorcery that starts in the command zone,
+/// uses commander-tax accounting, may be cast only while its owner's
+/// Oathbreaker is controlled on the battlefield, and gets the same zone-return
+/// treatment as other command-zone leaders. Stored as a typed marker to avoid
+/// proliferating bare role booleans on `GameObject`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SignatureSpellState;
+
 /// CR 702.148a-b + CR 612: Cleave form marker — `Some(_)` while this object's
 /// cleave text-changing effect is live (the spell was cast for its cleave cost
 /// and the bracket-removed ability set is currently installed on the object).
@@ -321,6 +331,13 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_rules_text: Option<String>,
     pub card_types: CardType,
+    /// CR 717.1: Which d6 results visit this Attraction (from card variant data).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attraction_lights: Vec<u8>,
+    /// CR 717.2: Object is in the supplementary Attraction deck (command zone),
+    /// tracked via `Player::attraction_deck` rather than `command_zone`.
+    #[serde(default)]
+    pub in_attraction_deck: bool,
     pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
     /// Live abilities after layer evaluation. Wrapped in `Arc<Vec<_>>` so
@@ -537,6 +554,9 @@ pub struct GameObject {
     // Commander: whether this object is a commander card
     #[serde(default)]
     pub is_commander: bool,
+    /// Oathbreaker RC: command-zone signature-spell role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_spell: Option<SignatureSpellState>,
 
     /// CR 903.8: Commander tax — pre-computed {2} per previous cast from command zone.
     /// Display-only: computed by `derive_display_state()`.
@@ -723,6 +743,22 @@ pub struct GameObject {
 }
 
 impl GameObject {
+    /// Oathbreaker RC: true for the command-zone signature spell role.
+    pub fn is_signature_spell(&self) -> bool {
+        self.signature_spell.is_some()
+    }
+
+    /// Oathbreaker RC: mark this command-zone object as a signature spell.
+    pub fn mark_signature_spell(&mut self) {
+        self.signature_spell = Some(SignatureSpellState);
+    }
+
+    /// CR 903 + Oathbreaker RC: command-zone cards that use commander tax and
+    /// zone-return handling.
+    pub fn uses_command_zone_rules(&self) -> bool {
+        self.is_commander || self.is_signature_spell()
+    }
+
     /// CR 603.10 + CR 400.7: Snapshot this object's public characteristics
     /// for a zone-change event. The record captures state *at the moment of
     /// the move* so zone-change trigger filters and past-tense conditions
@@ -842,6 +878,8 @@ impl GameObject {
             defense: None,
             token_rules_text: None,
             card_types: CardType::default(),
+            attraction_lights: Vec::new(),
+            in_attraction_deck: false,
             mana_cost: ManaCost::default(),
             keywords: Vec::new(),
             abilities: Arc::new(Vec::new()),
@@ -890,6 +928,7 @@ impl GameObject {
             available_mana_pips: Vec::new(),
             loyalty_activations_this_turn: 0,
             is_commander: false,
+            signature_spell: None,
             commander_tax: None,
             is_renowned: false,
             is_emblem: false,
