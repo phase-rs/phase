@@ -70,6 +70,27 @@ pub enum SideboardPolicy {
     Unlimited,
 }
 
+/// Per-card override to the default constructed copy limit.
+///
+/// CR 100.2a sets the default constructed limit to four of any card with a
+/// particular English name (basic lands excepted). A handful of cards print an
+/// explicit deck-construction override in their rules text:
+///
+/// - `Unlimited`: "A deck can have any number of cards named ~." (Relentless
+///   Rats, Shadowborn Apostle, etc.) — no upper bound on copies.
+/// - `UpTo(n)`: "A deck can have up to <n> cards named ~." (Seven Dwarves → 7,
+///   Nazgûl → 9) and the Commander/companion singleton override "Your deck can
+///   have only one copy of this card" (Vazal, the Compleat → `UpTo(1)`).
+///
+/// CR 903.5b's Commander singleton rule exempts basic lands; an `UpTo(n>1)`
+/// override likewise raises the cap above the format default for that card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DeckCopyLimit {
+    Unlimited,
+    UpTo(u32),
+}
+
 /// Configuration for a game format, describing player counts, starting life, deck rules, etc.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FormatConfig {
@@ -751,6 +772,24 @@ mod tests {
         // Tuple variant carries the cap in `data`.
         let limited = serde_json::to_string(&SideboardPolicy::Limited(15)).unwrap();
         assert_eq!(limited, r#"{"type":"Limited","data":15}"#);
+    }
+
+    #[test]
+    fn deck_copy_limit_serializes_as_tagged_union() {
+        // Unit variant emits {"type": "..."} with no "data" field; the frontend
+        // must switch on `.type`, never destructure `.data` unconditionally.
+        let unlimited = serde_json::to_string(&DeckCopyLimit::Unlimited).unwrap();
+        assert_eq!(unlimited, r#"{"type":"Unlimited"}"#);
+
+        // Tuple variant carries the cap in `data`.
+        let up_to = serde_json::to_string(&DeckCopyLimit::UpTo(7)).unwrap();
+        assert_eq!(up_to, r#"{"type":"UpTo","data":7}"#);
+
+        // Round-trips both directions.
+        let parsed: DeckCopyLimit = serde_json::from_str(r#"{"type":"Unlimited"}"#).unwrap();
+        assert_eq!(parsed, DeckCopyLimit::Unlimited);
+        let parsed: DeckCopyLimit = serde_json::from_str(r#"{"type":"UpTo","data":9}"#).unwrap();
+        assert_eq!(parsed, DeckCopyLimit::UpTo(9));
     }
 
     #[test]

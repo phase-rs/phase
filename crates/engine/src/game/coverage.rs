@@ -69,6 +69,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedBy { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
+            // CR 702.39a + CR 509.1c: MustBlockAttacker carries the `ObjectId` of
+            // the attacker that must be blocked (Provoke). Enforced by direct
+            // match in combat.rs declare-blockers validation.
+            | StaticMode::MustBlockAttacker { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
             // CR 602.5 + CR 117.1b: CantActivateDuring carries `who`, `when`, and `exemption`.
@@ -5135,11 +5139,18 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ZoneChangeObjectMatchesFilter { .. } => {
             ("ZoneChangeObjectMatchesFilter", Handled)
         }
-        // Variants below are parsed but have no runtime resolver today.
-        AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Unhandled),
-        AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
-        AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Unhandled),
-        AbilityCondition::SourceIsTapped => ("SourceIsTapped", Unhandled),
+        // CR 400.7 + CR 608.2c: Target filter conditions — resolved by
+        // `evaluate_condition` (effects/mod.rs) with current-state and optional
+        // LKI paths.
+        AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Handled),
+        // CR 608.2c: Source filter conditions — resolved by `evaluate_condition`
+        // against the ability source object.
+        AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
+        // CR 608.2c: Zone-change-this-way — resolved by `evaluate_condition`
+        // against `state.last_zone_changed_ids`.
+        AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Handled),
+        // CR 608.2c: Source tapped check — resolved by `evaluate_condition`.
+        AbilityCondition::SourceIsTapped => ("SourceIsTapped", Handled),
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
@@ -6644,7 +6655,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             } = &*a.effect
             {
                 static_abilities.iter().any(|s| match &s.mode {
-                    StaticMode::MustBeBlocked => {
+                    // CR 509.1c: "All creatures able to block ~ do so" lowers to the
+                    // lure-strength MustBeBlockedByAll (not the one-blocker MustBeBlocked).
+                    StaticMode::MustBeBlockedByAll => {
                         effective_lower.contains("able to block")
                             && effective_lower.contains("do so")
                     }
@@ -8376,6 +8389,7 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
         }
@@ -9835,6 +9849,42 @@ mod tests {
             FeatureSupport::Handled,
             "AbilityCondition::IsYourTurn must classify as Handled",
         );
+    }
+
+    #[test]
+    fn resolved_ability_conditions_are_marked_handled() {
+        let conditions = [
+            (
+                AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Any,
+                    use_lki: false,
+                },
+                "TargetMatchesFilter",
+            ),
+            (
+                AbilityCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Any,
+                },
+                "SourceMatchesFilter",
+            ),
+            (
+                AbilityCondition::ZoneChangedThisWay {
+                    filter: TargetFilter::Any,
+                },
+                "ZoneChangedThisWay",
+            ),
+            (AbilityCondition::SourceIsTapped, "SourceIsTapped"),
+        ];
+
+        for (condition, expected_name) in conditions {
+            let (name, support) = condition_feature(&condition);
+            assert_eq!(name, expected_name);
+            assert_eq!(
+                support,
+                FeatureSupport::Handled,
+                "AbilityCondition::{expected_name} is resolved by effects::evaluate_condition",
+            );
+        }
     }
 
     #[test]

@@ -6449,6 +6449,87 @@ pub(super) fn counter_placement_is_mass(clause_lower: &str) -> bool {
         || nom_primitives::scan_contains(clause_lower, "on all ")
 }
 
+/// CR 122.1 + CR 608.2c: In a distributive "put a number of +1/+1 counters on
+/// EACH ... equal to THAT CREATURE's <stat>" (Canopy Gargantuan), "that
+/// creature" is the per-iteration recipient — each object receives counters
+/// equal to its OWN stat. The shared `parse_event_context_refs` lowers "that
+/// creature's <stat>" to `ObjectScope::CostPaidObject` (correct in trigger
+/// bodies, where it refers to the triggering object), so for a mass placement
+/// we rebind it to `ObjectScope::Recipient`; `resolve_add_all` then re-evaluates
+/// the count per object. A genuine cost referent ("the SACRIFICED creature's
+/// power") carries a cost/zone-change participle and is left as
+/// `CostPaidObject` — `resolve_add_all` resolves that once and applies it
+/// uniformly per CR 608.2k.
+fn rebind_distributive_recipient_count(count: QuantityExpr, lower: &str) -> QuantityExpr {
+    let is_cost_referent = nom_primitives::scan_contains(lower, "sacrificed")
+        || nom_primitives::scan_contains(lower, "exiled")
+        || nom_primitives::scan_contains(lower, "discarded")
+        || nom_primitives::scan_contains(lower, "milled");
+    if is_cost_referent {
+        return count;
+    }
+    rebind_costpaid_scope_to_recipient(count)
+}
+
+/// Walk a `QuantityExpr` and rebind `ObjectScope::CostPaidObject` on the object
+/// P/T/mana-value leaves to `ObjectScope::Recipient`. Recurses through the
+/// arithmetic wrappers ("that creature's toughness plus 1", "twice that
+/// creature's power") so the whole class composes.
+fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
+    use crate::types::ability::ObjectScope::{CostPaidObject, Recipient};
+    match expr {
+        QuantityExpr::Ref { qty } => QuantityExpr::Ref {
+            qty: match qty {
+                QuantityRef::Power {
+                    scope: CostPaidObject,
+                } => QuantityRef::Power { scope: Recipient },
+                QuantityRef::Toughness {
+                    scope: CostPaidObject,
+                } => QuantityRef::Toughness { scope: Recipient },
+                QuantityRef::ObjectManaValue {
+                    scope: CostPaidObject,
+                } => QuantityRef::ObjectManaValue { scope: Recipient },
+                other => other,
+            },
+        },
+        QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
+            inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
+            offset,
+        },
+        QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
+            factor,
+            inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
+        },
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => QuantityExpr::DivideRounded {
+            inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
+            divisor,
+            rounding,
+        },
+        QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
+            exprs: exprs
+                .into_iter()
+                .map(rebind_costpaid_scope_to_recipient)
+                .collect(),
+        },
+        QuantityExpr::UpTo { max } => QuantityExpr::UpTo {
+            max: Box::new(rebind_costpaid_scope_to_recipient(*max)),
+        },
+        QuantityExpr::Power { base, exponent } => QuantityExpr::Power {
+            base,
+            exponent: Box::new(rebind_costpaid_scope_to_recipient(*exponent)),
+        },
+        QuantityExpr::Difference { left, right } => QuantityExpr::Difference {
+            left: Box::new(rebind_costpaid_scope_to_recipient(*left)),
+            right: Box::new(rebind_costpaid_scope_to_recipient(*right)),
+        },
+        QuantityExpr::Fixed { value } => QuantityExpr::Fixed { value },
+    }
+}
+
 pub(super) fn parse_zone_counter_ast(
     text: &str,
     lower: &str,
@@ -6524,7 +6605,7 @@ pub(super) fn parse_zone_counter_ast(
                 if is_all && multi_target.is_none() {
                     Some(ZoneCounterImperativeAst::PutCounterAll {
                         counter_type,
-                        count,
+                        count: rebind_distributive_recipient_count(count, lower),
                         target,
                     })
                 } else {
@@ -10209,6 +10290,128 @@ mod tests {
     }
 
     /// CR 706 + CR 706.2: "Roll a d20" with no modifier parses to a bare RollDie.
+    /// Issue #1675 — Canopy Gargantuan. "Put a number of +1/+1 counters on each
+    /// other creature you control equal to that creature's toughness." rebinds
+    /// the per-recipient "that creature's toughness" count to `Recipient` so the
+    /// resolver re-evaluates it per object.
+    #[test]
+    fn put_counter_all_each_equal_to_that_creatures_toughness_rebinds_to_recipient() {
+        use crate::types::ability::ObjectScope;
+        let def = super::super::parse_effect_chain(
+            "Put a number of +1/+1 counters on each other creature you control equal to that creature's toughness.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::PutCounterAll { count, .. } => assert!(
+                matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::Recipient
+                        }
+                    }
+                ),
+                "count must rebind to Recipient, got {count:?}"
+            ),
+            other => panic!("expected PutCounterAll, got {other:?}"),
+        }
+    }
+
+    /// The rebind is gated: a genuine cost referent ("the sacrificed creature's
+    /// power") stays `CostPaidObject` (resolved once, applied uniformly), so the
+    /// rebind does not hijack cost-paid `*All` counts.
+    #[test]
+    fn rebind_distributive_recipient_count_leaves_cost_referent_alone() {
+        use crate::types::ability::ObjectScope;
+        let cost_paid = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+        };
+        let out = super::rebind_distributive_recipient_count(
+            cost_paid.clone(),
+            "put a +1/+1 counter on each creature you control equal to the sacrificed creature's power",
+        );
+        assert_eq!(
+            out, cost_paid,
+            "cost-referent count must NOT rebind to Recipient"
+        );
+
+        // And "that creature's power" (no cost participle) DOES rebind.
+        let anaphor = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+        };
+        let rebound = super::rebind_distributive_recipient_count(
+            anaphor,
+            "put a +1/+1 counter on each creature you control equal to that creature's power",
+        );
+        assert!(matches!(
+            rebound,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Recipient
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn rebind_distributive_recipient_count_walks_all_quantity_wrappers() {
+        use crate::types::ability::ObjectScope;
+
+        let expr = QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+            right: Box::new(QuantityExpr::Power {
+                base: 2,
+                exponent: Box::new(QuantityExpr::UpTo {
+                    max: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject,
+                        },
+                    }),
+                }),
+            }),
+        };
+
+        let rebound = super::rebind_distributive_recipient_count(
+            expr,
+            "put a number of +1/+1 counters on each creature you control equal to that creature's power",
+        );
+
+        let QuantityExpr::Difference { left, right } = rebound else {
+            panic!("expected Difference, got {rebound:?}");
+        };
+        assert!(matches!(
+            *left,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Recipient
+                }
+            }
+        ));
+
+        let QuantityExpr::Power { exponent, .. } = *right else {
+            panic!("expected Power, got {right:?}");
+        };
+        let QuantityExpr::UpTo { max } = *exponent else {
+            panic!("expected UpTo, got {exponent:?}");
+        };
+        assert!(matches!(
+            *max,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Recipient
+                }
+            }
+        ));
+    }
+
     #[test]
     fn roll_a_d20_no_modifier_parses_to_roll_die() {
         let def = super::super::parse_effect_chain("Roll a d20.", AbilityKind::Spell);

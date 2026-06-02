@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     AbilityCost, CardPlayMode, CostCategory, QuantityExpr, QuantityRef, TargetFilter,
 };
+use super::identifiers::ObjectId;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost, StepEndManaAction};
 use super::phase::Phase;
@@ -592,6 +593,16 @@ pub enum StaticMode {
     PlayerProtection(super::keywords::ProtectionTarget),
     MustAttack,
     MustBlock,
+    /// CR 702.39a / CR 509.1c: This creature must block a *specific* attacker if
+    /// able (Provoke; "target creature blocks ~ this turn if able"). Unlike the
+    /// generic [`MustBlock`] (block *any* attacker), this carries the `ObjectId`
+    /// of the attacker that must be blocked. Data-carrying variant — not
+    /// registry-registered (see `coverage::is_data_carrying_static`); enforced by
+    /// direct pattern-match in `combat.rs` declare-blockers validation. The
+    /// `ObjectId` is stable for the end-of-turn lifetime of the granting effect.
+    MustBlockAttacker {
+        attacker: ObjectId,
+    },
     CantDraw {
         who: ProhibitionScope,
     },
@@ -841,8 +852,15 @@ pub enum StaticMode {
     // -- Tier 2: Rule-modification statics --
     CantTap,
     CantUntap,
-    /// CR 509.1c: This creature must be blocked if able.
+    /// CR 509.1c: This creature must be blocked if able — the defending player
+    /// must assign at least one legal blocker to it.
     MustBeBlocked,
+    /// CR 509.1c: "All creatures able to block this creature do so" (Lure,
+    /// Prized Unicorn, Breaker of Armies, …). Unlike [`MustBeBlocked`], this
+    /// places a block requirement on *every* creature able to block it: each
+    /// such untapped defender must be declared as a blocker of this attacker,
+    /// not merely one.
+    MustBeBlockedByAll,
     /// CR 701.15b: This creature is goaded for as long as the static applies.
     /// The source controller is the goading player for the "attack another
     /// player if able" requirement.
@@ -1010,6 +1028,7 @@ impl Hash for StaticMode {
                 cost_category.hash(state);
             }
             StaticMode::ExtraBlockers { count } => count.hash(state),
+            StaticMode::MustBlockAttacker { attacker } => attacker.hash(state),
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
@@ -1137,6 +1156,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::MustAttack => write!(f, "MustAttack"),
             StaticMode::MustBlock => write!(f, "MustBlock"),
+            StaticMode::MustBlockAttacker { attacker } => {
+                write!(f, "MustBlockAttacker({attacker:?})")
+            }
             StaticMode::CantDraw { who } => write!(f, "CantDraw({who})"),
             StaticMode::DoubleTriggers { cause } => write!(f, "DoubleTriggers({cause})"),
             StaticMode::IgnoreHexproof => write!(f, "IgnoreHexproof"),
@@ -1241,6 +1263,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantTap => write!(f, "CantTap"),
             StaticMode::CantUntap => write!(f, "CantUntap"),
             StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
+            StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
             StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
@@ -1536,6 +1559,7 @@ impl FromStr for StaticMode {
             "CantTap" => StaticMode::CantTap,
             "CantUntap" => StaticMode::CantUntap,
             "MustBeBlocked" => StaticMode::MustBeBlocked,
+            "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
             "Goaded" => StaticMode::Goaded,
             "CantAttackAlone" => StaticMode::CantAttackAlone,
             "CantBlockAlone" => StaticMode::CantBlockAlone,

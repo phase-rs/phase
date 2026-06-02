@@ -4563,8 +4563,11 @@ fn rebind_controller_to_triggering_source(mut clause: ParsedEffectClause) -> Par
 /// CR 205.1a: An object retains types explicitly stated by the effect.
 /// CR 509.1c: "All creatures able to block [target/~] [this turn] do so."
 ///
-/// Semantically equivalent to "[target/~] must be blocked this turn if able."
-/// Produces a GenericEffect with `MustBeBlocked` AddStaticMode on the referenced object.
+/// This is the "lure" requirement: *every* creature able to block the referenced
+/// object must block it, not merely one. It is therefore NOT equivalent to
+/// "[target/~] must be blocked if able" (which `MustBeBlocked` models, satisfied
+/// by a single blocker). Produces a GenericEffect with the stronger
+/// `MustBeBlockedByAll` AddStaticMode on the referenced object.
 ///
 /// Patterns:
 /// - "all creatures able to block target creature this turn do so"
@@ -4606,10 +4609,10 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
 
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
+            static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlockedByAll)
                 .affected(target.clone())
                 .modifications(vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustBeBlocked,
+                    mode: StaticMode::MustBeBlockedByAll,
                 }])],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(target),
@@ -26335,15 +26338,16 @@ mod tests {
     #[test]
     fn mass_forced_block_target_creature() {
         // "All creatures able to block target creature this turn do so" (Alluring Scent)
-        // CR 509.1c: Semantically equivalent to "target creature must be blocked"
+        // CR 509.1c: the lure requirement forces *every* able creature to block,
+        // so it lowers to MustBeBlockedByAll, not the one-blocker MustBeBlocked.
         let e = parse_effect("All creatures able to block target creature this turn do so");
         assert!(
             matches!(&e, Effect::GenericEffect { static_abilities, .. }
                 if static_abilities.iter().any(|sd|
-                    sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                    sd.mode == crate::types::statics::StaticMode::MustBeBlockedByAll
                 )
             ),
-            "Expected GenericEffect with MustBeBlocked, got {:?}",
+            "Expected GenericEffect with MustBeBlockedByAll, got {:?}",
             e
         );
     }
@@ -26355,10 +26359,10 @@ mod tests {
         assert!(
             matches!(&e, Effect::GenericEffect { static_abilities, .. }
                 if static_abilities.iter().any(|sd|
-                    sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                    sd.mode == crate::types::statics::StaticMode::MustBeBlockedByAll
                 )
             ),
-            "Expected GenericEffect with MustBeBlocked, got {:?}",
+            "Expected GenericEffect with MustBeBlockedByAll, got {:?}",
             e
         );
     }

@@ -3029,6 +3029,7 @@ mod tests {
             subtypes: vec!["Goblin".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
         };
         let goblin_ctx = PaymentContext::Spell(&goblin_spell);
         let mut pool_clone = pool.clone();
@@ -3044,6 +3045,7 @@ mod tests {
             subtypes: vec!["Elemental".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
         };
         let elemental_ctx = PaymentContext::Spell(&elemental_spell);
         assert!(
