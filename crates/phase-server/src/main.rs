@@ -30,6 +30,7 @@ use lobby_broker::{
     Outbound, NOT_OWNED_RESERVATION,
 };
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
+use server_core::ai_seats_wire_guard::guard_create_ai_seats;
 use server_core::draft_session::DraftSessionManager;
 use server_core::draft_wire_guard::{
     guard_create_draft_with_settings, guard_join_draft_with_password, guard_reconnect_draft,
@@ -2672,6 +2673,14 @@ async fn handle_client_message(
                     start_when_full,
                 },
             ) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
+            if let Err(reason) = guard_create_ai_seats(&ai_seats, requested_player_count) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
