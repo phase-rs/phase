@@ -1441,13 +1441,17 @@ pub(crate) fn resolve_multi_target_bounds(
         ));
     }
 
-    let min = resolve_multi_target_min(state, ability, spec);
+    let raw_min = resolve_multi_target_min(state, ability, spec);
     let raw_max = resolve_multi_target_max(state, ability, spec).unwrap_or(legal_target_count);
-    if raw_max < min {
-        return Err(EngineError::ActionNotAllowed(
-            "Multi-target maximum is below its minimum".to_string(),
-        ));
-    }
+    // CR 601.2c: A resolved variable maximum can legitimately fall below the
+    // spec's structural minimum. For "distribute X counters among any number of
+    // target creatures" (Grove's Bounty) the floor of 1 expresses "each chosen
+    // target must receive a counter", but that floor only applies when there is
+    // something to distribute — casting for X=0 distributes nothing, so the
+    // required target count collapses to 0. Clamping `min` to `raw_max` yields
+    // exactly `min(1, X)`: 1 when X >= 1, 0 when X = 0. A genuinely malformed
+    // static spec never reaches here (constructors keep min <= max).
+    let min = raw_min.min(raw_max);
     if legal_target_count < min {
         return Err(EngineError::ActionNotAllowed(
             "Not enough legal targets available".to_string(),

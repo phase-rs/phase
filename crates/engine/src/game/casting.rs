@@ -984,7 +984,7 @@ fn has_exile_cast_permission(
         || exile_cast_permission_source(state, player, obj.id).is_some()
 }
 
-fn cast_permission_constraint_allows_cast(
+pub(super) fn cast_permission_constraint_allows_cast(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
     constraint: &Option<crate::types::ability::CastPermissionConstraint>,
@@ -1006,7 +1006,7 @@ fn cast_permission_constraint_allows_cast(
             let required = resolve_quantity(state, value, obj.controller, obj.id);
             comparator.evaluate(resulting_mv as i32, required)
         }
-        Some(CastPermissionConstraint::CascadeResultingMvBelow { .. }) | None => true,
+        None => true,
     }
 }
 
@@ -5004,6 +5004,45 @@ pub fn handle_cast_spell_as_madness_with_payment_mode(
         Some(CastingVariant::Madness),
     )?;
     prepared.payment_mode = payment_mode;
+    continue_with_prepared(state, player, prepared, events)
+}
+
+/// CR 608.2g: Cast a Cascade/Discover hit *during resolution* of its source
+/// spell, rather than granting a lingering permission that requires a separate
+/// later `CastSpell`. The single authority that constructs the
+/// cast-during-resolution `ExileWithAltCost` permission and drives the cast.
+///
+/// Pushes a cost-zeroing `ExileWithAltCost` permission carrying `constraint`
+/// (the resulting-MV gate, evaluated at finalization once X is known) and
+/// `cleanup` (the misses + reject disposition, so a cast-time rejection can
+/// still bottom/hand the hit). Then prepares and continues the cast on the
+/// `Auto` payment mode. The returned `WaitingFor` falls through
+/// `run_post_action_pipeline` normally, which fires the hit's own cast-triggers
+/// (CR 702.85a, etc.) and returns priority to the active player — satisfying CR
+/// 608.2g's "no player receives priority after it's cast" without any explicit
+/// suppression (the opponent only gets priority later via normal passing).
+pub(super) fn initiate_cast_during_resolution(
+    state: &mut GameState,
+    player: PlayerId,
+    hit_card: ObjectId,
+    constraint: Option<crate::types::ability::CastPermissionConstraint>,
+    cleanup: crate::types::ability::ResolutionCastCleanup,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if let Some(obj) = state.objects.get_mut(&hit_card) {
+        // CR 601.2a + CR 601.2i: zero-cost permission consumed by
+        // `prepare_spell_cast_with_variant_override`'s exile alt-cost scan.
+        obj.casting_permissions
+            .push(CastingPermission::ExileWithAltCost {
+                cost: ManaCost::zero(),
+                cast_transformed: false,
+                constraint,
+                granted_to: Some(player),
+                resolution_cleanup: Some(cleanup),
+            });
+    }
+    let mut prepared = prepare_spell_cast_with_variant_override(state, player, hit_card, None)?;
+    prepared.payment_mode = CastPaymentMode::Auto;
     continue_with_prepared(state, player, prepared, events)
 }
 
@@ -16721,6 +16760,7 @@ mod tests {
                 value: QuantityExpr::Fixed { value: 4 },
             }),
             granted_to: Some(PlayerId(0)),
+            resolution_cleanup: None,
         }
     }
 
@@ -16756,6 +16796,7 @@ mod tests {
                     cast_transformed: false,
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: None,
                 });
         }
 
@@ -21910,6 +21951,7 @@ mod tests {
                 cast_transformed: false,
                 constraint: None,
                 granted_to: None,
+                resolution_cleanup: None,
             });
 
         assert!(is_blocked_by_cast_only_from_zones(
@@ -24055,6 +24097,7 @@ mod tests {
                     cast_transformed: false,
                     constraint: None,
                     granted_to: None,
+                    resolution_cleanup: None,
                 },
             );
         }

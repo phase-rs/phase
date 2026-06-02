@@ -1315,18 +1315,27 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
 ///   `state.waiting_for`. Returning `Priority` here would overwrite the prompt
 ///   and strand the queued triggers in `pending_trigger_order` forever (they
 ///   never reach the stack). Single-trigger steps take the `NoChoiceNeeded`
-///   path with no prompt and fall through to the normal priority grant.
+///   path with no prompt and fall through to the normal priority grant. The
+///   prompt is rebuilt from the AUTHORITATIVE `pending_trigger_order` state via
+///   `build_next_order_triggers_prompt_public`, not cloned from
+///   `state.waiting_for` — so a stale `waiting_for` left by an upstream
+///   phase-advance can't re-surface and hang, and already-corrupted saves
+///   recover by surfacing the real ordering prompt.
 fn process_phase_triggers(state: &mut GameState) -> (bool, Option<WaitingFor>) {
     let phase_event = [GameEvent::PhaseChanged { phase: state.phase }];
     let stack_before = state.stack.len();
     super::triggers::process_triggers(state, &phase_event);
     // CR 603.3b: an unresolved ordering pass keeps its triggers in
-    // `pending_trigger_order` (not on the stack, not in `pending_trigger`), so
-    // it must count toward `fired` and surface its prompt.
-    let ordering_prompt = state
-        .pending_trigger_order
-        .is_some()
-        .then(|| state.waiting_for.clone());
+    // `pending_trigger_order` (not on the stack, not in `pending_trigger`), so it
+    // must count toward `fired` and surface its prompt. Reconstruct the prompt
+    // from the AUTHORITATIVE source (`pending_trigger_order`) rather than cloning
+    // `state.waiting_for`: if an upstream phase-advance orphaned the pass and left
+    // `waiting_for` stale, cloning it would re-surface the stale state and hang.
+    // Reading the canonical pending state also RECOVERS already-corrupted saves by
+    // surfacing the real ordering prompt. Note `pending_trigger_order.is_some()` no
+    // longer blindly implies `waiting_for == OrderTriggers`, which is exactly why
+    // the prior `.then(|| clone)` idiom was unsafe.
+    let ordering_prompt = super::triggers::build_next_order_triggers_prompt_public(state);
     let fired = state.stack.len() > stack_before
         || state.pending_trigger.is_some()
         || ordering_prompt.is_some();
@@ -1535,6 +1544,23 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 if let Some(waiting) = combat_damage::resolve_combat_damage(state, events) {
                     state.waiting_for = waiting.clone();
                     return waiting;
+                }
+                // CR 603.3b: combat-damage triggers ran inside resolve_combat_damage
+                // (process_combat_damage_triggers -> process_triggers). If 2+ triggers
+                // controlled by the same player fired simultaneously, process_triggers
+                // populated `pending_trigger_order` and set `waiting_for` to the
+                // OrderTriggers prompt. Those triggers sit in `pending_trigger_order`, NOT
+                // on the stack, so the `!state.stack.is_empty()` guard below would advance
+                // past the prompt and strand them forever (the turn-18 hang). Surface the
+                // ordering prompt now, mirroring finish_declare_attackers (engine_combat.rs).
+                // NOTE: a first-strike sub-step OrderTriggers prompt is surfaced earlier,
+                // via the `Some(waiting)` return from resolve_combat_damage above (CR 510.4
+                // Part A in combat_damage.rs); the mandatory regular sub-step is then resumed
+                // by the empty-stack completeness gate in priority.rs. This guard handles the
+                // regular-step case, where resolve_combat_damage returns None but set
+                // `waiting_for` to the OrderTriggers prompt internally.
+                if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+                    return state.waiting_for.clone();
                 }
                 // CR 704.3 / CR 800.4: SBAs may have ended the game during combat damage.
                 if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {

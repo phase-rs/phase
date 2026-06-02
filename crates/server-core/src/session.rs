@@ -1184,6 +1184,18 @@ impl SessionManager {
         self.token_to_game.get(token).map(|s| s.as_str())
     }
 
+    /// Remove a game session entirely, cleaning up the token-to-game index.
+    /// Returns the removed session if it existed.
+    pub fn remove_game(&mut self, game_code: &str) -> Option<GameSession> {
+        let session = self.sessions.remove(game_code)?;
+        for token in &session.player_tokens {
+            if !token.is_empty() {
+                self.token_to_game.remove(token);
+            }
+        }
+        Some(session)
+    }
+
     /// Restore a pre-built session (e.g., from disk persistence).
     /// Registers all player tokens in the token-to-game index.
     pub fn restore_session(&mut self, session: GameSession) {
@@ -1306,6 +1318,32 @@ mod tests {
         let _ = mgr.join_game(&code, make_deck());
         let result = mgr.join_game(&code, make_deck());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn remove_game_clears_token_index() {
+        let mut mgr = SessionManager::new();
+        let (code, token1) = mgr.create_game(make_deck());
+        let (token2, _state) = mgr.join_game(&code, make_deck()).unwrap();
+
+        // While the game exists, both players' tokens resolve to it.
+        assert_eq!(mgr.game_for_token(&token1), Some(code.as_str()));
+        assert_eq!(mgr.game_for_token(&token2), Some(code.as_str()));
+
+        let removed = mgr.remove_game(&code);
+        assert!(removed.is_some());
+
+        // After removal, the session and both token-index entries are gone —
+        // no orphaned mappings linger in token_to_game.
+        assert!(!mgr.sessions.contains_key(&code));
+        assert_eq!(mgr.game_for_token(&token1), None);
+        assert_eq!(mgr.game_for_token(&token2), None);
+    }
+
+    #[test]
+    fn remove_nonexistent_game_returns_none() {
+        let mut mgr = SessionManager::new();
+        assert!(mgr.remove_game("NOPE00").is_none());
     }
 
     #[test]

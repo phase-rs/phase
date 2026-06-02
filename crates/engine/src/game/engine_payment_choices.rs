@@ -1043,9 +1043,13 @@ fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> Action
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityCondition, QuantityExpr, ResolvedAbility, SubAbilityLink};
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityCondition, ControllerRef, QuantityExpr, ResolvedAbility, SubAbilityLink, TypedFilter,
+    };
+    use crate::types::card_type::CoreType;
     use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
     fn gain_life(value: i32) -> Effect {
@@ -1307,6 +1311,55 @@ mod tests {
             .expect("unless-pay-life should resolve");
         // Player paid 3 life — life total drops by 3, gain-life effect skipped.
         assert_eq!(state.players[0].life, 17);
+    }
+
+    /// CR 118.12a + CR 701.21: Unless-sacrifice costs are payer-relative.
+    /// A parser-emitted `ControllerRef::You` filter must resolve against the
+    /// player paying the cost, not against the ability controller or a chosen
+    /// target player.
+    #[test]
+    fn unless_sacrifice_cost_uses_payer_relative_filter() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(1),
+            "Payer Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let pending = ResolvedAbility::new(gain_life(4), vec![], ObjectId(100), PlayerId(0));
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                count: 1,
+            },
+            pending_effect: Box::new(pending),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let mut events = Vec::new();
+        let waiting_for = state.waiting_for.clone();
+        handle_unless_payment(&mut state, waiting_for, true, &mut events)
+            .expect("unless-sacrifice should surface choice");
+        match &state.waiting_for {
+            WaitingFor::WardSacrificeChoice {
+                player, permanents, ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(permanents, &vec![creature]);
+            }
+            other => panic!("expected WardSacrificeChoice, got {other:?}"),
+        }
     }
 
     /// CR 118.12a: "unless any player pays" poll — when the prompted player

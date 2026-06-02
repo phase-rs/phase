@@ -703,7 +703,7 @@ async fn main() {
                 {
                     let mut mgr = bg_state.lock().await;
                     for game_code in &expired {
-                        mgr.sessions.remove(game_code);
+                        mgr.remove_game(game_code);
                     }
                 }
                 // Notify connected players and clean up persistence
@@ -747,7 +747,7 @@ async fn main() {
                 info!(count = expired_lobby.len(), "expiring stale lobby games");
                 let mut mgr = bg_state.lock().await;
                 for game_code in &expired_lobby {
-                    mgr.sessions.remove(game_code);
+                    mgr.remove_game(game_code);
                     if let Err(e) = bg_game_db.delete_session(game_code) {
                         error!(game = %game_code, error = %e, "failed to delete expired lobby session");
                     }
@@ -3560,7 +3560,7 @@ async fn handle_client_message(
             report_draft_game_over(draft_state, connections, &game_code, winner).await;
 
             let mut mgr = state.lock().await;
-            mgr.sessions.remove(&game_code);
+            mgr.remove_game(&game_code);
             delete_session_async(game_db, &game_code);
         }
 

@@ -281,6 +281,50 @@ This mirrors BNF grammar production rules and eliminates redundant prefix
 matching. When you find yourself writing `tag("X foo")` and `tag("X bar")`
 in the same `alt`, factor `X` into a `preceded`.
 
+### 8b. Multi-axis cross product — variation in the *middle*, not just the prefix
+
+Pattern 8 handles a single varying axis at the *front*. When two or more
+independent axes vary at *different positions* in the phrase — and especially
+when one axis is optional — `preceded` alone isn't enough. Build the fixed
+scaffold with a sequence and give **each axis its own single `alt` / `opt`**,
+then wrap in `recognize` if the caller needs the consumed slice. Never multiply
+the axes out into one flat `alt` of full-string `tag`s.
+
+**Bad** (4 possessives × {`creature `, ∅} scopes = 8 enumerated arms):
+```rust
+alt((
+    tag("in addition to its other creature types"),
+    tag("in addition to their other creature types"),
+    tag("in addition to his other creature types"),
+    tag("in addition to her other creature types"),
+    tag("in addition to its other types"),
+    tag("in addition to their other types"),
+    tag("in addition to his other types"),
+    tag("in addition to her other types"),
+))
+```
+
+**Good** (one `alt` for the pronoun axis, one `opt` for the scope axis):
+```rust
+recognize((
+    tag("in addition to "),
+    alt((tag("its"), tag("their"), tag("his"), tag("her"))), // axis 1
+    tag(" other "),
+    opt(tag("creature ")),                                   // axis 2 (optional)
+    tag("types"),
+))
+```
+
+Adding a fifth pronoun (`"our"`) is now a one-token edit to a 4-arm `alt`, not
+a doubling of the arm count. `opt(tag("creature "))` also removes the
+"longest-alternative-first" ordering footgun — `opt` greedily consumes the
+optional segment when present, so the parse is order-independent.
+
+**The smell:** any flat `alt` whose `tag` arms share a long common prefix *and*
+a long common suffix is a cross product that didn't get factored. The arm count
+should be the *sum* of the per-axis choices (4 + 2 = 6 tokens), never the
+*product* (4 × 2 = 8 arms).
+
 ---
 
 ## 9. When to use the `allow-noncombinator` escape hatch

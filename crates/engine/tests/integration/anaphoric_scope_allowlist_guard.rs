@@ -149,7 +149,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "baneful omen",
     "banewasp affliction",
     "bartz and boko",
-    "be'lakor, the dark master",
     "beastie beatdown",
     "bite down on crime",
     "blood poet",
@@ -161,7 +160,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "brightmare",
     "brokers charm",
     "calibrated blast",
-    "captain ripley vance",
     "champion of the path",
     "champion of wits",
     "chastise",
@@ -195,7 +193,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "doomgape",
     "durkwood tracker",
     "duskmantle seer",
-    "efteekay, flame of the kav",
     "electrosiphon",
     "electryte",
     "energy tap",
@@ -206,7 +203,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "feed the swarm",
     "felling blow",
     "feral encounter",
-    "fiendlash",
     "fiery encore",
     "flamethrower sonata",
     "foot chopper",
@@ -251,19 +247,15 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "kefka, dancing mad",
     "kindle the carnage",
     "knockout maneuver",
-    "laccolith rig",
     "lagonna-band storyteller",
     "lammastide weave",
     "lifeblood hydra",
     "living inferno",
     "lorcan, warlock collector",
-    "lothlórien blade",
     "lozhan, dragons' legacy",
     "lukka, coppercoat outcast",
-    "lukka, wayward bonder",
     "luminate primordial",
     "madame null, power broker",
-    "mage slayer",
     "make yourself useful",
     "mana drain",
     "marshland bloodcaster",
@@ -344,7 +336,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "spinal embrace",
     "spirit flare",
     "spoils of the hunt",
-    "stalking vengeance",
     "steadfast armasaur",
     "stronghold arena",
     "summon: kujata",
@@ -386,7 +377,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "vivien's invocation",
     "volcanic vision",
     "vraska's stoneglare",
-    "warstorm surge",
     "weed strangle",
     "willow geist",
     "wolverine riders",
@@ -451,17 +441,21 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        257,
-        "Expected exactly 257 cards retaining ObjectScope::Anaphoric. PR #1451 \
+        247,
+        "Expected exactly 247 cards retaining ObjectScope::Anaphoric. PR #1451 \
          re-scoped 8 dynamic-quantity 'its power' anaphora off the Anaphoric \
          arm onto typed quantity refs; PR #1522 re-scoped Dead Before Sunrise \
-         through the recipient/subject rewrite. Count moved to {}.",
+         through the recipient/subject rewrite. The category-2 'it deals damage \
+         equal to its power' trigger-subject class (#512) then moved 10 more \
+         cards (Warstorm Surge, Stalking Vengeance, Mage Slayer, et al.) onto \
+         `Power {{ scope: EventSource }}`, dropping 257 -> 247. Count moved to \
+         {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        257,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 257 cards."
+        247,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 247 cards."
     );
 }
 

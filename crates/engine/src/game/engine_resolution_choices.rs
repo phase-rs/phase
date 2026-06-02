@@ -325,39 +325,53 @@ pub(super) fn handle_resolution_choice(
                     CastOfferKind::Discover {
                         hit_card,
                         exiled_misses,
+                        discover_value,
                     },
             },
             GameAction::DiscoverChoice { choice },
         ) => {
             let cast = matches!(choice, crate::types::actions::CastChoice::Cast);
             if cast {
-                if let Some(obj) = state.objects.get_mut(&hit_card) {
-                    obj.casting_permissions.push(
-                        crate::types::ability::CastingPermission::ExileWithAltCost {
-                            cost: crate::types::mana::ManaCost::zero(),
-                            cast_transformed: false,
-                            constraint: None,
-                            // CR 702.190a (Discover): the discovering player is
-                            // the only player permitted to cast the hit card.
-                            granted_to: Some(player),
+                // CR 701.57a + CR 608.2g: cast the hit DURING resolution, gated
+                // by "resulting spell's mana value is less than or equal to N".
+                // The MV check is re-evaluated at finalization (after X), and on
+                // rejection the hit goes to the discovering player's hand
+                // (`ToHand`) while the misses go to the library bottom.
+                let cleanup = crate::types::ability::ResolutionCastCleanup {
+                    exiled_misses,
+                    reject_action: crate::types::ability::ResolutionMvRejectAction::ToHand,
+                };
+                let result = casting::initiate_cast_during_resolution(
+                    state,
+                    player,
+                    hit_card,
+                    Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                        comparator: crate::types::ability::Comparator::LE,
+                        value: QuantityExpr::Fixed {
+                            value: discover_value as i32,
                         },
-                    );
-                }
+                    }),
+                    cleanup,
+                    events,
+                )?;
+                ResolutionChoiceOutcome::WaitingFor(result)
             } else {
+                // CR 701.57a: decline — hit goes to the discovering player's
+                // hand; the misses go to the library bottom in a random order.
                 zones::move_to_zone(state, hit_card, Zone::Hand, events);
-            }
 
-            {
-                use rand::seq::SliceRandom;
+                {
+                    use rand::seq::SliceRandom;
 
-                let mut shuffled = exiled_misses;
-                shuffled.shuffle(&mut state.rng);
-                for card_id in shuffled {
-                    zones::move_to_library_position(state, card_id, false, events);
+                    let mut shuffled = exiled_misses;
+                    shuffled.shuffle(&mut state.rng);
+                    for card_id in shuffled {
+                        zones::move_to_library_position(state, card_id, false, events);
+                    }
                 }
-            }
 
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            }
         }
         // CR 701.20a + CR 608.2c: "You may put that card onto the battlefield" —
         // the controller routes the kept card after RevealUntil found a hit.
@@ -449,37 +463,39 @@ pub(super) fn handle_resolution_choice(
         ) => {
             let cast = matches!(choice, crate::types::actions::CastChoice::Cast);
             if cast {
-                // CR 702.85a: Grant a cast-from-exile permission gated by
-                // `CascadeResultingMvBelow`. The second MV check is enforced
-                // at cast time in `casting_costs`, where X has been chosen.
-                // Bottom-shuffle of misses is deferred to that point so a
-                // cast-time rejection can still reach them.
-                if let Some(obj) = state.objects.get_mut(&hit_card) {
-                    obj.casting_permissions.push(
-                        crate::types::ability::CastingPermission::ExileWithAltCost {
-                            cost: crate::types::mana::ManaCost::zero(),
-                            cast_transformed: false,
-                            constraint: Some(
-                                crate::types::ability::CastPermissionConstraint::CascadeResultingMvBelow {
-                                    source_mv,
-                                    exiled_misses,
-                                },
-                            ),
-                            // CR 702.85a (Cascade): the cascading player is the
-                            // only player permitted to cast the hit card.
-                            granted_to: Some(player),
+                // CR 702.85a + CR 608.2g: cast the hit DURING resolution, gated
+                // by "resulting spell's mana value is less than this spell's
+                // mana value". The MV check is re-evaluated at finalization
+                // (after X), and on rejection the hit joins the misses on the
+                // library bottom (`BottomWithMisses`).
+                let cleanup = crate::types::ability::ResolutionCastCleanup {
+                    exiled_misses,
+                    reject_action:
+                        crate::types::ability::ResolutionMvRejectAction::BottomWithMisses,
+                };
+                let result = casting::initiate_cast_during_resolution(
+                    state,
+                    player,
+                    hit_card,
+                    Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+                        comparator: crate::types::ability::Comparator::LT,
+                        value: QuantityExpr::Fixed {
+                            value: source_mv as i32,
                         },
-                    );
-                }
+                    }),
+                    cleanup,
+                    events,
+                )?;
+                ResolutionChoiceOutcome::WaitingFor(result)
             } else {
                 // CR 702.85a: Caster declines — hit and misses all go to the
                 // bottom of the library in a random order together.
                 let mut all_to_bottom = exiled_misses;
                 all_to_bottom.push(hit_card);
                 crate::game::effects::cascade::shuffle_to_bottom(state, &all_to_bottom, events);
-            }
 
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+                ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            }
         }
         (WaitingFor::LearnChoice { player, hand_cards }, GameAction::LearnDecision { choice }) => {
             match choice {
