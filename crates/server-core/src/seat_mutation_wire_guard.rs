@@ -42,3 +42,43 @@ pub fn guard_seat_mutation(mutation: &SeatMutation) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use phase_ai::config::AiDifficulty;
+
+    use super::{guard_seat_mutation, MAX_AI_DECK_NAME_LEN};
+    use crate::protocol::{DeckChoice, SeatKind, SeatMutation};
+
+    #[test]
+    fn seat_mutation_guard_accepts_valid_ai_named_deck() {
+        let mutation = SeatMutation::SetKind {
+            seat_index: 1,
+            kind: SeatKind::Ai {
+                difficulty: AiDifficulty::Medium,
+                deck: DeckChoice::Named("Mono Green".to_string()),
+            },
+        };
+        assert!(guard_seat_mutation(&mutation).is_ok());
+    }
+
+    #[test]
+    fn seat_mutation_guard_rejects_oversized_named_deck() {
+        let mutation = SeatMutation::SetKind {
+            seat_index: 1,
+            kind: SeatKind::Ai {
+                difficulty: AiDifficulty::Medium,
+                deck: DeckChoice::Named("x".repeat(MAX_AI_DECK_NAME_LEN + 1)),
+            },
+        };
+        let err = guard_seat_mutation(&mutation).unwrap_err();
+        assert!(err.contains("name"));
+    }
+
+    #[test]
+    fn seat_mutation_guard_rejects_oversized_seat_index() {
+        let mutation = SeatMutation::Remove { seat_index: 200 };
+        let err = guard_seat_mutation(&mutation).unwrap_err();
+        assert!(err.contains("seat_index"));
+    }
+}
