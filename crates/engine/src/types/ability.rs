@@ -1302,6 +1302,11 @@ pub enum ManaSpendRestriction {
     /// `value` is the printed threshold N; `comparator` applies
     /// `spell_mana_value <cmp> value`.
     SpellWithManaValue { comparator: Comparator, value: u32 },
+    /// CR 106.6 + CR 400.7: "Spend this mana only to cast spells from your
+    /// graveyard" / "from exile". Gates spending on the spell's cast-from zone
+    /// alone — a distinct axis from [`ManaSpendRestriction::SpellWithKeywordKindFromZone`],
+    /// which additionally requires a keyword. Resolved against `SpellMeta.cast_from_zone`.
+    SpellFromZone(Zone),
 }
 
 /// Duration for temporary effects.

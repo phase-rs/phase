@@ -27254,6 +27254,45 @@ mod tests {
         assert!(*tapped);
     }
 
+    /// CR 105.2 + CR 205.1a + CR 613.1d-e: Rise from the Grave reanimation —
+    /// "Put target creature card from a graveyard onto the battlefield under your
+    /// control. It's a black Zombie in addition to its other colors and types."
+    /// The trailing contracted-subject clause must chain (via `sub_ability`) to a
+    /// continuous `GenericEffect` adding the black color (layer 5) and the Zombie
+    /// subtype (layer 4) — not an Unimplemented fallback.
+    #[test]
+    fn reanimate_becomes_black_zombie_in_addition_to_colors_and_types() {
+        let def = parse_effect_chain(
+            "Put target creature card from a graveyard onto the battlefield under your control. It's a black Zombie in addition to its other colors and types.",
+            AbilityKind::Spell,
+        );
+        let mut mods: Vec<ContinuousModification> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*d.effect
+            {
+                for sd in static_abilities {
+                    mods.extend(sd.modifications.iter().cloned());
+                }
+            }
+            node = d.sub_ability.as_deref();
+        }
+        assert!(
+            mods.contains(&ContinuousModification::AddColor {
+                color: ManaColor::Black
+            }),
+            "expected AddColor(Black); chain mods: {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddSubtype {
+                subtype: "Zombie".to_string()
+            }),
+            "expected AddSubtype(Zombie); chain mods: {mods:?}"
+        );
+    }
+
     /// CR 701.17a + CR 701.17c + CR 400.7j + CR 608.2c: "Mill a card, then draw
     /// cards equal to the milled card's mana value." — Heed the Mists.
     ///

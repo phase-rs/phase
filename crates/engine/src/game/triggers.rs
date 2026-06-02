@@ -2164,6 +2164,84 @@ fn normalize_ability_identity(ability: &mut ResolvedAbility) {
     }
 }
 
+fn value_contains_trigger_event_context_ref(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(tag) => matches!(
+            tag.as_str(),
+            "TriggeringSpellController"
+                | "TriggeringSpellOwner"
+                | "TriggeringPlayer"
+                | "TriggeringSource"
+                | "ParentTarget"
+                | "ParentTargetController"
+                | "ParentTargetOwner"
+                | "StackSpell"
+                | "CostPaidObject"
+                | "EventContextAmount"
+                | "EventContextSourceCostX"
+                | "ManaSpentToCast"
+        ),
+        serde_json::Value::Array(values) => {
+            values.iter().any(value_contains_trigger_event_context_ref)
+        }
+        serde_json::Value::Object(map) => {
+            map.values().any(value_contains_trigger_event_context_ref)
+        }
+        _ => false,
+    }
+}
+
+fn ability_uses_trigger_event_context(ability: &ResolvedAbility) -> bool {
+    serde_json::to_value(ability)
+        .map(|value| value_contains_trigger_event_context_ref(&value))
+        .unwrap_or(true)
+}
+
+fn zone_changes_are_same_departure_batch(a: &GameEvent, b: &GameEvent) -> bool {
+    let (
+        GameEvent::ZoneChanged {
+            object_id: a_id,
+            from: a_from,
+            to: a_to,
+            record: a_record,
+        },
+        GameEvent::ZoneChanged {
+            object_id: b_id,
+            from: b_from,
+            to: b_to,
+            record: b_record,
+        },
+    ) = (a, b)
+    else {
+        return false;
+    };
+
+    a_from == b_from
+        && a_to == b_to
+        && a_record.co_departed.contains(b_id)
+        && b_record.co_departed.contains(a_id)
+}
+
+fn trigger_events_match_for_ordering(
+    first: &PendingTrigger,
+    candidate: &PendingTrigger,
+    ability_uses_trigger_event: bool,
+) -> bool {
+    if first.trigger_event == candidate.trigger_event {
+        return true;
+    }
+    if ability_uses_trigger_event {
+        return false;
+    }
+
+    match (&first.trigger_event, &candidate.trigger_event) {
+        (Some(first_event), Some(candidate_event)) => {
+            zone_changes_are_same_departure_batch(first_event, candidate_event)
+        }
+        _ => false,
+    }
+}
+
 /// CR 603.3c/603.3d + CR 601.2c/601.2d: A trigger requires ordering-relevant
 /// player input only when it announces a mode, targets, or a division as it goes
 /// on the stack. A trigger with none of those is placed with no observable
@@ -2189,14 +2267,27 @@ fn trigger_has_no_ordering_input(t: &PendingTrigger) -> bool {
 /// false-negative); it can never auto-order order-sensitive triggers.
 ///
 /// Two triggers are indistinguishable when both require no ordering input and
-/// they match on: the normalized ability (CR 603.4 intervening-`if` rides in
+/// they match on the normalized ability (CR 603.4 intervening-`if` rides in
 /// `condition`; all outcome fields ride in the derived `ResolvedAbility` `==`),
-/// the trigger-level `condition`, the firing event-context (`trigger_event` and
-/// `subject_match_count` — CR 603.2c: one event with multiple occurrences fires
-/// a batched trigger once per occurrence, each carrying its own subject; these
-/// live on `PendingTrigger`, NOT the ability, and are read at resolution, so
-/// identical abilities with different event context resolve differently and
-/// must NOT be collapsed), and the `may_trigger_origin`.
+/// the trigger-level `condition`, the batched `subject_match_count`
+/// (CR 603.2c — one event with multiple occurrences fires a batched trigger
+/// once per occurrence, each carrying its own subject count; read at
+/// resolution), and the `may_trigger_origin`.
+// CR 603.2c: `trigger_event` (the firing event itself) is intentionally NOT
+// part of the equality check only for explicitly simultaneous ZoneChanged
+// departure batches whose resolved ability has no event-context dependency.
+// When N co-departing events all match the same trigger definition and the
+// effect is fixed (e.g. three Liliana, Dreadhorde General draws from one board
+// wipe), placement order is unobservable and a prompt is noise. Other event
+// classes stay exact even when the ability is fixed: a CounterAdded trigger
+// can create more CounterAdded events while resolving, so distinct firing
+// events are not inherently interchangeable.
+// If the ability reads `TriggeringSource`, `TriggeringPlayer`,
+// `EventContextAmount`, or another event-context ref, the concrete firing
+// event is resolution-visible and must still match before auto-ordering.
+// `subject_match_count` is kept in the equality because that is the per-batch
+// count the effect reads at resolution and *can* differ across pending triggers
+// if two distinct batched events satisfy the same definition.
 fn group_is_order_independent(group: &[PendingTriggerContext]) -> bool {
     let Some((first, rest)) = group.split_first() else {
         return false;
@@ -2209,11 +2300,12 @@ fn group_is_order_independent(group: &[PendingTriggerContext]) -> bool {
     }
     let mut reference = first.pending.ability.clone();
     normalize_ability_identity(&mut reference);
+    let reference_uses_trigger_event = ability_uses_trigger_event_context(&reference);
     rest.iter().all(|ctx| {
         let t = &ctx.pending;
         trigger_has_no_ordering_input(t)
             && t.condition == first.pending.condition
-            && t.trigger_event == first.pending.trigger_event
+            && trigger_events_match_for_ordering(&first.pending, t, reference_uses_trigger_event)
             && t.subject_match_count == first.pending.subject_match_count
             && t.may_trigger_origin == first.pending.may_trigger_origin
             && {
@@ -17950,6 +18042,62 @@ mod dedup_regression_tests {
         assert!(
             matches!(disposition, TriggerOrderingDisposition::PromptForChoice(_)),
             "distinct subject_match_count must still prompt (CR 603.2c event context)"
+        );
+        assert!(
+            state.pending_trigger_order.is_some(),
+            "a live ordering pass must back the prompt"
+        );
+    }
+
+    /// CR 603.3b + CR 603.7c: Different firing events may be ignored only when
+    /// the resolved ability does not read event context. If the ability resolves
+    /// through `TriggeringSource`, the concrete event is visible at resolution,
+    /// so otherwise-identical no-input triggers must still prompt.
+    #[test]
+    fn order_triggers_event_context_ability_still_prompts_on_distinct_events() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::Upkeep;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::TriggeringSource,
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        );
+        let make_ctx = |source: ObjectId, event_object: ObjectId| {
+            PendingTriggerContext::single(PendingTrigger {
+                source_id: source,
+                controller: PlayerId(0),
+                condition: None,
+                ability: ability.clone(),
+                timestamp: source.0 as u32,
+                target_constraints: Vec::new(),
+                distribute: None,
+                trigger_event: Some(GameEvent::PermanentTapped {
+                    object_id: event_object,
+                    caused_by: None,
+                }),
+                modal: None,
+                mode_abilities: Vec::new(),
+                description: Some("Twin: tap the triggering source.".to_string()),
+                may_trigger_origin: None,
+                subject_match_count: None,
+            })
+        };
+        let ctx_a = make_ctx(ObjectId(1), ObjectId(11));
+        let ctx_b = make_ctx(ObjectId(2), ObjectId(22));
+
+        let disposition = begin_trigger_ordering(&mut state, vec![ctx_a, ctx_b]);
+        assert!(
+            matches!(disposition, TriggerOrderingDisposition::PromptForChoice(_)),
+            "distinct trigger_event must still prompt when the ability reads TriggeringSource"
         );
         assert!(
             state.pending_trigger_order.is_some(),

@@ -79,6 +79,7 @@ mod krark_clan_ironworks_castability;
 mod krark_thumb_coin_flip;
 mod lathiel_end_step_counters_repro;
 mod leyline_taps_for_mana_repro;
+mod liliana_dreadhorde_multi_dies;
 mod liliana_waker_cross_scope_decline;
 mod louisoix_sacrifice_counter;
 mod lurking_predators_1604_repro;

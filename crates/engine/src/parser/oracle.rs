@@ -11206,6 +11206,36 @@ mod tests {
     }
 
     #[test]
+    fn mana_spend_restriction_from_graveyard() {
+        assert_eq!(
+            crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+                "spend this mana only to cast a spell from your graveyard"
+            )
+            .map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellFromZone(Zone::Graveyard))
+        );
+        assert_eq!(
+            crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+                "spend this mana only to cast spells from exile"
+            )
+            .map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellFromZone(Zone::Exile))
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_on_costs_that_contain_x() {
+        // "contain" is an alias for the existing "include" X-cost wording.
+        assert_eq!(
+            crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
+                "spend this mana only on costs that contain {x}"
+            )
+            .map(|(r, _)| r),
+            Some(ManaSpendRestriction::XCostOnly)
+        );
+    }
+
+    #[test]
     fn mana_spend_restriction_chosen_type_cant_be_countered() {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
         use crate::types::mana::ManaSpellGrant;
