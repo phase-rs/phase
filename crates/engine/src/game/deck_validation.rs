@@ -20,6 +20,11 @@ pub struct DeckCompatibilityRequest {
     pub sideboard: Vec<String>,
     #[serde(default)]
     pub commander: Vec<String>,
+    /// Oathbreaker RC: the signature spell card name. Empty for all non-Oathbreaker
+    /// formats. Included in `all_deck_cards` so copy-count and identity checks are
+    /// accurate regardless of which validation path is active.
+    #[serde(default)]
+    pub signature_spell: Vec<String>,
     #[serde(default)]
     pub selected_format: Option<GameFormat>,
     #[serde(default)]
@@ -219,10 +224,34 @@ pub fn validate_name_deck_for_format(
     selected_format: GameFormat,
     selected_match_type: Option<MatchType>,
 ) -> Result<(), Vec<String>> {
+    validate_name_deck_for_format_with_sig(
+        db,
+        main_deck,
+        sideboard,
+        commander,
+        &[],
+        selected_format,
+        selected_match_type,
+    )
+}
+
+/// Extended variant of `validate_name_deck_for_format` that accepts a
+/// signature spell slot for Oathbreaker validation. All other callers
+/// continue to use `validate_name_deck_for_format` with an implicit empty slice.
+pub fn validate_name_deck_for_format_with_sig(
+    db: &CardDatabase,
+    main_deck: &[String],
+    sideboard: &[String],
+    commander: &[String],
+    signature_spell: &[String],
+    selected_format: GameFormat,
+    selected_match_type: Option<MatchType>,
+) -> Result<(), Vec<String>> {
     let request = DeckCompatibilityRequest {
         main_deck: main_deck.to_vec(),
         sideboard: sideboard.to_vec(),
         commander: commander.to_vec(),
+        signature_spell: signature_spell.to_vec(),
         selected_format: Some(selected_format),
         selected_match_type,
         summary_only: false,
@@ -1140,6 +1169,176 @@ fn names_match(a: &str, b: &str) -> bool {
     normalize(a) == normalize(b)
 }
 
+/// Oathbreaker RC: returns `true` if `face` is an instant or sorcery.
+fn is_instant_or_sorcery(face: &CardFace) -> bool {
+    face.card_type.core_types.contains(&CoreType::Instant)
+        || face.card_type.core_types.contains(&CoreType::Sorcery)
+}
+
+/// Oathbreaker RC: full deck compatibility check.
+fn evaluate_oathbreaker(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    unknown_cards: &BTreeSet<String>,
+) -> CompatibilityCheck {
+    let mut reasons = Vec::new();
+
+    if !unknown_cards.is_empty() {
+        reasons.push(summarize_cards("Unknown cards", unknown_cards, 6));
+    }
+
+    // Oathbreaker RC: exactly one Oathbreaker (legendary Planeswalker).
+    if request.commander.len() != 1 {
+        reasons.push(format!(
+            "Oathbreaker decks require exactly 1 Oathbreaker (found {})",
+            request.commander.len()
+        ));
+    } else {
+        let name = &request.commander[0];
+        if let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) {
+            if !face.is_oathbreaker {
+                reasons.push(format!(
+                    "{name}: Oathbreaker must be a legendary Planeswalker"
+                ));
+            }
+        }
+    }
+
+    // Oathbreaker RC: exactly one signature spell (instant or sorcery within color identity).
+    if request.signature_spell.len() != 1 {
+        reasons.push(format!(
+            "Oathbreaker decks require exactly 1 signature spell (found {})",
+            request.signature_spell.len()
+        ));
+    } else {
+        let sig_name = &request.signature_spell[0];
+        if let Some(face) = db.get_face_by_name(resolve_card_name(db, sig_name)) {
+            if !is_instant_or_sorcery(face) {
+                reasons.push(format!(
+                    "{sig_name}: signature spell must be an instant or sorcery"
+                ));
+            }
+            // Signature spell must be within the Oathbreaker's color identity.
+            if let Some(ob_name) = request.commander.first() {
+                if let Some(ob_face) = db.get_face_by_name(resolve_card_name(db, ob_name)) {
+                    let ob_identity: HashSet<ManaColor> =
+                        card_color_identity(ob_face).into_iter().collect();
+                    for color in card_color_identity(face) {
+                        if !ob_identity.contains(&color) {
+                            reasons.push(format!(
+                                "{sig_name}: signature spell is outside the Oathbreaker's color identity"
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Oathbreaker RC: exactly 60 cards total (main + commander + signature spell,
+    // de-duplicating any that appear in both main and a command-zone slot).
+    let commander_represented = request
+        .commander
+        .iter()
+        .filter(|n| request.main_deck.iter().any(|c| c.eq_ignore_ascii_case(n)))
+        .count();
+    let sig_represented = request
+        .signature_spell
+        .iter()
+        .filter(|n| request.main_deck.iter().any(|c| c.eq_ignore_ascii_case(n)))
+        .count();
+    let total_cards = request.main_deck.len()
+        + (request
+            .commander
+            .len()
+            .saturating_sub(commander_represented))
+        + (request
+            .signature_spell
+            .len()
+            .saturating_sub(sig_represented));
+    if total_cards != 60 {
+        reasons.push(format!(
+            "Oathbreaker deck must have exactly 60 cards (found {total_cards})"
+        ));
+    }
+
+    // Oathbreaker RC: singleton (basic lands exempt, consistent with other
+    // singleton command-zone formats). `all_deck_cards` now includes `signature_spell`
+    // so a card in both the main deck and signature-spell slot is caught here.
+    let counts = combined_copy_counts(db, request);
+    let singleton_violations = copy_limit_violations(db, &counts, 1);
+    if !singleton_violations.is_empty() {
+        reasons.push(summarize_cards(
+            "Singleton violations",
+            &singleton_violations,
+            6,
+        ));
+    }
+
+    // Oathbreaker RC: every main-deck card must be within the Oathbreaker's color identity.
+    let mut oathbreaker_identity: HashSet<ManaColor> = HashSet::new();
+    if let Some(ob_name) = request.commander.first() {
+        if let Some(face) = db.get_face_by_name(resolve_card_name(db, ob_name)) {
+            oathbreaker_identity.extend(card_color_identity(face));
+        }
+    }
+    let mut identity_violations = BTreeSet::new();
+    let mut basic_type_violations = BTreeSet::new();
+    for name in request.main_deck.iter().map(String::as_str) {
+        if unknown_cards.contains(name) {
+            continue;
+        }
+        let resolved = resolve_card_name(db, name);
+        let Some(face) = db.get_face_by_name(resolved) else {
+            continue;
+        };
+        for color in card_color_identity(face) {
+            if !oathbreaker_identity.contains(&color) {
+                identity_violations.insert(name.to_string());
+                break;
+            }
+        }
+        for color in basic_land_type_colors(face) {
+            if !oathbreaker_identity.contains(&color) {
+                basic_type_violations.insert(face.name.clone());
+                break;
+            }
+        }
+    }
+    if !identity_violations.is_empty() {
+        reasons.push(summarize_cards(
+            "Cards outside Oathbreaker color identity",
+            &identity_violations,
+            6,
+        ));
+    }
+    if !basic_type_violations.is_empty() {
+        reasons.push(summarize_cards(
+            "Cards with off-identity basic land types",
+            &basic_type_violations,
+            6,
+        ));
+    }
+
+    CompatibilityCheck {
+        compatible: reasons.is_empty(),
+        reasons,
+    }
+}
+
+fn quick_oathbreaker_check(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+) -> QuickCheckResult {
+    let unknown_cards = collect_unknown_cards(db, request);
+    let check = evaluate_oathbreaker(db, request, &unknown_cards);
+    QuickCheckResult {
+        reason: check.reasons.into_iter().next(),
+        unknown_cards,
+    }
+}
+
 fn evaluate_selected_format_summary(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
@@ -1191,6 +1390,7 @@ fn evaluate_selected_format_summary(
             100,
         ),
         GameFormat::TinyLeaders => quick_tiny_leaders_check(db, request),
+        GameFormat::Oathbreaker => quick_oathbreaker_check(db, request),
         GameFormat::Brawl | GameFormat::HistoricBrawl => quick_brawl_check(
             db,
             request,
@@ -1548,6 +1748,13 @@ fn evaluate_selected_format(
             }
             check.compatible
         }
+        GameFormat::Oathbreaker => {
+            let check = evaluate_oathbreaker(db, request, unknown_cards);
+            if !check.compatible {
+                reasons.extend(check.reasons);
+            }
+            check.compatible
+        }
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => true,
     };
 
@@ -1857,6 +2064,7 @@ fn all_deck_cards(request: &DeckCompatibilityRequest) -> impl Iterator<Item = &s
         .iter()
         .chain(request.sideboard.iter())
         .chain(request.commander.iter())
+        .chain(request.signature_spell.iter())
         .map(String::as_str)
 }
 
@@ -2505,6 +2713,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2527,6 +2736,7 @@ mod tests {
             commander: vec!["Legal Standard".to_string()],
             selected_format: None,
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2605,6 +2815,7 @@ mod tests {
             commander: vec!["Legal Standard".to_string()],
             selected_format: None,
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2631,6 +2842,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: Some(MatchType::Bo3),
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let with_sideboard = DeckCompatibilityRequest {
@@ -2659,6 +2871,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: None,
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2682,6 +2895,7 @@ mod tests {
             commander: vec!["Legal Standard".to_string()],
             selected_format: None,
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2751,6 +2965,7 @@ mod tests {
             commander: vec!["PDH Commander".to_string()],
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2821,6 +3036,7 @@ mod tests {
             commander: vec!["Rare Creature".to_string()],
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2890,6 +3106,7 @@ mod tests {
             commander: vec!["Uncommon Sorcery".to_string()],
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2914,6 +3131,7 @@ mod tests {
             ],
             selected_format: None,
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2935,6 +3153,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let thg_request = DeckCompatibilityRequest {
@@ -2961,6 +3180,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: Some(MatchType::Bo1),
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let commander_request = DeckCompatibilityRequest {
@@ -2969,6 +3189,7 @@ mod tests {
             commander: vec!["Legal Standard".to_string()],
             selected_format: Some(GameFormat::Commander),
             selected_match_type: Some(MatchType::Bo1),
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3002,6 +3223,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Pioneer),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &legal_request);
@@ -3017,6 +3239,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3034,6 +3257,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3055,6 +3279,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3077,6 +3302,7 @@ mod tests {
             commander: vec!["Legal Standard".to_string()],
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &commander_request);
@@ -3092,6 +3318,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &oversize_sideboard);
@@ -3109,6 +3336,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &copy_limit);
@@ -3140,6 +3368,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Pauper),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &illegal_request);
@@ -3161,6 +3390,7 @@ mod tests {
             commander: vec!["Legal Standard".to_string()],
             selected_format: None,
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let check = evaluate_constructed(
@@ -3188,6 +3418,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3203,6 +3434,7 @@ mod tests {
             commander: vec!["Legendary Planeswalker".to_string()],
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3218,6 +3450,7 @@ mod tests {
             commander: vec!["Legal Standard".to_string()],
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3240,6 +3473,7 @@ mod tests {
             ],
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3259,6 +3493,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3278,6 +3513,7 @@ mod tests {
             commander: vec!["White Tiny Leader".to_string()],
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3313,6 +3549,7 @@ mod tests {
             commander: vec!["White Tiny Leader".to_string()],
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3338,6 +3575,7 @@ mod tests {
             commander: vec!["Ajani, Nacatl Pariah".to_string()],
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3363,6 +3601,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(GameFormat::HistoricBrawl),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3809,6 +4048,7 @@ mod tests {
             commander: vec![],
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = validate_deck_for_format(&db, &request);
@@ -3837,6 +4077,7 @@ mod tests {
             commander: vec![],
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
@@ -3851,6 +4092,7 @@ mod tests {
             commander: vec![],
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
@@ -3865,6 +4107,7 @@ mod tests {
             commander: vec![],
             selected_format: None,
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
@@ -3881,6 +4124,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3901,6 +4145,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3923,6 +4168,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3943,6 +4189,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3963,6 +4210,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4011,6 +4259,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4032,6 +4281,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4054,6 +4304,7 @@ mod tests {
             commander: vec!["Grub Commander".to_string()],
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -4113,6 +4364,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4136,6 +4388,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4159,6 +4412,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let err = validate_deck_for_format(&db, &request)
@@ -4178,6 +4432,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: Some(MatchType::Bo3),
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &no_sideboard);
@@ -4204,6 +4459,7 @@ mod tests {
             commander: vec!["Test Commander".to_string()],
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = validate_deck_for_format(&db, &request);
@@ -4303,6 +4559,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4324,6 +4581,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4345,6 +4603,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4370,6 +4629,7 @@ mod tests {
             commander: vec!["Legal Commander".to_string()],
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4426,6 +4686,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Vintage),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4451,6 +4712,7 @@ mod tests {
             commander: Vec::new(),
             selected_format: Some(GameFormat::Vintage),
             selected_match_type: None,
+            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);

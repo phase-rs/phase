@@ -120,7 +120,10 @@ pub fn commander_lethal_headroom(
 /// deep interception of every `move_to_zone` call site.
 pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId, PlayerId, Zone)> {
     state.objects.values().find_map(|obj| {
-        if !obj.is_commander {
+        // Oathbreaker RC: signature spells return to the command zone just like
+        // commanders. `is_commander` covers all commander-zone leaders; `is_signature_spell`
+        // covers the Oathbreaker signature spell.
+        if !obj.is_commander && !obj.is_signature_spell {
             return None;
         }
         // CR 903.9a: graveyard or exile; CR 903.9b: hand or library.
@@ -1409,6 +1412,7 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: true,
+            is_oathbreaker: false,
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),

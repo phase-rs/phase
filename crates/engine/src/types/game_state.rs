@@ -1437,6 +1437,13 @@ pub struct PlayerDeckPool {
     pub registered_commander: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub current_commander: std::sync::Arc<Vec<DeckEntry>>,
+    /// Oathbreaker RC: registered and current signature spell entries.
+    /// Empty for all non-Oathbreaker formats. Mirrors the commander Arc pair
+    /// so between-games persistence works correctly.
+    #[serde(default)]
+    pub registered_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
+    #[serde(default)]
+    pub current_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
     /// The declared bracket tier for this player's deck. Used by the AI to
     /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
     /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward

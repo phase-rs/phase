@@ -1248,6 +1248,20 @@ pub fn compute_brawl_commander(mtgjson: &super::mtgjson::AtomicCard, face: &Card
     mtgjson_says || type_line_says
 }
 
+/// Oathbreaker RC: determine if a card can be an Oathbreaker commander.
+/// Uses MTGJSON `leadershipSkills.oathbreaker` (authoritative for WotC-blessed
+/// Planeswalkers) unioned with type-line analysis (legendary Planeswalker) as a
+/// staleness guard. Mirrors the `compute_commander` / `compute_brawl_commander` pattern.
+pub fn compute_oathbreaker(mtgjson: &super::mtgjson::AtomicCard, face: &CardFace) -> bool {
+    let mtgjson_says = mtgjson
+        .leadership_skills
+        .as_ref()
+        .is_some_and(|ls| ls.oathbreaker);
+    let is_legendary = face.card_type.supertypes.contains(&Supertype::Legendary);
+    let is_planeswalker = face.card_type.core_types.contains(&CoreType::Planeswalker);
+    mtgjson_says || (is_legendary && is_planeswalker)
+}
+
 /// CR 702.29a/e: Synthesize Cycling and Typecycling keywords into activated abilities.
 ///
 /// Cycling: "[Cost], Discard this card: Draw a card." (activated from hand)
@@ -5281,6 +5295,7 @@ fn build_oracle_face_inner(
         parse_warnings: parsed.parse_warnings,
         brawl_commander: false,
         is_commander: false,
+        is_oathbreaker: false,
         deck_copy_limit: None,
         metadata: Default::default(),
         rarities: Default::default(),
@@ -5289,6 +5304,7 @@ fn build_oracle_face_inner(
 
     face.brawl_commander = compute_brawl_commander(mtgjson, &face);
     face.is_commander = compute_commander(mtgjson, &face);
+    face.is_oathbreaker = compute_oathbreaker(mtgjson, &face);
     // CR 100.2a / CR 903.5b: per-card deck-construction copy-limit override.
     // `face.oracle_text` retains reminder text + DCI prefix, so reminder-only
     // limits (Vazal, the Compleat's Megalegendary) are still discovered.

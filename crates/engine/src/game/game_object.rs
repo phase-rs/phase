@@ -544,6 +544,12 @@ pub struct GameObject {
     // Commander: whether this object is a commander card
     #[serde(default)]
     pub is_commander: bool,
+    /// Oathbreaker RC: whether this object is a signature spell (a command-zone
+    /// instant/sorcery). Set by `create_signature_spell_from_card_face` at game
+    /// load. Drives zone-return, castability gating (only while the Oathbreaker
+    /// is on the battlefield), and commander-tax tracking via `commander_cast_count`.
+    #[serde(default)]
+    pub is_signature_spell: bool,
 
     /// CR 903.8: Commander tax — pre-computed {2} per previous cast from command zone.
     /// Display-only: computed by `derive_display_state()`.
@@ -899,6 +905,7 @@ impl GameObject {
             available_mana_pips: Vec::new(),
             loyalty_activations_this_turn: 0,
             is_commander: false,
+            is_signature_spell: false,
             commander_tax: None,
             is_renowned: false,
             is_emblem: false,

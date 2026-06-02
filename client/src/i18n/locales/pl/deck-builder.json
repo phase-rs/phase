@@ -177,7 +177,15 @@
     "setAsCommander": "Ustaw jako dowódcę:",
     "cardCount": "{{count}}/{{expected}} kart",
     "singletonViolations": "Naruszenia zasady singletona: {{cards}}",
-    "colorViolations": "Naruszenia tożsamości kolorów: {{cards}}"
+    "colorViolations": "Naruszenia tożsamości kolorów: {{cards}}",
+    "signatureSpell": {
+      "heading": "Czar sygnaturowy",
+      "noSignatureSpell": "Nie wybrano czaru sygnaturowego",
+      "setAsSignatureSpell": "Ustaw jako czar sygnaturowy:",
+      "remove": "Usuń czar sygnaturowy",
+      "mustBeInstantOrSorcery": "Czar sygnaturowy musi być błyskawicznym lub czarem",
+      "outsideColorIdentity": "{{name}}: poza tożsamością kolorów Przysięgołamacza"
+    }
   },
   "manaCurve": {
     "title": "Krzywa many",
