@@ -342,7 +342,7 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         // a time counter on it, remove a time counter from it."
         Rule::Impending(n, c) => Keyword::Impending {
             cost: pure_mana(c, "Rule::Impending", path)?,
-            counters: *n as u32,
+            counters: int_or_gap(n, "Rule::Impending.counters", path)?,
         },
 
         // CR 702.173a: Freerunning {cost} — alternative cost. Mana-only.
