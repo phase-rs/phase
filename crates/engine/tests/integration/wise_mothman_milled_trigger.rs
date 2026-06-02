@@ -26,6 +26,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::{ActionResult, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -349,5 +350,281 @@ fn infesting_radroach_opponent_milled_trigger_silent_on_own_mill() {
         runner.state().players[0].graveyard.len(),
         7, // Infesting Radroach + 5 milled + Tome Scour
         "five cards should have been milled into P0's own graveyard"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Trigger-target-selection re-stamp + take-ordering regression (the hang fix)
+// ---------------------------------------------------------------------------
+//
+// These tests drive The Wise Mothman's batched milled trigger ("put a +1/+1
+// counter on each of up to X target creatures, where X is the number of nonland
+// cards milled this way") all the way through to an *interactive* target
+// selection that chooses one or more creatures — the path the earlier
+// `wise_mothman_passive_milled_trigger_fires` test never exercised because it
+// resolved with zero targets.
+//
+// Two coupled defects lived in
+// `game/engine_stack.rs::handle_trigger_target_selection_{select_targets,
+// choose_target}`:
+//
+//   * BUG 1 (CR 601.2c + CR 603.2c): `multi_target.max = EventContextAmount`
+//     reads `state.current_trigger_match_count`, which is stamped only while a
+//     trigger surfaces its prompt and is `None` again by the *later* `apply()`
+//     that completes the target walk. So the assignment re-resolved the bound to
+//     0, consumed 0 of the selected slots, and returned
+//     `InvalidAction("Unused selected targets")` (the all-at-once `SelectTargets`
+//     path) / `InvalidAction("Unused selected target slots")` (the step-by-step
+//     `ChooseTarget` path) even though the player had chosen legal creatures.
+//
+//   * BUG 2 (CR 603.3d): the handlers took `state.pending_trigger` *before* the
+//     fallible assignment. `apply()` does not roll back on `Err`, and
+//     `sync_waiting_for` never runs after an `Err`, so the Bug-1 error left
+//     `pending_trigger = None` while `waiting_for` was still
+//     `TriggerTargetSelection` — bricking every subsequent action.
+//
+// The fix re-stamps `current_trigger_match_count` (save/restore) around the
+// assignment and takes the pending trigger only after the assignment succeeds.
+
+/// Drive the stack until The Wise Mothman's milled trigger surfaces its
+/// interactive `TriggerTargetSelection` prompt, passing priority as needed.
+fn advance_to_trigger_target_selection(runner: &mut engine::game::scenario::GameRunner) {
+    let mut guard = 0;
+    while !matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ) {
+        guard += 1;
+        assert!(
+            guard < 64,
+            "milled trigger never surfaced a TriggerTargetSelection prompt; \
+             last waiting_for = {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority pass should be accepted while reaching the trigger");
+    }
+}
+
+/// Read the creature `TargetRef`s offered by the *current* slot of a live
+/// `TriggerTargetSelection` prompt (the slot the next `ChooseTarget` fills).
+fn current_slot_legal_creatures(runner: &engine::game::scenario::GameRunner) -> Vec<TargetRef> {
+    match &runner.state().waiting_for {
+        WaitingFor::TriggerTargetSelection {
+            target_slots,
+            selection,
+            ..
+        } => {
+            let slot = selection
+                .current_slot
+                .min(target_slots.len().saturating_sub(1));
+            target_slots[slot].legal_targets.clone()
+        }
+        other => panic!("expected TriggerTargetSelection prompt, got {other:?}"),
+    }
+}
+
+/// `+1/+1` counters on a battlefield object.
+fn p1p1_counters(runner: &engine::game::scenario::GameRunner, id: ObjectId) -> u32 {
+    runner
+        .state()
+        .objects
+        .get(&id)
+        .expect("object still present")
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Build a Wise Mothman scenario: the Mothman + `creature_count` vanilla
+/// creatures on P0's battlefield, a Tome Scour in P0's hand, and a library of
+/// nonland cards to mill. Returns the runner plus the creature ids so the test
+/// can target them.
+fn wise_mothman_scenario(
+    db: &'static CardDatabase,
+    creature_count: usize,
+) -> (engine::game::scenario::GameRunner, ObjectId, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario.add_real_card(P0, "The Wise Mothman", Zone::Battlefield, db);
+    let creatures: Vec<ObjectId> = (0..creature_count)
+        .map(|_| scenario.add_vanilla(P0, 2, 2))
+        .collect();
+    let tome_scour = scenario.add_real_card(P0, "Tome Scour", Zone::Hand, db);
+
+    // Library top: nonland cards so Mill 5 mills five nonland cards.
+    for _ in 0..9 {
+        scenario.add_real_card(P0, "Lightning Bolt", Zone::Library, db);
+    }
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    add_blue_mana(&mut runner);
+    (runner, tome_scour, creatures)
+}
+
+/// BUG 1 — all-at-once `SelectTargets` path. Milling five nonland cards with two
+/// legal creatures present must let the controller put a `+1/+1` counter on each
+/// of TWO chosen creatures. Pre-fix, the EventContextAmount bound collapsed to 0
+/// at assign time and `SelectTargets` returned
+/// `InvalidAction("Unused selected targets")`.
+#[test]
+fn wise_mothman_select_targets_places_counters_on_chosen_creatures() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let (mut runner, tome_scour, creatures) = wise_mothman_scenario(db, 2);
+    let result = cast_tome_scour(&mut runner, tome_scour, P0);
+    let _ = result;
+    advance_to_trigger_target_selection(&mut runner);
+
+    // Five nonland cards genuinely milled into the graveyard.
+    assert_eq!(
+        runner.state().players[0].graveyard.len(),
+        6, // 5 milled + Tome Scour
+        "five cards should have been milled into P0's graveyard"
+    );
+
+    // Choose both creatures in one shot. Pre-fix this errors with
+    // "Unused selected targets"; post-fix it succeeds.
+    runner
+        .act(GameAction::SelectTargets {
+            targets: vec![
+                TargetRef::Object(creatures[0]),
+                TargetRef::Object(creatures[1]),
+            ],
+        })
+        .expect("selecting two creature targets must succeed (Bug 1 fix)");
+
+    runner.advance_until_stack_empty();
+
+    // Each chosen creature received exactly one +1/+1 counter. The number of
+    // counters placed equals min(milled_count = 5, legal_count = 2) = 2.
+    assert_eq!(
+        p1p1_counters(&runner, creatures[0]),
+        1,
+        "first chosen creature must receive exactly one +1/+1 counter"
+    );
+    assert_eq!(
+        p1p1_counters(&runner, creatures[1]),
+        1,
+        "second chosen creature must receive exactly one +1/+1 counter"
+    );
+}
+
+/// BUG 1 — step-by-step `ChooseTarget` path. Same trigger, but the controller
+/// walks the up-to-X slots one creature at a time. Exercises
+/// `handle_trigger_target_selection_choose_target`'s `Complete` arm, which has
+/// the identical re-stamp + take-ordering fix.
+#[test]
+fn wise_mothman_choose_target_walk_places_counters_on_chosen_creatures() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let (mut runner, tome_scour, creatures) = wise_mothman_scenario(db, 2);
+    cast_tome_scour(&mut runner, tome_scour, P0);
+    advance_to_trigger_target_selection(&mut runner);
+
+    // Walk the slots: pick creatures[0] then creatures[1], one ChooseTarget per
+    // step, until the prompt clears (the `Complete` arm fires on the last step).
+    let mut to_pick = vec![
+        TargetRef::Object(creatures[0]),
+        TargetRef::Object(creatures[1]),
+    ];
+    let mut guard = 0;
+    while matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ) {
+        guard += 1;
+        assert!(guard < 16, "ChooseTarget walk did not terminate");
+        let legal = current_slot_legal_creatures(&runner);
+        // Pick the next intended creature if it is legal at this slot; otherwise
+        // stop adding targets (an empty ChooseTarget completes the up-to-X walk).
+        let next = to_pick.first().filter(|t| legal.contains(t)).cloned();
+        match next {
+            Some(target) => {
+                to_pick.remove(0);
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(target),
+                    })
+                    .expect("choosing a legal creature target must succeed (Bug 1 fix)");
+            }
+            None => {
+                // No further intended target is legal here — complete the walk.
+                runner
+                    .act(GameAction::ChooseTarget { target: None })
+                    .expect("completing the up-to-X walk must succeed (Bug 1 fix)");
+            }
+        }
+    }
+
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        p1p1_counters(&runner, creatures[0]),
+        1,
+        "first chosen creature must receive exactly one +1/+1 counter (ChooseTarget path)"
+    );
+    assert_eq!(
+        p1p1_counters(&runner, creatures[1]),
+        1,
+        "second chosen creature must receive exactly one +1/+1 counter (ChooseTarget path)"
+    );
+}
+
+/// BUG 2 — recoverability / no-brick invariant. This drives the *same* real
+/// trigger and submits a legal one-creature selection. The discriminating
+/// assertion is the post-action invariant: the game must NEVER be left in the
+/// bricked shape `pending_trigger == None && waiting_for == TriggerTargetSelection`.
+///
+/// Pre-fix, the Bug-1 EventContextAmount=0 error fired *after* the pending
+/// trigger was already taken, stranding exactly that bricked shape — so this
+/// invariant failed. Post-fix, the selection resolves cleanly and the invariant
+/// holds. (If a future regression reintroduced only Bug 2 without Bug 1, the
+/// same invariant would still catch an assign-Err that strands the prompt.)
+#[test]
+fn wise_mothman_target_selection_never_bricks_pending_trigger() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let (mut runner, tome_scour, creatures) = wise_mothman_scenario(db, 1);
+    cast_tome_scour(&mut runner, tome_scour, P0);
+    advance_to_trigger_target_selection(&mut runner);
+
+    // Submit one legal creature target. Pre-fix: Err + bricked state. Post-fix:
+    // Ok and the prompt is consumed.
+    let act_result = runner.act(GameAction::SelectTargets {
+        targets: vec![TargetRef::Object(creatures[0])],
+    });
+
+    // Whatever the outcome, the game must never be stranded with a
+    // TriggerTargetSelection prompt and no pending trigger to satisfy it.
+    let bricked = runner.state().pending_trigger.is_none()
+        && matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        );
+    assert!(
+        !bricked,
+        "trigger target selection must never strand a TriggerTargetSelection \
+         prompt with no pending trigger (CR 603.3d recoverability); \
+         act_result = {act_result:?}"
+    );
+
+    // Post-fix the selection succeeds and the counter lands.
+    act_result.expect("selecting one legal creature target must succeed (Bug 1 + Bug 2 fix)");
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        p1p1_counters(&runner, creatures[0]),
+        1,
+        "the single chosen creature must receive exactly one +1/+1 counter"
     );
 }

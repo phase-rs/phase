@@ -101,23 +101,45 @@ pub(super) fn handle_trigger_target_selection_select_targets(
     // rolled number during the legality check. The next `apply()` clears
     // `die_result_this_resolution`, so this cannot leak.
     state.die_result_this_resolution = state.pending_trigger.as_ref().and_then(|t| t.die_result);
-    let trigger = state
-        .pending_trigger
-        .as_ref()
-        .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
+    let Some(pending) = state.pending_trigger.as_ref() else {
+        return Err(EngineError::InvalidAction("No pending trigger".to_string()));
+    };
     validate_selected_targets_for_ability(
         state,
-        &trigger.ability,
+        &pending.ability,
         target_slots,
         &targets,
         target_constraints,
     )?;
+    let mut ability = pending.ability.clone();
+    // Read the firing batch's subject count out of `pending` before any mutation
+    // of `state`, so the shared borrow of `state.pending_trigger` ends here.
+    let pending_match_count = pending.subject_match_count;
+    // CR 601.2c + CR 603.2c: A variable target count ("up to X target creatures,
+    // where X is the number milled this way") is fixed when the ability is put on
+    // the stack and does not change. Re-stamp the firing batch's subject count
+    // into resolution scope so `multi_target.max = EventContextAmount` resolves to
+    // that count on this later `apply()` instead of collapsing to 0. Save/restore
+    // (not a bare stamp) because `current_trigger_match_count` is not cleared at
+    // `apply()` start, so a bare stamp would leak into the next resolution.
+    // Mirrors the auto-target path's push/restore_trigger_event_context in
+    // triggers.rs. Partial re-stamp (only `current_trigger_match_count`, not the
+    // full event-context snapshot) is intentional and sufficient: the demonstrated
+    // bound (`EventContextAmount`) reads only this field.
+    let prev_match_count = state.current_trigger_match_count;
+    state.current_trigger_match_count = pending_match_count;
+    let assign_result = assign_targets_in_chain(state, &mut ability, &targets);
+    state.current_trigger_match_count = prev_match_count;
+    assign_result?;
+    // CR 603.3d: Consume the pending trigger only after the fallible assignment
+    // succeeds. `apply()` does not roll back on Err and `sync_waiting_for` never
+    // runs after an Err, so taking the trigger before assignment would strand
+    // `waiting_for = TriggerTargetSelection` with no pending trigger, bricking
+    // every later action. Taking after success leaves state recoverable.
     let trigger = state
         .pending_trigger
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
-    let mut ability = trigger.ability.clone();
-    assign_targets_in_chain(state, &mut ability, &targets)?;
 
     Ok(finalize_trigger_target_selection(
         state, trigger, ability, events,
@@ -187,12 +209,42 @@ pub(super) fn handle_trigger_target_selection_choose_target(
             description,
         }),
         TargetSelectionAdvance::Complete(selected_slots) => {
+            let Some(pending) = state.pending_trigger.as_ref() else {
+                return Err(EngineError::InvalidAction("No pending trigger".to_string()));
+            };
+            let mut ability = pending.ability.clone();
+            // Read the firing batch's subject count out of `pending` before any
+            // mutation of `state`, so the shared borrow of `state.pending_trigger`
+            // ends here.
+            let pending_match_count = pending.subject_match_count;
+            // CR 601.2c + CR 603.2c: A variable target count ("up to X target
+            // creatures, where X is the number milled this way") is fixed when the
+            // ability is put on the stack and does not change. Re-stamp the firing
+            // batch's subject count into resolution scope so `multi_target.max =
+            // EventContextAmount` resolves to that count on this later `apply()`
+            // instead of collapsing to 0. Save/restore (not a bare stamp) because
+            // `current_trigger_match_count` is not cleared at `apply()` start, so a
+            // bare stamp would leak into the next resolution. Mirrors the
+            // auto-target path's push/restore_trigger_event_context in triggers.rs.
+            // Partial re-stamp (only `current_trigger_match_count`, not the full
+            // event-context snapshot) is intentional and sufficient: the
+            // demonstrated bound (`EventContextAmount`) reads only this field.
+            let prev_match_count = state.current_trigger_match_count;
+            state.current_trigger_match_count = pending_match_count;
+            let assign_result =
+                assign_selected_slots_in_chain(state, &mut ability, &selected_slots);
+            state.current_trigger_match_count = prev_match_count;
+            assign_result?;
+            // CR 603.3d: Consume the pending trigger only after the fallible
+            // assignment succeeds. `apply()` does not roll back on Err and
+            // `sync_waiting_for` never runs after an Err, so taking the trigger
+            // before assignment would strand `waiting_for = TriggerTargetSelection`
+            // with no pending trigger, bricking every later action. Taking after
+            // success leaves state recoverable.
             let trigger = state
                 .pending_trigger
                 .take()
                 .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
-            let mut ability = trigger.ability.clone();
-            assign_selected_slots_in_chain(state, &mut ability, &selected_slots)?;
 
             Ok(finalize_trigger_target_selection(
                 state, trigger, ability, events,
