@@ -88,6 +88,7 @@ mod mass_phase_out_1792_repro;
 mod master_of_ceremonies;
 mod militant_angel_attacked_opponents;
 mod morophon_chosen_type_1653;
+mod multi_upkeep_triggers_suspend;
 mod mycoloth_upkeep_trigger;
 mod mystic_forge_regression;
 mod obeka_splitter_additional_phases;
