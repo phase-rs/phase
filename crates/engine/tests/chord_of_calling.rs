@@ -285,7 +285,7 @@ fn chord_convoke_paid_x_does_not_corrupt_announced_x() {
     // 7 green convoke-eligible creatures: 3 pay {G}{G}{G}, 4 pay the {4} generic.
     let convokers: Vec<ObjectId> = (0..7)
         .map(|i| {
-            let mut b = scenario.add_creature(P0, &format!("Convoker {i}"), 1, 1);
+            let b = scenario.add_creature(P0, &format!("Convoker {i}"), 1, 1);
             b.id()
         })
         .collect();
