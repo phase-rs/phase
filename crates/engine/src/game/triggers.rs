@@ -4364,11 +4364,11 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     // bounce/etc. targets.
     //
     // CR 115.1: Exile-link variants (`ExiledBySource`, `ParentTarget`, anaphoric
-    // "that card" / "the exiled card") continue to flow through targeting — those
-    // bind a single chosen object selected earlier in the same effect chain and
-    // are not the "free pick from hand" pattern this carve-out covers. The
-    // is-private-zone test mirrors `Effect::ChangeZone` and
-    // `Effect::PutAtLibraryPosition` above.
+    // "that card" / "the exiled card") stay resolved context references via the
+    // final `is_context_ref` guard rather than stack-time target slots. Those bind
+    // a single object selected earlier in the same effect chain and are not the
+    // "free pick from hand" pattern this carve-out covers. The is-private-zone
+    // test mirrors `Effect::ChangeZone` and `Effect::PutAtLibraryPosition` above.
     if let Effect::CastFromZone { target, .. } = effect {
         if let Some(zone) = target.extract_in_zone() {
             if matches!(zone, Zone::Hand | Zone::Library) {
