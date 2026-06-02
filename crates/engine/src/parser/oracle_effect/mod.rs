@@ -38828,18 +38828,17 @@ mod tests {
                 match &*def.effect {
                     Effect::GenericEffect {
                         static_abilities, ..
-                    } => {
-                        if static_abilities.iter().any(|s| {
-                            s.modifications.iter().any(|m| {
-                                matches!(
-                                    m,
-                                    ContinuousModification::AddKeyword { keyword }
-                                        if matches!(keyword, Keyword::Haste)
-                                )
-                            })
-                        }) {
-                            *found_haste = true;
-                        }
+                    } if static_abilities.iter().any(|s| {
+                        s.modifications.iter().any(|m| {
+                            matches!(
+                                m,
+                                ContinuousModification::AddKeyword { keyword }
+                                    if matches!(keyword, Keyword::Haste)
+                            )
+                        })
+                    }) =>
+                    {
+                        *found_haste = true;
                     }
                     Effect::CreateDelayedTrigger { effect, .. } => {
                         if matches!(&*effect.effect, Effect::Sacrifice { .. }) {
