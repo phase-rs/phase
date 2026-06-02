@@ -66,19 +66,7 @@ pub fn resolve_become_prepared(
 ) -> Result<(), EffectError> {
     let target_ids = resolve_object_targets(state, ability);
     for object_id in target_ids {
-        // Biblioplex gate — only creatures with prepare spells can become prepared.
-        if !has_prepare_face(state, object_id) {
-            continue;
-        }
-        let Some(obj) = state.objects.get_mut(&object_id) else {
-            continue;
-        };
-        // Idempotency: no-op if already prepared.
-        if obj.prepared.is_some() {
-            continue;
-        }
-        obj.prepared = Some(PreparedState);
-        events.push(GameEvent::BecamePrepared { object_id });
+        prepare_object(state, object_id, events);
     }
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::BecomePrepared,
@@ -129,6 +117,29 @@ pub fn unprepare_object(state: &mut GameState, object_id: ObjectId, events: &mut
     }
     obj.prepared = None;
     events.push(GameEvent::BecameUnprepared { object_id });
+}
+
+/// CR 722.3a: Direct-call variant that gives a specific object the prepared
+/// designation, emitting `BecamePrepared` only when the toggle actually fires.
+/// Mirrors [`unprepare_object`] for the opposite direction. Enforces the same
+/// two gates as `resolve_become_prepared`: the object must have a prepare-spell
+/// face ("A permanent can't gain this designation unless it has a prepare
+/// spell") and must not already be prepared (idempotent). Single authority for
+/// the "become prepared" toggle — used by the become-prepared resolver path and
+/// the debug `SetPrepared` action so neither sets the field directly.
+pub fn prepare_object(state: &mut GameState, object_id: ObjectId, events: &mut Vec<GameEvent>) {
+    // Biblioplex gate — only creatures with prepare spells can become prepared.
+    if !has_prepare_face(state, object_id) {
+        return;
+    }
+    let Some(obj) = state.objects.get_mut(&object_id) else {
+        return;
+    };
+    if obj.prepared.is_some() {
+        return;
+    }
+    obj.prepared = Some(PreparedState);
+    events.push(GameEvent::BecamePrepared { object_id });
 }
 
 /// CR 601.2c / CR 722.3c: After pushing a freshly cast prepare/paradigm copy
@@ -612,6 +623,41 @@ mod tests {
         let mut events2 = Vec::new();
         unprepare_object(&mut state, id, &mut events2);
         assert!(events2.is_empty());
+    }
+
+    #[test]
+    fn prepare_object_flips_and_emits_when_prepare_face_present() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_creature(&mut state);
+        state.objects.get_mut(&id).unwrap().back_face = Some(BackFaceForTest::prepare());
+
+        let mut events = Vec::new();
+        prepare_object(&mut state, id, &mut events);
+
+        assert!(state.objects[&id].prepared.is_some());
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::BecamePrepared { object_id } if *object_id == id)));
+
+        // Idempotency — second call must not re-emit.
+        let mut events2 = Vec::new();
+        prepare_object(&mut state, id, &mut events2);
+        assert!(events2.is_empty());
+    }
+
+    #[test]
+    fn prepare_object_noop_without_prepare_face() {
+        // CR 722.3a Biblioplex gate — an object with no prepare-spell face
+        // can't gain the prepared designation (matches the debug SetPrepared
+        // path's single-authority guarantee).
+        let mut state = GameState::new_two_player(42);
+        let id = setup_creature(&mut state);
+
+        let mut events = Vec::new();
+        prepare_object(&mut state, id, &mut events);
+
+        assert!(state.objects[&id].prepared.is_none());
+        assert!(events.is_empty());
     }
 
     // CR 707.10c: `open_copy_target_selection` detects whether the copy's

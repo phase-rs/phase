@@ -63,6 +63,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::ScryChoice { .. }
+            | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::CastOffer {
                 kind: CastOfferKind::Discover { .. },
@@ -285,6 +286,50 @@ pub(super) fn handle_resolution_choice(
                 player_state.library.push_back(card_id);
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+        }
+        (
+            WaitingFor::CoinFlipKeepChoice {
+                player,
+                results,
+                keep_count,
+            },
+            GameAction::SelectCoinFlips { keep_indices },
+        ) => {
+            // CR 614.1a + CR 705.1: the player must keep exactly `keep_count`
+            // distinct, in-range flips and ignore the rest.
+            if keep_indices.len() != keep_count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must keep exactly {keep_count} coin flip(s), got {}",
+                    keep_indices.len()
+                )));
+            }
+            let mut seen = std::collections::HashSet::new();
+            for &index in &keep_indices {
+                if index >= results.len() {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Coin flip index {index} out of range"
+                    )));
+                }
+                if !seen.insert(index) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Duplicate coin flip index {index}"
+                    )));
+                }
+            }
+            let kept: Vec<bool> = keep_indices.iter().map(|&index| results[index]).collect();
+            let pending = state.pending_coin_flip.take().ok_or_else(|| {
+                EngineError::InvalidAction("No pending coin flip to resume".to_string())
+            })?;
+            let next =
+                crate::game::effects::flip_coin::resume_after_keep(state, pending, kept, events)
+                    .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
+            // CR 608.2c: re-suspended for another interactive choice, else the
+            // whole flip effect completed — drain back to Priority.
+            let wf = match next {
+                Some(wf) => wf,
+                None => finish_with_continuation(state, player, events),
+            };
+            ResolutionChoiceOutcome::WaitingFor(wf)
         }
         (
             WaitingFor::ManifestDreadChoice { player, cards },

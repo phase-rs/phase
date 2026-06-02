@@ -315,6 +315,17 @@ pub(super) fn handle_replacement_choice(
                     );
                     state.pending_step_end_mana_handlers.clear();
                 }
+                // CR 705.1 + CR 614.1a: Coin-flip replacements (Krark's Thumb)
+                // are always Mandatory and applied inline by
+                // `flip_coin::flip_through_replacement`; they never reach the
+                // optional replacement-choice resume path. Unreachable in
+                // practice — present only for match exhaustiveness.
+                ProposedEvent::CoinFlip { .. } => {
+                    debug_assert!(
+                        false,
+                        "CoinFlip replacement reached the optional-choice resume path"
+                    );
+                }
             }
 
             let mut waiting_for = WaitingFor::Priority {

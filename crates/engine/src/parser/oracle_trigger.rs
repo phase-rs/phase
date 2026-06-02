@@ -18054,6 +18054,7 @@ mod tests {
                 phase: Phase::Upkeep,
                 after: Phase::Upkeep,
                 followed_by,
+                ..
             }) if followed_by.is_empty()
         ));
     }

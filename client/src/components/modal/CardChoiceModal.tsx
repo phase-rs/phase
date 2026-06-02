@@ -38,6 +38,7 @@ import { ProliferateModal } from "./ProliferateModal.tsx";
 import { CategoryChoiceModal } from "./CategoryChoiceModal.tsx";
 
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
+type CoinFlipKeepChoice = Extract<WaitingFor, { type: "CoinFlipKeepChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
@@ -167,6 +168,9 @@ export function CardChoiceModal() {
     case "ScryChoice":
       if (!canActForWaitingState) return null;
       return <ScryModal data={waitingFor.data} />;
+    case "CoinFlipKeepChoice":
+      if (!canActForWaitingState) return null;
+      return <CoinFlipKeepModal data={waitingFor.data} />;
     case "DigChoice":
       if (!canActForWaitingState) return null;
       return <DigModal data={waitingFor.data} />;
@@ -537,6 +541,57 @@ function ScryModal({ data }: { data: ScryChoice["data"] }) {
       reorderHint={t("cardChoice.reorderHint")}
       keepTone="emerald"
     />
+  );
+}
+
+// ── Coin Flip Keep Modal (Krark's Thumb) ────────────────────────────────────
+
+function CoinFlipKeepModal({ data }: { data: CoinFlipKeepChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+
+  const keepFlip = useCallback(
+    (index: number) => {
+      dispatch({
+        type: "SelectCoinFlips",
+        data: { keep_indices: [index] },
+      });
+    },
+    [dispatch],
+  );
+
+  return (
+    <ChoiceOverlay
+      title={t("coinFlip.keep.title")}
+      subtitle={t("coinFlip.keep.subtitle")}
+    >
+      <div className="flex items-center justify-center gap-6 py-4">
+        {data.results.map((won, index) => (
+          <motion.button
+            key={index}
+            className="flex flex-col items-center gap-2 rounded-lg p-3 ring-2 ring-transparent transition hover:ring-emerald-400/80 hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+            initial={{ opacity: 0, y: 40, scale: 0.85 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ delay: 0.1 + index * 0.08, duration: 0.3 }}
+            whileHover={{ scale: 1.05, y: -4 }}
+            onClick={() => keepFlip(index)}
+          >
+            <span
+              className={`flex h-16 w-16 items-center justify-center rounded-full text-sm font-bold ${
+                won
+                  ? "bg-amber-400/90 text-amber-950"
+                  : "bg-slate-500/80 text-slate-100"
+              }`}
+            >
+              {won ? t("coinFlip.keep.heads") : t("coinFlip.keep.tails")}
+            </span>
+            <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
+              {t("coinFlip.buttons.keep")}
+            </span>
+          </motion.button>
+        ))}
+      </div>
+    </ChoiceOverlay>
   );
 }
 

@@ -69,6 +69,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedBy { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
+            // CR 702.39a + CR 509.1c: MustBlockAttacker carries the `ObjectId` of
+            // the attacker that must be blocked (Provoke). Enforced by direct
+            // match in combat.rs declare-blockers validation.
+            | StaticMode::MustBlockAttacker { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
             // CR 602.5 + CR 117.1b: CantActivateDuring carries `who`, `when`, and `exemption`.
@@ -2268,12 +2272,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             phase,
             after,
             followed_by,
+            count,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("phase".into(), format!("{phase:?}")));
             d.push(("after".into(), format!("{after:?}")));
             if !followed_by.is_empty() {
                 d.push(("followed by".into(), format!("{followed_by:?}")));
+            }
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), format!("{count:?}")));
             }
         }
         Effect::Double {
