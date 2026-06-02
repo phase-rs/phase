@@ -945,6 +945,7 @@ pub(super) fn build_spell_meta(
         keyword_kinds: effective_spell_keyword_kinds(state, caster, object_id),
         cast_from_zone: Some(pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone)),
         mana_value: Some(obj.mana_cost.mana_value()),
+        color_count: Some(obj.color.len() as u32),
     })
 }
 
@@ -12621,6 +12622,247 @@ mod tests {
         );
     }
 
+    /// Exsanguinate (`{X}{B}{B}`) regression — drives the *real* Oracle text
+    /// through the parser→cast→resolve contract, complementing the hand-built
+    /// AST in `x_spell_doubled_lose_life_drains_opponents_and_gains_controller`
+    /// (which only guards the runtime). This locks the parser shape and the
+    /// end-to-end drain in one test:
+    ///   1. parse `"Each opponent loses X life. You gain life equal to the life
+    ///      lost this way."` and assert the produced `AbilityDefinition`:
+    ///      `player_scope == Some(Opponent)`, root `LoseLife { Variable("X") }`,
+    ///      and a `GainLife { PreviousEffectAmount, Controller }` sub-ability
+    ///      that carries NO `player_scope` (so the gain runs once, not once per
+    ///      opponent).
+    ///   2. attach it to a `{X}{B}{B}` sorcery, cast at X=3, and assert each
+    ///      opponent loses 3 and the controller gains the SUM lost this way.
+    ///
+    /// CR 107.3a: X's value is chosen as part of casting the spell.
+    /// CR 119.3: an effect causing life loss/gain adjusts that player's life
+    ///   total accordingly (covers both the loss and the controller's gain).
+    /// CR 608.2c: instructions resolve in written order, so the `LoseLife`
+    ///   parent records the life-lost amount before the `GainLife` sub-ability
+    ///   reads it via `QuantityRef::PreviousEffectAmount`.
+    #[test]
+    fn exsanguinate_oracle_text_drains_each_opponent_and_gains_controller() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{AbilityKind, PlayerFilter, QuantityRef};
+        use crate::types::zones::Zone;
+
+        // --- Parser contract -------------------------------------------------
+        let def = parse_effect_chain(
+            "Each opponent loses X life. You gain life equal to the life lost this way.",
+            AbilityKind::Spell,
+        );
+
+        // "Each opponent loses …" must scope the root effect to opponents.
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::Opponent),
+            "`each opponent loses X life` must set player_scope=Opponent on the root"
+        );
+        match &*def.effect {
+            Effect::LoseLife {
+                amount:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name },
+                    },
+                ..
+            } => assert_eq!(name, "X", "root LoseLife amount must be Variable(\"X\")"),
+            other => panic!("expected root LoseLife of Variable(X), got {other:?}"),
+        }
+
+        // The gain is a sibling sub-ability reading the life lost this way; it
+        // must NOT inherit `player_scope`, or it would run once per opponent and
+        // overpay the controller (sum-vs-per-opponent guard at the AST layer).
+        let gain = def
+            .sub_ability
+            .as_ref()
+            .expect("`You gain life equal to …` must parse as a sub-ability");
+        assert_eq!(
+            gain.player_scope, None,
+            "the GainLife sub-ability must carry no player_scope (runs once)"
+        );
+        match &*gain.effect {
+            Effect::GainLife {
+                amount:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::PreviousEffectAmount,
+                    },
+                player,
+            } => assert_eq!(
+                player,
+                &TargetFilter::Controller,
+                "controller gains the life lost this way"
+            ),
+            other => {
+                panic!("expected GainLife of PreviousEffectAmount to Controller, got {other:?}")
+            }
+        }
+
+        // --- Runtime contract (2-player) ------------------------------------
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Exsanguinate".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(def);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Black, ManaCostShard::Black],
+                generic: 0,
+            };
+        }
+
+        // Concretized cost at X=3 is {3}{B}{B} = 5 mana. BB satisfy the colored
+        // shards; the 3 colorless absorb the generic {X} portion, bounding X at 3.
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        let controller_life_before = state.players[0].life;
+        let opponent_life_before = state.players[1].life;
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(910),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        let max = match result.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => max,
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        };
+        assert_eq!(
+            max, 3,
+            "3 colorless mana bounds the generic {{X}} portion at 3"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+
+        for _ in 0..5 {
+            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            let _ = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        assert_eq!(
+            opponent_life_before - state.players[1].life,
+            3,
+            "the single opponent loses exactly X = 3 life"
+        );
+        // 2-player: only one opponent lost life, so the sum is 3.
+        assert_eq!(
+            state.players[0].life - controller_life_before,
+            3,
+            "controller gains exactly the 3 life lost this way (sum across opponents)"
+        );
+    }
+
+    /// Exsanguinate in a 3-player game locks the SUM-across-opponents semantic
+    /// for the controller's life gain (the discriminating case vs. max/single):
+    /// X=3 with 2 opponents → 6 total life lost → controller gains 6, not 3.
+    ///
+    /// CR 107.3a: X is chosen as part of casting.
+    /// CR 119.3: life loss/gain adjusts each affected player's life total.
+    /// CR 608.2c: the `LoseLife` parent iterates both opponents and accumulates
+    ///   the total before the `GainLife` sub-ability reads it via
+    ///   `QuantityRef::PreviousEffectAmount`.
+    #[test]
+    fn exsanguinate_three_player_controller_gains_sum_across_opponents() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::AbilityKind;
+        use crate::types::format::FormatConfig;
+        use crate::types::zones::Zone;
+
+        // 3-player game positioned at the active player's pre-combat main phase,
+        // mirroring `setup_game_at_main_phase` but with player_count = 3.
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let def = parse_effect_chain(
+            "Each opponent loses X life. You gain life equal to the life lost this way.",
+            AbilityKind::Spell,
+        );
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(0),
+            "Exsanguinate".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(def);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Black, ManaCostShard::Black],
+                generic: 0,
+            };
+        }
+
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        let controller_life_before = state.players[0].life;
+        let opp1_life_before = state.players[1].life;
+        let opp2_life_before = state.players[2].life;
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(911),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ChooseXValue { max: 3, .. }
+        ));
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+
+        for _ in 0..5 {
+            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            let _ = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        assert_eq!(
+            opp1_life_before - state.players[1].life,
+            3,
+            "opponent 1 loses exactly X = 3 life"
+        );
+        assert_eq!(
+            opp2_life_before - state.players[2].life,
+            3,
+            "opponent 2 loses exactly X = 3 life"
+        );
+        // SUM-across-opponents: 3 + 3 = 6, NOT 3 (max/single opponent).
+        assert_eq!(
+            state.players[0].life - controller_life_before,
+            6,
+            "controller gains the SUM of life lost across both opponents (3+3=6)"
+        );
+    }
+
     /// Passing priority during `ChooseXValue` is illegal — caster must commit
     /// or cancel (CR 601.2f).
     #[test]
@@ -16083,6 +16325,202 @@ mod tests {
         assert_eq!(state.objects[&own_creature].toughness, Some(2));
         assert_eq!(state.objects[&opposing_creature].power, Some(2));
         assert_eq!(state.objects[&opposing_creature].toughness, Some(2));
+    }
+
+    /// Vicious Rivalry {2}{B}{G}: "As an additional cost to cast this spell, pay
+    /// X life. Destroy all artifacts and creatures with mana value X or less."
+    /// The card has no {X} in its mana cost, so the single shared X (CR 107.3 /
+    /// CR 601.2b) chosen for the pay-life additional cost (CR 601.2f / CR 119.4)
+    /// must also drive the `DestroyAll` `Cmc{LE, X}` filter (CR 202.3 mana value;
+    /// CR 701.8a destroy). This is the FILTER flavor of the shared-X mechanism;
+    /// the sibling test above covers the `PumpAll{-X}` flavor.
+    #[test]
+    fn vicious_rivalry_additional_life_x_drives_destroyall_mv_filter() {
+        let mut state = setup_game_at_main_phase();
+        state.players[0].life = 20;
+
+        // Artifact, mana value 2 ({2}) -> destroyed at X=3.
+        let artifact_mv2 = create_object(
+            &mut state,
+            CardId(15400),
+            PlayerId(0),
+            "Artifact MV2".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&artifact_mv2).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            };
+        }
+
+        // Creature, mana value 3 ({2}{R}) -> destroyed at X=3 (LE boundary).
+        let creature_mv3 = create_object(
+            &mut state,
+            CardId(15401),
+            PlayerId(0),
+            "Creature MV3".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_mv3).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 2,
+            };
+            obj.base_power = Some(4);
+            obj.base_toughness = Some(4);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+        }
+
+        // Creature, mana value 4 ({3}{R}) -> survives at X=3.
+        let creature_mv4 = create_object(
+            &mut state,
+            CardId(15402),
+            PlayerId(0),
+            "Creature MV4".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_mv4).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 3,
+            };
+            obj.base_power = Some(5);
+            obj.base_toughness = Some(5);
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+        }
+
+        // Land (mana value 0, neither artifact nor creature) -> survives: proves
+        // the Or(Artifact, Creature) type gate, not merely the mana-value bound.
+        let land = create_object(
+            &mut state,
+            CardId(15403),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let spell = create_object(
+            &mut state,
+            CardId(15404),
+            PlayerId(0),
+            "Vicious Rivalry".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            // Real {2}{B}{G} mana cost, exercised below via add_mana.
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Green],
+                generic: 2,
+            };
+            // CR 601.2f / CR 119.4: pay-X-life additional cost (paying life as a
+            // cost is correct here, unlike a life-gain effect).
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }));
+            // CR 701.8a destroy; CR 202.3 mana value; CR 107.3 single shared X:
+            // the same X chosen for the additional cost drives this filter.
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DestroyAll {
+                    target: TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(
+                                vec![FilterProp::Cmc {
+                                    comparator: Comparator::LE,
+                                    value: QuantityExpr::Ref {
+                                        qty: QuantityRef::Variable {
+                                            name: "X".to_string(),
+                                        },
+                                    },
+                                }],
+                            )),
+                            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                                FilterProp::Cmc {
+                                    comparator: Comparator::LE,
+                                    value: QuantityExpr::Ref {
+                                        qty: QuantityRef::Variable {
+                                            name: "X".to_string(),
+                                        },
+                                    },
+                                },
+                            ])),
+                        ],
+                    },
+                    cant_regenerate: false,
+                },
+            ));
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        // CR 601.2b: X for the additional cost is announced as the spell is cast.
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell,
+            CardId(15404),
+            &mut Vec::new(),
+        )
+        .expect("pay-X-life additional cost should prompt for X");
+        state.waiting_for = waiting;
+        match state.waiting_for {
+            // CR 119.4: the maximum payable life equals the full life total (20).
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(max, 20),
+            ref other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+        // CR 119.4: 3 life actually paid; CR 601.2f: the mana cost is also paid.
+        assert_eq!(state.players[0].life, 17);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.stack.len(), 1);
+        // CR 107.3: the announced X is locked onto the spell on the stack.
+        match &state.stack[0].kind {
+            StackEntryKind::Spell {
+                ability: Some(ability),
+                ..
+            } => assert_eq!(ability.chosen_x, Some(3)),
+            other => panic!("expected spell on stack, got {other:?}"),
+        }
+
+        for _ in 0..5 {
+            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        // CR 701.8a + CR 202.3: at X=3, artifact MV2 and creature MV3 (LE bound)
+        // are destroyed to the owner's graveyard.
+        assert_eq!(state.objects[&artifact_mv2].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&creature_mv3].zone, Zone::Graveyard);
+        // Creature MV4 exceeds X=3 and survives on the battlefield.
+        assert_eq!(state.objects[&creature_mv4].zone, Zone::Battlefield);
+        // The land matches neither Or branch (not artifact/creature) and survives.
+        assert_eq!(state.objects[&land].zone, Zone::Battlefield);
     }
 
     #[test]

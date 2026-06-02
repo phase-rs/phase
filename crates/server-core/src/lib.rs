@@ -6,6 +6,7 @@ pub mod draft_session;
 pub mod draft_wire_guard;
 pub mod emote_guard;
 pub mod filter;
+pub mod game_action_payload_guard;
 pub mod game_reconnect_guard;
 #[cfg(test)]
 mod harness;
