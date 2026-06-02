@@ -1204,6 +1204,16 @@ fn evaluate_oathbreaker(
         }
     }
 
+    let oathbreaker_identity = request.commander.first().and_then(|ob_name| {
+        db.get_face_by_name(resolve_card_name(db, ob_name))
+            .filter(|face| face.is_oathbreaker)
+            .map(|face| {
+                card_color_identity(face)
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            })
+    });
+
     // Oathbreaker RC: exactly one signature spell (instant or sorcery within color identity).
     if request.signature_spell.len() != 1 {
         reasons.push(format!(
@@ -1219,17 +1229,13 @@ fn evaluate_oathbreaker(
                 ));
             }
             // Signature spell must be within the Oathbreaker's color identity.
-            if let Some(ob_name) = request.commander.first() {
-                if let Some(ob_face) = db.get_face_by_name(resolve_card_name(db, ob_name)) {
-                    let ob_identity: HashSet<ManaColor> =
-                        card_color_identity(ob_face).into_iter().collect();
-                    for color in card_color_identity(face) {
-                        if !ob_identity.contains(&color) {
-                            reasons.push(format!(
-                                "{sig_name}: signature spell is outside the Oathbreaker's color identity"
-                            ));
-                            break;
-                        }
+            if let Some(identity) = &oathbreaker_identity {
+                for color in card_color_identity(face) {
+                    if !identity.contains(&color) {
+                        reasons.push(format!(
+                            "{sig_name}: signature spell is outside the Oathbreaker's color identity"
+                        ));
+                        break;
                     }
                 }
             }
@@ -1241,12 +1247,12 @@ fn evaluate_oathbreaker(
     let commander_represented = request
         .commander
         .iter()
-        .filter(|n| request.main_deck.iter().any(|c| c.eq_ignore_ascii_case(n)))
+        .filter(|n| request.main_deck.iter().any(|c| names_match(c, n)))
         .count();
     let sig_represented = request
         .signature_spell
         .iter()
-        .filter(|n| request.main_deck.iter().any(|c| c.eq_ignore_ascii_case(n)))
+        .filter(|n| request.main_deck.iter().any(|c| names_match(c, n)))
         .count();
     let total_cards = request.main_deck.len()
         + (request
@@ -1277,32 +1283,28 @@ fn evaluate_oathbreaker(
     }
 
     // Oathbreaker RC: every main-deck card must be within the Oathbreaker's color identity.
-    let mut oathbreaker_identity: HashSet<ManaColor> = HashSet::new();
-    if let Some(ob_name) = request.commander.first() {
-        if let Some(face) = db.get_face_by_name(resolve_card_name(db, ob_name)) {
-            oathbreaker_identity.extend(card_color_identity(face));
-        }
-    }
     let mut identity_violations = BTreeSet::new();
     let mut basic_type_violations = BTreeSet::new();
-    for name in request.main_deck.iter().map(String::as_str) {
-        if unknown_cards.contains(name) {
-            continue;
-        }
-        let resolved = resolve_card_name(db, name);
-        let Some(face) = db.get_face_by_name(resolved) else {
-            continue;
-        };
-        for color in card_color_identity(face) {
-            if !oathbreaker_identity.contains(&color) {
-                identity_violations.insert(name.to_string());
-                break;
+    if let Some(identity) = &oathbreaker_identity {
+        for name in request.main_deck.iter().map(String::as_str) {
+            if unknown_cards.contains(name) {
+                continue;
             }
-        }
-        for color in basic_land_type_colors(face) {
-            if !oathbreaker_identity.contains(&color) {
-                basic_type_violations.insert(face.name.clone());
-                break;
+            let resolved = resolve_card_name(db, name);
+            let Some(face) = db.get_face_by_name(resolved) else {
+                continue;
+            };
+            for color in card_color_identity(face) {
+                if !identity.contains(&color) {
+                    identity_violations.insert(name.to_string());
+                    break;
+                }
+            }
+            for color in basic_land_type_colors(face) {
+                if !identity.contains(&color) {
+                    basic_type_violations.insert(face.name.clone());
+                    break;
+                }
             }
         }
     }
@@ -2711,9 +2713,9 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2734,9 +2736,9 @@ mod tests {
             main_deck: deck,
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2813,9 +2815,9 @@ mod tests {
             // to the singleton count below.
             sideboard: vec!["Legal Standard".to_string()],
             commander: vec!["Legal Standard".to_string()],
+            signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2840,9 +2842,9 @@ mod tests {
             main_deck: expand("Legal Standard", 60),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: Some(MatchType::Bo3),
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let with_sideboard = DeckCompatibilityRequest {
@@ -2869,9 +2871,9 @@ mod tests {
             main_deck: vec!["Mystery Card".to_string()],
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2893,9 +2895,9 @@ mod tests {
             main_deck: expand("Legal Standard", 99),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -2963,9 +2965,9 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["PDH Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3034,9 +3036,9 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["Rare Creature".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3104,9 +3106,9 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["Uncommon Sorcery".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::PauperCommander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3129,9 +3131,9 @@ mod tests {
                 "Partner Commander".to_string(),
                 "Legal Commander".to_string(),
             ],
+            signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3151,12 +3153,13 @@ mod tests {
             main_deck: Vec::new(),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let thg_request = DeckCompatibilityRequest {
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TwoHeadedGiant),
             ..request.clone()
         };
@@ -3178,18 +3181,18 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: Some(MatchType::Bo1),
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let commander_request = DeckCompatibilityRequest {
             main_deck: expand("Legal Standard", 99),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: Some(MatchType::Bo1),
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3221,9 +3224,9 @@ mod tests {
             main_deck: legal_60_main("Pioneer Only"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Pioneer),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &legal_request);
@@ -3237,9 +3240,9 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3255,9 +3258,9 @@ mod tests {
             main_deck: legal_60_main("Premodern Banned"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3277,9 +3280,9 @@ mod tests {
             main_deck: legal_60_main("Pioneer Only"),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3300,9 +3303,9 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &commander_request);
@@ -3316,9 +3319,9 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &oversize_sideboard);
@@ -3334,9 +3337,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Premodern),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &copy_limit);
@@ -3366,9 +3369,9 @@ mod tests {
             main_deck: expand("Pioneer Only", 60),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Pauper),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &illegal_request);
@@ -3388,9 +3391,9 @@ mod tests {
             main_deck: expand("Legal Standard", 30),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let check = evaluate_constructed(
@@ -3416,9 +3419,9 @@ mod tests {
             main_deck: expand("Plains", 59),
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3432,9 +3435,9 @@ mod tests {
             main_deck: expand("Plains", 59),
             sideboard: Vec::new(),
             commander: vec!["Legendary Planeswalker".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3448,9 +3451,9 @@ mod tests {
             main_deck: expand("Plains", 59),
             sideboard: Vec::new(),
             commander: vec!["Legal Standard".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3471,9 +3474,9 @@ mod tests {
                 "Legal Commander".to_string(),
                 "Partner Commander".to_string(),
             ],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3491,9 +3494,9 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3511,9 +3514,9 @@ mod tests {
             main_deck: expand("Plains", 49),
             sideboard: expand("Plains", 10),
             commander: vec!["White Tiny Leader".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3547,9 +3550,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["White Tiny Leader".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3573,9 +3576,9 @@ mod tests {
             main_deck: expand("Plains", 49),
             sideboard: Vec::new(),
             commander: vec!["Ajani, Nacatl Pariah".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::TinyLeaders),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -3599,9 +3602,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::HistoricBrawl),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -3609,6 +3612,7 @@ mod tests {
 
         // Same deck should fail Standard Brawl
         let brawl_request = DeckCompatibilityRequest {
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Brawl),
             ..request
         };
@@ -4046,9 +4050,9 @@ mod tests {
             main_deck: vec!["Not Standard".to_string(); 60],
             sideboard: vec![],
             commander: vec![],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = validate_deck_for_format(&db, &request);
@@ -4075,9 +4079,9 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: vec![],
             commander: vec![],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
@@ -4090,12 +4094,42 @@ mod tests {
             main_deck: vec!["Not Standard".to_string(); 60],
             sideboard: vec![],
             commander: vec![],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
+    }
+
+    #[test]
+    fn oathbreaker_missing_commander_does_not_spam_color_identity_errors() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: expand("Red Card", 58),
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+            signature_spell: vec!["Big Spell".to_string()],
+            selected_format: Some(GameFormat::Oathbreaker),
+            selected_match_type: None,
+            summary_only: false,
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+
+        assert_eq!(result.selected_format_compatible, Some(false));
+        assert!(result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("exactly 1 Oathbreaker")));
+        assert!(!result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("outside Oathbreaker color identity")));
+        assert!(!result
+            .selected_format_reasons
+            .iter()
+            .any(|r| r.contains("signature spell is outside")));
     }
 
     #[test]
@@ -4105,9 +4139,9 @@ mod tests {
             main_deck: vec!["Not Standard".to_string(); 60],
             sideboard: vec![],
             commander: vec![],
+            signature_spell: Vec::new(),
             selected_format: None,
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         assert!(validate_deck_for_format(&db, &request).is_ok());
@@ -4122,9 +4156,9 @@ mod tests {
             main_deck: legal_60_main("Legal Standard"),
             sideboard: expand("Plains", 15),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4143,9 +4177,9 @@ mod tests {
             main_deck: expand("Legal Standard", 60),
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4166,9 +4200,9 @@ mod tests {
             main_deck: main,
             sideboard: expand("Legal Standard", 2),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4187,9 +4221,9 @@ mod tests {
             main_deck: expand("Plains", 60),
             sideboard: expand("Plains", 15),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4208,9 +4242,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4257,9 +4291,9 @@ mod tests {
             main_deck: expand("Relentless Rats", 60),
             sideboard: expand("Relentless Rats", 15),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4279,9 +4313,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4302,9 +4336,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Grub Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
 
@@ -4362,9 +4396,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4386,9 +4420,9 @@ mod tests {
             main_deck: expand("Plains", 99),
             sideboard: vec!["Plains".to_string()],
             commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4410,9 +4444,9 @@ mod tests {
             main_deck: expand("Legal Standard", 60),
             sideboard: expand("Plains", 16),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Standard),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let err = validate_deck_for_format(&db, &request)
@@ -4430,9 +4464,9 @@ mod tests {
             main_deck: expand("Plains", 60),
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::FreeForAll),
             selected_match_type: Some(MatchType::Bo3),
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &no_sideboard);
@@ -4457,9 +4491,9 @@ mod tests {
             main_deck: vec!["Legal Standard".to_string(); 99],
             sideboard: vec![],
             commander: vec!["Test Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = validate_deck_for_format(&db, &request);
@@ -4557,9 +4591,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4579,9 +4613,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4601,9 +4635,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4627,9 +4661,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: vec!["Legal Commander".to_string()],
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Commander),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4684,9 +4718,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Vintage),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);
@@ -4710,9 +4744,9 @@ mod tests {
             main_deck: main,
             sideboard: Vec::new(),
             commander: Vec::new(),
+            signature_spell: Vec::new(),
             selected_format: Some(GameFormat::Vintage),
             selected_match_type: None,
-            signature_spell: Vec::new(),
             summary_only: false,
         };
         let result = evaluate_deck_compatibility(&db, &request);

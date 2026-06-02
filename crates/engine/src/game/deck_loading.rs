@@ -235,7 +235,7 @@ fn load_player_attraction_deck(state: &mut GameState, entries: &[DeckEntry], own
 }
 
 /// Oathbreaker RC: Place a signature spell in the command zone.
-/// The `is_signature_spell` flag drives zone-return, the Oathbreaker-present
+/// The `signature_spell` marker drives zone-return, the Oathbreaker-present
 /// casting gate, and commander-tax tracking via `commander_cast_count`.
 pub fn create_signature_spell_from_card_face(
     state: &mut GameState,
@@ -247,7 +247,7 @@ pub fn create_signature_spell_from_card_face(
 
     let obj = state.objects.get_mut(&obj_id).expect("just created");
     apply_card_face_to_object(obj, card_face);
-    obj.is_signature_spell = true;
+    obj.mark_signature_spell();
 
     obj_id
 }

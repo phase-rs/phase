@@ -183,7 +183,7 @@
       "noSignatureSpell": "Kein Signaturzauber ausgewählt",
       "setAsSignatureSpell": "Als Signaturzauber festlegen:",
       "remove": "Signaturzauber entfernen",
-      "mustBeInstantOrSorcery": "Der Signaturzauber muss eine Spontanzauber oder Hexerei sein",
+      "mustBeInstantOrSorcery": "Der Signaturzauber muss ein Spontanzauber oder eine Hexerei sein",
       "outsideColorIdentity": "{{name}}: außerhalb der Farbidentität des Eidbrechers"
     }
   },

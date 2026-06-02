@@ -397,7 +397,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
                 .filter(|obj| {
                     obj.owner == player
                         && obj.zone == Zone::Command
-                        && (obj.is_commander || (obj.is_signature_spell && ob_in_play))
+                        && (obj.is_commander || (obj.is_signature_spell() && ob_in_play))
                 })
                 .map(|obj| obj.id),
         );
@@ -2173,7 +2173,7 @@ fn prepare_spell_cast_with_variant_override_inner(
                     && obj.is_commander)
                 || (state.format_config.command_zone
                     && obj.zone == Zone::Command
-                    && obj.is_signature_spell
+                    && obj.is_signature_spell()
                     && oathbreaker_on_battlefield(state, player))
                 || has_madness
                 || has_graveyard_cast_keyword
@@ -5207,9 +5207,7 @@ pub fn handle_cast_spell_with_payment_mode(
                 )));
             }
         }
-        Zone::Command
-            if state.format_config.command_zone && (obj.is_commander || obj.is_signature_spell) => {
-        }
+        Zone::Command if state.format_config.command_zone && obj.uses_command_zone_rules() => {}
         Zone::Exile | Zone::Graveyard | Zone::Library => {
             // These zones are allowed only with permission — defer the
             // full permission check to `prepare_spell_cast` which already
