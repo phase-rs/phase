@@ -324,11 +324,42 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         false
     };
 
+    // CR 702.88a: Rebound — on-resolve hook. If the resolving spell is a
+    // non-permanent spell that carries `Keyword::Rebound`, was cast from
+    // its owner's hand, and is not a token, push the next-upkeep delayed
+    // triggered ability that offers an optional free recast and override
+    // the destination from graveyard to exile.
+    // CR 704.5d: tokens cease to exist off the battlefield (gate `!is_token`).
+    // CR 603.7a: delayed triggered abilities are created during resolution.
+    // CR 603.7d: source of the delayed trigger IS the resolving spell.
+    // CR 608.2n: default destination for a resolved instant/sorcery is graveyard.
+    // CR 702.88c: multiple instances of rebound on the same spell are
+    // redundant — `has_keyword` returns true even if duplicates exist, so
+    // arming runs at most once per resolution.
+    let rebound_armed = if is_spell && !is_permanent_spell(state, entry.id) {
+        let has_rebound = state.objects.get(&entry.id).is_some_and(|o| {
+            !o.is_token
+                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Rebound)
+        });
+        if has_rebound && super::casting::spell_cast_origin(state, entry.id) == Some(Zone::Hand) {
+            super::effects::rebound::arm_rebound(state, entry.id, entry.controller)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     // CR 608.3: Determine destination zone for spells.
     if is_spell {
         let dest = if paradigm_armed {
             // CR 702.xxx: Paradigm-armed spell exiles instead of going to
             // graveyard. The ExileLink is already created by arm_paradigm.
+            Zone::Exile
+        } else if rebound_armed {
+            // CR 702.88a: Rebound-armed non-permanent spell exiles instead
+            // of going to graveyard — the delayed trigger is already
+            // queued by `arm_rebound`.
             Zone::Exile
         } else if casting_variant == CastingVariant::Adventure {
             // CR 715.3d: Adventure spell resolves → exile with casting permission.
@@ -2452,6 +2483,7 @@ mod tests {
                     constraint: None,
                     granted_to: None,
                     resolution_cleanup: None,
+                    duration: None,
                 });
         }
 

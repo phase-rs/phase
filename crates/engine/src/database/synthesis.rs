@@ -3218,6 +3218,7 @@ fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint: None,
+            duration: None,
         },
     )
     .optional();
@@ -4865,6 +4866,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 cast_transformed: true,
                 alt_ability_cost: None,
                 constraint: None,
+                duration: None,
             },
         )
         .optional();

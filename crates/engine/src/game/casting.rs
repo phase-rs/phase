@@ -5047,6 +5047,7 @@ pub(super) fn initiate_cast_during_resolution(
                 constraint,
                 granted_to: Some(player),
                 resolution_cleanup: Some(cleanup),
+                duration: None,
             });
     }
     let mut prepared = prepare_spell_cast_with_variant_override(state, player, hit_card, None)?;
@@ -14029,6 +14030,7 @@ mod tests {
                 cast_transformed: false,
                 alt_ability_cost: None,
                 constraint: None,
+                duration: None,
             },
             vec![TargetRef::Object(suspended)],
             suspended,
@@ -14148,6 +14150,7 @@ mod tests {
                 cast_transformed: false,
                 alt_ability_cost: None,
                 constraint: None,
+                duration: None,
             },
             vec![TargetRef::Object(suspended)],
             suspended,
@@ -16903,6 +16906,7 @@ mod tests {
             }),
             granted_to: Some(PlayerId(0)),
             resolution_cleanup: None,
+            duration: None,
         }
     }
 
@@ -16939,6 +16943,7 @@ mod tests {
                     constraint: None,
                     granted_to: Some(PlayerId(0)),
                     resolution_cleanup: None,
+                    duration: None,
                 });
         }
 
@@ -22252,6 +22257,7 @@ mod tests {
                 constraint: None,
                 granted_to: None,
                 resolution_cleanup: None,
+                duration: None,
             });
 
         assert!(is_blocked_by_cast_only_from_zones(
@@ -24398,6 +24404,7 @@ mod tests {
                     constraint: None,
                     granted_to: None,
                     resolution_cleanup: None,
+                    duration: None,
                 },
             );
         }
