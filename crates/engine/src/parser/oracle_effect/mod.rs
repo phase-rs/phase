@@ -19055,6 +19055,75 @@ mod tests {
         );
     }
 
+    /// CR 702.3b + CR 613: the Walls-that-attack compound — "<self> gets +N/-M
+    /// until end of turn and can attack this turn as though it didn't have
+    /// defender" (Wall of Wonder, Mobile Fort, Nivix Cyclops). The sequence
+    /// splitter peels the subjectless "can attack ... as though it didn't have
+    /// defender" conjunct off the P/T conjunct;
+    /// `combat_requirement_conjunct_prepend` re-attaches the lifted `~` subject so
+    /// `try_parse_can_attack_with_defender` fires. The parsed chain must carry
+    /// BOTH a P/T modification (Pump) AND a `CanAttackWithDefender` static grant —
+    /// a regression that drops either half fails here.
+    #[test]
+    fn walls_that_attack_compound_yields_pump_and_can_attack() {
+        for (text, plus, minus) in [
+            (
+                "~ gets +4/-4 until end of turn and can attack this turn as though it didn't have defender",
+                4i32,
+                -4i32,
+            ),
+            (
+                "~ gets +3/-1 until end of turn and can attack this turn as though it didn't have defender",
+                3,
+                -1,
+            ),
+            (
+                "~ gets +2/-2 until end of turn and can attack this turn as though they didn't have defender",
+                2,
+                -2,
+            ),
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Activated);
+
+            // Collect every effect in the chain (primary + chained sub_abilities).
+            let mut effects: Vec<&Effect> = Vec::new();
+            let mut node = Some(&def);
+            while let Some(d) = node {
+                effects.push(&d.effect);
+                node = d.sub_ability.as_deref();
+            }
+
+            let has_pump = effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::Pump {
+                        target: TargetFilter::SelfRef,
+                        power: PtValue::Fixed(p),
+                        toughness: PtValue::Fixed(t),
+                    } if *p == plus && *t == minus
+                )
+            });
+            assert!(
+                has_pump,
+                "{text:?}: expected a self Pump({plus}/{minus}); chain effects: {effects:?}"
+            );
+
+            let has_can_attack = effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::GenericEffect { static_abilities, .. }
+                        if static_abilities
+                            .iter()
+                            .any(|s| s.mode == StaticMode::CanAttackWithDefender)
+                )
+            });
+            assert!(
+                has_can_attack,
+                "{text:?}: expected a CanAttackWithDefender grant; chain effects: {effects:?}"
+            );
+        }
+    }
+
     #[test]
     fn destroy_target_was_dealt_damage_preserves_relative_clause() {
         let def = parse_effect_chain(
@@ -25487,6 +25556,44 @@ mod tests {
     }
 
     #[test]
+    fn kicker_leading_instead_destroy_drops_base_mana_value_cap() {
+        let ability = parse_effect_chain(
+            "Destroy target creature or planeswalker with mana value 2 or less. If this spell was kicked, instead destroy target creature or planeswalker",
+            AbilityKind::Spell,
+        );
+        let sub = ability.sub_ability.as_ref().expect("expected sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        );
+
+        fn filter_contains_cmc_prop(filter: &TargetFilter) -> bool {
+            match filter {
+                TargetFilter::Typed(typed) => typed
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::Cmc { .. })),
+                TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                    filters.iter().any(filter_contains_cmc_prop)
+                }
+                TargetFilter::Not { filter } => filter_contains_cmc_prop(filter),
+                _ => false,
+            }
+        }
+
+        let Effect::Destroy { target, .. } = &*sub.effect else {
+            panic!(
+                "expected kicked override to be Destroy, got {:?}",
+                sub.effect
+            );
+        };
+        assert!(
+            !filter_contains_cmc_prop(target),
+            "kicked override target must not keep base mana-value restriction; got {target:?}",
+        );
+    }
+
+    #[test]
     fn rite_of_replication_kicker_creates_five_copies() {
         // CR 702.33d + CR 707.10: Rite of Replication's kicked mode creates
         // five copies instead of one. The "create five of those tokens" sub
@@ -26386,6 +26493,143 @@ mod tests {
             ),
             "Expected sub_ability GenericEffect with MustBeBlocked, got {:?}",
             sub.effect
+        );
+    }
+
+    /// CR 602.5 + CR 603.2a: Standalone EFFECT-form activation prohibition.
+    /// "target creature's activated abilities can't be activated" emits a
+    /// GenericEffect carrying `StaticMode::CantBeActivated { who: AllPlayers }`.
+    /// The selection lives on the outer `target` slot (the chosen creature); the
+    /// per-static `affected` is `ParentTarget` (the runtime-bound application
+    /// spec, per the `static_affected_for_application` convention), NOT a
+    /// SelfRef-of-the-source.
+    #[test]
+    fn cant_be_activated_effect_standalone_targets_creature() {
+        use crate::types::statics::{ActivationExemption, ProhibitionScope, StaticMode};
+        let def = parse_effect_chain(
+            "target creature's activated abilities can't be activated",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                duration,
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                assert_eq!(static_abilities.len(), 1);
+                let sd = &static_abilities[0];
+                assert!(
+                    matches!(
+                        &sd.mode,
+                        StaticMode::CantBeActivated {
+                            who: ProhibitionScope::AllPlayers,
+                            source_filter: TargetFilter::SelfRef,
+                            exemption: ActivationExemption::None,
+                        }
+                    ),
+                    "expected CantBeActivated(AllPlayers), got {:?}",
+                    sd.mode
+                );
+                assert!(
+                    sd.modifications
+                        .contains(&ContinuousModification::AddStaticMode {
+                            mode: sd.mode.clone()
+                        }),
+                    "expected AddStaticMode modification, got {:?}",
+                    sd.modifications
+                );
+                assert_eq!(
+                    sd.affected,
+                    Some(TargetFilter::ParentTarget),
+                    "affected must be the runtime-bound ParentTarget, not SelfRef"
+                );
+                // The selection filter rides on the outer target slot.
+                let outer = target.as_ref().expect("outer target slot must be set");
+                assert!(
+                    matches!(
+                        outer,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Creature))
+                    ),
+                    "outer target must be the creature selection filter, got {outer:?}"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 602.5 + CR 605.1a: EFFECT-form activation prohibitions preserve the
+    /// shared mana-ability exemption suffix instead of defaulting every
+    /// transient `CantBeActivated` static to `ActivationExemption::None`.
+    #[test]
+    fn cant_be_activated_effect_standalone_preserves_mana_exemption() {
+        use crate::types::statics::{ActivationExemption, StaticMode};
+        let def = parse_effect_chain(
+            "target creature's activated abilities can't be activated unless they're mana abilities",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        let sd = static_abilities
+            .first()
+            .expect("expected transient CantBeActivated static");
+        assert!(
+            matches!(
+                &sd.mode,
+                StaticMode::CantBeActivated {
+                    exemption: ActivationExemption::ManaAbilities,
+                    ..
+                }
+            ),
+            "expected mana-ability exemption, got {:?}",
+            sd.mode
+        );
+    }
+
+    /// CR 602.5 + CR 603.2a + CR 608.2c: Dovin Baan's +1 — "up to one target
+    /// creature gets -3/-0 and its activated abilities can't be activated."
+    /// The compound splits into a Pump primary and a CantBeActivated conjunct
+    /// chained as a sub_ability whose `affected` binds to the same chosen
+    /// creature via `ParentTarget`.
+    #[test]
+    fn dovin_baan_compound_yields_pump_and_cant_be_activated() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "up to one target creature gets -3/-0 and its activated abilities can't be activated",
+            AbilityKind::Activated,
+        );
+        // Walk the primary + sub_ability chain collecting the two effects.
+        let mut saw_pump = false;
+        let mut saw_cant_be_activated = false;
+        let mut node = Some(&def);
+        while let Some(current) = node {
+            match &*current.effect {
+                Effect::Pump { .. } => saw_pump = true,
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => {
+                    saw_cant_be_activated |= static_abilities.iter().any(|sd| {
+                        matches!(&sd.mode, StaticMode::CantBeActivated { .. })
+                            && sd.affected == Some(TargetFilter::ParentTarget)
+                    });
+                }
+                _ => {}
+            }
+            node = current.sub_ability.as_deref();
+        }
+        assert!(
+            saw_pump,
+            "expected a Pump (-3/-0) in the chain, got {:?}",
+            def.effect
+        );
+        assert!(
+            saw_cant_be_activated,
+            "expected a GenericEffect CantBeActivated (affected=ParentTarget) in the chain"
         );
     }
 

@@ -712,7 +712,14 @@ fn granted_spell_keywords(
         return Vec::new();
     };
 
-    let origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(spell_obj.zone);
+    // CR 601.2a: Prefer cast_from_zone (stamped during finalize_cast and persists
+    // through SpellCast event) over pending_cast_origin_zone_for (transient and
+    // cleared after finalize_cast). This ensures origin zone is available when
+    // triggers are processed for filters like "InZone { zone: Hand }".
+    let origin_zone = spell_obj
+        .cast_from_zone
+        .or_else(|| pending_cast_origin_zone_for(state, object_id))
+        .unwrap_or(spell_obj.zone);
 
     let mut keywords = Vec::new();
     // CR 702.26b + CR 604.1: Functioning gate owned by
@@ -16606,6 +16613,140 @@ mod tests {
     }
 
     #[test]
+    fn convoke_from_exile_stacks_with_red_spell_cost_reduction_on_hybrid_cost() {
+        let mut state = setup_game_at_main_phase();
+        let party_thrasher = create_object(
+            &mut state,
+            CardId(260),
+            PlayerId(0),
+            "Party Thrasher".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&party_thrasher)
+            .unwrap()
+            .static_definitions
+            .push(
+                parse_static_line("Noncreature spells you cast from exile have convoke.")
+                    .expect("party thrasher static should parse"),
+            );
+
+        let ruby_medallion = create_object(
+            &mut state,
+            CardId(261),
+            PlayerId(0),
+            "Ruby Medallion".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&ruby_medallion)
+            .unwrap()
+            .static_definitions
+            .push(
+                parse_static_line("Red spells you cast cost {1} less to cast.")
+                    .expect("ruby medallion static should parse"),
+            );
+
+        let helper = create_object(
+            &mut state,
+            CardId(262),
+            PlayerId(0),
+            "Red Helper".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&helper).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color.push(ManaColor::Red);
+        }
+
+        let manamorphose = create_object(
+            &mut state,
+            CardId(263),
+            PlayerId(0),
+            "Manamorphose".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&manamorphose).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.color.push(ManaColor::Red);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::RedGreen],
+                generic: 1,
+            };
+            obj.casting_permissions
+                .push(crate::types::ability::CastingPermission::PlayFromExile {
+                    duration: crate::types::ability::Duration::Permanent,
+                    granted_to: PlayerId(0),
+                    frequency: CastFrequency::Unlimited,
+                    source_id: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission: None,
+                });
+        }
+
+        let cast_result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: manamorphose,
+                card_id: CardId(263),
+                targets: vec![],
+            },
+        )
+        .expect("manamorphose should be castable from exile");
+        assert!(matches!(
+            cast_result.waiting_for,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(ConvokeMode::Convoke),
+                ..
+            }
+        ));
+
+        let pending = state
+            .pending_cast
+            .as_ref()
+            .expect("cast should populate pending cast");
+        assert_eq!(
+            pending.cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::RedGreen],
+                generic: 0,
+            },
+            "ruby medallion should reduce only the generic mana from {{1}}{{R/G}} to {{R/G}}"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::TapForConvoke {
+                object_id: helper,
+                mana_type: ManaType::Red,
+            },
+        )
+        .expect("red helper should pay the red half of {R/G} via convoke");
+
+        let finalize = apply_as_current(&mut state, GameAction::PassPriority)
+            .expect("convoke payment should finalize the cast");
+        assert!(matches!(finalize.waiting_for, WaitingFor::Priority { .. }));
+        assert!(matches!(
+            state.stack.last().map(|entry| &entry.kind),
+            Some(StackEntryKind::Spell {
+                actual_mana_spent: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn improvise_castability_preview_counts_untapped_artifacts_for_generic_cost() {
         let mut state = setup_game_at_main_phase();
         let spell = create_object(
@@ -19761,6 +19902,112 @@ mod tests {
         (spell_id, artifact_id, creature_id)
     }
 
+    fn create_bloodchiefs_thirst_like_spell(
+        state: &mut GameState,
+    ) -> (ObjectId, ObjectId, ObjectId, ObjectId) {
+        let spell_id = create_object(
+            state,
+            CardId(64),
+            PlayerId(0),
+            "Bloodchief's Thirst".to_string(),
+            Zone::Hand,
+        );
+        let two_mv_creature = create_object(
+            state,
+            CardId(65),
+            PlayerId(1),
+            "Two Drop".to_string(),
+            Zone::Battlefield,
+        );
+        let three_mv_creature = create_object(
+            state,
+            CardId(66),
+            PlayerId(1),
+            "Three Drop".to_string(),
+            Zone::Battlefield,
+        );
+        let four_mv_creature = create_object(
+            state,
+            CardId(67),
+            PlayerId(1),
+            "Four Drop".to_string(),
+            Zone::Battlefield,
+        );
+
+        {
+            let obj = state.objects.get_mut(&two_mv_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            };
+        }
+        {
+            let obj = state.objects.get_mut(&three_mv_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 3,
+            };
+        }
+        {
+            let obj = state.objects.get_mut(&four_mv_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 4,
+            };
+        }
+        {
+            let spell = state.objects.get_mut(&spell_id).unwrap();
+            spell.card_types.core_types.push(CoreType::Sorcery);
+            spell.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 0,
+            };
+            spell.additional_cost = Some(AdditionalCost::Kicker {
+                costs: vec![AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black],
+                        generic: 2,
+                    },
+                }],
+                repeatable: false,
+            });
+            Arc::make_mut(&mut spell.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Destroy {
+                        target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                value: QuantityExpr::Fixed { value: 2 },
+                            },
+                        ])),
+                        cant_regenerate: false,
+                    },
+                )
+                .sub_ability(
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Destroy {
+                            target: TargetFilter::Typed(TypedFilter::creature()),
+                            cant_regenerate: false,
+                        },
+                    )
+                    .condition(AbilityCondition::AdditionalCostPaidInstead),
+                ),
+            );
+        }
+
+        (
+            spell_id,
+            two_mv_creature,
+            three_mv_creature,
+            four_mv_creature,
+        )
+    }
+
     #[test]
     fn kicker_instead_target_declines_before_base_target_selection() {
         let mut state = setup_game_at_main_phase();
@@ -19865,6 +20112,58 @@ mod tests {
         assert!(target_slots[0]
             .legal_targets
             .contains(&TargetRef::Object(second_creature_id)));
+    }
+
+    #[test]
+    fn kicked_bloodchiefs_thirst_like_spell_targets_three_mv_creature() {
+        let mut state = setup_game_at_main_phase();
+        let (spell_id, two_mv_creature, three_mv_creature, four_mv_creature) =
+            create_bloodchiefs_thirst_like_spell(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(64), &mut events)
+                .expect("kicker-dependent targets should prompt for kicker first");
+
+        let WaitingFor::OptionalCostChoice {
+            pending_cast, cost, ..
+        } = &state.waiting_for
+        else {
+            panic!("expected OptionalCostChoice, got {:?}", state.waiting_for);
+        };
+        let pending_cast = *pending_cast.clone();
+        let cost = cost.clone();
+        state.waiting_for = crate::game::engine_casting::handle_optional_cost_choice(
+            &mut state,
+            PlayerId(0),
+            pending_cast,
+            &cost,
+            true,
+            &mut events,
+        )
+        .expect("paying kicker should continue to replacement target selection");
+
+        let WaitingFor::TargetSelection {
+            target_slots,
+            pending_cast,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("expected TargetSelection, got {:?}", state.waiting_for);
+        };
+        assert!(pending_cast.ability.context.additional_cost_paid);
+        assert_eq!(target_slots.len(), 1);
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(two_mv_creature)));
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(three_mv_creature)));
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(four_mv_creature)));
     }
 
     #[test]

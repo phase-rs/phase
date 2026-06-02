@@ -1793,15 +1793,17 @@ pub fn deserialize_static_mode_fwd<'de, D>(d: D) -> Result<StaticMode, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::Deserialize as _;
     let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
     match raw {
         serde_json::Value::String(ref s) => {
-            // Unit variant path. Try the derived deserializer first so all
-            // known unit variants (e.g. "SpendManaAsAnyColor", "Flying", …)
-            // round-trip correctly. If the derived impl rejects the string
-            // (unknown variant from a newer engine build), fall back to
-            // Other(s) so the card still loads without a hard error.
+            // Unit variant path. Handle legacy cost-modify unit variants first.
+            if let Some(mode) = deserialize_legacy_cost_modify_string(s) {
+                return Ok(mode);
+            }
+            // Try the derived deserializer so all known unit variants
+            // (e.g. "SpendManaAsAnyColor", "Flying", …) round-trip correctly.
+            // If the derived impl rejects the string (unknown variant from a newer
+            // engine build), fall back to Other(s) so the card still loads.
             match serde_json::from_value::<StaticMode>(serde_json::Value::String(s.clone())) {
                 Ok(mode) => Ok(mode),
                 Err(_) => Ok(StaticMode::Other(s.clone())),
@@ -1816,6 +1818,21 @@ where
             serde_json::from_value::<StaticMode>(other).map_err(serde::de::Error::custom)
         }
     }
+}
+
+fn deserialize_legacy_cost_modify_string(s: &str) -> Option<StaticMode> {
+    let mode = match s {
+        "ReduceCost" => CostModifyMode::Reduce,
+        "RaiseCost" => CostModifyMode::Raise,
+        "MinimumCost" => CostModifyMode::Minimum,
+        _ => return None,
+    };
+    Some(StaticMode::ModifyCost {
+        mode,
+        amount: ManaCost::zero(),
+        spell_filter: None,
+        dynamic_count: None,
+    })
 }
 
 #[derive(Deserialize)]
@@ -2114,6 +2131,35 @@ mod tests {
                 StaticMode::ModifyCost {
                     mode: expected_mode,
                     amount: ManaCost::generic(2),
+                    spell_filter: None,
+                    dynamic_count: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn fwd_compat_legacy_cost_modify_strings_map_to_modify_cost() {
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_static_mode_fwd")]
+            mode: StaticMode,
+        }
+
+        let cases = [
+            ("ReduceCost", CostModifyMode::Reduce),
+            ("RaiseCost", CostModifyMode::Raise),
+            ("MinimumCost", CostModifyMode::Minimum),
+        ];
+
+        for (legacy_name, expected_mode) in cases {
+            let json = format!(r#"{{"mode":"{legacy_name}"}}"#);
+            let wrapper: Wrapper = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                wrapper.mode,
+                StaticMode::ModifyCost {
+                    mode: expected_mode,
+                    amount: ManaCost::zero(),
                     spell_filter: None,
                     dynamic_count: None,
                 }

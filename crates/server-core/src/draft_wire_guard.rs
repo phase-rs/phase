@@ -1,6 +1,6 @@
 //! Wire validation for draft session handlers in `phase-server`.
 //!
-//! Draft create/join/reconnect frames are `ClientMessage` variants handled
+//! Draft create/join/reconnect/action frames are `ClientMessage` variants handled
 //! directly by the server shell. Unlike lobby game frames, they never pass
 //! through `lobby_broker::validate_lobby_message`, so client-supplied names,
 //! codes, passwords, and tokens must be bounded before clone-heavy work.
@@ -51,4 +51,55 @@ pub fn guard_reconnect_draft(draft_code: &str, player_token: &str) -> Result<(),
     validate_token("draft_code", draft_code, MAX_GAME_CODE_LEN)?;
     validate_token("player_token", player_token, MAX_TOKEN_LEN)?;
     Ok(())
+}
+
+/// Validate `DraftAction` wire fields before draft session lookup and mutation.
+pub fn guard_draft_action(draft_code: &str) -> Result<(), String> {
+    validate_token("draft_code", draft_code, MAX_GAME_CODE_LEN)
+}
+
+#[cfg(test)]
+mod tests {
+    use lobby_broker::validation::MAX_GAME_CODE_LEN;
+
+    use super::{
+        guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
+        guard_reconnect_draft,
+    };
+
+    #[test]
+    fn create_draft_accepts_valid_fields() {
+        assert!(guard_create_draft_with_settings("Alice", "TST", &None, None, 4).is_ok());
+    }
+
+    #[test]
+    fn create_draft_rejects_oversized_display_name() {
+        let err =
+            guard_create_draft_with_settings(&"a".repeat(21), "TST", &None, None, 4).unwrap_err();
+        assert!(err.contains("display_name"));
+    }
+
+    #[test]
+    fn join_draft_rejects_oversized_draft_code() {
+        let err = guard_join_draft_with_password(&"x".repeat(MAX_GAME_CODE_LEN + 1), "Bob", &None)
+            .unwrap_err();
+        assert!(err.contains("draft_code"));
+    }
+
+    #[test]
+    fn reconnect_rejects_oversized_player_token() {
+        let err = guard_reconnect_draft("ABC123", &"t".repeat(129)).unwrap_err();
+        assert!(err.contains("player_token"));
+    }
+
+    #[test]
+    fn draft_action_accepts_valid_code() {
+        assert!(guard_draft_action("ABC123").is_ok());
+    }
+
+    #[test]
+    fn draft_action_rejects_oversized_code() {
+        let err = guard_draft_action(&"x".repeat(MAX_GAME_CODE_LEN + 1)).unwrap_err();
+        assert!(err.contains("draft_code"));
+    }
 }

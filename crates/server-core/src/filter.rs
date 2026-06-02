@@ -107,6 +107,21 @@ mod tests {
     }
 
     #[test]
+    fn non_seat_spectator_sees_no_player_hands() {
+        let state = setup_state();
+        let filtered = filter_state_for_player(&state, PlayerId(u8::MAX));
+
+        for player in &filtered.players {
+            let hand = &player.hand;
+            assert_eq!(hand.len(), 1, "hand size remains public");
+            let obj = filtered.objects.get(&hand[0]).unwrap();
+            assert_eq!(obj.name, "Hidden Card");
+            assert!(obj.face_down);
+            assert!(obj.abilities.is_empty());
+        }
+    }
+
+    #[test]
     fn library_contents_hidden_for_both() {
         let state = setup_state();
         let filtered = filter_state_for_player(&state, PlayerId(0));

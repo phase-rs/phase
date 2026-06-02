@@ -30,6 +30,7 @@ export interface RegisterHostRequest {
   formatConfig: FormatConfig | null;
   aiSeats: unknown[];
   startWhenFull?: boolean;
+  ranked?: boolean;
   roomName: string | null;
   /** Draft-specific metadata. When set, the lobby entry is badged as a
    *  draft pod with set code and draft kind. */
@@ -175,6 +176,7 @@ function makeBrokerClient(socket: PhaseSocket): BrokerClient {
             host_peer_id: req.hostPeerId,
             draft_metadata: req.draftMetadata,
             start_when_full: req.startWhenFull ?? true,
+            ranked: req.ranked ?? false,
           },
         }),
       );
