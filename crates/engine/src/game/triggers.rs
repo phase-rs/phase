@@ -4274,6 +4274,27 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
             }
         }
     }
+    // CR 601.2c: "You may cast a spell ... from your hand without paying its mana
+    // cost" (Baral's Expertise, Bring Back-style sub-effects) names no "target" —
+    // CR 601.2c puts target announcement BEFORE costs, and these clauses skip it
+    // entirely. The spell is chosen at resolution from the granting player's hand
+    // (or library, for Future Sight-style cast-from-library permissions), so a
+    // stack-time target slot would surface a phantom 4th pick alongside the real
+    // bounce/etc. targets.
+    //
+    // CR 115.1: Exile-link variants (`ExiledBySource`, `ParentTarget`, anaphoric
+    // "that card" / "the exiled card") continue to flow through targeting — those
+    // bind a single chosen object selected earlier in the same effect chain and
+    // are not the "free pick from hand" pattern this carve-out covers. The
+    // is-private-zone test mirrors `Effect::ChangeZone` and
+    // `Effect::PutAtLibraryPosition` above.
+    if let Effect::CastFromZone { target, .. } = effect {
+        if let Some(zone) = target.extract_in_zone() {
+            if matches!(zone, Zone::Hand | Zone::Library) {
+                return None;
+            }
+        }
+    }
     // CR 115.1 / CR 115.1d: Only effects that use the word "target" require stack-time target
     // selection. `TargetFilter::Any` is a sentinel value meaning "broadcast to all
     // matching permanents at resolution time" — it is never a declared target on any
@@ -9484,6 +9505,67 @@ pub mod tests {
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
             "targeted Bounce (Targeted) must extract a target filter"
+        );
+    }
+
+    /// CR 601.2c: "You may cast a spell ... from your hand without paying its
+    /// mana cost" (Baral's Expertise, issue #1529) has no "target" word — the
+    /// spell is chosen at resolution from the player's hand, so no stack-time
+    /// target slot should be surfaced for the cast permission.
+    #[test]
+    fn extract_target_skips_cast_from_zone_from_hand() {
+        use crate::types::ability::{CardPlayMode, FilterProp, TypedFilter};
+        let effect = Effect::CastFromZone {
+            target: TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(crate::types::ability::TypeFilter::Card)
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::InZone { zone: Zone::Hand },
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 4 },
+                        },
+                    ]),
+            ),
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "CastFromZone from Hand has no `target` word — must not surface a target slot"
+        );
+    }
+
+    /// CR 115.1 boundary: A typed `CastFromZone` filter without an explicit
+    /// private-zone constraint (defaults to the battlefield class) keeps its
+    /// targeting behavior. This guards the carve-out above from regressing the
+    /// "from your graveyard" / library-search cast permissions that legitimately
+    /// flow through `extract_in_zone`.
+    #[test]
+    fn extract_target_keeps_cast_from_zone_from_graveyard() {
+        use crate::types::ability::{CardPlayMode, FilterProp, TypedFilter};
+        let effect = Effect::CastFromZone {
+            target: TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(crate::types::ability::TypeFilter::Card)
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }]),
+            ),
+            without_paying_mana_cost: false,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "CastFromZone from a non-private zone (graveyard) must still flow through targeting"
         );
     }
 
