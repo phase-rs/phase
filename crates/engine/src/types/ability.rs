@@ -9316,8 +9316,12 @@ pub enum AbilityCondition {
     /// CR 601.2h + CR 608.2c: "if {C} was spent to cast this spell" gates
     /// resolution on the source object's recorded paid-mana colors.
     ManaColorSpent { color: ManaColor, minimum: u32 },
-    /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last revealed card's type.
-    /// Evaluated at resolution time by inspecting `state.last_revealed_ids[0]`.
+    /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last
+    /// revealed card's type, or on the just-moved card when the parent effect
+    /// changed zones without revealing.
+    /// Evaluated at resolution time by inspecting `state.last_revealed_ids[0]`,
+    /// falling back to `state.last_zone_changed_ids[0]` only when no reveal
+    /// occurred in the current resolution.
     /// `additional_filter` holds optional extra filter properties (e.g., `IsChosenCreatureType`
     /// for "creature card of the chosen type"). For "if it's a nonland card" patterns,
     /// wrap with `AbilityCondition::Not`.

@@ -14169,6 +14169,39 @@ mod tests {
         assert_eq!(def.spell_cast_origin, OriginConstraint::Any);
     }
 
+    #[test]
+    fn trigger_you_cast_target_player_mill_instead_keeps_chosen_player() {
+        let def = parse_trigger_line(
+            "Whenever you cast an instant or sorcery spell, target player mills three cards. If five or more mana was spent to cast that spell, that player mills ten cards instead.",
+            "Exhibition Tidecaller",
+        );
+
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+
+        let execute = def.execute.as_ref().expect("trigger should have an effect");
+        match &*execute.effect {
+            Effect::Mill { target, .. } => assert_eq!(*target, TargetFilter::Player),
+            other => panic!("expected base target-player Mill, got {other:?}"),
+        }
+
+        let instead = execute
+            .sub_ability
+            .as_ref()
+            .expect("mv>=5 clause should lower as an instead sub-ability");
+        assert!(
+            matches!(
+                instead.condition,
+                Some(AbilityCondition::ConditionInstead { .. })
+            ),
+            "mv>=5 clause should be a ConditionInstead override"
+        );
+        match &*instead.effect {
+            Effect::Mill { target, .. } => assert_eq!(*target, TargetFilter::ParentTarget),
+            other => panic!("expected instead target-player Mill, got {other:?}"),
+        }
+    }
+
     /// CR 601.2a + #538: Ghostly Pilferer. The cast-origin discriminator
     /// "from anywhere other than their hand" must survive parsing as
     /// `NotEquals(Hand)`; without it the trigger fires on every opponent

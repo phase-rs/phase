@@ -3538,6 +3538,12 @@ fn apply_action(
                 engine_resolution_choices::ResolutionChoiceOutcome::WaitingFor(waiting_for) => {
                     waiting_for
                 }
+                engine_resolution_choices::ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
+                    waiting_for,
+                ) => {
+                    triggers_processed_inline = true;
+                    waiting_for
+                }
                 engine_resolution_choices::ResolutionChoiceOutcome::ActionResult(result) => {
                     return Ok(result);
                 }

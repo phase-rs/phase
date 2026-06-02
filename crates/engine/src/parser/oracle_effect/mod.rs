@@ -9008,6 +9008,20 @@ fn has_anaphoric_reference(lower: &str) -> bool {
     false
 }
 
+/// CR 608.2c: "that player" / "the player" after an earlier explicit player
+/// target binds to that chosen player, not to the triggering-event player and
+/// not to the controller of an object target.
+fn has_player_anaphoric_reference(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        alt((
+            tag::<_, _, OracleError<'_>>("that player"),
+            tag("the player"),
+        ))
+        .parse(input)
+    })
+    .is_some()
+}
+
 fn explicit_any_target_clause(effect: &Effect, lower: &str) -> bool {
     matches!(effect.target_filter(), Some(TargetFilter::Any))
         && nom_primitives::scan_contains(lower, "any target")
@@ -9133,6 +9147,17 @@ fn replace_target_with_self(effect: &mut Effect) {
             // stay as-is.
         }
     }
+}
+
+fn replace_player_anaphor_with_parent_target(effect: &mut Effect) {
+    each_target_filter_mut(effect, &mut |filter| {
+        if matches!(
+            filter,
+            TargetFilter::TriggeringPlayer | TargetFilter::ParentTargetController
+        ) {
+            *filter = TargetFilter::ParentTarget;
+        }
+    });
 }
 
 /// CR 608.2k (issue #319): True when `ctx` carries a *typed* trigger subject
@@ -9271,6 +9296,21 @@ fn has_typed_target(effect: &Effect) -> bool {
     )
 }
 
+fn target_filter_is_explicit_player_target(filter: &TargetFilter) -> bool {
+    if filter.is_context_ref() {
+        return false;
+    }
+    match filter {
+        TargetFilter::Player | TargetFilter::SpecificPlayer { .. } => true,
+        TargetFilter::Typed(tf) => tf.type_filters.is_empty(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_is_explicit_player_target)
+        }
+        TargetFilter::Not { filter } => target_filter_is_explicit_player_target(filter),
+        _ => false,
+    }
+}
+
 /// CR 608.2c: An earlier clause whose target filter is a compound shape
 /// (`And` / `Or` wrapping a `Typed` branch) still introduces a typed object
 /// referent for a sibling bare-"it" anaphor.
@@ -9295,6 +9335,12 @@ fn filter_introduces_typed_object(filter: &TargetFilter) -> bool {
         TargetFilter::Not { .. } => false,
         _ => false,
     }
+}
+
+fn has_explicit_player_target(effect: &Effect) -> bool {
+    effect
+        .target_filter()
+        .is_some_and(target_filter_is_explicit_player_target)
 }
 
 /// CR 608.2c: Variant of `has_typed_target` that accepts compound filter
@@ -9372,6 +9418,25 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr]) -> bool {
         if matches!(
             prev.parsed.effect.target_filter(),
             Some(TargetFilter::ParentTarget)
+        ) {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
+    for prev in clauses.iter().rev() {
+        if prev.condition.is_some() {
+            return false;
+        }
+        if has_explicit_player_target(&prev.parsed.effect) {
+            return true;
+        }
+        if matches!(
+            prev.parsed.effect.target_filter(),
+            Some(TargetFilter::ParentTarget | TargetFilter::ParentTargetController)
         ) {
             continue;
         }
@@ -14897,6 +14962,11 @@ pub(crate) fn parse_effect_chain_ir(
             )
         {
             replace_target_with_parent(&mut clause.effect);
+        }
+        if chain_has_prior_player_target_referent(&clauses)
+            && has_player_anaphoric_reference(&text_lower)
+        {
+            replace_player_anaphor_with_parent_target(&mut clause.effect);
         }
         if clauses
             .last()
