@@ -1,5 +1,6 @@
 pub mod deck_resolve;
 pub mod draft_session;
+pub mod draft_wire_guard;
 pub mod filter;
 #[cfg(test)]
 mod harness;
@@ -12,6 +13,9 @@ pub mod starter_decks;
 
 pub use deck_resolve::resolve_deck;
 pub use draft_session::{generate_draft_code, DraftSession, DraftSessionManager};
+pub use draft_wire_guard::{
+    guard_create_draft_with_settings, guard_join_draft_with_password, guard_reconnect_draft,
+};
 pub use filter::filter_state_for_player;
 pub use lobby::LobbyManager;
 pub use persist::{PersistedLobbyMeta, PersistedSession};

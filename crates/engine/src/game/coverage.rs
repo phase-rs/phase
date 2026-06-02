@@ -6644,7 +6644,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             } = &*a.effect
             {
                 static_abilities.iter().any(|s| match &s.mode {
-                    StaticMode::MustBeBlocked => {
+                    // CR 509.1c: "All creatures able to block ~ do so" lowers to the
+                    // lure-strength MustBeBlockedByAll (not the one-blocker MustBeBlocked).
+                    StaticMode::MustBeBlockedByAll => {
                         effective_lower.contains("able to block")
                             && effective_lower.contains("do so")
                     }

@@ -15528,6 +15528,61 @@ mod tests {
         assert!(def.optional);
     }
 
+    /// CR 109.4: "other than this card" in an exile target must add
+    /// `FilterProp::Another` so the ability source (Ichorid) cannot be used
+    /// to pay its own recursion cost.
+    #[test]
+    fn trigger_ichorid_exile_target_excludes_self() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, if this card is in your graveyard, you may exile a black creature card other than this card from your graveyard. If you do, return this card to the battlefield.",
+            "Ichorid",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
+        let exec = def
+            .execute
+            .expect("Ichorid upkeep trigger must have execute")
+            .effect;
+        let Effect::ChangeZone {
+            ref target,
+            origin,
+            destination,
+            ..
+        } = *exec
+        else {
+            panic!("expected ChangeZone exile, got {exec:?}")
+        };
+        assert_eq!(origin, Some(Zone::Graveyard));
+        assert_eq!(destination, Zone::Exile);
+        let TargetFilter::Typed(ref tf) = *target else {
+            panic!("expected Typed filter, got {target:?}")
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "exile target must carry FilterProp::Another for 'other than this card'; got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }),
+            "exile target must be scoped to your graveyard; got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasColor {
+                    color: ManaColor::Black
+                }
+            )),
+            "exile target must require black; got {:?}",
+            tf.properties
+        );
+    }
+
     #[test]
     fn trigger_nth_spell_third() {
         let def = parse_trigger_line(

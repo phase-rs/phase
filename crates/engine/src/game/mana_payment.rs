@@ -2510,6 +2510,7 @@ mod tests {
             subtypes: vec!["Elf".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
         };
         let elf_ctx = PaymentContext::Spell(&elf);
         assert!(can_pay_for_spell(
@@ -2529,6 +2530,7 @@ mod tests {
             subtypes: vec!["Goblin".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
         };
         let goblin_ctx = PaymentContext::Spell(&goblin);
         assert!(!can_pay_for_spell(
@@ -2572,6 +2574,7 @@ mod tests {
             subtypes: vec!["Eldrazi".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
         };
         let thought_knot_ctx = PaymentContext::Spell(&thought_knot);
         assert!(can_pay_for_spell(
@@ -2590,6 +2593,7 @@ mod tests {
             subtypes: vec!["Eldrazi".to_string()],
             keyword_kinds: vec![],
             cast_from_zone: None,
+            mana_value: None,
         };
         let colored_eldrazi_ctx = PaymentContext::Spell(&colored_eldrazi);
         assert!(!can_pay_for_spell(
@@ -2629,6 +2633,7 @@ mod tests {
             subtypes: vec![],
             keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
             cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
+            mana_value: None,
         };
         let flashback_ctx = PaymentContext::Spell(&flashback_spell);
         assert!(can_pay_for_spell(
@@ -2647,6 +2652,7 @@ mod tests {
             subtypes: vec![],
             keyword_kinds: vec![],
             cast_from_zone: Some(crate::types::zones::Zone::Hand),
+            mana_value: None,
         };
         let normal_ctx = PaymentContext::Spell(&normal_spell);
         assert!(!can_pay_for_spell(
@@ -2687,6 +2693,7 @@ mod tests {
             subtypes: vec![],
             keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
             cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
+            mana_value: None,
         };
         let gy_ctx = PaymentContext::Spell(&graveyard_flashback_spell);
         assert!(can_pay_for_spell(
@@ -2705,6 +2712,7 @@ mod tests {
             subtypes: vec![],
             keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
             cast_from_zone: Some(crate::types::zones::Zone::Hand),
+            mana_value: None,
         };
         let hand_ctx = PaymentContext::Spell(&hand_flashback_spell);
         assert!(!can_pay_for_spell(

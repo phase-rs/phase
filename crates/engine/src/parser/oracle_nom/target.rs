@@ -243,6 +243,7 @@ pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
         value(TargetFilter::SelfRef, tag("this creature")),
         value(TargetFilter::SelfRef, tag("this permanent")),
         value(TargetFilter::SelfRef, tag("this spell")),
+        value(TargetFilter::SelfRef, tag("this card")),
         value(TargetFilter::SelfRef, tag("this enchantment")),
         value(TargetFilter::SelfRef, tag("this artifact")),
         value(TargetFilter::SelfRef, tag("this land")),
@@ -641,6 +642,12 @@ mod tests {
         let (rest3, f3) = parse_self_reference("this creature gets").unwrap();
         assert_eq!(rest3, " gets");
         assert_eq!(f3, TargetFilter::SelfRef);
+
+        // "this card" used when the ability source is in a non-battlefield zone
+        // (e.g. Ichorid: "other than this card from your graveyard").
+        let (rest4, f4) = parse_self_reference("this card from your graveyard").unwrap();
+        assert_eq!(rest4, " from your graveyard");
+        assert_eq!(f4, TargetFilter::SelfRef);
     }
 
     #[test]

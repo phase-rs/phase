@@ -283,6 +283,12 @@ pub(crate) fn resolve_restrictions(
             ManaSpendRestriction::SpellWithKeywordKindFromZone { kind, zone } => Some(
                 ManaRestriction::OnlyForSpellWithKeywordKindFromZone(*kind, *zone),
             ),
+            ManaSpendRestriction::SpellWithManaValue { comparator, value } => {
+                Some(ManaRestriction::OnlyForSpellWithManaValue {
+                    comparator: *comparator,
+                    value: *value,
+                })
+            }
         })
         .collect()
 }
