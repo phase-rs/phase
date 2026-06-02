@@ -251,6 +251,7 @@ fn queue_room_trigger(
         description: Some(format!("{}: {name}", dungeon::get_definition(dungeon).name)),
         may_trigger_origin: None,
         subject_match_count: None,
+        die_result: None,
     };
 
     // CR 603.2 + CR 309.4c: Dispatch through the standard

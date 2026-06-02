@@ -203,9 +203,11 @@ mod tests {
                 parse_warnings: vec![],
                 brawl_commander: false,
                 is_commander: false,
+                is_oathbreaker: false,
                 deck_copy_limit: None,
                 metadata: Default::default(),
                 rarities: Default::default(),
+                attraction_lights: vec![],
             },
             count: 4,
         };
@@ -455,6 +457,7 @@ mod tests {
             description: Some(description.to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         PendingTriggerContext {
             pending,

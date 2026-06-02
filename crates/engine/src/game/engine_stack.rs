@@ -94,6 +94,13 @@ pub(super) fn handle_trigger_target_selection_select_targets(
     targets: Vec<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 706.2 + CR 603.12: Re-stamp the carried die-roll result into
+    // resolution scope before validating targets, so a dynamic
+    // `TargetSelectionConstraint::TotalManaValue` whose cap is the
+    // `where X is the result` value (`EventContextAmount`) resolves against the
+    // rolled number during the legality check. The next `apply()` clears
+    // `die_result_this_resolution`, so this cannot leak.
+    state.die_result_this_resolution = state.pending_trigger.as_ref().and_then(|t| t.die_result);
     let trigger = state
         .pending_trigger
         .as_ref()
@@ -148,6 +155,13 @@ pub(super) fn handle_trigger_target_selection_choose_target(
                 ));
             }
         };
+
+    // CR 706.2 + CR 603.12: Re-stamp the carried die-roll result into resolution
+    // scope before computing/validating legal targets, so a dynamic
+    // `TotalManaValue` cap (`EventContextAmount` = "where X is the result")
+    // resolves against the rolled number during the step-by-step choose walk.
+    // Cleared by the next `apply()`, so it cannot leak.
+    state.die_result_this_resolution = state.pending_trigger.as_ref().and_then(|t| t.die_result);
 
     let Some(pending_trigger) = state.pending_trigger.as_ref() else {
         return Err(EngineError::InvalidAction("No pending trigger".to_string()));

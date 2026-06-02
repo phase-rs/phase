@@ -716,6 +716,24 @@ fn destroy_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState)
     matches!(event, ProposedEvent::Destroy { .. })
 }
 
+/// CR 701.19c: Returns true if `object_id` is currently marked with an active
+/// `StaticMode::CantBeRegenerated` static. The standalone "[creature] can't be
+/// regenerated this turn" effect (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort)
+/// grants this mode onto the affected creature's `static_definitions` via a
+/// transient until-end-of-turn continuous effect (CR 514.2 auto-expiry at
+/// cleanup), so the mark is observed directly on the object through the
+/// CR-gated `active_static_definitions` iterator.
+fn object_has_active_cant_be_regenerated(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        super::functioning_abilities::active_static_definitions(state, obj).any(|def| {
+            matches!(
+                def.mode,
+                crate::types::statics::StaticMode::CantBeRegenerated
+            )
+        })
+    })
+}
+
 /// CR 701.19: Regeneration shield applier for Destroy events.
 /// If the replacement definition is a regeneration shield and the destruction allows
 /// regeneration, removes damage, taps the permanent, removes it from combat,
@@ -742,12 +760,24 @@ fn destroy_applier(
         return ApplyResult::Modified(event);
     }
 
-    // CR 701.19: "It can't be regenerated" bypasses regeneration shields.
-    if let ProposedEvent::Destroy {
-        cant_regenerate: true,
-        ..
-    } = &event
-    {
+    // CR 701.19c: Regeneration shields are not applied when the destruction
+    // forbids regeneration. Two sources of this prohibition:
+    //   1. The inline "Destroy X. It can't be regenerated." one-shot rides on the
+    //      event's `cant_regenerate: true` flag (Effect::Destroy { cant_regenerate }).
+    //   2. The standalone "[creature] can't be regenerated this turn" effect marks
+    //      the destroy target with an active `StaticMode::CantBeRegenerated` static
+    //      (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort).
+    // In both cases the shield is left unconsumed (CR 701.19c: shields are not
+    // applied, not destroyed) and destruction proceeds.
+    let target_cant_regenerate = match &event {
+        ProposedEvent::Destroy {
+            object_id,
+            cant_regenerate,
+            ..
+        } => *cant_regenerate || object_has_active_cant_be_regenerated(state, *object_id),
+        _ => false,
+    };
+    if target_cant_regenerate {
         return ApplyResult::Modified(event);
     }
 
@@ -7158,6 +7188,69 @@ mod tests {
         // Shield not consumed
         let obj = state.objects.get(&bear_id).unwrap();
         assert!(!obj.replacement_definitions[0].is_consumed);
+    }
+
+    /// CR 701.19c: A creature marked with `StaticMode::CantBeRegenerated`
+    /// (granted by the standalone "[creature] can't be regenerated this turn"
+    /// effect — Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort) has its
+    /// regeneration shield bypassed at destroy time, even though the Destroy
+    /// event itself carries `cant_regenerate: false`. Mirrors
+    /// `cant_regenerate_bypasses_shield` but exercises the static-driven path.
+    #[test]
+    fn cant_be_regenerated_static_bypasses_shield() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+
+        // Grant the regeneration prohibition onto the creature, mirroring the
+        // transient until-end-of-turn continuous effect's `AddStaticMode`
+        // propagation onto the affected creature's `static_definitions`.
+        state
+            .objects
+            .get_mut(&bear_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::types::ability::StaticDefinition::new(
+                    crate::types::statics::StaticMode::CantBeRegenerated,
+                )
+                .affected(TargetFilter::SelfRef),
+            );
+
+        // Helper observes the active mark.
+        assert!(object_has_active_cant_be_regenerated(&state, bear_id));
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: Some(ObjectId(100)),
+            // Note: the inline flag is false — the bypass is driven purely by the
+            // static mark, not by the destroy event.
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // Destruction proceeds; the shield does NOT save the creature.
+        assert!(
+            matches!(
+                result,
+                ReplacementResult::Execute(ProposedEvent::Destroy { .. })
+            ),
+            "CantBeRegenerated static should bypass the shield, got {:?}",
+            result
+        );
+        // CR 701.19c: shields are not applied, not consumed.
+        let obj = state.objects.get(&bear_id).unwrap();
+        assert!(!obj.replacement_definitions[0].is_consumed);
+    }
+
+    /// Negative control for `object_has_active_cant_be_regenerated`: a creature
+    /// with no regeneration prohibition is not reported as marked.
+    #[test]
+    fn object_without_cant_be_regenerated_is_not_marked() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+        assert!(!object_has_active_cant_be_regenerated(&state, bear_id));
     }
 
     #[test]

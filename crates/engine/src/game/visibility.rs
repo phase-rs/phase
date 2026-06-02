@@ -531,7 +531,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
 /// the controller's not-yet-public choices. Strip every payload
 /// an opponent has no rules-permission to see, leaving only
 /// the public spine (source_id, controller, timestamp, ability,
-/// condition, target_constraints, subject_match_count,
+/// condition, target_constraints, subject_match_count, die_result,
 /// may_trigger_origin) needed for the engine to keep running on
 /// the wire and for the opponent's frontend to render an
 /// "opponent is ordering N triggers" indicator.
@@ -587,6 +587,7 @@ mod tests {
                 caster,
             ),
             cost: ManaCost::NoCost,
+            base_cost: None,
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: vec![],

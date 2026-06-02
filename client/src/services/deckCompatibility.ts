@@ -51,6 +51,8 @@ interface DeckCompatibilityRequest {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  /** Oathbreaker RC: signature spell card name (empty for non-Oathbreaker formats). */
+  signature_spell: string[];
   selected_format?: GameFormat | null;
   selected_match_type?: MatchType | null;
   summary_only?: boolean;
@@ -83,6 +85,7 @@ function compatibilityCacheKey(request: DeckCompatibilityRequest): string {
     main_deck: request.main_deck,
     sideboard: request.sideboard,
     commander: request.commander,
+    signature_spell: request.signature_spell,
     selected_format: request.selected_format ?? null,
     selected_match_type: request.selected_match_type ?? null,
   });

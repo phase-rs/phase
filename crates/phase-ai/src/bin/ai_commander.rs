@@ -136,7 +136,7 @@ fn main() {
             main_deck: main,
             sideboard: vec![],
             commander: cmd_names,
-            bracket_tier: Default::default(),
+            ..Default::default()
         });
     }
 

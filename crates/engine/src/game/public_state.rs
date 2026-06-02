@@ -275,6 +275,9 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             GameEvent::MonarchChanged { player_id }
             | GameEvent::CityBlessingGained { player_id }
             | GameEvent::InitiativeTaken { player_id }
+            | GameEvent::AttractionOpened { player_id, .. }
+            | GameEvent::AttractionsRolledToVisit { player_id, .. }
+            | GameEvent::AttractionVisited { player_id, .. }
             | GameEvent::RingTemptsYou { player_id } => {
                 mark_public_state_player_dirty(state, *player_id);
             }

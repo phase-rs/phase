@@ -227,7 +227,12 @@ export function ManaPaymentUI() {
         exit={{ y: 80, opacity: 0 }}
         transition={{ duration: 0.25 }}
       >
-        <div className="rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
+        {/* `pointer-events-auto` re-enables clicks on the panel itself: under a
+            click-through convoke/improvise host (CR 702.51a / 702.126a) the
+            DialogHost wrapper is `pointer-events: none` so board taps reach the
+            artifacts/creatures, but the Pay/Cancel controls must still respond.
+            The surrounding full-width strip stays pass-through. */}
+        <div className="pointer-events-auto rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
             {t("mana.payMana")}
             {cardName && (

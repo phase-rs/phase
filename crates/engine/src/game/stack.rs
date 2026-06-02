@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    CastingPermission, ContinuousModification, Duration, EffectKind, KeywordAction,
+    CastingPermission, ContinuousModification, Duration, Effect, EffectKind, KeywordAction,
     ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
@@ -159,10 +159,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // `current_trigger_event` and cleared at every reset site below.
     if let StackEntryKind::TriggeredAbility {
         subject_match_count,
+        die_result,
         ..
     } = entry.kind
     {
         state.current_trigger_match_count = subject_match_count;
+        // CR 706.2 + CR 706.4 + CR 603.12: re-stamp the carried die-roll result
+        // into resolution scope so a reflexive "When you do … the result"
+        // sub-ability resolving on its own stack entry (a later apply(), after
+        // the original roll's resolution scope cleared) reads the rolled value
+        // via the `QuantityRef::EventContextAmount` cascade.
+        state.die_result_this_resolution = die_result;
     }
 
     // Extract the resolved ability from the stack entry. `KeywordAction` is
@@ -291,6 +298,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 state.current_trigger_event = None;
                 state.current_trigger_events.clear();
                 state.current_trigger_match_count = None;
+                // CR 706.2 + CR 706.4: clear the carried die-roll result at the
+                // same cross-resolution boundary as the batched subject count.
+                state.die_result_this_resolution = None;
                 return;
             }
             execute_effect(state, &validated, events);
@@ -352,7 +362,15 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 608.3: Determine destination zone for spells.
     if is_spell {
-        let dest = if paradigm_armed {
+        let end_the_turn_resolving_object = ability
+            .as_ref()
+            .is_some_and(|ability| matches!(ability.effect, Effect::EndTheTurn));
+        let dest = if end_the_turn_resolving_object {
+            // CR 724.1b: The "end the turn" procedure exiles every object on
+            // the stack, including the resolving object that `resolve_top`
+            // already popped before executing its effect.
+            Zone::Exile
+        } else if paradigm_armed {
             // CR 702.xxx: Paradigm-armed spell exiles instead of going to
             // graveyard. The ExileLink is already created by arm_paradigm.
             Zone::Exile
@@ -794,6 +812,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     state.current_trigger_event = None;
                     state.current_trigger_events.clear();
                     state.current_trigger_match_count = None;
+                    // CR 706.2 + CR 706.4: clear the carried die-roll result at
+                    // the same cross-resolution boundary as the batched subject
+                    // count.
+                    state.die_result_this_resolution = None;
                     return;
                 }
             }
@@ -1028,6 +1050,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.current_trigger_event = None;
     state.current_trigger_events.clear();
     state.current_trigger_match_count = None;
+    // CR 706.2 + CR 706.4: clear the carried die-roll result at the same
+    // cross-resolution boundary as the batched subject count.
+    state.die_result_this_resolution = None;
 
     events.push(GameEvent::StackResolved {
         object_id: entry.id,
@@ -1277,12 +1302,17 @@ fn resolve_batched(
         if let crate::types::game_state::StackEntryKind::TriggeredAbility {
             trigger_event: Some(te),
             subject_match_count,
+            die_result,
             ..
         } = &top.kind
         {
             state.current_trigger_event = Some(te.clone());
             state.current_trigger_events = vec![te.clone()];
             state.current_trigger_match_count = *subject_match_count;
+            // CR 706.2 + CR 706.4 + CR 603.12: re-stamp the carried die-roll
+            // result into resolution scope for a reflexive "When you do … the
+            // result" sub-ability (see `resolve_top`).
+            state.die_result_this_resolution = *die_result;
         }
     }
 
@@ -1293,6 +1323,9 @@ fn resolve_batched(
     state.current_trigger_event = None;
     state.current_trigger_events.clear();
     state.current_trigger_match_count = None;
+    // CR 706.2 + CR 706.4: clear the carried die-roll result at the same
+    // cross-resolution boundary as the batched subject count.
+    state.die_result_this_resolution = None;
 
     // §5.4: one StackResolved per consumed entry.
     for entry in &popped {
@@ -1496,6 +1529,10 @@ fn normalize_ability_source(ability: &ResolvedAbility) -> ResolvedAbility {
 ///   equal deep `ability` carry the same batched subject count. It is therefore
 ///   redundant to key on (would never break a run the other fields kept
 ///   together) and is correctly applied from the top entry in the batch path.
+/// - `die_result` — EXCLUDED for the same reason as `subject_match_count`: it
+///   is CR 706.2 resolution data (the carried die-roll result re-stamped from
+///   the run's top entry in `resolve_batched`), not run identity. Keying on it
+///   would needlessly split runs without changing correctness.
 fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<BatchRunKey<'a>> {
     let StackEntryKind::TriggeredAbility {
         source_id,
@@ -1505,6 +1542,7 @@ fn batch_run_key<'a>(state: &'a GameState, entry: &'a StackEntry) -> Option<Batc
         description,
         source_name: _,
         subject_match_count: _,
+        die_result: _,
     } = &entry.kind
     else {
         return None;
@@ -1997,6 +2035,41 @@ mod tests {
         );
     }
 
+    /// CR 724.1b: "end the turn" exiles every object on the stack, including
+    /// the resolving spell itself. Discriminating against routing the source
+    /// through the normal CR 608.2n instant/sorcery graveyard path.
+    #[test]
+    fn end_the_turn_spell_exiles_resolving_object() {
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(724),
+            PlayerId(0),
+            "Time Stop".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(Effect::EndTheTurn, vec![], spell_id, PlayerId(0));
+
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(724),
+                ability: Some(ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(state.objects[&spell_id].zone, Zone::Exile);
+        assert!(state.exile.contains(&spell_id));
+        assert!(!state.players[0].graveyard.contains(&spell_id));
+    }
+
     #[test]
     fn trigger_event_context_becomes_target_controller() {
         // Set up: triggered ability with BecomesTarget event in trigger_event.
@@ -2044,6 +2117,7 @@ mod tests {
                 description: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 
@@ -2807,6 +2881,7 @@ mod tests {
                     description: Some("landfall copy trigger".to_string()),
                     source_name: String::new(),
                     subject_match_count: None,
+                    die_result: None,
                 },
             });
         }
@@ -2857,6 +2932,7 @@ mod tests {
                 description: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         };
         state.stack.push_back(mk_entry(s1));
@@ -2909,6 +2985,7 @@ mod tests {
                 description: Some("target player loses 1 life".to_string()),
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         };
         state
@@ -2964,6 +3041,7 @@ mod tests {
                     description: Some("then target player loses 1 life".to_string()),
                     source_name: String::new(),
                     subject_match_count: None,
+                    die_result: None,
                 },
             }
         };
@@ -3640,6 +3718,7 @@ mod tests {
                         description: Some("Landfall".to_string()),
                         source_name: "Scute Swarm".to_string(),
                         subject_match_count: None,
+                        die_result: None,
                     },
                 });
             }
@@ -4002,6 +4081,7 @@ mod tests {
                         description: None,
                         source_name: String::new(),
                         subject_match_count: None,
+                        die_result: None,
                     },
                 });
             }
@@ -4249,6 +4329,7 @@ mod tests {
                         description: Some("Landfall".to_string()),
                         source_name: "Scute Swarm".to_string(),
                         subject_match_count: None,
+                        die_result: None,
                     },
                 });
             }
@@ -6494,5 +6575,81 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// CR 706.2 + CR 706.4 + CR 603.12: A reflexive "When you do … the result"
+    /// sub-ability resolves on its OWN `StackEntryKind::TriggeredAbility` entry,
+    /// in a later resolution scope than the original roll. The rolled value is
+    /// carried on the entry's `die_result` field and re-stamped into
+    /// `die_result_this_resolution` by `resolve_top` so the entry's
+    /// `EventContextAmount` reads the roll (11), NOT the surviving combat-damage
+    /// event amount (6). This is the building-block guard for Ancient Bronze
+    /// Dragon's reflexive class (issue #1602, Deliverable 1).
+    #[test]
+    fn reflexive_entry_lifts_carried_die_result_into_resolution_scope() {
+        let mut state = setup();
+        // A source object on the battlefield (controller P0).
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Ancient Bronze Dragon".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The reflexive sub-ability: "gain life equal to the result".
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::EventContextAmount,
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        // Carry die_result: Some(11) onto the entry, alongside a SURVIVING
+        // combat-damage trigger event (amount 6). Match-count is None so the
+        // die slot is what the cascade must read.
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 6,
+            is_combat: true,
+            excess: 0,
+        });
+        state.stack.push_back(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Ancient Bronze Dragon".to_string(),
+                subject_match_count: None,
+                die_result: Some(11),
+            },
+        });
+
+        let life_before = state.players[0].life;
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        // Gained 11 (the carried die result), NOT 6 (the combat-damage event).
+        assert_eq!(
+            state.players[0].life - life_before,
+            11,
+            "reflexive entry must read the carried die result (11), not the \
+             surviving combat-damage amount (6)"
+        );
+        // The die slot is cleared at the cross-resolution boundary after the
+        // entry resolves (mirrors the batched subject-count lifecycle).
+        assert_eq!(state.die_result_this_resolution, None);
+        assert_eq!(state.current_trigger_match_count, None);
     }
 }

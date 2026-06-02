@@ -40,6 +40,7 @@ use server_core::draft_wire_guard::{
     guard_reconnect_draft,
 };
 use server_core::emote_guard::guard_emote;
+use server_core::game_action_payload_guard::guard_game_action_payload;
 use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::legacy_join_guard::guard_legacy_join_game;
@@ -52,7 +53,9 @@ use server_core::protocol::{
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{ActionResult, GameSession, SessionManager};
-use server_core::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
+use server_core::spectator_wire_guard::{
+    guard_game_spectator_capacity, guard_spectate_draft, guard_spectator_join,
+};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
@@ -88,6 +91,53 @@ type SharedDraftSpectators = Arc<
 >;
 /// Spectator senders keyed by game code (live games only).
 type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
+
+async fn remove_game_spectator_sender(
+    game_spectators: &SharedGameSpectators,
+    game_code: &str,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) {
+    let mut specs = game_spectators.lock().await;
+    if let Some(spectators) = specs.get_mut(game_code) {
+        spectators.retain(|sender| !sender.same_channel(tx) && !sender.is_closed());
+        if spectators.is_empty() {
+            specs.remove(game_code);
+        }
+    }
+}
+
+async fn reserve_game_spectator_slot(
+    game_spectators: &SharedGameSpectators,
+    game_code: &str,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) -> Result<(), String> {
+    let mut specs = game_spectators.lock().await;
+    let spectators = specs.entry(game_code.to_string()).or_default();
+    spectators.retain(|sender| !sender.is_closed());
+
+    if spectators.iter().any(|sender| sender.same_channel(tx)) {
+        return Ok(());
+    }
+
+    guard_game_spectator_capacity(spectators.len())?;
+    spectators.push(tx.clone());
+    Ok(())
+}
+
+async fn switch_game_spectator_slot(
+    game_spectators: &SharedGameSpectators,
+    previous_game_code: Option<&str>,
+    game_code: &str,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) -> Result<(), String> {
+    reserve_game_spectator_slot(game_spectators, game_code, tx).await?;
+    if previous_game_code != Some(game_code) {
+        if let Some(previous_game_code) = previous_game_code {
+            remove_game_spectator_sender(game_spectators, previous_game_code, tx).await;
+        }
+    }
+    Ok(())
+}
 
 /// Build the `GameStarted` message for a single seat.
 ///
@@ -1242,14 +1292,7 @@ async fn handle_socket(
     }
 
     if let Some(game_code) = &identity.spectator_game_code {
-        let mut specs = game_spectators.lock().await;
-        if let Some(spectators) = specs.get_mut(game_code) {
-            spectators.retain(|sender| !sender.same_channel(&tx));
-            spectators.retain(|sender| !sender.is_closed());
-            if spectators.is_empty() {
-                specs.remove(game_code);
-            }
-        }
+        remove_game_spectator_sender(&game_spectators, game_code, &tx).await;
     }
 
     if !identity.seat_reservations.is_empty() {
@@ -2064,6 +2107,8 @@ impl DeckResolver for ServerDeckResolver<'_> {
             main_deck: deck.main_deck,
             sideboard: deck.sideboard,
             commander: deck.commander,
+            attraction_deck: deck.attraction_deck,
+            signature_spell: deck.signature_spell,
             bracket_tier: deck.bracket_tier,
         })
     }
@@ -2450,6 +2495,17 @@ async fn handle_client_message(
             };
 
             debug!(game = %game_code, player = ?identity.player_id, action = ?action, "Action");
+
+            // Bound client-supplied action payload sizes before the clone-heavy
+            // engine reducers process them (mirrors guard_draft_action_payload
+            // for draft actions).
+            if let Err(reason) = guard_game_action_payload(&action) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
 
             // Apply human action and collect AI follow-up results while holding the lock.
             // Filtering is deferred until after the lock is dropped to reduce contention.
@@ -4034,7 +4090,7 @@ async fn handle_client_message(
             }
 
             debug!(game = %game_code, "spectator join request");
-            let spectator_msg = {
+            {
                 let mgr = state.lock().await;
                 let Some(session) = mgr.sessions.get(&game_code) else {
                     let msg = ServerMessage::Error {
@@ -4054,15 +4110,51 @@ async fn handle_client_message(
                     }
                     return;
                 }
-                build_spectator_game_started_message(session)
+            }
+
+            if let Err(reason) = switch_game_spectator_slot(
+                game_spectators,
+                identity.spectator_game_code.as_deref(),
+                &game_code,
+                tx,
+            )
+            .await
+            {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
+            let snapshot_result = {
+                let mgr = state.lock().await;
+                match mgr.sessions.get(&game_code) {
+                    Some(session) if session.game_started => {
+                        Ok(build_spectator_game_started_message(session))
+                    }
+                    Some(_) => Err("Game has not started yet".to_string()),
+                    None => Err(format!("Game not found: {game_code}")),
+                }
             };
 
-            identity.spectator_game_code = Some(game_code.clone());
-            {
-                let mut specs = game_spectators.lock().await;
-                specs.entry(game_code.clone()).or_default().push(tx.clone());
+            let spectator_msg = match snapshot_result {
+                Ok(msg) => msg,
+                Err(message) => {
+                    remove_game_spectator_sender(game_spectators, &game_code, tx).await;
+                    let msg = ServerMessage::Error { message };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+
+            if tx.send(spectator_msg).is_err() {
+                remove_game_spectator_sender(game_spectators, &game_code, tx).await;
+                return;
             }
-            let _ = tx.send(spectator_msg);
+            identity.spectator_game_code = Some(game_code.clone());
             info!(game = %game_code, "spectator connected to live game");
         }
 
@@ -4849,6 +4941,7 @@ mod ranked_tests {
 #[cfg(test)]
 mod live_spectator_tests {
     use super::*;
+    use server_core::spectator_wire_guard::MAX_GAME_SPECTATORS_PER_GAME;
 
     #[test]
     fn spectator_state_update_keeps_public_status_without_actions() {
@@ -4875,6 +4968,101 @@ mod live_spectator_tests {
             other => panic!("expected spectator StateUpdate, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn game_spectator_reservation_rejects_when_game_is_at_cap() {
+        let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let mut receivers = Vec::new();
+        {
+            let mut specs = spectators.lock().await;
+            let game_spectators = specs.entry("FULL".to_string()).or_default();
+            for _ in 0..MAX_GAME_SPECTATORS_PER_GAME {
+                let (tx, rx) = mpsc::unbounded_channel();
+                game_spectators.push(tx);
+                receivers.push(rx);
+            }
+        }
+        let (overflow_tx, _overflow_rx) = mpsc::unbounded_channel();
+
+        let err = reserve_game_spectator_slot(&spectators, "FULL", &overflow_tx)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("maximum"));
+        assert_eq!(
+            spectators.lock().await.get("FULL").map(Vec::len),
+            Some(MAX_GAME_SPECTATORS_PER_GAME)
+        );
+        drop(receivers);
+    }
+
+    #[tokio::test]
+    async fn game_spectator_reservation_prunes_closed_senders_before_cap_check() {
+        let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut specs = spectators.lock().await;
+            let game_spectators = specs.entry("PRUNE".to_string()).or_default();
+            for _ in 0..MAX_GAME_SPECTATORS_PER_GAME {
+                let (tx, rx) = mpsc::unbounded_channel();
+                drop(rx);
+                game_spectators.push(tx);
+            }
+        }
+        let (new_tx, _new_rx) = mpsc::unbounded_channel();
+
+        reserve_game_spectator_slot(&spectators, "PRUNE", &new_tx)
+            .await
+            .expect("closed senders should be pruned before enforcing cap");
+
+        assert_eq!(spectators.lock().await.get("PRUNE").map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn game_spectator_reservation_is_idempotent_for_same_channel() {
+        let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        reserve_game_spectator_slot(&spectators, "SAME", &tx)
+            .await
+            .unwrap();
+        reserve_game_spectator_slot(&spectators, "SAME", &tx)
+            .await
+            .unwrap();
+
+        assert_eq!(spectators.lock().await.get("SAME").map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn game_spectator_switch_keeps_previous_game_when_new_game_is_full() {
+        let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let (current_tx, _current_rx) = mpsc::unbounded_channel();
+        let mut full_receivers = Vec::new();
+        {
+            let mut specs = spectators.lock().await;
+            specs
+                .entry("CURRENT".to_string())
+                .or_default()
+                .push(current_tx.clone());
+            let full_game = specs.entry("FULL".to_string()).or_default();
+            for _ in 0..MAX_GAME_SPECTATORS_PER_GAME {
+                let (tx, rx) = mpsc::unbounded_channel();
+                full_game.push(tx);
+                full_receivers.push(rx);
+            }
+        }
+
+        let err = switch_game_spectator_slot(&spectators, Some("CURRENT"), "FULL", &current_tx)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("maximum"));
+        let specs = spectators.lock().await;
+        assert_eq!(specs.get("CURRENT").map(Vec::len), Some(1));
+        assert_eq!(
+            specs.get("FULL").map(Vec::len),
+            Some(MAX_GAME_SPECTATORS_PER_GAME)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4886,9 +5074,7 @@ mod mode_gate_tests {
     fn deck() -> DeckData {
         DeckData {
             main_deck: vec!["Forest".into()],
-            sideboard: vec![],
-            commander: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -5056,9 +5242,7 @@ mod handshake_tests {
     fn empty_deck() -> DeckData {
         DeckData {
             main_deck: vec!["Forest".into()],
-            sideboard: vec![],
-            commander: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         }
     }
 

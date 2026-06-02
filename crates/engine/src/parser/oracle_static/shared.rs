@@ -1791,6 +1791,9 @@ pub(crate) fn strip_rule_static_subject<'a>(
         " blocks each turn if able",
         " block each turn if able",
         " can block only creatures with flying",
+        // CR 509.1b: Evasion — "<subject> can't be blocked except by <filter>".
+        " can't be blocked except by ",
+        " can\u{2019}t be blocked except by ",
         " has shroud",
         " have shroud",
         " has hexproof",
@@ -1834,6 +1837,19 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
 
     if matches!(tp.lower, "players" | "each player") {
         return Some(TargetFilter::Player);
+    }
+
+    // CR 205.3 + CR 604.1: "All/Each <subtype>" universal-quantifier subject for a
+    // rule-static grant (e.g. "All Slivers have shroud"). Strip the quantifier and
+    // delegate to parse_type_phrase (mirroring parse_target), so the subtype filter
+    // is recognized and the line lands as a top-level continuous static (CR 604.1)
+    // instead of a spell-resolution GenericEffect. Runs AFTER the player-scope match
+    // above so it never shadows "all players"/"each player".
+    if let Some(rest_tp) = nom_tag_tp(&tp, "all ").or_else(|| nom_tag_tp(&tp, "each ")) {
+        let (filter, rest) = parse_type_phrase(rest_tp.original);
+        if rest.trim().is_empty() {
+            return Some(filter);
+        }
     }
 
     if tp.lower == "enchanted creature" {

@@ -833,6 +833,18 @@ pub enum StaticMode {
     Indestructible,
     /// Permanent cannot be destroyed (distinct from Indestructible).
     CantBeDestroyed,
+    /// CR 701.19c: "[Permanent] can't be regenerated [this turn]." This does not
+    /// stop regeneration abilities from being activated or shields from being
+    /// created; rather, it causes regeneration shields to not be applied the
+    /// next time the affected permanent would be destroyed. The per-target
+    /// `StaticDefinition::affected` filter carries which permanent is marked;
+    /// runtime enforcement bypasses the regen shield in
+    /// `replacement.rs::destroy_applier` (CR 701.19). Distinct from
+    /// `CantBeDestroyed` (which prevents destruction outright) and the inline
+    /// `Effect::Destroy { cant_regenerate }` (the "Destroy X. It can't be
+    /// regenerated." one-shot) — this is the standalone, until-end-of-turn form
+    /// (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort).
+    CantBeRegenerated,
     /// CR 702.34: Flashback — allows casting from graveyard, exiled after resolution.
     FlashBack,
     /// CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
@@ -1261,6 +1273,7 @@ impl fmt::Display for StaticMode {
             StaticMode::Protection => write!(f, "Protection"),
             StaticMode::Indestructible => write!(f, "Indestructible"),
             StaticMode::CantBeDestroyed => write!(f, "CantBeDestroyed"),
+            StaticMode::CantBeRegenerated => write!(f, "CantBeRegenerated"),
             StaticMode::FlashBack => write!(f, "FlashBack"),
             StaticMode::Shroud => write!(f, "Shroud"),
             StaticMode::Hexproof => write!(f, "Hexproof"),
@@ -1562,6 +1575,8 @@ impl FromStr for StaticMode {
             "Protection" => StaticMode::Protection,
             "Indestructible" => StaticMode::Indestructible,
             "CantBeDestroyed" => StaticMode::CantBeDestroyed,
+            // CR 701.19c: "[Permanent] can't be regenerated."
+            "CantBeRegenerated" => StaticMode::CantBeRegenerated,
             "FlashBack" => StaticMode::FlashBack,
             "Shroud" => StaticMode::Shroud,
             "Hexproof" => StaticMode::Hexproof,

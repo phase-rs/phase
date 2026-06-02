@@ -1302,6 +1302,10 @@ pub enum ManaSpendRestriction {
     /// `value` is the printed threshold N; `comparator` applies
     /// `spell_mana_value <cmp> value`.
     SpellWithManaValue { comparator: Comparator, value: u32 },
+    /// CR 105.2 + CR 106.6: "Spend this mana only to cast spells with exactly N
+    /// colors" (also "N or more / N or fewer"; colorless = 0). Parameterized over
+    /// [`Comparator`] — one variant per color-count reading. `count` is N.
+    SpellWithColorCount { comparator: Comparator, count: u32 },
     /// CR 106.6 + CR 400.7: "Spend this mana only to cast spells from your
     /// graveyard" / "from exile". Gates spending on the spell's cast-from zone
     /// alone — a distinct axis from [`ManaSpendRestriction::SpellWithKeywordKindFromZone`],
@@ -5701,6 +5705,11 @@ pub enum Effect {
     Populate,
     /// CR 701.30: Clash with an opponent — reveal top cards, compare mana values.
     Clash,
+    /// CR 724.1: End the turn. Exile every object on the stack, check
+    /// state-based actions, remove everything from combat, then skip straight
+    /// to the cleanup step. Time Stop, Sundial of the Infinite, Obeka,
+    /// Glorious End, Discontinuity, Day's Undoing.
+    EndTheTurn,
     /// CR 701.38: Vote — each player chooses one of the listed options, starting
     /// with a specified player and proceeding in turn order. After all votes are
     /// collected, the resolver runs `per_choice_effect[i]` once for each vote
@@ -6542,6 +6551,13 @@ pub enum Effect {
     /// CR 726.1 + CR 726.2: Take the initiative. Grants the initiative
     /// designation and triggers venture into Undercity.
     TakeTheInitiative,
+    /// CR 701.51b: Open N Attractions by putting cards from the top of your
+    /// Attraction deck onto the battlefield.
+    OpenAttractions {
+        count: u32,
+    },
+    /// CR 701.52: Roll to visit your Attractions.
+    RollToVisitAttractions,
     /// CR 728.1: Process rad counters — mill cards equal to rad counter count,
     /// lose 1 life and remove one rad counter per nonland card milled.
     ProcessRadCounters,
@@ -7823,6 +7839,7 @@ impl Effect {
             | Effect::Proliferate
             | Effect::Populate
             | Effect::Clash
+            | Effect::EndTheTurn
             | Effect::Vote { .. }
             | Effect::Cleanup { .. }
             | Effect::RevealTop { .. }
@@ -7867,6 +7884,8 @@ impl Effect {
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
             | Effect::TakeTheInitiative
+            | Effect::OpenAttractions { .. }
+            | Effect::RollToVisitAttractions
             | Effect::ProcessRadCounters
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
@@ -7964,6 +7983,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::TimeTravel => "TimeTravel",
         Effect::BecomeMonarch => "BecomeMonarch",
         Effect::Proliferate => "Proliferate",
+        Effect::EndTheTurn => "EndTheTurn",
         Effect::Populate => "Populate",
         Effect::Clash => "Clash",
         Effect::Vote { .. } => "Vote",
@@ -8031,6 +8051,8 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::VentureIntoDungeon => "VentureIntoDungeon",
         Effect::VentureInto { .. } => "VentureInto",
         Effect::TakeTheInitiative => "TakeTheInitiative",
+        Effect::OpenAttractions { .. } => "OpenAttractions",
+        Effect::RollToVisitAttractions => "RollToVisitAttractions",
         Effect::ProcessRadCounters => "ProcessRadCounters",
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
@@ -8146,6 +8168,7 @@ pub enum EffectKind {
     Proliferate,
     Populate,
     Clash,
+    EndTheTurn,
     /// CR 701.38: Vote — interactive APNAP-ordered choice with per-choice tally effects.
     Vote,
     /// CR 700.3: SeparateIntoPiles — partition objects into two piles, another player chooses one, sub-effect applies.
@@ -8210,6 +8233,8 @@ pub enum EffectKind {
     VentureIntoDungeon,
     VentureInto,
     TakeTheInitiative,
+    OpenAttractions,
+    RollToVisitAttractions,
     ProcessRadCounters,
     GrantCastingPermission,
     ChooseFromZone,
@@ -8326,6 +8351,7 @@ impl From<&Effect> for EffectKind {
             Effect::TimeTravel => EffectKind::TimeTravel,
             Effect::BecomeMonarch => EffectKind::BecomeMonarch,
             Effect::Proliferate => EffectKind::Proliferate,
+            Effect::EndTheTurn => EffectKind::EndTheTurn,
             Effect::Populate => EffectKind::Populate,
             Effect::Clash => EffectKind::Clash,
             Effect::Vote { .. } => EffectKind::Vote,
@@ -8395,6 +8421,8 @@ impl From<&Effect> for EffectKind {
             Effect::VentureIntoDungeon => EffectKind::VentureIntoDungeon,
             Effect::VentureInto { .. } => EffectKind::VentureInto,
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
+            Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
+            Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
             Effect::ProcessRadCounters => EffectKind::ProcessRadCounters,
             Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
@@ -9866,6 +9894,9 @@ pub enum TriggerCondition {
     /// CR 716.2a: True when the source Class enchantment is at or above the given level.
     /// Used to gate continuous triggers that only become active at higher class levels.
     ClassLevelGE { level: u8 },
+    /// CR 701.52a + CR 702.159a: Visit ability on a numbered attraction line —
+    /// the roll from `AttractionVisited` must fall within the printed range.
+    AttractionVisitRoll { min: u8, max: u8 },
 
     /// CR 601.2 + CR 603.4: reads the ENTERING object's `cast_from_zone`, never the source.
     WasCast {
@@ -11695,6 +11726,12 @@ pub struct ResolvedAbility {
     /// Variable-count targeting preserved from the originating ability definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_target: Option<MultiTargetSpec>,
+    /// CR 115.1 + CR 601.2c: Constraints the chosen target set must satisfy
+    /// (e.g. combined mana value cap). Carried through from the originating
+    /// `AbilityDefinition` so the resolution-time validator can enforce them
+    /// against the announced/selected targets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_constraints: Vec<TargetSelectionConstraint>,
     /// CR 601.2c + CR 608.2d: Whether target-like filters are announced on the
     /// stack or selected during resolution.
     #[serde(default, skip_serializing_if = "TargetChoiceTiming::is_stack")]
@@ -11826,6 +11863,7 @@ impl ResolvedAbility {
             optional: false,
             optional_for: None,
             multi_target: None,
+            target_constraints: Vec::new(),
             target_choice_timing: TargetChoiceTiming::Stack,
             description: None,
             repeat_for: None,
