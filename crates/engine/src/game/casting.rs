@@ -16614,8 +16614,6 @@ mod tests {
 
     #[test]
     fn convoke_from_exile_stacks_with_red_spell_cost_reduction_on_hybrid_cost() {
-        use crate::game::engine::apply_as_current;
-
         let mut state = setup_game_at_main_phase();
         let party_thrasher = create_object(
             &mut state,
