@@ -66,19 +66,7 @@ pub fn resolve_become_prepared(
 ) -> Result<(), EffectError> {
     let target_ids = resolve_object_targets(state, ability);
     for object_id in target_ids {
-        // Biblioplex gate — only creatures with prepare spells can become prepared.
-        if !has_prepare_face(state, object_id) {
-            continue;
-        }
-        let Some(obj) = state.objects.get_mut(&object_id) else {
-            continue;
-        };
-        // Idempotency: no-op if already prepared.
-        if obj.prepared.is_some() {
-            continue;
-        }
-        obj.prepared = Some(PreparedState);
-        events.push(GameEvent::BecamePrepared { object_id });
+        prepare_object(state, object_id, events);
     }
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::BecomePrepared,
