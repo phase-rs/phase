@@ -19,6 +19,8 @@ use crate::convert::filter::{
     convert_permanent, spells_to_filter,
 };
 use crate::convert::result::{ConvResult, ConversionGap};
+#[cfg(test)]
+use crate::schema::types::CreatureType;
 use crate::schema::types::{
     CardInExile, CardType, CardsInExile, CardsInGraveyard, CounterType, GameNumber, Permanent,
     Permanents, Player, Players, Spell,
@@ -880,16 +882,28 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             }
         },
 
-        // CR 609.3: Sub-ability chain anaphors — "the number of [counter
-        // type] counters removed this way" / "the number of permanents
-        // destroyed this way" route through the EventContextAmount channel,
-        // mirroring the existing "...this way" handlers above (the engine
-        // doesn't distinguish counter-type or filter shape on the chain
-        // counter — the preceding effect's amount is what's read).
-        GameNumber::NumberOfCountersOfTypeRemovedThisWay(_)
-        | GameNumber::NumPermanentsDestroyedThisWay(_) => QuantityExpr::Ref {
+        // CR 608.2c + CR 122.1: "the number of [counter type] counters removed
+        // this way" — reads the preceding effect's amount from the chain counter.
+        GameNumber::NumberOfCountersOfTypeRemovedThisWay(_) => QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
         },
+
+        // CR 608.2c + CR 609.3: "the number of [filter] permanents destroyed
+        // this way" — routes through the tracked set populated by the preceding
+        // DestroyAll effect. When the filter restricts the tracked set, emit
+        // FilteredTrackedSetSize so only matching members are counted. Otherwise
+        // plain TrackedSetSize covers the unfiltered case.
+        GameNumber::NumPermanentsDestroyedThisWay(perms_filter) => {
+            let filter = convert_permanents(perms_filter).unwrap_or(TargetFilter::Any);
+            let qty = if filter_is_nontrivial(&filter) {
+                QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(filter),
+                }
+            } else {
+                QuantityRef::TrackedSetSize
+            };
+            QuantityExpr::Ref { qty }
+        }
 
         // CR 122.1 + CR 603.7c: "the number of [counter type] counters on
         // the dead permanent" — the dead-permanent referent is the trigger-
@@ -1413,6 +1427,13 @@ fn unsupported(g: &GameNumber) -> ConversionGap {
     }
 }
 
+/// Returns true when the filter carries information that can exclude members of
+/// the tracked set. Only `Any` is trivial; even a plain type/subtype filter can
+/// matter when the parent effect destroyed a wider set.
+fn filter_is_nontrivial(filter: &TargetFilter) -> bool {
+    !matches!(filter, TargetFilter::Any)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1430,5 +1451,27 @@ mod tests {
                 qty: QuantityRef::CardsExiledBySource,
             }
         );
+    }
+
+    #[test]
+    fn num_permanents_destroyed_this_way_preserves_subtype_filter() {
+        let converted = convert(&GameNumber::NumPermanentsDestroyedThisWay(Box::new(
+            Permanents::IsCreatureType(CreatureType::Vampire),
+        )))
+        .unwrap();
+
+        match converted {
+            QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize { filter },
+            } => match *filter {
+                TargetFilter::Typed(ref tf) => assert!(
+                    tf.type_filters
+                        .contains(&TypeFilter::Subtype("Vampire".to_string())),
+                    "filter must preserve the Vampire subtype"
+                ),
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
     }
 }

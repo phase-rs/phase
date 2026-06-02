@@ -558,6 +558,13 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 509.1b: "<predicate> and can block an additional creature [each combat]"
+    // pairs a keyword/continuous grant with an extra-block grant under one
+    // subject (Brave the Sands). Split so the extra-block clause is not dropped.
+    if let Some(defs) = try_split_and_can_block_additional(&stripped) {
+        return defs;
+    }
+
     // CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Attached-subject grant lines
     // ("enchanted creature ...", "equipped creature ...") may decompose into more
     // than one StaticDefinition (e.g. CantBeBlocked + Continuous{AddKeyword}).

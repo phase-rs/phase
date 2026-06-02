@@ -16,7 +16,11 @@ use engine::types::keywords::{Keyword, WardCost};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
+use crate::damage_reflection::{
+    is_event_context_damage_to_player, opponent_creature_reflection_penalty,
+};
 use crate::eval::{evaluate_creature, threat_level};
+use engine::game::players;
 
 use super::activation::turn_only;
 use super::context::PolicyContext;
@@ -390,6 +394,29 @@ fn score_target_ref(ctx: &PolicyContext<'_>, target: &TargetRef) -> f64 {
                 }
             }
 
+            // Spiteful Sliver / Boros Reckoner-style reflection: in multiplayer,
+            // concentrate damage on the lowest-life opponent instead of rotating
+            // targets each trigger (issue #1364).
+            if !is_self
+                && !beneficial
+                && ctx
+                    .effects()
+                    .iter()
+                    .any(|e| is_event_context_damage_to_player(e))
+            {
+                let opponents = players::opponents(ctx.state, ctx.ai_player);
+                if opponents.len() > 1 {
+                    if let Some(weakest) = opponents
+                        .iter()
+                        .min_by_key(|&&p| ctx.state.players[p.0 as usize].life)
+                    {
+                        if *player_id == *weakest {
+                            return 12.0 + threat_level(ctx.state, ctx.ai_player, *player_id) * 4.0;
+                        }
+                    }
+                }
+            }
+
             let player_impact = targeted_player_impact(ctx, *player_id)
                 .unwrap_or_else(|| aggregate_player_impact(ctx));
             let prefers_self = if player_impact > 0.25 {
@@ -463,6 +490,13 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
 
         if !beneficial {
             if let Some(damage) = extract_damage_amount(&effects) {
+                score += opponent_creature_reflection_penalty(
+                    ctx.state,
+                    object_id,
+                    ctx.ai_player,
+                    damage,
+                );
+
                 if let Some(toughness) = object.toughness {
                     let remaining = toughness - object.damage_marked as i32;
                     // Penalize targeting creatures that won't die to this damage.
@@ -785,8 +819,8 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, BounceSelection, ContinuousModification, ControllerRef,
-        FilterProp, PtValue, ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition,
-        TypeFilter, TypedFilter,
+        FilterProp, PtValue, QuantityRef, ResolvedAbility, StaticDefinition, TargetFilter,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
@@ -3194,6 +3228,128 @@ mod tests {
         assert!(
             score > 0.0,
             "Lethal burn on tapped creature should be positive (removing a threat), got {score}"
+        );
+    }
+
+    /// Issue #1364: pinging an opponent's Spiteful-style sliver gives them free
+    /// damage triggers — non-lethal damage should be strongly penalized.
+    #[test]
+    fn non_lethal_damage_on_opponent_spiteful_creature_penalized() {
+        let mut state = make_state();
+        let spiteful = add_creature(&mut state, PlayerId(1), "Sliver", 2, 3);
+        let trigger = TriggerDefinition::new(TriggerMode::DamageReceived)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Player,
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                        ],
+                    },
+                    damage_source: None,
+                },
+            ));
+        state
+            .objects
+            .get_mut(&spiteful)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        let effect = Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            damage_source: None,
+        };
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect,
+            vec![TargetRef::Object(spiteful)],
+            Some(TargetRef::Object(spiteful)),
+        );
+        let config = AiConfig::default();
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        let score = AntiSelfHarmPolicy.score(&ctx);
+        assert!(
+            score <= -10.0,
+            "Non-lethal damage on opponent spiteful creature should be heavily penalized, got {score}"
+        );
+    }
+
+    /// Issue #1364: reflected damage in multiplayer should concentrate on the
+    /// lowest-life opponent instead of cycling evenly between opponents.
+    #[test]
+    fn event_context_damage_prefers_lowest_life_opponent_in_multiplayer() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.players[0].life = 20;
+        state.players[1].life = 5;
+        state.players[2].life = 14;
+
+        let effect = Effect::DealDamage {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            target: TargetFilter::Player,
+            damage_source: None,
+        };
+        let config = AiConfig::default();
+
+        let (decision, candidate_lowest) = make_target_selection_ctx(
+            &state,
+            effect.clone(),
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            Some(TargetRef::Player(PlayerId(1))),
+        );
+        let ctx_lowest = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate_lowest,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        let lowest_score = AntiSelfHarmPolicy.score(&ctx_lowest);
+
+        let (decision, candidate_other) = make_target_selection_ctx(
+            &state,
+            effect,
+            vec![
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            Some(TargetRef::Player(PlayerId(2))),
+        );
+        let ctx_other = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate_other,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        let other_score = AntiSelfHarmPolicy.score(&ctx_other);
+
+        assert!(
+            lowest_score > other_score,
+            "Reflected damage should prefer the lowest-life opponent: lowest={lowest_score}, other={other_score}"
         );
     }
 }

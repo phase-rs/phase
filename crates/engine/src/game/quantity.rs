@@ -277,6 +277,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::CardsExiledBySource
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
+        | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount
         | QuantityRef::LifeLostThisTurn { .. }
@@ -442,6 +443,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::CardsExiledBySource
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
+        | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount
         | QuantityRef::LifeLostThisTurn { .. }
@@ -1595,6 +1597,22 @@ fn resolve_ref(
             .max_by_key(|(id, _)| id.0)
             .map(|(_, ids)| usize_to_i32_saturating(ids.len()))
             .unwrap_or(0),
+        // CR 608.2c + CR 400.7: Count only the members of the most recent tracked
+        // set that also satisfy the inner filter. Used for "for each nontoken
+        // creature you controlled that was destroyed this way" — the tracked set
+        // holds all destroyed creatures; the filter narrows to controlled nontokens.
+        QuantityRef::FilteredTrackedSetSize { filter } => {
+            let Some((_, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0) else {
+                return 0;
+            };
+            let count = ids
+                .iter()
+                .filter(|&&oid| {
+                    crate::game::filter::matches_target_filter(state, oid, filter, &filter_ctx)
+                })
+                .count();
+            usize_to_i32_saturating(count)
+        }
         // CR 400.7 + CR 608.2c: Read the per-resolution counter populated by
         // ChangeZoneAll when it exiles cards from a hand. Used by "draws a card
         // for each card exiled from their hand this way" (Deadly Cover-Up).

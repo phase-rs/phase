@@ -82,6 +82,14 @@ export function DiceRollOverlay() {
     void import("./dice3d/Coin3D.tsx");
   }, [shouldReduceMotion]);
 
+  // CR 103.1 contest holds for input, so its hint reads "tap to continue"; an
+  // ability roll auto-advances, so tapping early just skips it. The copy tracks
+  // the same `context` axis that decides whether the roll auto-advances (see
+  // `scheduleDiceAdvance` in uiStore), so affordance and behaviour stay in sync.
+  const dismissHint = t(
+    diceRoll?.context === "startingPlayer" ? "diceRoll.continue" : "diceRoll.skip",
+  );
+
   return (
     <AnimatePresence>
       {diceRoll && (
@@ -99,7 +107,7 @@ export function DiceRollOverlay() {
               itself stays pointer-events-none so it never traps board input. */}
           <button
             type="button"
-            aria-label={t("diceRoll.skip")}
+            aria-label={dismissHint}
             onClick={skipDiceRoll}
             className="absolute inset-0 cursor-pointer bg-[radial-gradient(circle_at_center,rgba(2,6,23,0.55),rgba(2,6,23,0.86)_70%)] backdrop-blur-[2px] pointer-events-auto"
           />
@@ -116,7 +124,7 @@ export function DiceRollOverlay() {
             animate={{ opacity: 1 }}
             transition={{ delay: 1, duration: 0.5 }}
           >
-            {t("diceRoll.skip")}
+            {dismissHint}
           </motion.span>
         </motion.div>
       )}

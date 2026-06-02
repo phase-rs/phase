@@ -13,10 +13,12 @@ import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { computePTDisplay, formatCounterType, formatTypeLine, toRoman } from "../../viewmodel/cardProps.ts";
 import {
   getKeywordDisplayText,
   getKeywordName,
+  getKeywordReminderText,
   isGrantedKeyword,
   sortKeywords,
 } from "../../viewmodel/keywordProps.ts";
@@ -868,20 +870,29 @@ function CardInfoPanel({
 
       {/* Keywords */}
       {keywords.length > 0 && (
-        <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
+        <div className="pointer-events-auto mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
           {keywords.map((kw, i) => {
             const granted = isGrantedKeyword(kw, obj.base_keywords);
             const source = keywordSources.get(getKeywordName(kw));
+            const reminder = getKeywordReminderText(kw);
+            const tooltipId = reminder ? `card-preview-keyword-${obj.id}-${i}` : undefined;
             return (
               <span
                 key={i}
-                className={granted ? "text-indigo-300" : "text-white"}
+                tabIndex={reminder ? 0 : undefined}
+                aria-describedby={tooltipId}
+                className={`group relative cursor-default rounded-sm focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/60 ${granted ? "text-indigo-300" : "text-white"}`}
               >
                 {getKeywordDisplayText(kw)}
                 {source && (
                   <span className="ml-1 text-[10px] text-indigo-400/80">
                     {t("preview.fromSource", { source })}
                   </span>
+                )}
+                {reminder && (
+                  <GameplayTooltip id={tooltipId} className="right-auto left-0 mb-1.5 w-52 px-2.5 py-1.5 text-[10px] font-normal text-slate-200 shadow-xl">
+                    {reminder}
+                  </GameplayTooltip>
                 )}
               </span>
             );
