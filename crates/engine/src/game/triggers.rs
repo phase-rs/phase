@@ -15168,6 +15168,49 @@ pub mod tests {
         )
         .expect("opponent sacrifices a creature");
 
+        // #1793: the deferred flush now routes through `begin_trigger_ordering`,
+        // so the two same-controller deferred triggers (Undying dies-trigger +
+        // targeted observer) surface a CR 603.3b ordering prompt before
+        // dispatch. Order the no-input Undying trigger first so it reaches the
+        // stack, leaving the targeted observer to pause on its own target
+        // selection.
+        let WaitingFor::OrderTriggers {
+            triggers: order_choices,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "the two same-controller deferred triggers must surface a CR 603.3b \
+                 ordering prompt after the deferred flush, got {:?}",
+                state.waiting_for
+            );
+        };
+        // The reflexive opponent sacrifice itself kills a creature, so the
+        // dies-observer fires again for that death: the co-triggered group is
+        // the Undying dies-trigger plus one targeted observer per creature that
+        // died (Young Wolf + the sacrificed opponent). All are P0-controlled and
+        // ordered together (CR 603.3b).
+        assert!(
+            order_choices.len() >= 2,
+            "the co-triggered group (Undying dies-trigger + targeted dies-observers) \
+             must be ordered together (issue #423), got {}",
+            order_choices.len()
+        );
+        let undying_idx = order_choices
+            .iter()
+            .position(|t| t.source_name == "Young Wolf")
+            .expect("the Undying dies-trigger must be one of the ordered triggers");
+        let undying_first: Vec<usize> = std::iter::once(undying_idx)
+            .chain((0..order_choices.len()).filter(|&i| i != undying_idx))
+            .collect();
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::OrderTriggers {
+                order: undying_first,
+            },
+        )
+        .expect("submit deferred-trigger order");
+
         // (iii) The drained targeted observer reached its own target selection.
         assert!(
             matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
@@ -15184,21 +15227,39 @@ pub mod tests {
             "the Undying dies-trigger must have reached the stack via the deferred flush"
         );
 
-        // Pick the observer's target, then resolve everything. Undying returns.
-        crate::game::engine::apply_as_current(
-            &mut state,
-            GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(opp_b)),
-            },
-        )
-        .expect("choose observer Tap target");
-        resolve_stack_until_paused(&mut state);
+        // Drive the flush to completion: each targeted dies-observer picks a
+        // legal Tap target (opp_b is always a legal creature target), and the
+        // stack resolves. The #423 invariant: nothing is dropped and Undying
+        // returns its creature to the battlefield.
+        let mut guard = 0;
+        while state.objects.get(&young_wolf).map(|o| o.zone) != Some(Zone::Battlefield) {
+            guard += 1;
+            assert!(
+                guard < 16,
+                "issue #423 deferred flush failed to settle (state: {:?})",
+                state.waiting_for
+            );
+            match &state.waiting_for {
+                WaitingFor::TriggerTargetSelection { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(opp_b)),
+                        },
+                    )
+                    .expect("choose observer Tap target");
+                }
+                _ => {
+                    resolve_stack_until_paused(&mut state);
+                }
+            }
+        }
 
         let wolf = state.objects.get(&young_wolf).expect("wolf tracked");
         assert_eq!(
             wolf.zone,
             Zone::Battlefield,
-            "Undying returned the sacrificed creature despite the co-triggered observer"
+            "Undying returned the sacrificed creature despite the co-triggered observers"
         );
     }
 
