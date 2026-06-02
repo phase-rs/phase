@@ -26,6 +26,7 @@ pub mod additional_phase;
 pub mod amass;
 pub mod animate;
 pub mod attach;
+pub mod attractions;
 pub mod awaken;
 pub mod become_copy;
 pub mod become_monarch;
@@ -1849,6 +1850,9 @@ pub fn resolve_effect(
             venture::resolve_venture_into(state, ability, *dungeon, events)
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
+        Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
+            attractions::resolve(state, ability, events)
+        }
         Effect::ProcessRadCounters => rad_counters::resolve(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
         Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),

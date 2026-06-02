@@ -275,7 +275,7 @@ pub fn create_object(
 pub fn move_to_zone(
     state: &mut GameState,
     object_id: ObjectId,
-    to: Zone,
+    mut to: Zone,
     events: &mut Vec<GameEvent>,
 ) {
     // CR 903.9a: A fresh zone change resets the "declined zone return" flag
@@ -316,6 +316,13 @@ pub fn move_to_zone(
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
+    let redirect_attraction_to_command = super::attractions::is_attraction_card(obj)
+        && !matches!(to, Zone::Battlefield | Zone::Exile | Zone::Command);
+    if redirect_attraction_to_command {
+        // CR 717.6: Astrotorium-backed cards that would move to any zone other
+        // than battlefield, exile, or command move to command instead.
+        to = Zone::Command;
+    }
     let unattached_from = if from == Zone::Battlefield {
         obj.attached_to
             .map(super::effects::attach::target_ref_from_attach_target)
@@ -335,6 +342,15 @@ pub fn move_to_zone(
     apply_zone_exit_cleanup(state, object_id, from, to);
 
     remove_from_zone(state, object_id, from, owner);
+    if redirect_attraction_to_command {
+        // CR 717.6a: Cards redirected this way are kept in the command-zone
+        // junkyard pile, separate from the Attraction deck.
+        state
+            .objects
+            .get_mut(&object_id)
+            .expect("object exists")
+            .in_attraction_deck = false;
+    }
     add_to_zone(state, object_id, to, owner);
 
     // CR 603.6c: Drop the leaving permanent from the TriggerIndex. The
@@ -681,7 +697,23 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
             state.stack_paid_facts.remove(&object_id);
         }
         Zone::Exile => state.exile.retain(|id| *id != object_id),
-        Zone::Command => state.command_zone.retain(|id| *id != object_id),
+        Zone::Command => {
+            if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| obj.in_attraction_deck)
+            {
+                state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == owner)
+                    .expect("owner exists")
+                    .attraction_deck
+                    .retain(|id| *id != object_id);
+            } else {
+                state.command_zone.retain(|id| *id != object_id);
+            }
+        }
     }
 }
 
@@ -705,7 +737,23 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
         Zone::Battlefield => state.battlefield.push_back(object_id),
         Zone::Stack => {} // Stack entries are managed separately via StackEntry
         Zone::Exile => state.exile.push_back(object_id),
-        Zone::Command => state.command_zone.push_back(object_id),
+        Zone::Command => {
+            if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| obj.in_attraction_deck)
+            {
+                state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == owner)
+                    .expect("owner exists")
+                    .attraction_deck
+                    .push_back(object_id);
+            } else {
+                state.command_zone.push_back(object_id);
+            }
+        }
     }
 }
 

@@ -396,7 +396,7 @@ pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
             main_deck: names,
             sideboard: Vec::new(),
             commander: Vec::new(),
-            bracket_tier: Default::default(),
+            ..Default::default()
         };
         let payload = resolve_player_deck_list(db, &list);
         let profile = DeckProfile::analyze(&payload.main_deck);
@@ -1407,6 +1407,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                 main_deck: deck_data.main_deck,
                 sideboard: deck_data.sideboard,
                 commander: deck_data.commander,
+                attraction_deck: deck_data.attraction_deck,
                 bracket_tier: deck_data.bracket_tier,
             })
         }
@@ -1477,7 +1478,7 @@ mod bracket_estimate_tests {
             commander: vec!["Atraxa, Praetors' Voice".into()],
             main_deck: vec!["Smothering Tithe".into(), "Forest".into()],
             sideboard: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         };
         let result = estimate_bracket_inner(&deck);
         let est = result.expect("estimate present");
@@ -1494,7 +1495,7 @@ mod bracket_estimate_tests {
             commander: vec!["Cmdr".into()],
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         };
         assert!(estimate_bracket_inner(&deck).is_none());
     }

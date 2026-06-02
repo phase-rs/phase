@@ -793,9 +793,7 @@ mod tests {
     fn test_deck() -> engine::starter_decks::DeckData {
         engine::starter_decks::DeckData {
             main_deck: vec![],
-            sideboard: vec![],
-            commander: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         }
     }
 

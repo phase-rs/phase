@@ -29,6 +29,7 @@ use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::primitives::parse_number as nom_parse_number;
 use super::oracle_nom::primitives::scan_contains;
 
+use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
 };
@@ -1609,8 +1610,8 @@ pub(crate) fn parse_oracle_ir(
     let oracle_text_owned = normalize_card_name_refs(oracle_text, card_name);
     let lines: Vec<&str> = oracle_text_owned.split('\n').collect();
 
-    // CR 714: Pre-parse Saga chapter lines into triggers + ETB replacement.
-    let saga_consumed = if subtypes.iter().any(|s| s == "Saga") {
+    // CR 714 / CR 717: Pre-parse Saga chapters and Attraction visit lines.
+    let mut preparsed_consumed = if subtypes.iter().any(|s| s == "Saga") {
         let (chapter_triggers, etb_replacement, consumed) = parse_saga_chapters(&lines, card_name);
         result.triggers.extend(chapter_triggers);
         result.replacements.push(etb_replacement);
@@ -1618,6 +1619,14 @@ pub(crate) fn parse_oracle_ir(
     } else {
         std::collections::HashSet::new()
     };
+    if subtypes
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("Attraction"))
+    {
+        let (visit_triggers, consumed) = parse_attraction_visit_triggers(&lines, card_name);
+        result.triggers.extend(visit_triggers);
+        preparsed_consumed.extend(consumed);
+    }
 
     // CR 716: Pre-parse Class level sections into level-gated abilities.
     if subtypes.iter().any(|s| s == "Class") {
@@ -1759,8 +1768,8 @@ pub(crate) fn parse_oracle_ir(
             i += 1;
             continue;
         }
-        // CR 714: Skip lines already consumed by the saga pre-parser.
-        if saga_consumed.contains(&i) {
+        // CR 714 / CR 717: Skip lines consumed by saga/attraction pre-parsers.
+        if preparsed_consumed.contains(&i) {
             i += 1;
             continue;
         }
@@ -2844,7 +2853,7 @@ pub(crate) fn parse_oracle_ir(
             let mut next_i = i + 1;
             while next_i < lines.len() {
                 if level_consumed.contains(&next_i)
-                    || saga_consumed.contains(&next_i)
+                    || preparsed_consumed.contains(&next_i)
                     || spacecraft_consumed.contains(&next_i)
                     || parse_oracle_block(&lines, next_i).is_some()
                 {

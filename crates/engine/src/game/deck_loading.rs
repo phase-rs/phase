@@ -27,6 +27,9 @@ pub struct PlayerDeckPayload {
     pub sideboard: Vec<DeckEntry>,
     #[serde(default)]
     pub commander: Vec<DeckEntry>,
+    /// CR 717.2: Optional supplementary Attraction deck (typically 10 cards).
+    #[serde(default)]
+    pub attraction_deck: Vec<DeckEntry>,
     /// The declared bracket tier for this player's deck. Defaults to `Core`
     /// so that existing serialized payloads and test fixtures that omit the
     /// field continue to deserialize correctly.
@@ -57,6 +60,8 @@ pub struct PlayerDeckList {
     pub sideboard: Vec<String>,
     #[serde(default)]
     pub commander: Vec<String>,
+    #[serde(default)]
+    pub attraction_deck: Vec<String>,
     /// Declared bracket tier for this player's deck. Defaults to `Core` for
     /// backward-compatible deserialization (payloads that predate this field
     /// omit it, which `#[serde(default)]` handles transparently).
@@ -111,6 +116,7 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
+        attraction_deck: resolve_names(db, &list.attraction_deck),
         bracket_tier: list.bracket_tier,
     }
 }
@@ -128,12 +134,14 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             main_deck: resolve_names(db, &list.player.main_deck),
             sideboard: resolve_names(db, &list.player.sideboard),
             commander: resolve_names(db, &list.player.commander),
+            attraction_deck: resolve_names(db, &list.player.attraction_deck),
             bracket_tier: list.player.bracket_tier,
         },
         opponent: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.opponent.main_deck),
             sideboard: resolve_names(db, &list.opponent.sideboard),
             commander: resolve_names(db, &list.opponent.commander),
+            attraction_deck: resolve_names(db, &list.opponent.attraction_deck),
             bracket_tier: list.opponent.bracket_tier,
         },
         ai_decks: list
@@ -143,6 +151,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 main_deck: resolve_names(db, &deck.main_deck),
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
+                attraction_deck: resolve_names(db, &deck.attraction_deck),
                 bracket_tier: deck.bracket_tier,
             })
             .collect(),
@@ -181,6 +190,36 @@ pub fn create_commander_from_card_face(
     obj.is_commander = true;
 
     obj_id
+}
+
+/// CR 717.2: Create an Attraction in the supplementary deck (command zone).
+pub fn create_attraction_deck_card(
+    state: &mut GameState,
+    card_face: &CardFace,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Command);
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    apply_card_face_to_object(obj, card_face);
+    obj.in_attraction_deck = true;
+    state.command_zone.retain(|id| *id != obj_id);
+    state
+        .players
+        .iter_mut()
+        .find(|p| p.id == owner)
+        .expect("owner exists")
+        .attraction_deck
+        .push_back(obj_id);
+    obj_id
+}
+
+fn load_player_attraction_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
+    for entry in entries {
+        for _ in 0..entry.count {
+            create_attraction_deck_card(state, &entry.card, owner);
+        }
+    }
 }
 
 /// Load deck data into a GameState, creating GameObjects in each player's library and shuffling.
@@ -305,6 +344,12 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         }
     }
 
+    load_player_attraction_deck(state, &payload.player.attraction_deck, PlayerId(0));
+    load_player_attraction_deck(state, &payload.opponent.attraction_deck, PlayerId(1));
+    for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
+        load_player_attraction_deck(state, &ai_deck.attraction_deck, PlayerId((2 + i) as u8));
+    }
+
     // Collect all creature subtypes for Changeling CDA expansion.
     // CR 205.2b + CR 205.3m + CR 308.1: creature subtypes are shared by Creature
     // and Kindred (legacy Tribal) faces. Subtype categories are disjoint, so a
@@ -347,10 +392,11 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     sorted.sort();
     state.all_creature_types = sorted;
 
-    // Shuffle each player's library
+    // Shuffle each player's library and Attraction deck (CR 103.3a / CR 717.2).
     let GameState { players, rng, .. } = state;
     for player in players.iter_mut() {
         crate::util::im_ext::shuffle_vector(&mut player.library, rng);
+        crate::util::im_ext::shuffle_vector(&mut player.attraction_deck, rng);
     }
 }
 
@@ -472,6 +518,7 @@ mod tests {
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
+            attraction_lights: vec![],
         }
     }
 
@@ -522,6 +569,7 @@ mod tests {
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
+            attraction_lights: vec![],
         }
     }
 
@@ -644,7 +692,7 @@ mod tests {
                     count: 3,
                 }],
                 commander: vec![],
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![DeckEntry {
@@ -656,7 +704,7 @@ mod tests {
                     count: 2,
                 }],
                 commander: vec![],
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             ai_decks: vec![],
             ai_difficulties: vec![],
@@ -935,13 +983,13 @@ mod tests {
                 commander: vec![String::from(
                     "Brigid, Clachan's Heart // Brigid, Doun's Mind",
                 )],
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             opponent: PlayerDeckList {
                 main_deck: vec![],
                 sideboard: vec![],
                 commander: vec![],
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             ..Default::default()
         };

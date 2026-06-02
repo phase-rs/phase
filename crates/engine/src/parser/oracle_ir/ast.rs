@@ -406,6 +406,12 @@ pub(crate) enum ImperativeFamilyAst {
     VentureIntoUndercity,
     /// CR 725: "take the initiative"
     TakeTheInitiative,
+    /// CR 701.51b: "open N Attractions"
+    OpenAttractions {
+        count: u32,
+    },
+    /// CR 701.52: "roll to visit your Attractions"
+    RollToVisitAttractions,
     Proliferate,
     /// CR 701.56a: Time travel — add or remove time counters.
     TimeTravel,

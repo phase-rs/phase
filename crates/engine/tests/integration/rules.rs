@@ -96,7 +96,7 @@ pub fn run_combat(
 }
 
 // Mechanic test modules (stubs -- populated in Plans 02 and 03)
-#[path = "rules/battle.rs"]
+mod attractions;
 mod battle;
 #[path = "rules/casting.rs"]
 mod casting;

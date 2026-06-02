@@ -1,5 +1,6 @@
 pub mod ability_utils;
 pub mod arithmetic;
+pub mod attractions;
 pub mod bending;
 pub mod bracket_estimate;
 pub mod casting;

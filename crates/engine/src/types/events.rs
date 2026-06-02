@@ -568,6 +568,22 @@ pub enum GameEvent {
     InitiativeTaken {
         player_id: PlayerId,
     },
+    /// CR 701.51c: An Attraction was opened onto the battlefield.
+    AttractionOpened {
+        player_id: PlayerId,
+        object_id: ObjectId,
+    },
+    /// CR 701.52: The active player rolled to visit their Attractions.
+    AttractionsRolledToVisit {
+        player_id: PlayerId,
+        roll: u8,
+    },
+    /// CR 701.52a + CR 702.159a: A specific Attraction was visited this roll.
+    AttractionVisited {
+        player_id: PlayerId,
+        roll: u8,
+        attraction_id: ObjectId,
+    },
     /// Avatar crossover: A firebending ability resolved and produced mana.
     Firebend {
         source_id: ObjectId,

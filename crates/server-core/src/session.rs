@@ -374,6 +374,7 @@ impl GameSession {
                 main_deck: deck.main_deck.clone(),
                 sideboard: deck.sideboard.clone(),
                 commander: deck.commander.clone(),
+                attraction_deck: deck.attraction_deck.clone(),
                 bracket_tier: deck.bracket_tier,
             };
             // The resolver (`ServerDeckResolver::resolve` in phase-server)
@@ -1306,6 +1307,7 @@ mod tests {
                     deck_copy_limit: None,
                     metadata: Default::default(),
                     rarities: Default::default(),
+                    attraction_lights: vec![],
                 },
                 count: 10,
             }],
