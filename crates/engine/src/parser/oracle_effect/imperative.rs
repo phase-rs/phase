@@ -5041,6 +5041,19 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn));
     }
 
+    // CR 724.2: "end the combat phase" (Mandate of Peace). Whole-phrase
+    // imperative with no target; anchored nom production mirroring the
+    // "end the turn" parse so unrelated clauses cannot accidentally match it.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("end the combat phase"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase));
+    }
+
     // CR 500.8: Additional step/phase effects can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
     // Intercept early regardless of first_word.
@@ -10381,6 +10394,25 @@ mod tests {
         assert!(
             matches!(ast, ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn)),
             "expected Effect::EndTheTurn"
+        );
+    }
+
+    /// CR 724.2: "end the combat phase" parses to the no-target
+    /// `Effect::EndCombatPhase` (Mandate of Peace).
+    #[test]
+    fn end_the_combat_phase_parses_to_end_combat_phase_effect() {
+        let ast = parse_imperative_family_ast(
+            "end the combat phase",
+            "end the combat phase",
+            &mut ParseContext::default(),
+        )
+        .expect("'end the combat phase' should parse");
+        assert!(
+            matches!(
+                ast,
+                ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase)
+            ),
+            "expected Effect::EndCombatPhase"
         );
     }
 

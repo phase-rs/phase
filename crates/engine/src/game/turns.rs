@@ -95,6 +95,34 @@ pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
     enter_phase(state, Phase::Cleanup, events);
 }
 
+/// CR 724.2d: End the current combat phase by removing everything from combat,
+/// expiring "until end of combat" effects, and skipping straight to the
+/// postcombat main phase. Mirrors the end-of-combat teardown the `EndCombat`
+/// step performs (see the `Phase::EndCombat` arm of `advance_phase`), but skips
+/// the intervening end-of-combat step so its "at end of combat" triggers do not
+/// fire (CR 724.2e). Drives `Effect::EndCombatPhase` (Mandate of Peace).
+pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 724.2d / CR 511.3: Remove all creatures and planeswalkers from combat.
+    state.combat = None;
+    // CR 724.2d: Effects that last "until end of combat" expire — continuous
+    // effects, replacement definitions, and pending damage replacements alike,
+    // matching the normal end-of-combat prune.
+    super::layers::prune_end_of_combat_effects(state);
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        obj.replacement_definitions
+            .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+    }
+    state
+        .pending_damage_replacements
+        .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+
+    // CR 724.2d: Skip straight to the postcombat main phase, skipping any
+    // intervening steps (including the end-of-combat step — CR 724.2e). Any
+    // extra combat phases scheduled for this turn are also skipped.
+    state.extra_phases.clear();
+    enter_phase(state, Phase::PostCombatMain, events);
+}
+
 /// Enter a phase directly: set phase, run the CR 703.4q step-end empty
 /// unspent mana event for each player in APNAP order through the replacement
 /// pipeline, then (when the queue empties) reset priority (CR 117.3a),

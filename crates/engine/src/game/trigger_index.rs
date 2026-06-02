@@ -666,6 +666,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::BecomeMonarch
         | EffectKind::Proliferate
         | EffectKind::EndTheTurn
+        | EffectKind::EndCombatPhase
         | EffectKind::Populate
         | EffectKind::Clash
         | EffectKind::Vote

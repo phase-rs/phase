@@ -352,13 +352,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 608.3: Determine destination zone for spells.
     if is_spell {
-        let end_the_turn_resolving_object = ability
-            .as_ref()
-            .is_some_and(|ability| matches!(ability.effect, Effect::EndTheTurn));
-        let dest = if end_the_turn_resolving_object {
-            // CR 724.1b: The "end the turn" procedure exiles every object on
-            // the stack, including the resolving object that `resolve_top`
-            // already popped before executing its effect.
+        let ends_turn_or_combat_phase_resolving_object = ability.as_ref().is_some_and(|ability| {
+            matches!(ability.effect, Effect::EndTheTurn | Effect::EndCombatPhase)
+        });
+        let dest = if ends_turn_or_combat_phase_resolving_object {
+            // CR 724.1b / CR 724.2b: The "end the turn" and "end the combat
+            // phase" procedures exile every object on the stack, including the
+            // resolving object that `resolve_top` already popped before
+            // executing its effect.
             Zone::Exile
         } else if paradigm_armed {
             // CR 702.xxx: Paradigm-armed spell exiles instead of going to

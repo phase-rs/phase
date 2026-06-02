@@ -67,6 +67,7 @@ pub mod double;
 pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod effect;
+pub mod end_combat_phase;
 pub mod end_the_turn;
 pub mod endure;
 pub mod energy;
@@ -1680,6 +1681,7 @@ pub fn resolve_effect(
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
         Effect::Proliferate => proliferate::resolve(state, ability, events),
         Effect::EndTheTurn => end_the_turn::resolve(state, ability, events),
+        Effect::EndCombatPhase => end_combat_phase::resolve(state, ability, events),
         Effect::Populate => populate::resolve(state, ability, events),
         Effect::Clash => clash::resolve(state, ability, events),
         // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
