@@ -897,4 +897,19 @@ mod tests {
             assert!(err.contains("player_token"));
         }
     }
+
+    mod draft_action_wire_guard_tests {
+        use crate::draft_action_wire_guard::guard_draft_action;
+
+        #[test]
+        fn draft_action_accepts_valid_code() {
+            assert!(guard_draft_action("ABC123").is_ok());
+        }
+
+        #[test]
+        fn draft_action_rejects_oversized_code() {
+            let err = guard_draft_action(&"x".repeat(65)).unwrap_err();
+            assert!(err.contains("draft_code"));
+        }
+    }
 }

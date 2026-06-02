@@ -1,4 +1,5 @@
 pub mod deck_resolve;
+pub mod draft_action_wire_guard;
 pub mod draft_session;
 pub mod draft_wire_guard;
 pub mod emote_guard;
@@ -16,6 +17,7 @@ pub mod session;
 pub mod starter_decks;
 
 pub use deck_resolve::resolve_deck;
+pub use draft_action_wire_guard::guard_draft_action;
 pub use draft_session::{generate_draft_code, DraftSession, DraftSessionManager};
 pub use draft_wire_guard::{
     guard_create_draft_with_settings, guard_join_draft_with_password, guard_reconnect_draft,
