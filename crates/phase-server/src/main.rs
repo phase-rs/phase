@@ -46,6 +46,7 @@ use server_core::protocol::{
     MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
+use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{ActionResult, GameSession, SessionManager};
 use server_core::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
 use std::time::Duration;
@@ -3897,6 +3898,14 @@ async fn handle_client_message(
                 return;
             }
             if require_host(identity, socket).await.is_err() {
+                return;
+            }
+
+            if let Err(reason) = guard_seat_mutation(&mutation) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
                 return;
             }
 

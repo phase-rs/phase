@@ -13,6 +13,7 @@ pub mod lookup_join_guard;
 pub mod persist;
 pub mod protocol;
 pub mod reconnect;
+pub mod seat_mutation_wire_guard;
 pub mod session;
 pub mod spectator_wire_guard;
 pub mod starter_decks;
@@ -36,6 +37,7 @@ pub use protocol::{
     SeatMutation, SeatView, ServerMessage,
 };
 pub use reconnect::ReconnectManager;
+pub use seat_mutation_wire_guard::guard_seat_mutation;
 pub use session::{
     acting_player, acting_players, generate_game_code, generate_player_token, is_acting,
     SessionManager,

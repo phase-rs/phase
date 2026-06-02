@@ -16613,6 +16613,140 @@ mod tests {
     }
 
     #[test]
+    fn convoke_from_exile_stacks_with_red_spell_cost_reduction_on_hybrid_cost() {
+        let mut state = setup_game_at_main_phase();
+        let party_thrasher = create_object(
+            &mut state,
+            CardId(260),
+            PlayerId(0),
+            "Party Thrasher".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&party_thrasher)
+            .unwrap()
+            .static_definitions
+            .push(
+                parse_static_line("Noncreature spells you cast from exile have convoke.")
+                    .expect("party thrasher static should parse"),
+            );
+
+        let ruby_medallion = create_object(
+            &mut state,
+            CardId(261),
+            PlayerId(0),
+            "Ruby Medallion".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&ruby_medallion)
+            .unwrap()
+            .static_definitions
+            .push(
+                parse_static_line("Red spells you cast cost {1} less to cast.")
+                    .expect("ruby medallion static should parse"),
+            );
+
+        let helper = create_object(
+            &mut state,
+            CardId(262),
+            PlayerId(0),
+            "Red Helper".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&helper).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color.push(ManaColor::Red);
+        }
+
+        let manamorphose = create_object(
+            &mut state,
+            CardId(263),
+            PlayerId(0),
+            "Manamorphose".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&manamorphose).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.color.push(ManaColor::Red);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::RedGreen],
+                generic: 1,
+            };
+            obj.casting_permissions
+                .push(crate::types::ability::CastingPermission::PlayFromExile {
+                    duration: crate::types::ability::Duration::Permanent,
+                    granted_to: PlayerId(0),
+                    frequency: CastFrequency::Unlimited,
+                    source_id: None,
+                    exiled_by_ability_controller: None,
+                    mana_spend_permission: None,
+                });
+        }
+
+        let cast_result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: manamorphose,
+                card_id: CardId(263),
+                targets: vec![],
+            },
+        )
+        .expect("manamorphose should be castable from exile");
+        assert!(matches!(
+            cast_result.waiting_for,
+            WaitingFor::ManaPayment {
+                convoke_mode: Some(ConvokeMode::Convoke),
+                ..
+            }
+        ));
+
+        let pending = state
+            .pending_cast
+            .as_ref()
+            .expect("cast should populate pending cast");
+        assert_eq!(
+            pending.cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::RedGreen],
+                generic: 0,
+            },
+            "ruby medallion should reduce only the generic mana from {{1}}{{R/G}} to {{R/G}}"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::TapForConvoke {
+                object_id: helper,
+                mana_type: ManaType::Red,
+            },
+        )
+        .expect("red helper should pay the red half of {R/G} via convoke");
+
+        let finalize = apply_as_current(&mut state, GameAction::PassPriority)
+            .expect("convoke payment should finalize the cast");
+        assert!(matches!(finalize.waiting_for, WaitingFor::Priority { .. }));
+        assert!(matches!(
+            state.stack.last().map(|entry| &entry.kind),
+            Some(StackEntryKind::Spell {
+                actual_mana_spent: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn improvise_castability_preview_counts_untapped_artifacts_for_generic_cost() {
         let mut state = setup_game_at_main_phase();
         let spell = create_object(
