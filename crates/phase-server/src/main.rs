@@ -1798,6 +1798,27 @@ fn spawn_pick_timer(
     });
 }
 
+type DraftPickWindow = (draft_core::types::DraftStatus, u8, u8);
+
+fn should_rearm_pick_timer(
+    before: Option<DraftPickWindow>,
+    after: Option<DraftPickWindow>,
+) -> bool {
+    let Some(after) = after else {
+        return false;
+    };
+    if after.0 != draft_core::types::DraftStatus::Drafting {
+        return false;
+    }
+    match before {
+        Some((draft_core::types::DraftStatus::Lobby, _, _)) => true,
+        Some((draft_core::types::DraftStatus::Drafting, pack, pick)) => {
+            after.1 != pack || after.2 != pick
+        }
+        _ => false,
+    }
+}
+
 struct ServerDeckResolver<'a> {
     db: &'a CardDatabase,
 }
@@ -4106,35 +4127,44 @@ async fn handle_client_message(
 
             let result = {
                 let mut mgr = draft_state.lock().await;
-                mgr.handle_draft_action(
+                let before_window = mgr.sessions.get(&draft_code).map(|s| {
+                    (
+                        s.session.status,
+                        s.session.current_pack_number,
+                        s.session.pick_number,
+                    )
+                });
+                let result = mgr.handle_draft_action(
                     &draft_code,
                     &token,
                     action,
                     pack_generator
                         .as_ref()
                         .map(|generator| generator as &dyn draft_core::pack_source::PackSource),
-                )
+                );
+                let after_window = mgr.sessions.get(&draft_code).map(|s| {
+                    (
+                        s.session.status,
+                        s.session.current_pack_number,
+                        s.session.pick_number,
+                    )
+                });
+                let should_rearm_timer =
+                    result.is_ok() && should_rearm_pick_timer(before_window, after_window);
+                result.map(|views| (views, should_rearm_timer))
             };
 
             match result {
-                Ok(views) => {
+                Ok((views, should_rearm_timer)) => {
                     // Broadcast DraftStateUpdate to all connected sockets in the pod
                     broadcast_draft_views(&draft_code, &views, connections, draft_state).await;
 
-                    // (Re)arm the pick timer for the next pick window whenever
-                    // the draft is actively drafting. It was previously armed
-                    // only on StartDraft, so once it fired it was never
-                    // renewed: every pick window after the first had no
-                    // auto-pick protection, and a single idle or disconnected
-                    // seat could stall the whole pod indefinitely.
-                    // spawn_pick_timer aborts any prior timer, so each pick
-                    // resets the window.
-                    let drafting = {
-                        let mgr = draft_state.lock().await;
-                        let status = mgr.sessions.get(&draft_code).map(|s| s.session.status);
-                        status == Some(draft_core::types::DraftStatus::Drafting)
-                    };
-                    if drafting {
+                    // (Re)arm only when a new pick window begins: StartDraft
+                    // or a completed round that advanced pack/pick position.
+                    // A single partial pick must not reset the whole pod's
+                    // timeout while other seats still owe picks in the current
+                    // window.
+                    if should_rearm_timer {
                         spawn_pick_timer(
                             draft_state.clone(),
                             connections.clone(),
@@ -4731,5 +4761,43 @@ mod handshake_tests {
                 "expected {action:?} to be allowed from client"
             );
         }
+    }
+
+    #[test]
+    fn pick_timer_rearms_when_draft_starts() {
+        use draft_core::types::DraftStatus;
+
+        assert!(should_rearm_pick_timer(
+            Some((DraftStatus::Lobby, 0, 0)),
+            Some((DraftStatus::Drafting, 0, 0)),
+        ));
+    }
+
+    #[test]
+    fn pick_timer_rearms_when_pick_window_advances() {
+        use draft_core::types::DraftStatus;
+
+        assert!(should_rearm_pick_timer(
+            Some((DraftStatus::Drafting, 0, 0)),
+            Some((DraftStatus::Drafting, 0, 1)),
+        ));
+        assert!(should_rearm_pick_timer(
+            Some((DraftStatus::Drafting, 0, 13)),
+            Some((DraftStatus::Drafting, 1, 0)),
+        ));
+    }
+
+    #[test]
+    fn pick_timer_does_not_rearm_for_partial_pick_or_non_drafting_status() {
+        use draft_core::types::DraftStatus;
+
+        assert!(!should_rearm_pick_timer(
+            Some((DraftStatus::Drafting, 0, 0)),
+            Some((DraftStatus::Drafting, 0, 0)),
+        ));
+        assert!(!should_rearm_pick_timer(
+            Some((DraftStatus::Drafting, 2, 13)),
+            Some((DraftStatus::Deckbuilding, 2, 13)),
+        ));
     }
 }
