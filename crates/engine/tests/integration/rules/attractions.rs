@@ -51,6 +51,7 @@ fn test_attraction_face(name: &str, oracle: &str, lights: Vec<u8>) -> CardFace {
         strive_cost: None,
         brawl_commander: false,
         is_commander: false,
+        is_oathbreaker: false,
         deck_copy_limit: None,
         parse_warnings: vec![],
         metadata: Default::default(),
