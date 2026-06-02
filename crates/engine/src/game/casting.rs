@@ -21717,6 +21717,358 @@ mod tests {
         }
     }
 
+    /// Build a Kozilek's Command spell object from the REAL parsed Oracle text
+    /// (the same `parse_oracle_text` entry the card-data pipeline uses), so the
+    /// runtime tests below drive the four parsed modes — not a hand-built
+    /// `ModalChoice`. The parsed abilities + modal metadata are written onto a
+    /// fresh hand-zone instant with the printed `{X}{C}{C}` cost.
+    fn build_kozileks_command(state: &mut GameState, card_id: CardId) -> ObjectId {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Choose two —\n\
+             • Target player creates X 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this token: Add {C}.\"\n\
+             • Target player scries X, then draws a card.\n\
+             • Exile target creature with mana value X or less.\n\
+             • Exile up to X target cards from graveyards.",
+            "Kozilek's Command",
+            &[],
+            &["Kindred".to_string(), "Instant".to_string()],
+            &["Eldrazi".to_string()],
+        );
+        assert_eq!(
+            parsed.abilities.len(),
+            4,
+            "Kozilek's Command must parse four modes before driving the runtime"
+        );
+        let spell_id = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            "Kozilek's Command".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&spell_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![
+                ManaCostShard::X,
+                ManaCostShard::Colorless,
+                ManaCostShard::Colorless,
+            ],
+            generic: 0,
+        };
+        // Attach the real parsed abilities + modal. These are the same fields
+        // `apply_card_face_to_object` writes; the spell is cast straight from
+        // hand without a layer re-evaluation, so the live fields suffice.
+        obj.abilities = Arc::new(parsed.abilities.clone());
+        obj.base_abilities = Arc::new(parsed.abilities);
+        obj.modal = parsed.modal;
+        spell_id
+    }
+
+    fn add_creature_with_mv(
+        state: &mut GameState,
+        card_id: CardId,
+        controller: PlayerId,
+        name: &str,
+        mana_value: u32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            card_id,
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.mana_cost = ManaCost::generic(mana_value);
+        id
+    }
+
+    /// CR 700.2 + CR 700.2c + CR 601.2b: Pairing A drives the real four-mode
+    /// Kozilek's Command through `apply()` with modes [0, 2] chosen (create X
+    /// Eldrazi Spawn + exile target creature with mana value X or less). After
+    /// X = 2 is announced (CR 601.2b before targets), the MV<=2 creature is a
+    /// legal exile target while the MV-3 creature is not (X-resolved Cmc
+    /// legality). Resolution creates exactly 2 Eldrazi Spawn tokens for the
+    /// targeted player and exiles the chosen creature.
+    #[test]
+    fn kozileks_command_modes_tokens_and_exile_creature_end_to_end() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = build_kozileks_command(&mut state, CardId(61));
+
+        let small = add_creature_with_mv(&mut state, CardId(62), PlayerId(1), "Two Drop", 2);
+        let big = add_creature_with_mv(&mut state, CardId(63), PlayerId(1), "Three Drop", 3);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 4);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(61), &mut events).unwrap();
+        // Modes 0 (tokens) and 2 (exile target creature with MV X or less).
+        state.waiting_for =
+            handle_select_modes(&mut state, PlayerId(0), vec![0, 2], &mut events).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "X must be announced before mode-2 target legality (CR 601.2b), got {:?}",
+            state.waiting_for
+        );
+
+        state.waiting_for = apply_as_current(&mut state, GameAction::ChooseX { value: 2 })
+            .unwrap()
+            .waiting_for;
+        // Mode 0 (tokens) targets a player; mode 2 targets a creature. After X is
+        // chosen, the deferred target slots are built with the resolved X.
+        let WaitingFor::TargetSelection { target_slots, .. } = &state.waiting_for else {
+            panic!(
+                "expected target selection after choosing X, got {:?}",
+                state.waiting_for
+            );
+        };
+        // The creature slot must include the MV<=2 creature and exclude the MV-3
+        // creature (CR 202.3 + X = 2). Locate the slot whose legal set contains
+        // the small creature (the other slot is the player-owner slot for tokens).
+        let creature_slot = target_slots
+            .iter()
+            .find(|slot| slot.legal_targets.contains(&TargetRef::Object(small)))
+            .expect("a target slot must offer the MV<=2 creature as a legal exile target");
+        assert!(
+            !creature_slot
+                .legal_targets
+                .contains(&TargetRef::Object(big)),
+            "with X = 2, the MV-3 creature must NOT be a legal exile target"
+        );
+
+        // Select the targeted player (controller) for the token owner and the
+        // small creature for the exile. Walk slots in order, matching each to the
+        // legal target it offers.
+        let mut chosen = Vec::new();
+        for slot in target_slots.iter() {
+            if slot.legal_targets.contains(&TargetRef::Object(small)) {
+                chosen.push(TargetRef::Object(small));
+            } else if slot.legal_targets.contains(&TargetRef::Player(PlayerId(0))) {
+                chosen.push(TargetRef::Player(PlayerId(0)));
+            } else {
+                chosen.push(
+                    slot.legal_targets
+                        .first()
+                        .cloned()
+                        .expect("each slot must offer at least one legal target"),
+                );
+            }
+        }
+        state.waiting_for =
+            apply_as_current(&mut state, GameAction::SelectTargets { targets: chosen })
+                .unwrap()
+                .waiting_for;
+
+        stack::resolve_top(&mut state, &mut events);
+
+        // CR 701.13 + CR 406: the targeted creature is exiled.
+        assert_eq!(
+            state.objects[&small].zone,
+            Zone::Exile,
+            "mode 2 must exile the targeted MV<=2 creature"
+        );
+        assert_eq!(
+            state.objects[&big].zone,
+            Zone::Battlefield,
+            "the untargeted MV-3 creature must remain on the battlefield"
+        );
+        // Mode 0: the targeted player (P0) receives exactly X = 2 Eldrazi Spawn
+        // tokens, each a 0/1 with a Sacrifice: Add {C} ability.
+        let spawns: Vec<ObjectId> = state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| state.objects[id].name == "Eldrazi Spawn")
+            .collect();
+        assert_eq!(
+            spawns.len(),
+            2,
+            "X = 2 must create two Eldrazi Spawn tokens"
+        );
+        for token in &spawns {
+            let obj = &state.objects[token];
+            assert_eq!(
+                obj.owner,
+                PlayerId(0),
+                "tokens belong to the targeted player"
+            );
+            assert_eq!(obj.power, Some(0));
+            assert_eq!(obj.toughness, Some(1));
+            assert!(
+                obj.abilities.iter().any(|ability| {
+                    matches!(*ability.effect, Effect::Mana { .. })
+                        && matches!(
+                            ability.cost,
+                            Some(AbilityCost::Sacrifice {
+                                target: TargetFilter::SelfRef,
+                                count: 1
+                            })
+                        )
+                }),
+                "each Eldrazi Spawn must carry 'Sacrifice this token: Add {{C}}'"
+            );
+        }
+    }
+
+    /// CR 700.2 + CR 601.2b/c + CR 701.22a: Pairing B drives modes [1, 3]
+    /// (scry X then draw + exile up to X target cards from graveyards). This is
+    /// the path the planner flagged as previously unproven in the spell-cast
+    /// direction: the mode-3 "up to X" multi-target maximum is a
+    /// `QuantityExpr::Ref(Variable("X"))` carried on the parsed ability's
+    /// `multi_target` spec. `build_chained_resolved` propagates that spec into
+    /// the resolved chain and `ability_target_legality_needs_chosen_x` inspects
+    /// `multi_target.max`, so the cast must defer target selection until X is
+    /// announced; with X = 2 the mode-3 maximum resolves to 2 graveyard cards.
+    #[test]
+    fn kozileks_command_modes_scry_draw_and_exile_graveyard_end_to_end() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = build_kozileks_command(&mut state, CardId(71));
+
+        // Two cards in P0's graveyard for the mode-3 "up to X" exile.
+        let gy_a = create_object(
+            &mut state,
+            CardId(72),
+            PlayerId(0),
+            "Graveyard Card A".to_string(),
+            Zone::Graveyard,
+        );
+        let gy_b = create_object(
+            &mut state,
+            CardId(73),
+            PlayerId(0),
+            "Graveyard Card B".to_string(),
+            Zone::Graveyard,
+        );
+        // Library cards so the mode-1 scry has cards to look at and the
+        // follow-up draw has a card to draw.
+        for (idx, name) in ["Lib 1", "Lib 2", "Lib 3", "Lib 4"].iter().enumerate() {
+            let id = create_object(
+                &mut state,
+                CardId(74 + idx as u64),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            );
+            // Keep deterministic top-of-library ordering.
+            let player = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap();
+            player.library.retain(|&oid| oid != id);
+            player.library.push_front(id);
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 4);
+
+        let hand_before = state.players[0].hand.len();
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(71), &mut events).unwrap();
+        // Modes 1 (scry X, draw) and 3 (exile up to X target cards from graveyards).
+        state.waiting_for =
+            handle_select_modes(&mut state, PlayerId(0), vec![1, 3], &mut events).unwrap();
+        // CR 601.2b: the mode-3 "up to X" multi-target maximum references X, so
+        // target selection must be deferred until X is announced — proving the
+        // multi_target branch of `ability_target_legality_needs_chosen_x`.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "mode-3 'up to X' must defer target selection until X is chosen \
+             (CR 601.2b), got {:?}",
+            state.waiting_for
+        );
+
+        state.waiting_for = apply_as_current(&mut state, GameAction::ChooseX { value: 2 })
+            .unwrap()
+            .waiting_for;
+        // The deferred target slot for mode 3 must offer the graveyard cards and
+        // resolve the "up to X" maximum to 2 (resolve_multi_target_bounds).
+        let WaitingFor::TargetSelection { target_slots, .. } = &state.waiting_for else {
+            panic!(
+                "expected mode-3 graveyard target selection after choosing X, got {:?}",
+                state.waiting_for
+            );
+        };
+        let gy_slot = target_slots
+            .iter()
+            .find(|slot| slot.legal_targets.contains(&TargetRef::Object(gy_a)))
+            .expect("mode-3 slot must offer graveyard card A");
+        assert!(
+            gy_slot.legal_targets.contains(&TargetRef::Object(gy_b)),
+            "mode-3 slot must offer both graveyard cards as legal targets"
+        );
+
+        state.waiting_for = apply_as_current(
+            &mut state,
+            GameAction::SelectTargets {
+                targets: vec![TargetRef::Object(gy_a), TargetRef::Object(gy_b)],
+            },
+        )
+        .unwrap()
+        .waiting_for;
+
+        // Resolve the spell, submitting any scry ordering prompt that surfaces
+        // mid-resolution (CR 701.22a). Keep the looked-at cards on top.
+        for _ in 0..8 {
+            stack::resolve_top(&mut state, &mut events);
+            if let WaitingFor::ScryChoice { cards, .. } = state.waiting_for.clone() {
+                state.waiting_for = apply_as_current(&mut state, GameAction::SelectCards { cards })
+                    .unwrap()
+                    .waiting_for;
+                continue;
+            }
+            break;
+        }
+
+        // CR 701.22a + draw: the player scried then drew exactly one card.
+        assert_eq!(
+            state.players[0].hand.len(),
+            hand_before + 1,
+            "mode 1 must scry then draw exactly one card"
+        );
+        // CR 701.13 + CR 406: both selected graveyard cards are exiled.
+        assert_eq!(
+            state.objects[&gy_a].zone,
+            Zone::Exile,
+            "mode-3 exile must move graveyard card A to exile"
+        );
+        assert_eq!(
+            state.objects[&gy_b].zone,
+            Zone::Exile,
+            "mode-3 exile must move graveyard card B to exile"
+        );
+    }
+
+    /// CR 700.2 + CR 700.2d: Kozilek's Command is a "Choose two —" spell, so
+    /// `validate_modal_indices` must reject both under-selection (one mode) and
+    /// over-selection (three modes) of the real parsed modal metadata.
+    #[test]
+    fn kozileks_command_rejects_wrong_mode_cardinality() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = build_kozileks_command(&mut state, CardId(91));
+        let modal = state.objects[&spell_id]
+            .modal
+            .clone()
+            .expect("Kozilek's Command must carry modal metadata");
+
+        assert!(
+            crate::game::ability_utils::validate_modal_indices(&modal, &[0], &[]).is_err(),
+            "choosing one mode must be rejected for a 'Choose two —' spell"
+        );
+        assert!(
+            crate::game::ability_utils::validate_modal_indices(&modal, &[0, 1, 2], &[]).is_err(),
+            "choosing three modes must be rejected for a 'Choose two —' spell"
+        );
+        assert!(
+            crate::game::ability_utils::validate_modal_indices(&modal, &[0, 1], &[]).is_ok(),
+            "choosing exactly two distinct modes must be accepted"
+        );
+    }
+
     /// CR 602.2b + CR 601.2b/c: Activated abilities follow the same mode/X/target
     /// announcement ordering as spells. A modal activated ability with {X} in its
     /// activation cost must choose X before building target slots whose legality
