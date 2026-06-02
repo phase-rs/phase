@@ -81,7 +81,7 @@ fn parse_visit_line_header(input: &str) -> nom::IResult<&str, ()> {
 
 fn strip_visit_effect_text(line: &str) -> Option<&str> {
     let lower = line.to_ascii_lowercase();
-    let effect_body = nom_parse_lower(&lower, |input| {
+    let (effect_start, effect_end) = nom_parse_lower(&lower, |input| {
         let (rest, _) = tag("visit").parse(input)?;
         let (rest, _) = multispace0.parse(rest)?;
         let (rest, _) = opt((alt((tag("—"), tag("-"), tag(":"))), multispace0)).parse(rest)?;
@@ -92,10 +92,10 @@ fn strip_visit_effect_text(line: &str) -> Option<&str> {
                 nom::error::ErrorKind::Fail,
             )));
         }
-        Ok(("", effect_body))
+        let body_start = input.len() - rest.len() + (rest.len() - rest.trim_start().len());
+        Ok(("", (body_start, body_start + effect_body.len())))
     })?;
-    let offset = lower.len() - effect_body.len();
-    Some(line[offset..].trim())
+    Some(line[effect_start..effect_end].trim())
 }
 
 fn parse_attraction_die_face(input: &str) -> nom::IResult<&str, u8> {
