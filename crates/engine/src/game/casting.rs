@@ -16085,6 +16085,202 @@ mod tests {
         assert_eq!(state.objects[&opposing_creature].toughness, Some(2));
     }
 
+    /// Vicious Rivalry {2}{B}{G}: "As an additional cost to cast this spell, pay
+    /// X life. Destroy all artifacts and creatures with mana value X or less."
+    /// The card has no {X} in its mana cost, so the single shared X (CR 107.3 /
+    /// CR 601.2b) chosen for the pay-life additional cost (CR 601.2f / CR 119.4)
+    /// must also drive the `DestroyAll` `Cmc{LE, X}` filter (CR 202.3 mana value;
+    /// CR 701.8a destroy). This is the FILTER flavor of the shared-X mechanism;
+    /// the sibling test above covers the `PumpAll{-X}` flavor.
+    #[test]
+    fn vicious_rivalry_additional_life_x_drives_destroyall_mv_filter() {
+        let mut state = setup_game_at_main_phase();
+        state.players[0].life = 20;
+
+        // Artifact, mana value 2 ({2}) -> destroyed at X=3.
+        let artifact_mv2 = create_object(
+            &mut state,
+            CardId(15400),
+            PlayerId(0),
+            "Artifact MV2".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&artifact_mv2).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            };
+        }
+
+        // Creature, mana value 3 ({2}{R}) -> destroyed at X=3 (LE boundary).
+        let creature_mv3 = create_object(
+            &mut state,
+            CardId(15401),
+            PlayerId(0),
+            "Creature MV3".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_mv3).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 2,
+            };
+            obj.base_power = Some(4);
+            obj.base_toughness = Some(4);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+        }
+
+        // Creature, mana value 4 ({3}{R}) -> survives at X=3.
+        let creature_mv4 = create_object(
+            &mut state,
+            CardId(15402),
+            PlayerId(0),
+            "Creature MV4".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_mv4).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 3,
+            };
+            obj.base_power = Some(5);
+            obj.base_toughness = Some(5);
+            obj.power = Some(5);
+            obj.toughness = Some(5);
+        }
+
+        // Land (mana value 0, neither artifact nor creature) -> survives: proves
+        // the Or(Artifact, Creature) type gate, not merely the mana-value bound.
+        let land = create_object(
+            &mut state,
+            CardId(15403),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+
+        let spell = create_object(
+            &mut state,
+            CardId(15404),
+            PlayerId(0),
+            "Vicious Rivalry".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            // Real {2}{B}{G} mana cost, exercised below via add_mana.
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Green],
+                generic: 2,
+            };
+            // CR 601.2f / CR 119.4: pay-X-life additional cost (paying life as a
+            // cost is correct here, unlike a life-gain effect).
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            }));
+            // CR 701.8a destroy; CR 202.3 mana value; CR 107.3 single shared X:
+            // the same X chosen for the additional cost drives this filter.
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::DestroyAll {
+                    target: TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(
+                                vec![FilterProp::Cmc {
+                                    comparator: Comparator::LE,
+                                    value: QuantityExpr::Ref {
+                                        qty: QuantityRef::Variable {
+                                            name: "X".to_string(),
+                                        },
+                                    },
+                                }],
+                            )),
+                            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                                FilterProp::Cmc {
+                                    comparator: Comparator::LE,
+                                    value: QuantityExpr::Ref {
+                                        qty: QuantityRef::Variable {
+                                            name: "X".to_string(),
+                                        },
+                                    },
+                                },
+                            ])),
+                        ],
+                    },
+                    cant_regenerate: false,
+                },
+            ));
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        // CR 601.2b: X for the additional cost is announced as the spell is cast.
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell,
+            CardId(15404),
+            &mut Vec::new(),
+        )
+        .expect("pay-X-life additional cost should prompt for X");
+        state.waiting_for = waiting;
+        match state.waiting_for {
+            // CR 119.4: the maximum payable life equals the full life total (20).
+            WaitingFor::ChooseXValue { max, .. } => assert_eq!(max, 20),
+            ref other => panic!("expected ChooseXValue, got {other:?}"),
+        }
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+        // CR 119.4: 3 life actually paid; CR 601.2f: the mana cost is also paid.
+        assert_eq!(state.players[0].life, 17);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.stack.len(), 1);
+        // CR 107.3: the announced X is locked onto the spell on the stack.
+        match &state.stack[0].kind {
+            StackEntryKind::Spell {
+                ability: Some(ability),
+                ..
+            } => assert_eq!(ability.chosen_x, Some(3)),
+            other => panic!("expected spell on stack, got {other:?}"),
+        }
+
+        for _ in 0..5 {
+            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        // CR 701.8a + CR 202.3: at X=3, artifact MV2 and creature MV3 (LE bound)
+        // are destroyed to the owner's graveyard.
+        assert_eq!(state.objects[&artifact_mv2].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&creature_mv3].zone, Zone::Graveyard);
+        // Creature MV4 exceeds X=3 and survives on the battlefield.
+        assert_eq!(state.objects[&creature_mv4].zone, Zone::Battlefield);
+        // The land matches neither Or branch (not artifact/creature) and survives.
+        assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+    }
+
     #[test]
     fn toxic_deluge_style_x_life_additional_cost_still_pays_mana_cost() {
         let mut state = setup_game_at_main_phase();
