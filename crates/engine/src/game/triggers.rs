@@ -12063,11 +12063,14 @@ pub mod tests {
             "Cascade Grant Source".to_string(),
             Zone::Battlefield,
         );
+        // Use InZone { zone: Hand } to match Quandrix's actual parsed filter
         let grant = StaticDefinition::new(StaticMode::CastWithKeyword {
             keyword: Keyword::Cascade,
         })
         .affected(TargetFilter::Typed(
-            TypedFilter::new(TypeFilter::Sorcery).controller(ControllerRef::You),
+            TypedFilter::new(TypeFilter::Sorcery)
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
         ));
         state
             .objects
@@ -12107,6 +12110,46 @@ pub mod tests {
                 )
             }),
             "cascade granted by a static ability should enqueue a Cascade trigger"
+        );
+    }
+
+    #[test]
+    fn printed_cascade_triggers_for_cast_spell() {
+        let mut state = setup();
+        let caster = PlayerId(0);
+
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            caster,
+            "Printed Cascade Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.keywords.push(Keyword::Cascade);
+            obj.cast_from_zone = Some(Zone::Hand);
+        }
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::SpellCast {
+                object_id: spell,
+                controller: caster,
+                card_id: CardId(1),
+            }],
+        );
+
+        assert!(
+            state.stack.iter().any(|entry| {
+                matches!(
+                    &entry.kind,
+                    StackEntryKind::TriggeredAbility { ability, .. }
+                        if matches!(ability.effect, Effect::Cascade)
+                )
+            }),
+            "printed cascade keyword should enqueue a Cascade trigger"
         );
     }
 

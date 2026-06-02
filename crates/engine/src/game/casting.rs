@@ -712,7 +712,14 @@ fn granted_spell_keywords(
         return Vec::new();
     };
 
-    let origin_zone = pending_cast_origin_zone_for(state, object_id).unwrap_or(spell_obj.zone);
+    // CR 601.2a: Prefer cast_from_zone (stamped during finalize_cast and persists
+    // through SpellCast event) over pending_cast_origin_zone_for (transient and
+    // cleared after finalize_cast). This ensures origin zone is available when
+    // triggers are processed for filters like "InZone { zone: Hand }".
+    let origin_zone = spell_obj
+        .cast_from_zone
+        .or_else(|| pending_cast_origin_zone_for(state, object_id))
+        .unwrap_or(spell_obj.zone);
 
     let mut keywords = Vec::new();
     // CR 702.26b + CR 604.1: Functioning gate owned by
