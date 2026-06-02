@@ -4675,6 +4675,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // ability that exiles self and grants a Plotted casting permission for
     // free-cast on a later turn. Runs after Suspend; idempotent.
     synthesize_plot(face);
+    // CR 702.176a: Impending — end-step trigger removing one time counter while
+    // the impending cost was paid and a counter remains. Idempotent.
+    synthesize_impending(face);
     synthesize_siege_intrinsics(face);
     synthesize_tribute_intrinsics(face);
     // CR 702.124j: Partner with — ETB trigger letting target player fetch the
@@ -4693,6 +4696,74 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.165: Backup — ETB trigger placing +1/+1 counters and granting
     // non-Backup abilities printed below Backup until end of turn.
     synthesize_backup(face);
+}
+
+/// CR 702.176a: Synthesize the Impending end-step counter-removal trigger.
+///
+/// "At the beginning of your end step, if this permanent's impending cost was
+/// paid and it has a time counter on it, remove a time counter from it."
+///
+/// The trigger is a battlefield-zone, end-step trigger gated on:
+/// - `TriggerCondition::CastVariantPaid { Impending }` — impending cost was paid
+/// - `TriggerCondition::HasCounters { Time, minimum: 1 }` — still has counters
+///
+/// Combined with `TriggerConstraint::OnlyDuringYourTurn` to enforce "your" end step.
+/// Idempotent: skips if the trigger shape is already present.
+pub fn synthesize_impending(face: &mut CardFace) {
+    if !face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Impending { .. }))
+    {
+        return;
+    }
+    // Idempotency: skip if the end-step counter-removal trigger is already present.
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::Phase)
+            && t.phase == Some(Phase::End)
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::RemoveCounter {
+                    counter_type: Some(CounterType::Time),
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    let remove_one = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RemoveCounter {
+            counter_type: Some(CounterType::Time),
+            count: 1,
+            target: TargetFilter::SelfRef,
+        },
+    );
+    // CR 702.176a: gated on impending cost paid AND has a time counter.
+    let condition = TriggerCondition::And {
+        conditions: vec![
+            TriggerCondition::CastVariantPaid {
+                variant: CastVariantPaid::Impending,
+            },
+            TriggerCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                minimum: 1,
+                maximum: None,
+            },
+        ],
+    };
+    let trigger = TriggerDefinition::new(TriggerMode::Phase)
+        .phase(Phase::End)
+        .condition(condition)
+        .constraint(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn)
+        .execute(remove_one)
+        .description(
+            "CR 702.176a: At the beginning of your end step, if this permanent's impending cost was paid and it has a time counter on it, remove a time counter from it.".to_string(),
+        );
+    face.triggers.push(trigger);
 }
 
 /// CR 702.124j: Synthesize the "Partner with [Name]" ETB trigger.

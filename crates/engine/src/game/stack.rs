@@ -477,6 +477,34 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            // CR 702.176a: Impending — seed the N time counters into the ZoneChange
+            // ProposedEvent BEFORE the replacement pipeline so Doubling Season and
+            // similar counter-doubling replacements (CR 614.1a) can modify them.
+            // N is read from the `Keyword::Impending { counters, .. }` on the still-
+            // stack-resident object; `cast_variant_paid = Impending` is already stamped
+            // by `finalize_cast_to_stack` in `casting_costs.rs`.
+            if casting_variant == CastingVariant::Impending {
+                let impending_counters = state.objects.get(&entry.id).and_then(|obj| {
+                    obj.keywords.iter().find_map(|k| match k {
+                        crate::types::keywords::Keyword::Impending { counters, .. } => {
+                            Some(*counters)
+                        }
+                        _ => None,
+                    })
+                });
+                if let Some(n) = impending_counters {
+                    if n > 0 {
+                        if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                            enter_with_counters,
+                            ..
+                        } = &mut proposed
+                        {
+                            enter_with_counters.push((CounterType::Time, n));
+                        }
+                    }
+                }
+            }
+
             // CR 702.188a: Web-slinging is a casting alternative cost. Tag the
             // permanent BEFORE the ETB replacement pipeline runs so a
             // `ReplacementCondition::CastVariantPaid` gate (Scarlet Spider's
@@ -929,6 +957,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 if let Some(obj) = state.objects.get_mut(&entry.id) {
                     obj.cast_variant_paid = Some((
                         crate::types::ability::CastVariantPaid::Escape,
+                        state.turn_number,
+                    ));
+                }
+            }
+
+            // CR 702.176a: Impending-cast permanent gets the `cast_variant_paid`
+            // tag re-applied after `reset_for_battlefield_entry` cleared it.
+            // The "not a creature" layer fixup and the end-step counter-removal
+            // trigger both gate on this marker being present.
+            if casting_variant == CastingVariant::Impending {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Impending,
                         state.turn_number,
                     ));
                 }

@@ -1273,6 +1273,11 @@ pub fn evaluate_layers(state: &mut GameState) {
 
         if *layer == Layer::Type {
             apply_intrinsic_basic_land_mana_abilities(state, &bf_ids);
+            // CR 702.176a (Layer 4): Strip Creature type from Impending permanents
+            // that still have time counters. Applied here so every Layer-4 effect
+            // (including AddType / SetType from other sources) is fully resolved
+            // before the strip runs — mirrors the Changeling post-fixup pattern.
+            apply_impending_not_creature(state, &bf_ids);
         }
         if matches!(*layer, Layer::Control | Layer::Type) {
             super::pairing::cleanup_invalid_pairs(state);
@@ -3632,6 +3637,35 @@ fn apply_continuous_effect_filtered(
                     }
                 }
             }
+        }
+    }
+}
+
+/// CR 702.176a (Layer 4 post-fixup): "As long as this permanent's impending cost
+/// was paid and it has a time counter on it, it's not a creature."
+///
+/// Runs after all Layer-4 continuous effects have been applied so that
+/// `AddType`/`SetType` grants from other sources are already present before we
+/// strip — the strip is the final word for this layer pass.
+fn apply_impending_not_creature(state: &mut GameState, battlefield_ids: &[ObjectId]) {
+    use crate::types::ability::CastVariantPaid;
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
+    for &id in battlefield_ids {
+        let Some(obj) = state.objects.get_mut(&id) else {
+            continue;
+        };
+        let impending_paid = obj
+            .cast_variant_paid
+            .is_some_and(|(v, _)| v == CastVariantPaid::Impending);
+        if !impending_paid {
+            continue;
+        }
+        let has_time_counter = obj.counters.get(&CounterType::Time).copied().unwrap_or(0) > 0;
+        if has_time_counter {
+            obj.card_types
+                .core_types
+                .retain(|t| !matches!(t, CoreType::Creature));
         }
     }
 }
