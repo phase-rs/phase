@@ -7909,6 +7909,7 @@ mod tests {
                 description: None,
                 source_name: "Innkeeper's Talent".to_string(),
                 subject_match_count: Some(0),
+                die_result: None,
             },
         });
 

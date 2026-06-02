@@ -13349,6 +13349,7 @@ pub mod tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         })
     }
 
@@ -18065,6 +18066,7 @@ mod dedup_regression_tests {
                 description: Some("Twin: draw a card.".to_string()),
                 may_trigger_origin: None,
                 subject_match_count: Some(count),
+                die_result: None,
             })
         };
         let ctx_a = make_ctx(ObjectId(1), 1);
@@ -18121,6 +18123,7 @@ mod dedup_regression_tests {
                 description: Some("Twin: tap the triggering source.".to_string()),
                 may_trigger_origin: None,
                 subject_match_count: None,
+                die_result: None,
             })
         };
         let ctx_a = make_ctx(ObjectId(1), ObjectId(11));
