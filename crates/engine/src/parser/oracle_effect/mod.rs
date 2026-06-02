@@ -16534,12 +16534,12 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, BounceSelection, CardTypeSetSource, CastVariantPaid,
-        ChoiceType, CombatRelation, CombatRelationSubject, Comparator, ContinuousModification,
-        ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode, Duration, FilterProp,
-        LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction, ObjectProperty,
-        ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValue, PtValueScope, QuantityExpr,
-        QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming, TypeFilter,
-        TypedFilter, ZoneRef,
+        ChoiceType, ChosenSubtypeKind, CombatRelation, CombatRelationSubject, Comparator,
+        ContinuousModification, ControllerRef, CopyRetargetPermission, CountScope, DoublePTMode,
+        Duration, FilterProp, LibraryPosition, LinkedExileScope, ManaContribution, ManaProduction,
+        ObjectProperty, ObjectScope, PaymentCost, PermissionGrantee, PtStat, PtValue, PtValueScope,
+        QuantityExpr, QuantityRef, SearchSelectionConstraint, SharedQuality, TargetChoiceTiming,
+        TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -27387,6 +27387,44 @@ mod tests {
             }
         );
         assert!(*tapped);
+    }
+
+    /// CR 205.3e + CR 607.2d: "Choose a creature type other than Wall. Target
+    /// creature becomes that type until end of turn." (Imagecrafter, Unnatural
+    /// Selection, Mistform Mutant, Standardize). "becomes that type" applies the
+    /// chosen creature type via a continuous `AddChosenSubtype(CreatureType)` —
+    /// not an Unimplemented fallback or a mis-tokenized "That"/"Type" subtype.
+    #[test]
+    fn becomes_that_type_applies_chosen_creature_type() {
+        let def = parse_effect_chain(
+            "Choose a creature type other than Wall. Target creature becomes that type until end of turn.",
+            AbilityKind::Activated,
+        );
+        let mut found = false;
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            if let Effect::GenericEffect {
+                static_abilities, ..
+            } = &*d.effect
+            {
+                for sd in static_abilities {
+                    if sd
+                        .modifications
+                        .contains(&ContinuousModification::AddChosenSubtype {
+                            kind: ChosenSubtypeKind::CreatureType,
+                        })
+                    {
+                        found = true;
+                    }
+                }
+            }
+            node = d.sub_ability.as_deref();
+        }
+        assert!(
+            found,
+            "expected AddChosenSubtype(CreatureType) in the chain; got: {:?}",
+            def.effect
+        );
     }
 
     /// CR 105.2 + CR 205.1a + CR 613.1d-e: Rise from the Grave reanimation —

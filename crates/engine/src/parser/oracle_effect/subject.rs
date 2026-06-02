@@ -11,9 +11,9 @@ use super::animation::{
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    StaticDefinition, TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+    Duration, Effect, FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue,
+    QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -1890,6 +1890,37 @@ fn build_become_clause(
     // Must intercept before parse_animation_spec which rejects "of your choice" patterns.
     if let Some(clause) = try_parse_become_choice(become_text, &application, duration.clone()) {
         return Some(clause);
+    }
+
+    // CR 205.3e + CR 607.2d: "becomes that type" applies the creature type chosen
+    // by the preceding "Choose a creature type" instruction in the same ability
+    // (Imagecrafter, Unnatural Selection, Mistform Mutant, Standardize). Unlike
+    // the "of your choice" arm above, the choice is already made upstream, so this
+    // emits only the apply half — a continuous `AddChosenSubtype` that reads the
+    // source's chosen creature type at resolution. Must intercept before
+    // parse_animation_spec, which would mis-tokenize "that"/"type" as subtypes.
+    if become_text.eq_ignore_ascii_case("that type") {
+        let affected = static_affected_for_application(&application);
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                }])
+                .description(become_text.to_string())],
+            duration: duration.clone(),
+            target: application.target.clone(),
+        };
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
     }
 
     // CR 702.xxx: Prepare (Strixhaven) — "becomes prepared" / "becomes
