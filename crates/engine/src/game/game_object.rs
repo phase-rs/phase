@@ -321,6 +321,13 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_rules_text: Option<String>,
     pub card_types: CardType,
+    /// CR 717.1: Which d6 results visit this Attraction (from card variant data).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attraction_lights: Vec<u8>,
+    /// CR 717.2: Object is in the supplementary Attraction deck (command zone),
+    /// tracked via `Player::attraction_deck` rather than `command_zone`.
+    #[serde(default)]
+    pub in_attraction_deck: bool,
     pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
     /// Live abilities after layer evaluation. Wrapped in `Arc<Vec<_>>` so
@@ -842,6 +849,8 @@ impl GameObject {
             defense: None,
             token_rules_text: None,
             card_types: CardType::default(),
+            attraction_lights: Vec::new(),
+            in_attraction_deck: false,
             mana_cost: ManaCost::default(),
             keywords: Vec::new(),
             abilities: Arc::new(Vec::new()),

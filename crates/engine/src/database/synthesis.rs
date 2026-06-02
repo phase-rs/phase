@@ -5284,6 +5284,7 @@ fn build_oracle_face_inner(
         deck_copy_limit: None,
         metadata: Default::default(),
         rarities: Default::default(),
+        attraction_lights: vec![],
     };
 
     face.brawl_commander = compute_brawl_commander(mtgjson, &face);

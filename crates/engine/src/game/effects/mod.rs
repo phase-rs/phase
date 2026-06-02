@@ -141,6 +141,7 @@ pub mod token;
 pub mod token_copy;
 pub mod transform_effect;
 pub mod tribute;
+pub mod attractions;
 pub mod venture;
 pub mod vote;
 pub mod win_lose;
@@ -1847,6 +1848,9 @@ pub fn resolve_effect(
             venture::resolve_venture_into(state, ability, *dungeon, events)
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
+        Effect::OpenAttraction | Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
+            attractions::resolve(state, ability, events)
+        }
         Effect::ProcessRadCounters => rad_counters::resolve(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
         Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),

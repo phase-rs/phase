@@ -175,6 +175,9 @@ pub struct CardFace {
     /// singleton) limit applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deck_copy_limit: Option<DeckCopyLimit>,
+    /// CR 717.1: Lit-up roll numbers for Attraction card variants (d6 values 1–6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attraction_lights: Vec<u8>,
     /// Parser diagnostic warnings — silent fallbacks, ignored remainders, bare filters.
     /// Populated at build time by the Oracle parser warning accumulator.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

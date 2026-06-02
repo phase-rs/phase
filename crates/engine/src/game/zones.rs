@@ -681,7 +681,23 @@ pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, 
             state.stack_paid_facts.remove(&object_id);
         }
         Zone::Exile => state.exile.retain(|id| *id != object_id),
-        Zone::Command => state.command_zone.retain(|id| *id != object_id),
+        Zone::Command => {
+            if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| obj.in_attraction_deck)
+            {
+                state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == owner)
+                    .expect("owner exists")
+                    .attraction_deck
+                    .retain(|id| *id != object_id);
+            } else {
+                state.command_zone.retain(|id| *id != object_id);
+            }
+        }
     }
 }
 
@@ -705,7 +721,23 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
         Zone::Battlefield => state.battlefield.push_back(object_id),
         Zone::Stack => {} // Stack entries are managed separately via StackEntry
         Zone::Exile => state.exile.push_back(object_id),
-        Zone::Command => state.command_zone.push_back(object_id),
+        Zone::Command => {
+            if state
+                .objects
+                .get(&object_id)
+                .is_some_and(|obj| obj.in_attraction_deck)
+            {
+                state
+                    .players
+                    .iter_mut()
+                    .find(|p| p.id == owner)
+                    .expect("owner exists")
+                    .attraction_deck
+                    .push_back(object_id);
+            } else {
+                state.command_zone.push_back(object_id);
+            }
+        }
     }
 }
 

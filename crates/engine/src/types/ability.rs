@@ -6542,6 +6542,15 @@ pub enum Effect {
     /// CR 726.1 + CR 726.2: Take the initiative. Grants the initiative
     /// designation and triggers venture into Undercity.
     TakeTheInitiative,
+    /// CR 701.48: Open an Attraction — put the top card of your Attraction deck
+    /// onto the battlefield.
+    OpenAttraction,
+    /// CR 701.48: Open N Attractions.
+    OpenAttractions {
+        count: u32,
+    },
+    /// CR 701.52: Roll to visit your Attractions.
+    RollToVisitAttractions,
     /// CR 728.1: Process rad counters — mill cards equal to rad counter count,
     /// lose 1 life and remove one rad counter per nonland card milled.
     ProcessRadCounters,
@@ -7867,6 +7876,9 @@ impl Effect {
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
             | Effect::TakeTheInitiative
+            | Effect::OpenAttraction
+            | Effect::OpenAttractions { .. }
+            | Effect::RollToVisitAttractions
             | Effect::ProcessRadCounters
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
@@ -8031,6 +8043,9 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::VentureIntoDungeon => "VentureIntoDungeon",
         Effect::VentureInto { .. } => "VentureInto",
         Effect::TakeTheInitiative => "TakeTheInitiative",
+        Effect::OpenAttraction => "OpenAttraction",
+        Effect::OpenAttractions { .. } => "OpenAttractions",
+        Effect::RollToVisitAttractions => "RollToVisitAttractions",
         Effect::ProcessRadCounters => "ProcessRadCounters",
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
@@ -8210,6 +8225,9 @@ pub enum EffectKind {
     VentureIntoDungeon,
     VentureInto,
     TakeTheInitiative,
+    OpenAttraction,
+    OpenAttractions,
+    RollToVisitAttractions,
     ProcessRadCounters,
     GrantCastingPermission,
     ChooseFromZone,
@@ -8395,6 +8413,9 @@ impl From<&Effect> for EffectKind {
             Effect::VentureIntoDungeon => EffectKind::VentureIntoDungeon,
             Effect::VentureInto { .. } => EffectKind::VentureInto,
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
+            Effect::OpenAttraction => EffectKind::OpenAttraction,
+            Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
+            Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
             Effect::ProcessRadCounters => EffectKind::ProcessRadCounters,
             Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
@@ -9866,6 +9887,9 @@ pub enum TriggerCondition {
     /// CR 716.2a: True when the source Class enchantment is at or above the given level.
     /// Used to gate continuous triggers that only become active at higher class levels.
     ClassLevelGE { level: u8 },
+    /// CR 701.52a + CR 702.159a: Visit ability on a numbered attraction line —
+    /// the roll from `AttractionVisited` must fall within the printed range.
+    AttractionVisitRoll { min: u8, max: u8 },
 
     /// CR 601.2 + CR 603.4: reads the ENTERING object's `cast_from_zone`, never the source.
     WasCast {

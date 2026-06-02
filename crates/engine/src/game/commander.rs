@@ -1412,6 +1412,7 @@ mod tests {
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
+            attraction_lights: vec![],
         };
 
         let obj_id = create_commander_from_card_face(&mut state, &face, PlayerId(0));

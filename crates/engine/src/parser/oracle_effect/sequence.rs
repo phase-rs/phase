@@ -2916,6 +2916,9 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::OpenAttraction
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
