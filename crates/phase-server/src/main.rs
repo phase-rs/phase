@@ -2919,6 +2919,14 @@ async fn handle_client_message(
             // LobbyGameAdded fan-out (in order). Deck data, AI seats, and
             // format-legality are host-authoritative and irrelevant here.
             if matches!(mode, ServerMode::LobbyOnly) {
+                // Validate deck bounds before cloning to reject oversized decks early
+                if let Err(reason) = lobby_broker::validate_deck_payload("deck", &deck) {
+                    let msg = ServerMessage::Error { message: reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
                 dispatch_broker_msg(
                     lobby_broker::LobbyClientMessage::CreateGameWithSettings {
                         deck: deck.clone(),
@@ -3624,6 +3632,14 @@ async fn handle_client_message(
             // is created server-side. The deck is ignored — the host validates
             // guest decks over P2P once the connection is up.
             if matches!(mode, ServerMode::LobbyOnly) {
+                // Validate deck bounds before cloning to reject oversized decks early
+                if let Err(reason) = lobby_broker::validate_deck_payload("deck", &deck) {
+                    let msg = ServerMessage::Error { message: reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
                 dispatch_broker_msg(
                     lobby_broker::LobbyClientMessage::JoinGameWithPassword {
                         game_code: game_code.clone(),
