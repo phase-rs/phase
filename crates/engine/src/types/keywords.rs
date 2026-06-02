@@ -1094,6 +1094,21 @@ impl Keyword {
             | Keyword::WebSlinging(_) => KeywordKind::Unknown,
         }
     }
+
+    /// CR 702.85c / CR 702.40b: keywords whose multiple instances each function
+    /// separately AND are printed in Oracle text as repeated bare words.
+    ///
+    /// Both Cascade (CR 702.85a) and Storm (CR 702.40a) are triggered abilities
+    /// that function on the stack; the runtime consumes their instance count via a
+    /// `for _ in 0..count` loop in `game/triggers.rs`, so each printed occurrence
+    /// must survive as a distinct `Keyword` on the card face.
+    ///
+    /// Returns `false` for everything else, including CR 702.44d Sunburst — which
+    /// also "works separately" per instance but is a STATIC ability never printed
+    /// as a repeated bare word and not loop-counted, so it is out of this class.
+    pub fn instances_function_separately(&self) -> bool {
+        matches!(self, Keyword::Cascade | Keyword::Storm)
+    }
 }
 
 /// Capitalize the first character of a string (for type name normalization).

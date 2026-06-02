@@ -5155,7 +5155,18 @@ fn build_oracle_face_inner(
     // When the Oracle parser extracts a parameterized keyword (e.g., Morph({2}{B}{G}{U})),
     // remove any MTGJSON-derived default of the same kind (e.g., Morph(zero)).
     for extracted_kw in &parsed.extracted_keywords {
-        if matches!(extracted_kw, Keyword::Bloodthirst(_)) {
+        if extracted_kw.instances_function_separately() {
+            // CR 702.85c / CR 702.40b: the parser recovered the true printed instance
+            // count from Oracle text; the deduped MTGJSON array carries at most one
+            // copy. Drop every MTGJSON copy of THIS keyword so the parser-extracted
+            // occurrences are authoritative, then extend below. Match on the concrete
+            // variant (not kind()): Storm shares `KeywordKind::Unknown` with ~50 other
+            // keywords, so a kind()-based retain would wrongly strip unrelated Unknown
+            // keywords. Cascade/Storm are unit variants, so equality is exact.
+            // Fallback: if the parser found zero occurrences, this branch never runs
+            // for the keyword, so the single MTGJSON copy is preserved.
+            keywords.retain(|existing| existing != extracted_kw);
+        } else if matches!(extracted_kw, Keyword::Bloodthirst(_)) {
             keywords.retain(|existing| {
                 !matches!(existing, Keyword::Bloodthirst(_)) || existing == extracted_kw
             });
@@ -12803,6 +12814,130 @@ mod bloodthirst_synthesis_tests {
                 .count(),
             1,
             "Bloodthirst X should synthesize exactly one dynamic replacement"
+        );
+    }
+
+    /// Builds an MTGJSON-shaped `AtomicCard` for a card whose keyword line
+    /// prints cascade as repeated bare words, so the synthesis pipeline can be
+    /// exercised end-to-end. MTGJSON dedupes the keywords array to one "Cascade".
+    fn cascade_atomic(
+        name: &str,
+        type_line: &str,
+        subtypes: Vec<String>,
+        text: &str,
+    ) -> AtomicCard {
+        AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{8}{R}{G}".to_string()),
+            colors: vec!["G".to_string(), "R".to_string()],
+            color_identity: vec!["G".to_string(), "R".to_string(), "U".to_string()],
+            power: Some("7".to_string()),
+            toughness: Some("5".to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some(text.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some(type_line.to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes,
+            supertypes: Vec::new(),
+            keywords: Some(vec!["Cascade".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 10.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_id: None,
+                scryfall_oracle_id: None,
+            },
+            foreign_data: Vec::new(),
+        }
+    }
+
+    /// CR 702.85c / CR 702.40b: Maelstrom Wanderer prints "Cascade, cascade".
+    /// MTGJSON's deduped keywords array carries one "Cascade"; the synthesized
+    /// face must carry exactly two so the runtime fires two cascade triggers.
+    #[test]
+    fn synthesize_face_recovers_maelstrom_wanderer_two_cascades() {
+        let mtgjson = cascade_atomic(
+            "Maelstrom Wanderer",
+            "Creature — Elemental",
+            vec!["Elemental".to_string()],
+            "Creatures you control have haste.\nCascade, cascade (When you cast this spell, exile cards from the top of your library until you exile a nonland card that costs less. You may cast it without paying its mana cost. Put the exiled cards on the bottom of your library in a random order.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        let cascades: Vec<&Keyword> = face
+            .keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::Cascade))
+            .collect();
+        assert_eq!(
+            cascades.len(),
+            2,
+            "Maelstrom Wanderer must synthesize two Cascade instances"
+        );
+        // Pin ordering/leak behavior: filtering the face keywords to Cascade must
+        // yield exactly [Cascade, Cascade] — no foreign keyword masquerades as
+        // Cascade and both printed instances survive.
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|k| matches!(k, Keyword::Cascade))
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![Keyword::Cascade, Keyword::Cascade],
+        );
+    }
+
+    /// CR 702.85c: Apex Devastator prints cascade four times; the synthesized
+    /// face must carry exactly four instances.
+    #[test]
+    fn synthesize_face_recovers_apex_devastator_four_cascades() {
+        let mtgjson = cascade_atomic(
+            "Apex Devastator",
+            "Creature — Hydra",
+            vec!["Hydra".to_string()],
+            "Cascade, cascade, cascade, cascade (When you cast this spell, exile cards from the top of your library until you exile a nonland card that costs less. You may cast it without paying its mana cost. Put the exiled cards on the bottom of your library in a random order.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|k| matches!(k, Keyword::Cascade))
+                .count(),
+            4,
+            "Apex Devastator must synthesize four Cascade instances"
+        );
+    }
+
+    /// CR 702.85c regression guard: Bloodbraid Elf prints a single cascade and
+    /// must net exactly one instance after synthesis — recovery must not double.
+    #[test]
+    fn synthesize_face_single_cascade_yields_one_instance() {
+        let mtgjson = cascade_atomic(
+            "Bloodbraid Elf",
+            "Creature — Elf Berserker",
+            vec!["Elf".to_string(), "Berserker".to_string()],
+            "Haste\nCascade (When you cast this spell, exile cards from the top of your library until you exile a nonland card that costs less. You may cast it without paying its mana cost. Put the exiled cards on the bottom of your library in a random order.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|k| matches!(k, Keyword::Cascade))
+                .count(),
+            1,
+            "Bloodbraid Elf must synthesize exactly one Cascade instance"
         );
     }
 

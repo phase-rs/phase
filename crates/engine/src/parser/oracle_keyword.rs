@@ -279,8 +279,19 @@ pub(crate) fn extract_keyword_line(
         if mtgjson_match {
             any_mtgjson_match = true;
 
-            // Exact name match means MTGJSON already has the parsed keyword — skip
+            // Exact name match means MTGJSON already carries one parsed copy.
             if mtgjson_keyword_names.contains(&lower) {
+                // CR 702.85c / CR 702.40b: keywords whose instances each trigger
+                // separately are printed as repeated bare words ("Cascade, cascade"),
+                // but MTGJSON's keywords array dedupes them. The Oracle line is the only
+                // place printed multiplicity survives — emit one Keyword per occurrence
+                // so the runtime's per-instance trigger loop fires correctly. Synthesis
+                // reconciles the deduped MTGJSON copy against these.
+                if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                    if kw.instances_function_separately() {
+                        new_keywords.push(kw);
+                    }
+                }
                 continue;
             }
 
@@ -1458,6 +1469,42 @@ mod tests {
         // CR 702.85a: Cascade is a no-parameter keyword.
         let kw = parse_keyword_from_oracle("cascade").unwrap();
         assert_eq!(kw, Keyword::Cascade);
+    }
+
+    /// CR 702.85c: a spell printing cascade as repeated bare words has one instance
+    /// per word; each triggers separately. MTGJSON dedupes the keywords array to a
+    /// single "Cascade", so the Oracle line is the sole source of printed
+    /// multiplicity — extract_keyword_line must recover every occurrence.
+    #[test]
+    fn extract_keyword_line_recovers_repeated_cascade_instances() {
+        let mtgjson_kws = vec!["cascade".to_string()];
+        let two = extract_keyword_line("Cascade, cascade", &mtgjson_kws)
+            .expect("repeated cascade line is a keyword line");
+        assert_eq!(
+            two.iter().filter(|k| matches!(k, Keyword::Cascade)).count(),
+            2
+        );
+        let four = extract_keyword_line("Cascade, cascade, cascade, cascade", &mtgjson_kws)
+            .expect("repeated cascade line is a keyword line");
+        assert_eq!(
+            four.iter()
+                .filter(|k| matches!(k, Keyword::Cascade))
+                .count(),
+            4
+        );
+    }
+
+    /// CR 702.85c regression guard: a single printed cascade (Bloodbraid Elf) must
+    /// still net exactly one instance — recovery must not over-count.
+    #[test]
+    fn extract_keyword_line_single_cascade_yields_one_instance() {
+        let mtgjson_kws = vec!["cascade".to_string()];
+        let one = extract_keyword_line("Cascade", &mtgjson_kws)
+            .expect("single cascade line is a keyword line");
+        assert_eq!(
+            one.iter().filter(|k| matches!(k, Keyword::Cascade)).count(),
+            1
+        );
     }
 
     /// CR 702.60a: Ripple N triggers when the spell is cast. The engine
