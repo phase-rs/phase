@@ -1654,6 +1654,7 @@ impl FromStr for Keyword {
                     });
                 }
                 "levelup" | "level up" => return Ok(Keyword::LevelUp(parse_keyword_mana_cost(p))),
+                "specialize" => return Ok(Keyword::Specialize(parse_keyword_mana_cost(p))),
                 "warp" => return Ok(Keyword::Warp(parse_keyword_mana_cost(p))),
                 "sneak" => return Ok(Keyword::Sneak(parse_keyword_mana_cost(p))),
                 "web-slinging" | "webslinging" => {

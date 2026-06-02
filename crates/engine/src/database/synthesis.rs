@@ -102,6 +102,8 @@ pub enum LayoutKind {
     /// CR 702.xxx: Prepare (Strixhaven) — Adventure-family two-face layout.
     /// Assign when WotC publishes SOS CR update.
     Prepare,
+    /// Digital-only Specialize (Alchemy Horizons: Baldur's Gate).
+    Specialize,
 }
 
 pub fn map_layout(layout_str: &str) -> LayoutKind {
@@ -116,6 +118,7 @@ pub fn map_layout(layout_str: &str) -> LayoutKind {
         // CR 702.xxx: Prepare frame (Strixhaven) — two-face card whose face `b`
         // is a "prepare spell". Assign when WotC publishes SOS CR update.
         "prepare" => LayoutKind::Prepare,
+        "specialize" => LayoutKind::Specialize,
         _ => LayoutKind::Single,
     }
 }
@@ -1132,6 +1135,39 @@ pub fn synthesize_case_solve(face: &mut CardFace) {
 
 /// CR 702.87a: Synthesize level up activated ability — "Pay {cost}: Put a level counter
 /// on this permanent. Activate only as a sorcery."
+/// Digital-only Specialize: `{cost}, Discard a card` activated ability at sorcery speed.
+pub fn synthesize_specialize(face: &mut CardFace) {
+    let specialize_abilities: Vec<AbilityDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            if let Keyword::Specialize(cost) = kw {
+                Some(
+                    AbilityDefinition::new(AbilityKind::Activated, Effect::Specialize)
+                        .cost(AbilityCost::Composite {
+                            costs: vec![
+                                AbilityCost::Mana {
+                                    cost: cost.clone(),
+                                },
+                                AbilityCost::Discard {
+                                    count: QuantityExpr::Fixed { value: 1 },
+                                    filter: None,
+                                    random: false,
+                                    self_ref: false,
+                                },
+                            ],
+                        })
+                        .sorcery_speed(),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+    face.abilities.extend(specialize_abilities);
+}
+
+/// CR 702.87a: Synthesize level up activated ability — "Pay {cost}: Put a level counter
 pub fn synthesize_level_up(face: &mut CardFace) {
     let level_up_abilities: Vec<AbilityDefinition> = face
         .keywords
@@ -4610,6 +4646,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     // and job select; creates a 2/2 red Rebel creature token.
     synthesize_for_mirrodin(face);
     synthesize_level_up(face);
+    synthesize_specialize(face);
     synthesize_cycling(face);
     synthesize_scavenge(face);
     synthesize_outlast(face);

@@ -2613,6 +2613,12 @@ pub enum WaitingFor {
         options: Vec<u8>,
         option_names: Vec<String>,
     },
+    /// Digital-only Specialize: choose which color specialization to apply.
+    SpecializeColor {
+        player: PlayerId,
+        object_id: crate::types::identifiers::ObjectId,
+        options: Vec<crate::types::mana::ManaColor>,
+    },
     /// CR 118.3 + CR 601.2b + CR 605.3b: Player must select `count` objects
     /// from `choices` to pay a cost, then the engine resumes via `resume`.
     /// Replaces: DiscardForCost, SacrificeForCost, ReturnToHandForCost,
@@ -3224,6 +3230,7 @@ impl WaitingFor {
             | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }
             | WaitingFor::ChooseDungeonRoom { player, .. }
+            | WaitingFor::SpecializeColor { player, .. }
             | WaitingFor::PayCost { player, .. }
             | WaitingFor::ActivationCostOneOfChoice { player, .. }
             | WaitingFor::BlightChoice { player, .. }

@@ -95,6 +95,7 @@ pub mod manifest;
 pub mod manifest_dread;
 pub mod mill;
 pub mod monstrosity;
+pub mod specialize;
 pub mod myriad;
 pub mod overload;
 pub mod pair_with;
@@ -1815,6 +1816,7 @@ pub fn resolve_effect(
         Effect::Incubate { .. } => incubate::resolve(state, ability, events),
         Effect::Amass { .. } => amass::resolve(state, ability, events),
         Effect::Monstrosity { .. } => monstrosity::resolve(state, ability, events),
+        Effect::Specialize => specialize::resolve(state, ability, events),
         Effect::Renown { .. } => renown::resolve(state, ability, events),
         Effect::Adapt { .. } => adapt::resolve(state, ability, events),
         Effect::Bolster { .. } => bolster::resolve(state, ability, events),

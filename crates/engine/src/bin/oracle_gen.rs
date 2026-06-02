@@ -242,6 +242,13 @@ fn build_export_layout(
             LayoutKind::Modal => CardLayout::Modal(face_a, face_b),
             // CR 702.xxx: Prepare (Strixhaven) — Adventure-family frame layout.
             LayoutKind::Prepare => CardLayout::Prepare(face_a, face_b),
+            LayoutKind::Specialize => {
+                let mut variant_faces = vec![face_b];
+                for extra in faces.iter().skip(2) {
+                    variant_faces.push(build_oracle_face_multi(extra, oracle_id.clone()));
+                }
+                CardLayout::Specialize(face_a, variant_faces)
+            }
             LayoutKind::Single => CardLayout::Single(face_a),
         }
     } else {

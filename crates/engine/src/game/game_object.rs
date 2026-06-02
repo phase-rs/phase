@@ -369,6 +369,14 @@ pub struct GameObject {
     // Back face data for double-faced cards (DFCs)
     pub back_face: Option<BackFaceData>,
 
+    /// Digital-only Specialize: specialized faces keyed by added color pip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialize_faces: Option<super::specialize::SpecializeFaceMap>,
+
+    /// Digital-only Specialize: set after specializing; prevents re-specializing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialized_color: Option<ManaColor>,
+
     // Base characteristics (for layer system)
     pub base_power: Option<i32>,
     pub base_toughness: Option<i32>,
@@ -892,6 +900,8 @@ impl GameObject {
             token_image_ref: None,
             source_related_token_ids: Vec::new(),
             back_face: None,
+            specialize_faces: None,
+            specialized_color: None,
             base_power: None,
             base_toughness: None,
             base_name: name.clone(),

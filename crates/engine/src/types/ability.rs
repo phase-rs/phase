@@ -6938,6 +6938,9 @@ pub enum Effect {
         /// Number of +1/+1 counters to place.
         count: QuantityExpr,
     },
+    /// Digital-only Specialize: permanently become a color-specific face after
+    /// paying the synthesized activation cost (mana + discard). Not in CR text.
+    Specialize,
     /// CR 702.112a: Renown N — if not renowned, put N +1/+1 counters on this
     /// permanent and it becomes renowned.
     Renown {
@@ -7886,6 +7889,7 @@ impl Effect {
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
             | Effect::Monstrosity { .. }
+            | Effect::Specialize
             | Effect::Renown { .. }
             | Effect::Bolster { .. }
             | Effect::Adapt { .. }
@@ -8076,6 +8080,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Incubate { .. } => "Incubate",
         Effect::Amass { .. } => "Amass",
         Effect::Monstrosity { .. } => "Monstrosity",
+        Effect::Specialize => "Specialize",
         Effect::Renown { .. } => "Renown",
         Effect::Bolster { .. } => "Bolster",
         Effect::Adapt { .. } => "Adapt",
@@ -8258,6 +8263,7 @@ pub enum EffectKind {
     Incubate,
     Amass,
     Monstrosity,
+    Specialize,
     Renown,
     Bolster,
     Adapt,
@@ -8448,6 +8454,7 @@ impl From<&Effect> for EffectKind {
             Effect::Incubate { .. } => EffectKind::Incubate,
             Effect::Amass { .. } => EffectKind::Amass,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
+            Effect::Specialize => EffectKind::Specialize,
             Effect::Renown { .. } => EffectKind::Renown,
             Effect::Bolster { .. } => EffectKind::Bolster,
             Effect::Adapt { .. } => EffectKind::Adapt,

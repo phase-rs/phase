@@ -119,6 +119,7 @@ mod serras_emissary_chosen_card_type_protection;
 mod skullwinder_chosen_opponent;
 mod sliver_static_grants;
 mod spellstutter_sprite_counter_with_x;
+mod specialize_runtime;
 mod spikeshell_harrier_speed_superlative;
 mod springheart_nantuko_bestow_landfall;
 mod swans_prevention_followup;
