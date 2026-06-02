@@ -232,7 +232,7 @@ fn build_export_layout(
 ) -> CardLayout {
     if faces.len() >= 2 {
         let face_a = build_oracle_face_multi(&faces[0], oracle_id.clone());
-        let face_b = build_oracle_face_multi(&faces[1], oracle_id);
+        let face_b = build_oracle_face_multi(&faces[1], oracle_id.clone());
         match layout_kind {
             LayoutKind::Split => CardLayout::Split(face_a, face_b),
             LayoutKind::Flip => CardLayout::Flip(face_a, face_b),
