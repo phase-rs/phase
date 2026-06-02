@@ -108,6 +108,7 @@ pub mod pump;
 pub mod put_on_top;
 pub mod put_on_top_or_bottom;
 pub mod rad_counters;
+pub mod rebound;
 pub mod regenerate;
 pub mod register_bending;
 pub mod remove_from_combat;
@@ -8135,6 +8136,7 @@ mod tests {
                         constraint: None,
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -8224,6 +8226,7 @@ mod tests {
                         constraint: None,
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -8287,6 +8290,7 @@ mod tests {
                     constraint: None,
                     granted_to: None,
                     resolution_cleanup: None,
+                    duration: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

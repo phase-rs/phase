@@ -340,7 +340,6 @@ fn resolve_choice(
             ..
         }
         | WaitingFor::ManaPayment { .. }
-        | WaitingFor::ChooseXValue { .. }
         | WaitingFor::ChooseManaColor { .. }
         | WaitingFor::DefilerPayment { .. }
         | WaitingFor::PhyrexianPayment { .. }
@@ -354,6 +353,18 @@ fn resolve_choice(
                 .cloned()
                 .ok_or(BailReason::NoLegalManaPayment)?
         }
+
+        // CR 107.1c + CR 601.2f: X-value projection picks the maximum legal X.
+        // Candidates are emitted in `min..=max` order
+        // (`engine::ai_support::candidates`), so the last action is the
+        // maximum. Issue #710: projecting X=0 (the previous behavior, shared
+        // with the payment arms above) collapsed the search-tree value of every
+        // X-cost spell to "does nothing." The engine has already capped `max`
+        // to a legally payable amount, so `last()` is always affordable.
+        WaitingFor::ChooseXValue { .. } => actions
+            .last()
+            .cloned()
+            .ok_or(BailReason::NoLegalManaPayment)?,
 
         WaitingFor::OptionalEffectChoice { .. }
         | WaitingFor::OpponentMayChoice { .. }
