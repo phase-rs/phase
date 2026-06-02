@@ -15692,10 +15692,14 @@ mod tests {
             &mut events,
         )
         .expect("overload cast prepares and reaches X announcement");
-        let max = match wf {
-            WaitingFor::ChooseXValue { max, .. } => max,
+        let max = match &wf {
+            WaitingFor::ChooseXValue { max, .. } => *max,
             other => panic!("expected ChooseXValue from {{X}}{{R}} overload base, got {other:?}"),
         };
+        // `continue_cast_with_variant` returns the WaitingFor without committing it
+        // to state; install it as the production `apply` caller would, so the
+        // subsequent `ChooseX` validates against `state.waiting_for`.
+        state.waiting_for = wf;
         assert_eq!(
             max, 4,
             "max X must derive from alt base {{X}}{{R}} (pool 5 − R = 4), not printed {{2}}{{R}}"
