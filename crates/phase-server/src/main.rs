@@ -24,6 +24,7 @@ use engine::game::validate_name_deck_for_format;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
+use engine::types::GameLogEntry;
 use http::HeaderValue;
 use lobby_broker::{
     check_build_commit, conn_holds_reservation, Broker, BrokerEnv, BuildCommitCheck, ConnState,
@@ -70,6 +71,7 @@ type SharedLobbySubscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<ServerMessage>
 type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
 type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
+const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
 type SharedDraftPools = Arc<draft_pools::DraftPools>;
 /// Spectator senders keyed by draft_code. Each spectator has a visibility + sender.
 type SharedDraftSpectators = Arc<
@@ -83,6 +85,8 @@ type SharedDraftSpectators = Arc<
         >,
     >,
 >;
+/// Spectator senders keyed by game code (live games only).
+type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
 
 /// Build the `GameStarted` message for a single seat.
 ///
@@ -191,6 +195,51 @@ fn build_state_update_message(result: &ActionResult, player: PlayerId) -> Server
         } else {
             HashMap::new()
         },
+        derived,
+    }
+}
+
+/// Build the public spectator view for an in-progress game.
+///
+/// Spectators are modeled as a non-seat viewer (`PlayerId(u8::MAX)`), which
+/// keeps all seat-private data redacted and guarantees no legal-action payload.
+fn build_spectator_game_started_message(session: &GameSession) -> ServerMessage {
+    let filtered = server_core::filter_state_for_player(&session.state, SPECTATOR_PLAYER_ID);
+    let derived = derive_views(&filtered, None);
+
+    ServerMessage::GameStarted {
+        state: filtered,
+        your_player: SPECTATOR_PLAYER_ID,
+        opponent_name: None,
+        player_names: session.display_names.clone(),
+        legal_actions: Vec::new(),
+        auto_pass_recommended: false,
+        spell_costs: HashMap::new(),
+        legal_actions_by_object: HashMap::new(),
+        derived,
+        player_token: None,
+        events: Vec::new(),
+    }
+}
+
+fn build_spectator_state_update_message(
+    raw_state: &GameState,
+    events: &[GameEvent],
+    log_entries: &[GameLogEntry],
+) -> ServerMessage {
+    let filtered = server_core::filter_state_for_player(raw_state, SPECTATOR_PLAYER_ID);
+    let derived = derive_views(&filtered, None);
+    let eliminated_players = raw_state.eliminated_players.clone();
+
+    ServerMessage::StateUpdate {
+        state: filtered,
+        events: events.to_vec(),
+        legal_actions: Vec::new(),
+        auto_pass_recommended: false,
+        eliminated_players,
+        log_entries: log_entries.to_vec(),
+        spell_costs: HashMap::new(),
+        legal_actions_by_object: HashMap::new(),
         derived,
     }
 }
@@ -323,6 +372,9 @@ struct SocketIdentity {
     /// checks draft_seat.is_some() before processing, rejecting spectators).
     spectator_draft_code: Option<String>,
     spectator_visibility: Option<draft_core::types::SpectatorVisibility>,
+    /// Set when this socket is spectating a live game. Kept separate from
+    /// `game_code`/`player_id` so spectator sockets remain read-only.
+    spectator_game_code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -581,6 +633,7 @@ async fn main() {
     };
     let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
     let draft_spectators: SharedDraftSpectators = Arc::new(Mutex::new(HashMap::new()));
+    let game_spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
     let lobby: SharedLobby = Arc::new(Mutex::new(Broker::new()));
     let lobby_subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(Vec::new()));
     let player_count: SharedPlayerCount = Arc::new(AtomicU32::new(0));
@@ -698,6 +751,7 @@ async fn main() {
     let bg_draft_state = draft_sessions.clone();
     let bg_connections = connections.clone();
     let bg_draft_spectators = draft_spectators.clone();
+    let bg_game_spectators = game_spectators.clone();
     let bg_lobby = lobby.clone();
     let bg_lobby_subs = lobby_subscribers.clone();
     let bg_game_db = game_db.clone();
@@ -737,6 +791,10 @@ async fn main() {
                         error!(game = %game_code, error = %e, "failed to delete persisted session");
                     }
                 }
+                let mut specs = bg_game_spectators.lock().await;
+                for game_code in &expired {
+                    specs.remove(game_code);
+                }
             }
 
             // Check lobby game expiry (5 minute timeout for waiting games).
@@ -767,6 +825,10 @@ async fn main() {
                     }
                 }
                 drop(mgr);
+                let mut specs = bg_game_spectators.lock().await;
+                for game_code in &expired_lobby {
+                    specs.remove(game_code);
+                }
 
                 let subs = bg_lobby_subs.lock().await;
                 for ob in reap_outbounds {
@@ -882,6 +944,7 @@ async fn main() {
             player_count,
             game_db,
             draft_spectators,
+            game_spectators,
             mode,
         });
 
@@ -979,6 +1042,7 @@ struct AppState {
     player_count: SharedPlayerCount,
     game_db: SharedGameDb,
     draft_spectators: SharedDraftSpectators,
+    game_spectators: SharedGameSpectators,
     mode: Mode,
 }
 
@@ -1007,6 +1071,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(app_state): State<AppState>) -> 
                 app_state.player_count,
                 app_state.game_db,
                 app_state.draft_spectators,
+                app_state.game_spectators,
                 app_state.mode,
             )
         })
@@ -1026,6 +1091,7 @@ async fn handle_socket(
     player_count: SharedPlayerCount,
     game_db: SharedGameDb,
     draft_spectators: SharedDraftSpectators,
+    game_spectators: SharedGameSpectators,
     mode: Mode,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
@@ -1049,6 +1115,7 @@ async fn handle_socket(
         draft_token: None,
         spectator_draft_code: None,
         spectator_visibility: None,
+        spectator_game_code: None,
     };
     let mut rate_limiter = RateLimiter::new();
 
@@ -1124,6 +1191,7 @@ async fn handle_socket(
                             &player_count,
                             &game_db,
                             &draft_spectators,
+                            &game_spectators,
                             &tx,
                             &mut identity,
                             mode,
@@ -1164,6 +1232,17 @@ async fn handle_socket(
                 if pid != *player_id {
                     let _ = sender.send(msg.clone());
                 }
+            }
+        }
+    }
+
+    if let Some(game_code) = &identity.spectator_game_code {
+        let mut specs = game_spectators.lock().await;
+        if let Some(spectators) = specs.get_mut(game_code) {
+            spectators.retain(|sender| !sender.same_channel(&tx));
+            spectators.retain(|sender| !sender.is_closed());
+            if spectators.is_empty() {
+                specs.remove(game_code);
             }
         }
     }
@@ -1988,10 +2067,11 @@ impl DeckResolver for ServerDeckResolver<'_> {
 async fn broadcast_game_started(
     state: &SharedState,
     connections: &SharedConnections,
+    game_spectators: &SharedGameSpectators,
     game_db: &SharedGameDb,
     game_code: &str,
 ) {
-    let player_messages = {
+    let (player_messages, spectator_msg) = {
         let mut mgr = state.lock().await;
         let Some(session) = mgr.sessions.get_mut(game_code) else {
             return;
@@ -1999,7 +2079,10 @@ async fn broadcast_game_started(
 
         session.run_ai();
         persist_session_async(game_db, game_code, session);
-        build_game_started_messages(session)
+        (
+            build_game_started_messages(session),
+            build_spectator_game_started_message(session),
+        )
     };
 
     {
@@ -2010,6 +2093,14 @@ async fn broadcast_game_started(
                     let _ = sender.send(msg.clone());
                 }
             }
+        }
+    }
+
+    let mut specs = game_spectators.lock().await;
+    if let Some(spectators) = specs.get_mut(game_code) {
+        spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
+        if spectators.is_empty() {
+            specs.remove(game_code);
         }
     }
 }
@@ -2089,6 +2180,7 @@ async fn handle_client_message(
     player_count: &SharedPlayerCount,
     game_db: &SharedGameDb,
     draft_spectators: &SharedDraftSpectators,
+    game_spectators: &SharedGameSpectators,
     tx: &mpsc::UnboundedSender<ServerMessage>,
     identity: &mut SocketIdentity,
     mode: Mode,
@@ -2499,6 +2591,17 @@ async fn handle_client_message(
                             }
                         }
                     }
+                    {
+                        let spectator_msg =
+                            build_spectator_state_update_message(&raw_state, &events, &log_entries);
+                        let mut specs = game_spectators.lock().await;
+                        if let Some(spectators) = specs.get_mut(&game_code) {
+                            spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
+                            if spectators.is_empty() {
+                                specs.remove(&game_code);
+                            }
+                        }
+                    }
 
                     // Broadcast AI follow-up results with delays
                     for (i, result) in ai_results.iter().enumerate() {
@@ -2560,6 +2663,19 @@ async fn handle_client_message(
                                         derived: derive_views(pstate, Some(*pid)),
                                     });
                                 }
+                            }
+                        }
+                        let (ai_raw_state, ai_events, _, ai_log_entries, _, _, _) = result;
+                        let spectator_msg = build_spectator_state_update_message(
+                            ai_raw_state,
+                            ai_events,
+                            ai_log_entries,
+                        );
+                        let mut specs = game_spectators.lock().await;
+                        if let Some(spectators) = specs.get_mut(&game_code) {
+                            spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
+                            if spectators.is_empty() {
+                                specs.remove(&game_code);
                             }
                         }
                     }
@@ -3775,7 +3891,14 @@ async fn handle_client_message(
                         )
                         .await;
                     }
-                    broadcast_game_started(state, connections, game_db, &game_code).await;
+                    broadcast_game_started(
+                        state,
+                        connections,
+                        game_spectators,
+                        game_db,
+                        &game_code,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     error!(game = %game_code, error = %e, "JoinGameWithPassword failed");
@@ -3882,13 +4005,36 @@ async fn handle_client_message(
             }
 
             debug!(game = %game_code, "spectator join request");
-            // Spectator support is planned but not yet implemented
-            let msg = ServerMessage::Error {
-                message: "Spectator mode not yet available".to_string(),
+            let spectator_msg = {
+                let mgr = state.lock().await;
+                let Some(session) = mgr.sessions.get(&game_code) else {
+                    let msg = ServerMessage::Error {
+                        message: format!("Game not found: {game_code}"),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                };
+                if !session.game_started {
+                    let msg = ServerMessage::Error {
+                        message: "Game has not started yet".to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+                build_spectator_game_started_message(session)
             };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
+
+            identity.spectator_game_code = Some(game_code.clone());
+            {
+                let mut specs = game_spectators.lock().await;
+                specs.entry(game_code.clone()).or_default().push(tx.clone());
             }
+            let _ = tx.send(spectator_msg);
+            info!(game = %game_code, "spectator connected to live game");
         }
 
         ClientMessage::Emote { emote } => {
@@ -4114,7 +4260,8 @@ async fn handle_client_message(
                     )
                     .await;
                 }
-                broadcast_game_started(state, connections, game_db, &game_code).await;
+                broadcast_game_started(state, connections, game_spectators, game_db, &game_code)
+                    .await;
             } else {
                 let updated = {
                     let mut lob_guard = lobby.lock().await;
@@ -4671,6 +4818,37 @@ mod ranked_tests {
 }
 
 #[cfg(test)]
+mod live_spectator_tests {
+    use super::*;
+
+    #[test]
+    fn spectator_state_update_keeps_public_status_without_actions() {
+        let mut state = GameState::new_two_player(42);
+        state.eliminated_players.push(PlayerId(1));
+
+        let msg = build_spectator_state_update_message(&state, &[], &[]);
+
+        match msg {
+            ServerMessage::StateUpdate {
+                legal_actions,
+                auto_pass_recommended,
+                eliminated_players,
+                spell_costs,
+                legal_actions_by_object,
+                ..
+            } => {
+                assert!(legal_actions.is_empty());
+                assert!(!auto_pass_recommended);
+                assert_eq!(eliminated_players, vec![PlayerId(1)]);
+                assert!(spell_costs.is_empty());
+                assert!(legal_actions_by_object.is_empty());
+            }
+            other => panic!("expected spectator StateUpdate, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod mode_gate_tests {
     use super::*;
     use engine::types::actions::GameAction;
@@ -4841,6 +5019,7 @@ mod handshake_tests {
             draft_token: None,
             spectator_draft_code: None,
             spectator_visibility: None,
+            spectator_game_code: None,
         }
     }
 
