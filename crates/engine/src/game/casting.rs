@@ -22440,14 +22440,41 @@ mod tests {
             "mode-3 slot must offer both graveyard cards as legal targets"
         );
 
-        state.waiting_for = apply_as_current(
-            &mut state,
-            GameAction::SelectTargets {
-                targets: vec![TargetRef::Object(gy_a), TargetRef::Object(gy_b)],
-            },
-        )
-        .unwrap()
-        .waiting_for;
+        // CR 601.2c: targets are declared slot-by-slot in written order. Mode 1
+        // ("Target player scries X") contributes a player slot that precedes the
+        // mode-3 graveyard slots, so the flat target vector must cover every slot:
+        // the caster for the player slot (so the scry+draw below is observed on
+        // P0) and the two graveyard cards for the mode-3 "up to X = 2" slots.
+        let mut remaining_gy = vec![gy_a, gy_b];
+        let mut chosen: Vec<TargetRef> = Vec::new();
+        for slot in target_slots {
+            if let Some(pos) = remaining_gy
+                .iter()
+                .position(|&g| slot.legal_targets.contains(&TargetRef::Object(g)))
+            {
+                chosen.push(TargetRef::Object(remaining_gy.remove(pos)));
+            } else if slot.legal_targets.contains(&TargetRef::Player(PlayerId(0))) {
+                chosen.push(TargetRef::Player(PlayerId(0)));
+            } else {
+                chosen.push(
+                    slot.legal_targets
+                        .first()
+                        .cloned()
+                        .expect("each target slot must offer at least one legal target"),
+                );
+            }
+        }
+        // Both graveyard cards must be assignable, proving the mode-3 "up to X"
+        // maximum resolved to 2 (resolve_multi_target_bounds).
+        assert!(
+            remaining_gy.is_empty(),
+            "mode-3 'up to X = 2' must accept both graveyard cards"
+        );
+
+        state.waiting_for =
+            apply_as_current(&mut state, GameAction::SelectTargets { targets: chosen })
+                .unwrap()
+                .waiting_for;
 
         // Resolve the spell, submitting any scry ordering prompt that surfaces
         // mid-resolution (CR 701.22a). Keep the looked-at cards on top.
