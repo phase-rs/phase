@@ -26,8 +26,12 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
   const blockerTotal = amounts.reduce((acc, n) => acc + n, 0);
   const total = blockerTotal + trampleDamage + controllerDamage;
   const remaining = data.total_damage - total;
-  // CR 702.19b: Trample requires lethal to every blocker.
+  // CR 702.19b: Lethal-to-all-blockers is a precondition only for assigning
+  // excess to the defending player/planeswalker, not an unconditional constraint.
+  // When trampleDamage and controllerDamage are both 0 the player is freely
+  // dividing all damage among blockers, so any split is legal.
   const trampleLethalMet = data.trample == null ||
+    (trampleDamage === 0 && controllerDamage === 0) ||
     data.blockers.every((b, i) => amounts[i] >= b.lethal_minimum);
   // CR 702.19c: Must assign at least PW loyalty before controller spillover.
   const loyaltyMet = !isOverPw || controllerDamage === 0 ||
