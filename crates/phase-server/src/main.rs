@@ -40,6 +40,7 @@ use server_core::draft_wire_guard::{
 use server_core::emote_guard::guard_emote;
 use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::legacy_deck_guard::guard_legacy_deck;
+use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
 use server_core::lookup_join_guard::guard_lookup_join_target;
 use server_core::protocol::{
@@ -2228,7 +2229,7 @@ async fn handle_client_message(
 
         ClientMessage::JoinGame { game_code, deck } => {
             info!(game = %game_code, deck_size = deck.main_deck.len(), "JoinGame");
-            if let Err(reason) = guard_legacy_deck(&deck) {
+            if let Err(reason) = guard_legacy_join_game(&game_code, &deck) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;

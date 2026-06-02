@@ -9,6 +9,7 @@ pub mod game_reconnect_guard;
 #[cfg(test)]
 mod harness;
 pub mod legacy_deck_guard;
+pub mod legacy_join_guard;
 pub mod lobby;
 pub mod lookup_join_guard;
 pub mod persist;
@@ -31,6 +32,7 @@ pub use emote_guard::guard_emote;
 pub use filter::filter_state_for_player;
 pub use game_reconnect_guard::guard_game_reconnect;
 pub use legacy_deck_guard::guard_legacy_deck;
+pub use legacy_join_guard::guard_legacy_join_game;
 pub use lobby::LobbyManager;
 pub use lookup_join_guard::guard_lookup_join_target;
 pub use persist::{PersistedLobbyMeta, PersistedSession};
