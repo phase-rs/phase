@@ -4301,20 +4301,45 @@ fn resolve_chain_body(
             return Ok(());
         }
 
-        // Apply forward_result: moved object becomes sub's source, original source becomes target.
-        // This wires "put onto the battlefield attached to [source]" so Attach sees the
-        // moved card as source_id (the attachment) and the original source as target (the host).
+        // Apply forward_result: moved object becomes sub's source.
+        //
+        // CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
+        // CR 301.5b: Equipment entering attached via "put onto the battlefield attached to" wiring.
+        // For the Attach shape (Armored Skyhunter, Quest for the Holy Relic),
+        // the moved card is the attachment and the original source is the
+        // host, so we additionally push the original source into the sub's
+        // targets.
+        //
+        // CR 608.2k: For non-Attach shapes (Emperor of Bones' "It gains
+        // haste. Sacrifice it." after a `ChangeZone` to Battlefield),
+        // pushing the original source as a target would mis-bind any
+        // downstream `ParentTarget` consumer — the delayed Sacrifice
+        // would target Emperor itself instead of the just-returned
+        // creature. Instead, when the sub has no targets of its own and
+        // the parent ability has no targets to inherit (and the sub
+        // isn't an implicit tracked-set consumer), prepend the moved
+        // card as a target so `ParentTarget` consumers downstream
+        // resolve to it.
         if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
             sub_with_context.source_id = forwarded_objects[0];
-            if !sub_with_context
-                .targets
-                .iter()
-                .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+            if matches!(sub.effect, Effect::Attach { .. }) {
+                if !sub_with_context
+                    .targets
+                    .iter()
+                    .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+                {
+                    sub_with_context
+                        .targets
+                        .push(TargetRef::Object(ability.source_id));
+                }
+            } else if sub_with_context.targets.is_empty()
+                && ability.targets.is_empty()
+                && !effect_uses_implicit_tracked_set_targets(&sub.effect)
             {
                 sub_with_context
                     .targets
-                    .push(TargetRef::Object(ability.source_id));
+                    .insert(0, TargetRef::Object(forwarded_objects[0]));
             }
             apply_parent_chain_context(
                 &mut sub_with_context,
