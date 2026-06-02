@@ -5,12 +5,14 @@
 use std::collections::HashMap;
 
 use crate::game::game_object::BackFaceData;
-use crate::game::printed_cards::{apply_back_face_to_object, apply_card_face_to_back_face, snapshot_object_face};
-use crate::types::keywords::Keyword;
+use crate::game::printed_cards::{
+    apply_back_face_to_object, apply_card_face_to_back_face, snapshot_object_face,
+};
 use crate::types::card::CardFace;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, LKISnapshot};
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
@@ -22,10 +24,9 @@ pub type SpecializeFaceMap = HashMap<ManaColor, BackFaceData>;
 
 /// Infer which specialization color a variant face represents from its mana cost / colors.
 pub fn specialize_color_for_face(face: &CardFace) -> Option<ManaColor> {
-    let colors = face
-        .color_override
-        .clone()
-        .unwrap_or_else(|| crate::game::printed_cards::derive_colors_from_mana_cost(&face.mana_cost));
+    let colors = face.color_override.clone().unwrap_or_else(|| {
+        crate::game::printed_cards::derive_colors_from_mana_cost(&face.mana_cost)
+    });
     if colors.len() == 1 {
         return Some(colors[0]);
     }
@@ -46,7 +47,10 @@ pub fn specialize_faces_from_variants(variants: &[CardFace]) -> SpecializeFaceMa
 }
 
 /// Colors the player may choose after discarding `lki`, intersected with `available`.
-pub fn eligible_specialize_colors(lki: &LKISnapshot, available: &SpecializeFaceMap) -> Vec<ManaColor> {
+pub fn eligible_specialize_colors(
+    lki: &LKISnapshot,
+    available: &SpecializeFaceMap,
+) -> Vec<ManaColor> {
     let mut from_discard = lki.colors.clone();
     if from_discard.is_empty() {
         for subtype in &lki.subtypes {
@@ -132,9 +136,10 @@ pub fn specialize_permanent(
         EngineError::InvalidAction(format!("No specialized face for {:?}", color))
     })?;
 
-    let obj = state.objects.get(&object_id).ok_or_else(|| {
-        EngineError::InvalidAction("Object not found".into())
-    })?;
+    let obj = state
+        .objects
+        .get(&object_id)
+        .ok_or_else(|| EngineError::InvalidAction("Object not found".into()))?;
     if obj.zone != Zone::Battlefield {
         return Err(EngineError::InvalidAction(
             "Only battlefield permanents can specialize".into(),
@@ -148,14 +153,13 @@ pub fn specialize_permanent(
     apply_back_face_to_object(obj, face);
     obj.specialized_color = Some(color);
     obj.specialize_faces = None;
-    obj.keywords.retain(|k| !matches!(k, Keyword::Specialize(_)));
-    obj.base_keywords.retain(|k| !matches!(k, Keyword::Specialize(_)));
+    obj.keywords
+        .retain(|k| !matches!(k, Keyword::Specialize(_)));
+    obj.base_keywords
+        .retain(|k| !matches!(k, Keyword::Specialize(_)));
     layers::mark_layers_full(state);
 
-    events.push(GameEvent::Specialized {
-        object_id,
-        color,
-    });
+    events.push(GameEvent::Specialized { object_id, color });
     Ok(())
 }
 

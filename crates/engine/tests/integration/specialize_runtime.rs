@@ -76,7 +76,11 @@ fn specialize_applies_chosen_face_and_emits_event() {
         let mut faces = SpecializeFaceMap::new();
         faces.insert(
             ManaColor::White,
-            specialize_back("Test Student — White", ManaColor::White, ManaCostShard::White),
+            specialize_back(
+                "Test Student — White",
+                ManaColor::White,
+                ManaCostShard::White,
+            ),
         );
         faces.insert(
             ManaColor::Blue,
@@ -84,12 +88,8 @@ fn specialize_applies_chosen_face_and_emits_event() {
         );
         let obj = runner.state_mut().objects.get_mut(&creature).unwrap();
         obj.specialize_faces = Some(faces);
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&discard)
-            .unwrap()
-            .color = vec![ManaColor::White, ManaColor::Blue];
+        runner.state_mut().objects.get_mut(&discard).unwrap().color =
+            vec![ManaColor::White, ManaColor::Blue];
     }
 
     runner
@@ -138,12 +138,10 @@ fn specialize_applies_chosen_face_and_emits_event() {
     assert_eq!(obj.power, Some(3));
     assert_eq!(obj.specialized_color, Some(ManaColor::White));
     assert!(obj.specialize_faces.is_none());
-    assert!(
-        !obj
-            .keywords
-            .iter()
-            .any(|k| matches!(k, Keyword::Specialize(_)))
-    );
+    assert!(!obj
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Specialize(_))));
 
     assert!(
         result.events.iter().any(|e| {

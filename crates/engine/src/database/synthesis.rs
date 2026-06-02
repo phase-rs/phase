@@ -1146,9 +1146,7 @@ pub fn synthesize_specialize(face: &mut CardFace) {
                     AbilityDefinition::new(AbilityKind::Activated, Effect::Specialize)
                         .cost(AbilityCost::Composite {
                             costs: vec![
-                                AbilityCost::Mana {
-                                    cost: cost.clone(),
-                                },
+                                AbilityCost::Mana { cost: cost.clone() },
                                 AbilityCost::Discard {
                                     count: QuantityExpr::Fixed { value: 1 },
                                     filter: None,
