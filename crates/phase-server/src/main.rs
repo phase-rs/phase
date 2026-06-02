@@ -30,10 +30,10 @@ use lobby_broker::{
     Outbound, NOT_OWNED_RESERVATION,
 };
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
-use server_core::draft_action_wire_guard::guard_draft_action;
 use server_core::draft_session::DraftSessionManager;
 use server_core::draft_wire_guard::{
-    guard_create_draft_with_settings, guard_join_draft_with_password, guard_reconnect_draft,
+    guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
+    guard_reconnect_draft,
 };
 use server_core::emote_guard::guard_emote;
 use server_core::game_reconnect_guard::guard_game_reconnect;
