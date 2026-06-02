@@ -337,12 +337,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // redundant — `has_keyword` returns true even if duplicates exist, so
     // arming runs at most once per resolution.
     let rebound_armed = if is_spell && !is_permanent_spell(state, entry.id) {
-        let cast_from_hand = super::casting::spell_cast_origin(state, entry.id) == Some(Zone::Hand);
         let has_rebound = state.objects.get(&entry.id).is_some_and(|o| {
             !o.is_token
                 && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Rebound)
         });
-        if has_rebound && cast_from_hand {
+        if has_rebound && super::casting::spell_cast_origin(state, entry.id) == Some(Zone::Hand) {
             super::effects::rebound::arm_rebound(state, entry.id, entry.controller)
         } else {
             false
