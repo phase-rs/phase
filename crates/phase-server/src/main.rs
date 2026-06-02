@@ -38,7 +38,6 @@ use server_core::protocol::{
 };
 use server_core::resolve_deck;
 use server_core::session::{ActionResult, GameSession, SessionManager};
-use server_core::session_lobby_guard::guard_full_lobby_client_message;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
@@ -2582,7 +2581,7 @@ async fn handle_client_message(
                 return;
             }
 
-            if let Err(reason) = guard_full_lobby_client_message(
+            if let Err(reason) = lobby_broker::guard_inbound(
                 &lobby_broker::LobbyClientMessage::CreateGameWithSettings {
                     deck: deck.clone(),
                     display_name: display_name.clone(),
@@ -3251,7 +3250,7 @@ async fn handle_client_message(
                 return;
             }
 
-            if let Err(reason) = guard_full_lobby_client_message(
+            if let Err(reason) = lobby_broker::guard_inbound(
                 &lobby_broker::LobbyClientMessage::JoinGameWithPassword {
                     game_code: game_code.clone(),
                     deck: deck.clone(),
