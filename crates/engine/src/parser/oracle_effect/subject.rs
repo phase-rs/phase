@@ -442,7 +442,7 @@ fn try_parse_subject_restriction_clause(
     build_restriction_clause(application, predicate)
 }
 
-/// CR 702.3b: "[subject] can attack [this turn] as though it didn't have defender"
+/// CR 702.3b: "[subject] can attack [this turn] as though it/they didn't have defender"
 /// Produces a GenericEffect with CanAttackWithDefender static mode.
 fn try_parse_can_attack_with_defender(
     text: &str,
@@ -451,7 +451,7 @@ fn try_parse_can_attack_with_defender(
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let pos = tp.find(" can attack")?;
-    if !lower.contains("as though it didn't have defender") {
+    if !is_can_attack_despite_defender_predicate(&lower[pos + 1..]) {
         return None;
     }
     let subject = text[..pos].trim();
@@ -549,6 +549,24 @@ pub(super) fn is_can_block_extra_predicate(lower: &str) -> bool {
         tag(" "),
         parse_extra_blockers_count,
         parse_block_grant_duration,
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+}
+
+/// CR 702.3b: predicate-only "can attack [this turn] as though [it|they]
+/// didn't have defender" — the subjectless conjunct left after the sequence
+/// splitter peels it off a "<subject> gets +N/-M ... and ..." compound. Mirrors
+/// `is_can_block_extra_predicate`; used by `combat_requirement_conjunct_prepend`
+/// to re-attach the subject so `try_parse_can_attack_with_defender` can fire.
+pub(super) fn is_can_attack_despite_defender_predicate(lower: &str) -> bool {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("can attack"),
+        opt(tag(" this turn")),
+        tag(" as though "),
+        alt((tag("it"), tag("they"))),
+        tag(" didn't have defender"),
         opt(tag(".")),
     ))
     .parse(lower.trim())
@@ -2835,6 +2853,30 @@ mod tests {
     use super::*;
     use crate::types::ability::{AbilityKind, ContinuousModification, Effect, TypeFilter};
     use crate::types::card_type::Supertype;
+
+    /// CR 702.3b: the subjectless conjunct recognizer accepts every grammatical
+    /// shape the sequence splitter can leave behind ("this turn" optional, both
+    /// "it"/"they" pronoun forms, optional trailing period) and rejects unrelated
+    /// combat predicates so it only re-attaches subjects for genuine
+    /// can-attack-despite-defender grants.
+    #[test]
+    fn is_can_attack_despite_defender_predicate_matches() {
+        assert!(is_can_attack_despite_defender_predicate(
+            "can attack this turn as though it didn't have defender"
+        ));
+        assert!(is_can_attack_despite_defender_predicate(
+            "can attack as though they didn't have defender"
+        ));
+        assert!(is_can_attack_despite_defender_predicate(
+            "can attack this turn as though it didn't have defender."
+        ));
+        // Negative: a bare "can attack" with no defender clause must not match.
+        assert!(!is_can_attack_despite_defender_predicate("can attack"));
+        // Negative: an extra-blocker grant belongs to the can-block predicate.
+        assert!(!is_can_attack_despite_defender_predicate(
+            "can block an additional creature"
+        ));
+    }
 
     /// CR 707.9 + CR 611.2b: Sarkhan, Soul Aflame's "have ~ become a copy of
     /// it until end of turn, except its name is ~ and it's legendary in
