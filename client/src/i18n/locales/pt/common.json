@@ -201,6 +201,7 @@
   },
   "diceRoll": {
     "rollingForFirst": "Rolagem para ver quem começa",
+    "tieReroll": "Empate — rolar de novo!",
     "versus": "VS",
     "skip": "Toque para pular",
     "continue": "Toque para continuar",

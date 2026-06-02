@@ -1604,6 +1604,16 @@ export type GameEvent =
   // CR 706: a die was rolled. Animated by DiceRollOverlay. `sides`/`result` are
   // the engine's authoritative roll (1..=sides after modifiers).
   | { type: "DieRolled"; data: { player_id: PlayerId; sides: number; result: number } }
+  // CR 103.1: the starting-player d20 roll-off as one structured event. `rounds`
+  // preserves the round boundaries (round 1 = every seat; each later round = the
+  // previous round's tied-max group that rerolled); `winner` is the engine's
+  // authoritative starting player. Each round's `rolls` are [playerId, result]
+  // pairs in seat order. Replaces the flat per-roll DieRolled batch for the
+  // contest; in-game die rolls still emit DieRolled.
+  | {
+      type: "StartingPlayerContest";
+      data: { rounds: { rolls: [PlayerId, number][] }[]; winner: PlayerId };
+    }
   // CR 705: a coin was flipped. `won` is whether the flipping player won the flip
   // (relative to that player) — there is no engine-named face; the heads/tails
   // depiction is a presentation choice.

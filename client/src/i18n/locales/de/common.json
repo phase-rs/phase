@@ -201,6 +201,7 @@
   },
   "diceRoll": {
     "rollingForFirst": "Auswürfeln, wer beginnt",
+    "tieReroll": "Gleichstand — neu würfeln!",
     "versus": "VS",
     "skip": "Zum Überspringen tippen",
     "continue": "Zum Fortfahren tippen",
