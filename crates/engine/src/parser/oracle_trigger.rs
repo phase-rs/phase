@@ -510,38 +510,46 @@ fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
 /// `ControllerRef::TargetPlayer` because the damaged player is not necessarily
 /// the defending player in combat). This function specifically detects attack
 /// patterns without matching damage-to-player patterns.
+fn parse_trigger_actor(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("you ")),
+        value((), tag("an opponent ")),
+        value((), tag("a player ")),
+        value((), tag("another player ")),
+    ))
+    .parse(input)
+}
+
+fn parse_attack_verb(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("attack ")),
+        value((), tag("attacks ")),
+    ))
+    .parse(input)
+}
+
+fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("one or more of your opponents"),
+        ),
+        value((), tag("one of your opponents")),
+        value((), tag("another player")),
+        value((), tag("an opponent")),
+        value((), tag("a player")),
+    ))
+    .parse(input)
+}
+
 fn condition_introduces_defending_player(cond_lower: &str) -> bool {
-    use nom::bytes::complete::tag;
-    use nom::combinator::value;
-
-    fn parse_actor(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
-        alt((
-            value((), tag::<_, _, OracleError<'_>>("you ")),
-            value((), tag("an opponent ")),
-            value((), tag("a player ")),
-            value((), tag("another player ")),
-        ))
-        .parse(input)
-    }
-
-    fn parse_attack_verb(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
-        alt((
-            value((), tag::<_, _, OracleError<'_>>("attack ")),
-            value((), tag("attacks ")),
-        ))
-        .parse(input)
-    }
-
     // Walk word boundaries — the actor/verb pair may be preceded by "whenever",
     // "when", or quantifiers like "one or more creatures you control".
     let mut remaining = cond_lower;
     while !remaining.is_empty() {
-        if let Ok((after_actor, ())) = parse_actor(remaining) {
+        if let Ok((after_actor, ())) = parse_trigger_actor(remaining) {
             if let Ok((after_verb, ())) = parse_attack_verb(after_actor) {
-                if tag::<_, _, OracleError<'_>>("a player")
-                    .parse(after_verb)
-                    .is_ok()
-                {
+                if parse_referenced_player_phrase(after_verb).is_ok() {
                     return true;
                 }
             }
@@ -554,10 +562,7 @@ fn condition_introduces_defending_player(cond_lower: &str) -> bool {
         // unambiguous in trigger-condition text — "attack" never appears as a
         // noun before "a player" here.
         if let Ok((after_verb, ())) = parse_attack_verb(remaining) {
-            if tag::<_, _, OracleError<'_>>("a player")
-                .parse(after_verb)
-                .is_ok()
-            {
+            if parse_referenced_player_phrase(after_verb).is_ok() {
                 return true;
             }
         }
@@ -572,38 +577,14 @@ fn condition_introduces_defending_player(cond_lower: &str) -> bool {
     false
 }
 
-/// any subject prefix (verb-phrase only), so relative-clause subjects like
-/// "one or more Warriors you control" and "a creature you control" match
-/// without needing an explicit-actor variant per subject shape.
 fn condition_introduces_target_player(cond_lower: &str) -> bool {
-    use nom::bytes::complete::tag;
-    use nom::combinator::value;
-
-    fn parse_actor(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
-        alt((
-            value((), tag::<_, _, OracleError<'_>>("you ")),
-            value((), tag("an opponent ")),
-            value((), tag("a player ")),
-            value((), tag("another player ")),
-        ))
-        .parse(input)
-    }
-
-    fn parse_attack_verb(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
-        alt((
-            value((), tag::<_, _, OracleError<'_>>("attack ")),
-            value((), tag("attacks ")),
-        ))
-        .parse(input)
-    }
-
     /// CR 120.3: "deals [combat] damage to a player" — damage dealt to a player
     /// causes that player to lose life (CR 120.3a) and introduces the damaged
     /// player as the target-referring player, so "that player controls" in the
     /// effect refers to it
     /// (Dokuchi Silencer's "destroy target creature or planeswalker that player
-    /// controls"). Mirrors `parse_attack_verb` — both verbs produce the same
-    /// downstream scope.
+    /// controls"). Attack-player triggers are intentionally handled by
+    /// `condition_introduces_defending_player`.
     fn parse_damage_phrase(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
         alt((
             value((), tag::<_, _, OracleError<'_>>("deals combat damage to ")),
@@ -618,40 +599,12 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
     // "when", or quantifiers like "one or more creatures you control".
     let mut remaining = cond_lower;
     while !remaining.is_empty() {
-        if let Ok((after_actor, ())) = parse_actor(remaining) {
-            if let Ok((after_verb, ())) = parse_attack_verb(after_actor) {
-                if tag::<_, _, OracleError<'_>>("a player")
-                    .parse(after_verb)
-                    .is_ok()
-                {
-                    return true;
-                }
-            }
-        }
-        // CR 506.2 + CR 508.1a: "[anything] attack[s] a player" — same subject
-        // permissiveness as the damage scan below. Covers cases where the
-        // actor is wrapped in a relative clause that the explicit actor branch
-        // above cannot match, e.g. "one or more Warriors you control attack a
-        // player" (Gornog, the Red Reaper) or "a creature you control attacks
-        // a player". The verb phrase alone is unambiguous in trigger-condition
-        // text — "attack" never appears as a noun before "a player" here.
-        if let Ok((after_verb, ())) = parse_attack_verb(remaining) {
-            if tag::<_, _, OracleError<'_>>("a player")
-                .parse(after_verb)
-                .is_ok()
-            {
-                return true;
-            }
-        }
         // CR 120.3: "[anything] deals [combat] damage to a player" — introduces
         // the damaged player as the target-referring player. The subject can be
         // SelfRef ("~"), equipped creature ("equipped creature"), or any typed
         // subject, so match on the verb phrase alone.
         if let Ok((after_damage, ())) = parse_damage_phrase(remaining) {
-            if tag::<_, _, OracleError<'_>>("a player")
-                .parse(after_damage)
-                .is_ok()
-            {
+            if parse_referenced_player_phrase(after_damage).is_ok() {
                 return true;
             }
         }
@@ -22940,6 +22893,51 @@ mod tests {
         }
     }
 
+    /// CR 506.2 + CR 508.1a + CR 608.2c: "attack an opponent" introduces the
+    /// attacked player just like "attack a player"; the effect's "that player"
+    /// anaphor must still bind to `DefendingPlayer`.
+    #[test]
+    fn attack_an_opponent_uses_defending_player_controller() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control attacks an opponent, tap target creature that player controls.",
+            "Test Card",
+        );
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::Tap { target } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::DefendingPlayer),
+                    "tap target should reference the defending player via DefendingPlayer",
+                ),
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected Tap effect, got {other:?}"),
+        }
+    }
+
+    /// CR 506.2 + CR 508.1a + CR 608.2c: plural opponent phrases are the same
+    /// attacked-player anaphor class and must not fall back to TargetPlayer.
+    #[test]
+    fn attack_one_or_more_opponents_uses_defending_player_controller() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control attack one or more of your opponents, tap target creature that player controls.",
+            "Test Card",
+        );
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::Tap { target } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::DefendingPlayer),
+                    "tap target should reference the defending player via DefendingPlayer",
+                ),
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected Tap effect, got {other:?}"),
+        }
+    }
+
     /// CR 120.3: Damage-to-player triggers (e.g., "Whenever ~ deals combat
     /// damage to a player, destroy target creature that player controls") must
     /// continue using `ControllerRef::TargetPlayer`, not `DefendingPlayer`,
@@ -22963,6 +22961,30 @@ mod tests {
                     t.controller,
                     Some(ControllerRef::TargetPlayer),
                     "Damage-to-player trigger should use TargetPlayer, not DefendingPlayer",
+                ),
+                other => panic!("expected Typed target filter, got {other:?}"),
+            },
+            other => panic!("expected Destroy effect, got {other:?}"),
+        }
+    }
+
+    /// CR 120.3: Damage-to-opponent triggers introduce the damaged player,
+    /// which remains TargetPlayer even though attack-to-opponent triggers use
+    /// DefendingPlayer.
+    #[test]
+    fn damage_to_opponent_trigger_uses_target_player() {
+        let def = parse_trigger_line(
+            "Whenever ~ deals combat damage to an opponent, destroy target creature that player controls.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::Destroy { target, .. } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::TargetPlayer),
+                    "Damage-to-opponent trigger should use TargetPlayer, not DefendingPlayer",
                 ),
                 other => panic!("expected Typed target filter, got {other:?}"),
             },
