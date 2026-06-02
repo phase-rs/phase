@@ -35,6 +35,7 @@ use server_core::draft_wire_guard::{
     guard_create_draft_with_settings, guard_join_draft_with_password, guard_reconnect_draft,
 };
 use server_core::emote_guard::guard_emote;
+use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::lobby::RegisterGameRequest;
 use server_core::lookup_join_guard::guard_lookup_join_target;
@@ -2418,6 +2419,14 @@ async fn handle_client_message(
             player_token,
         } => {
             info!(game = %game_code, "Reconnect attempt");
+
+            if let Err(reason) = guard_game_reconnect(&game_code, &player_token) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
 
             // Determine game phase and handle reconnect in a single lock
             // to avoid TOCTOU races (game could fill between check and action).
