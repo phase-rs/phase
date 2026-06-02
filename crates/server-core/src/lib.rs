@@ -48,4 +48,7 @@ pub use session::{
     acting_player, acting_players, generate_game_code, generate_player_token, is_acting,
     SessionManager,
 };
-pub use spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
+pub use spectator_wire_guard::{
+    guard_game_spectator_capacity, guard_spectate_draft, guard_spectator_join,
+    MAX_GAME_SPECTATORS_PER_GAME,
+};
