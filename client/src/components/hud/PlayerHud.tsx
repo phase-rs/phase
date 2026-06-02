@@ -50,9 +50,16 @@ export function PlayerHud() {
     && waitingFor.data.player === playerId
     && waitingFor.data.scope.type === "Single"
     && waitingFor.data.legal_new_targets.some((t) => "Player" in t && t.Player === playerId);
+  // CR 303.4g + CR 115.1: a returned / non-spell Aura that can enchant a player
+  // (a Curse) is hosted by a board pick — the picker's controller may attach it
+  // to this player when they appear in `legal_targets`. Click dispatches the
+  // same `ChooseTarget { Player }` the engine accepts (engine.rs ~2984).
+  const returnAsAuraHasMe = waitingFor?.type === "ReturnAsAuraTarget"
+    && waitingFor.data.player === playerId
+    && waitingFor.data.legal_targets.some((t) => "Player" in t && t.Player === playerId);
   const isValidTarget = (isHumanTargetSelection && (waitingFor.data.selection?.current_legal_targets ?? []).some(
     (target) => "Player" in target && target.Player === playerId,
-  )) || copyRetargetCurrentSlotHasMe || retargetChoiceHasMe;
+  )) || copyRetargetCurrentSlotHasMe || retargetChoiceHasMe || returnAsAuraHasMe;
 
   const handleTargetClick = useCallback(() => {
     if (isValidTarget) {
