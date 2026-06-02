@@ -146,4 +146,5 @@ mod volatile_fault_that_player_search;
 mod wedding_ring_etb_token_copy;
 mod wernog_riders_chaplain_investigate_count;
 mod wise_mothman_milled_trigger;
+mod wise_mothman_target_distinctness;
 mod yuriko_combat_damage;

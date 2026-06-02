@@ -51,7 +51,8 @@ fn lathiel_end_step_distributes_counters_from_lifelink_gain() {
     let lathiel = scenario
         .add_creature_from_oracle(P0, "Lathiel, the Bounteous Dawn", 2, 2, LATHIEL_ORACLE)
         .id();
-    let receiver = scenario.add_creature(P0, "Receiver", 1, 1).id();
+    let receiver = scenario.add_creature(P0, "Receiver A", 1, 1).id();
+    let receiver2 = scenario.add_creature(P0, "Receiver B", 1, 1).id();
     scenario.add_creature(P1, "Blocker", 3, 3);
 
     let mut runner = scenario.build();
@@ -64,7 +65,13 @@ fn lathiel_end_step_distributes_counters_from_lifelink_gain() {
 
     advance_to_end_step_trigger(&mut runner);
 
-    // Choose the receiver as the only distributed target.
+    // CR 601.2c + CR 115.3: "distribute ... among any number of OTHER target
+    // creatures" is a single instance of "target", so each chosen creature must be
+    // a DISTINCT object — the same receiver cannot fill two slots. Choose the two
+    // distinct receivers, one per slot (slot 1's offered set excludes the creature
+    // already chosen in slot 0).
+    let receivers = [receiver, receiver2];
+    let mut next = 0;
     let mut guard = 0;
     while matches!(
         runner.state().waiting_for,
@@ -72,12 +79,18 @@ fn lathiel_end_step_distributes_counters_from_lifelink_gain() {
     ) {
         guard += 1;
         assert!(guard < 10, "target selection did not terminate");
+        let pick = receivers[next];
+        next += 1;
         runner
             .act(GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(receiver)),
+                target: Some(TargetRef::Object(pick)),
             })
             .expect("ChooseTarget should succeed");
     }
+    assert_eq!(
+        next, 2,
+        "two distinct creatures targeted (slots capped to life gained = 2)"
+    );
 
     match &runner.state().waiting_for {
         WaitingFor::DistributeAmong {
@@ -88,9 +101,13 @@ fn lathiel_end_step_distributes_counters_from_lifelink_gain() {
         other => panic!("expected DistributeAmong after targets, got {other:?}"),
     }
 
+    // Split the pool of 2 across the two distinct targets, 1 each.
     runner
         .act(GameAction::DistributeAmong {
-            distribution: vec![(TargetRef::Object(receiver), 2)],
+            distribution: vec![
+                (TargetRef::Object(receiver), 1),
+                (TargetRef::Object(receiver2), 1),
+            ],
         })
         .expect("DistributeAmong should succeed");
 
@@ -98,8 +115,13 @@ fn lathiel_end_step_distributes_counters_from_lifelink_gain() {
 
     assert_eq!(
         p1p1_counters(&runner, receiver),
-        2,
-        "Lathiel must distribute exactly 2 +1/+1 counters (= life gained via lifelink)"
+        1,
+        "first distinct target receives 1 of the 2 +1/+1 counters"
+    );
+    assert_eq!(
+        p1p1_counters(&runner, receiver2),
+        1,
+        "second distinct target receives the other +1/+1 counter (= life gained via lifelink)"
     );
 }
 
