@@ -16198,6 +16198,35 @@ pub mod tests {
     ///
     /// The trigger must fire when a flying creature you control dies and there is
     /// a valid lower-CMC creature in the graveyard.
+    fn move_to_graveyard_through_replacement_pipeline(
+        state: &mut GameState,
+        object_id: ObjectId,
+        events: &mut Vec<GameEvent>,
+    ) {
+        let from = state
+            .objects
+            .get(&object_id)
+            .expect("object exists before zone change")
+            .zone;
+        let proposed = crate::types::proposed_event::ProposedEvent::zone_change(
+            object_id,
+            from,
+            Zone::Graveyard,
+            None,
+        );
+        match crate::game::replacement::replace_event(state, proposed, events) {
+            crate::game::replacement::ReplacementResult::Execute(event) => {
+                crate::game::effects::change_zone::deliver_replaced_zone_change(
+                    state, event, None, None, false, events,
+                );
+            }
+            crate::game::replacement::ReplacementResult::Prevented => {}
+            crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+                panic!("test death should not require replacement choice for {player:?}");
+            }
+        }
+    }
+
     #[test]
     fn jackdaw_savior_trigger_fires_when_another_flying_creature_dies() {
         use crate::types::ability::{FilterProp, ObjectScope, QuantityRef};
@@ -16336,9 +16365,9 @@ pub mod tests {
         // Rebuild trigger index so Jackdaw is in the Dies/LBF buckets.
         crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
 
-        // Simulate the flying bird dying: move it to the graveyard and emit ZoneChanged.
+        // Simulate the flying bird dying through the replacement pipeline.
         let mut events = Vec::new();
-        crate::game::zones::move_to_zone(&mut state, flying_bird, Zone::Graveyard, &mut events);
+        move_to_graveyard_through_replacement_pipeline(&mut state, flying_bird, &mut events);
 
         process_triggers(&mut state, &events);
 
@@ -16461,9 +16490,9 @@ pub mod tests {
         }
         crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
 
-        // Jackdaw Savior dies.
+        // Jackdaw Savior dies through the replacement pipeline.
         let mut events = Vec::new();
-        crate::game::zones::move_to_zone(&mut state, jackdaw, Zone::Graveyard, &mut events);
+        move_to_graveyard_through_replacement_pipeline(&mut state, jackdaw, &mut events);
         process_triggers(&mut state, &events);
 
         // The SelfRef arm should fire via the LKI scan (CR 603.10a).
