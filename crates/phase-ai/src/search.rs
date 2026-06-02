@@ -1305,6 +1305,30 @@ pub(crate) fn deterministic_choice(
         return Some(GameAction::MulliganDecision { choice });
     }
 
+    // CR 103.5 + TL:R 906.6: Mulligan / opening-hand bottoming. Each pending
+    // player owes a distinct `count`, and several players can be pending at
+    // once (simultaneous bottoming). The AI controller must scope to
+    // `ai_player`'s own entry: the shared candidate pool mixes every pending
+    // player's combos, and `validate_candidates` simulates them as the first
+    // authorized submitter (seat order) rather than `ai_player` — so without
+    // this branch the AI can pick a selection sized for a different player and
+    // the engine rejects it ("Expected N cards to bottom, got M"). Bottom the
+    // N least valuable cards, mirroring the DiscardToHandSize heuristic below.
+    if let WaitingFor::MulliganBottomCards { pending }
+    | WaitingFor::OpeningHandBottomCards { pending, .. } = &state.waiting_for
+    {
+        let entry = pending.iter().find(|e| e.player == ai_player)?;
+        let count = entry.count as usize;
+        let mut scored: Vec<_> = state.players[ai_player.0 as usize]
+            .hand
+            .iter()
+            .map(|&id| (id, evaluate_card_value(state, id)))
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let to_bottom: Vec<_> = scored.iter().take(count).map(|(id, _)| *id).collect();
+        return Some(GameAction::SelectCards { cards: to_bottom });
+    }
+
     // Scry/Dig/Surveil: use card evaluation heuristics
     if let WaitingFor::ScryChoice { cards, .. } = &state.waiting_for {
         let mut scored: Vec<_> = cards
@@ -2515,13 +2539,21 @@ mod tests {
     }
 
     /// CR 608.2c + CR 701.23: Gifts Ungiven scaling regression — with a
-    /// large library (80 cards), a count-4 search must complete in well
-    /// under 100 ms via the BEAM_K-bounded path. The pre-fix Cartesian
-    /// enumerator (~C(80, 4) ≈ 1.5M combos × per-combo scoring) stalled
-    /// the AI; the beam reduces to C(BEAM_K, 4) candidates. The DistinctNames
-    /// constraint is honored by the engine candidate filter and re-checked
-    /// inside the AI beam, so the returned selection must contain only
-    /// uniquely-named cards.
+    /// large library (80 cards), a count-4 search must complete via the
+    /// BEAM_K-bounded path rather than the pre-fix Cartesian enumerator
+    /// (~C(80, 4) ≈ 1.5M combos × per-combo scoring) that stalled the AI.
+    /// The beam reduces this to C(BEAM_K, 4) ≈ 794 scored selections.
+    ///
+    /// The ceiling is a *blowup* guard, not a tight micro-benchmark: the
+    /// healthy beam path runs in ~60–130 ms (machine- and load-dependent —
+    /// this runs in CI and alongside concurrent Tilt rebuilds), while a
+    /// reversion to Cartesian enumeration costs *tens of seconds*. A 1 s
+    /// ceiling cleanly separates the two — ~8× headroom over the loaded
+    /// healthy path, ~1000× below a Cartesian regression — so it catches the
+    /// regression it exists to catch without flaking on contention. The
+    /// DistinctNames constraint is honored by the engine candidate filter and
+    /// re-checked inside the AI beam, so the returned selection must contain
+    /// only uniquely-named cards.
     #[test]
     fn gifts_ungiven_search_choice_returns_quickly_with_distinct_names() {
         use engine::types::ability::{SearchSelectionConstraint, SharedQuality};
@@ -2570,8 +2602,10 @@ mod tests {
         let action = choose_action(&state, PlayerId(0), &config, &mut rng);
         let elapsed = started.elapsed();
         assert!(
-            elapsed.as_millis() < 100,
-            "AI search-choice took {elapsed:?}; beam path must keep it under 100ms"
+            elapsed.as_millis() < 1000,
+            "AI search-choice took {elapsed:?}; a Cartesian-enumeration regression \
+             (C(80,4) ≈ 1.5M combos) costs tens of seconds — the BEAM_K path must \
+             stay well under the 1s blowup ceiling"
         );
 
         match action {
@@ -2898,6 +2932,136 @@ mod tests {
             GameAction::DecideOptionalCost { pay: true },
             "AI must pay a multikick when it has mana to spare"
         );
+    }
+
+    /// Create a vanilla (zero-value) card directly in `owner`'s hand.
+    fn vanilla_in_hand(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = CardId(state.next_object_id);
+        create_object(state, id, owner, "Card".to_string(), Zone::Hand)
+    }
+
+    /// Create a creature (high `evaluate_card_value`) directly in `owner`'s hand.
+    fn creature_in_hand(state: &mut GameState, owner: PlayerId) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Creature".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(3);
+        obj.toughness = Some(3);
+        id
+    }
+
+    /// Build a two-player simultaneous-bottoming fixture. Player 0 (the first
+    /// pending seat) gets a plain 7-card hand; the AI (player 1) gets
+    /// `keep` creatures plus `bottom` vanilla cards. Returns the AI's vanilla
+    /// object ids — the cards a least-valuable heuristic must put on the bottom.
+    fn two_player_bottom_fixture(
+        state: &mut GameState,
+        keep: usize,
+        bottom: usize,
+    ) -> Vec<ObjectId> {
+        for _ in 0..7 {
+            vanilla_in_hand(state, PlayerId(0));
+        }
+        for _ in 0..keep {
+            creature_in_hand(state, PlayerId(1));
+        }
+        (0..bottom)
+            .map(|_| vanilla_in_hand(state, PlayerId(1)))
+            .collect()
+    }
+
+    /// Regression (CR 103.5 simultaneous bottoming): driven through the real
+    /// `choose_action` entry point so the validate-as-first-pending-seat
+    /// contamination is actually exercised. Player 0 (first seat) owes 1 and
+    /// player 1 (the AI) owes 3 from a 7-card hand of 4 creatures + 3 vanilla.
+    /// `validate_candidates` (via `apply_as_current`) keeps only player 0's
+    /// 1-card combos in the pool, so before the scoped `deterministic_choice`
+    /// branch the AI's search path emitted a 1-card selection and the engine
+    /// rejected it ("Expected 3 cards to bottom, got 1"). The fix must instead
+    /// bottom the AI's own 3 least valuable cards — exactly the vanilla cards.
+    #[test]
+    fn ai_bottoms_own_least_valuable_count_via_choose_action() {
+        let mut state = make_state();
+        let vanilla = two_player_bottom_fixture(&mut state, 4, 3);
+
+        state.waiting_for = WaitingFor::MulliganBottomCards {
+            pending: vec![
+                engine::types::game_state::MulliganBottomEntry {
+                    player: PlayerId(0),
+                    count: 1,
+                },
+                engine::types::game_state::MulliganBottomEntry {
+                    player: PlayerId(1),
+                    count: 3,
+                },
+            ],
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+        let action = choose_action(&state, PlayerId(1), &config, &mut rng)
+            .expect("AI owes bottoms, must produce an action");
+
+        match action {
+            GameAction::SelectCards { cards } => {
+                let chosen: std::collections::HashSet<_> = cards.iter().copied().collect();
+                let expected: std::collections::HashSet<_> = vanilla.iter().copied().collect();
+                assert_eq!(
+                    chosen, expected,
+                    "AI must bottom its own 3 least valuable (vanilla) cards, \
+                     not player 0's 1-card selection"
+                );
+            }
+            other => panic!("expected SelectCards, got {other:?}"),
+        }
+    }
+
+    /// The fix's `|`-combined arm must hold for `OpeningHandBottomCards`
+    /// (TL:R 906.6 Tiny Leaders forced bottom), not just `MulliganBottomCards`:
+    /// the AI must still scope to its own owed count when a second player is
+    /// pending. Guards against a future refactor silently dropping one variant.
+    #[test]
+    fn ai_opening_hand_bottom_scopes_to_own_count_via_choose_action() {
+        let mut state = make_state();
+        let vanilla = two_player_bottom_fixture(&mut state, 5, 2);
+
+        state.waiting_for = WaitingFor::OpeningHandBottomCards {
+            pending: vec![
+                engine::types::game_state::MulliganBottomEntry {
+                    player: PlayerId(0),
+                    count: 1,
+                },
+                engine::types::game_state::MulliganBottomEntry {
+                    player: PlayerId(1),
+                    count: 2,
+                },
+            ],
+            reason: engine::types::game_state::OpeningHandBottomReason::TinyLeadersMultiCommander,
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(1);
+        let action = choose_action(&state, PlayerId(1), &config, &mut rng)
+            .expect("AI owes opening-hand bottoms, must produce an action");
+
+        match action {
+            GameAction::SelectCards { cards } => {
+                let chosen: std::collections::HashSet<_> = cards.iter().copied().collect();
+                let expected: std::collections::HashSet<_> = vanilla.iter().copied().collect();
+                assert_eq!(
+                    chosen, expected,
+                    "AI must bottom its own 2 least valuable cards for the \
+                     opening-hand-bottom path too"
+                );
+            }
+            other => panic!("expected SelectCards, got {other:?}"),
+        }
     }
 
     /// Build a single-blocker AssignCombatDamage prompt and run the AI fallback.

@@ -2427,10 +2427,13 @@ fn apply_action(
                 object_id,
                 value,
             });
-            // CR 601.2b + CR 601.2f: X is now locked in. Apply the cost floor
-            // (Trinisphere class) that was deferred while X was symbolic, against
-            // the now-concrete total, before payment is determined.
-            casting::apply_post_x_cost_floor(state, player, object_id);
+            // CR 601.2b + CR 601.2f: X is now locked in. Re-derive the full
+            // concrete cost from the captured base — all reductions, target-
+            // dependent modifiers, and Strive re-applied, with floors (Trinisphere
+            // class) run LAST — against the now-concrete total, before payment is
+            // determined. (Legacy/in-flight pending casts without a captured base
+            // fall back to flooring the already-concretized cost.)
+            casting::apply_post_x_cost_modifiers(state, player, object_id);
             casting_costs::enter_payment_step(state, player, convoke_mode, &mut events)?
         }
         // CR 601.2h: Player has confirmed payment — delegate to the shared finalizer
@@ -3376,6 +3379,7 @@ fn apply_action(
                 description: Some("Miracle — you may cast this card".to_string()),
                 may_trigger_origin: None,
                 subject_match_count: None,
+                die_result: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
 
@@ -10492,6 +10496,7 @@ mod tests {
                 PlayerId(0),
             ),
             cost: crate::types::mana::ManaCost::NoCost,
+            base_cost: None,
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: vec![],
@@ -10872,6 +10877,7 @@ mod tests {
                 PlayerId(0),
             ),
             cost: crate::types::mana::ManaCost::NoCost,
+            base_cost: None,
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: vec![],
@@ -12377,6 +12383,7 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -12480,6 +12487,7 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -12562,6 +12570,7 @@ mod trigger_target_tests {
             description: Some("Choose two target players".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -12684,6 +12693,7 @@ mod trigger_target_tests {
             description: Some("Whenever you cast your second spell each turn".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -12811,6 +12821,7 @@ mod trigger_target_tests {
             description: Some("Choose one or both with commander".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -12891,6 +12902,7 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -13021,6 +13033,7 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -13125,6 +13138,7 @@ mod trigger_target_tests {
             description: Some("Choose different target players".to_string()),
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let mut setup_events = Vec::new();
@@ -13236,6 +13250,7 @@ mod trigger_target_tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let pending_for_state = pending.clone();
         let stack_before = state.stack.len();
@@ -13929,6 +13944,7 @@ mod exile_return_tests {
                 trigger_event: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 
@@ -14075,6 +14091,7 @@ mod exile_return_tests {
                 trigger_event: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 
@@ -14189,6 +14206,7 @@ mod exile_return_tests {
                 trigger_event: None,
                 source_name: String::new(),
                 subject_match_count: None,
+                die_result: None,
             },
         });
 

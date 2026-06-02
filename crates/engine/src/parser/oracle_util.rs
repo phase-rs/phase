@@ -1697,6 +1697,11 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                         || is_non_subtype_subject_name(&lower_candidate)
                         || is_supertype_word(&lower_candidate)
                         || super::oracle_nom::primitives::is_keyword_word(&lower_candidate)
+                        // CR 201.5: a sentence-initial imperative verb ("Search
+                        // your library...") is never a self-reference, even when
+                        // it is the first word of a verb-named card ("Search for
+                        // Tomorrow"). Reject it so the verb survives unmangled.
+                        || super::oracle_nom::primitives::is_verb_word(&lower_candidate)
                         || is_subtype_word(&lower_candidate)
                     {
                         continue;
@@ -1847,6 +1852,64 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Sharuum enters", "Sharuum the Hegemon"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_verb_first_word_name_preserves_instruction_verb() {
+        // CR 201.5: "Search for Tomorrow" begins its Oracle text with the
+        // imperative verb "Search", not a self-reference. The strategy-5
+        // first-word fallback must not rewrite the verb to `~`.
+        assert_eq!(
+            normalize_card_name_refs(
+                "Search your library for a basic land card, put it onto the battlefield, then shuffle.",
+                "Search for Tomorrow"
+            ),
+            "Search your library for a basic land card, put it onto the battlefield, then shuffle."
+        );
+        // Same class: "Destroy the Evidence" / "Return to Battle".
+        assert_eq!(
+            normalize_card_name_refs("Destroy target land.", "Destroy the Evidence"),
+            "Destroy target land."
+        );
+        assert_eq!(
+            normalize_card_name_refs(
+                "Return target creature card from your graveyard to your hand.",
+                "Return to Battle"
+            ),
+            "Return target creature card from your graveyard to your hand."
+        );
+        // Sibling instruction verbs also in the lexicon: "Seek New Knowledge",
+        // "Choose Your Weapon", "Double Trouble" must not mangle their leading
+        // verb either.
+        assert_eq!(
+            normalize_card_name_refs(
+                "Seek two nonland cards, then put a card from your hand on the bottom of your library.",
+                "Seek New Knowledge"
+            ),
+            "Seek two nonland cards, then put a card from your hand on the bottom of your library."
+        );
+        assert_eq!(
+            normalize_card_name_refs("Choose one —", "Choose Your Weapon"),
+            "Choose one —"
+        );
+        assert_eq!(
+            normalize_card_name_refs(
+                "Double the power of each creature you control until end of turn.",
+                "Double Trouble"
+            ),
+            "Double the power of each creature you control until end of turn."
+        );
+    }
+
+    #[test]
+    fn normalize_verb_guard_preserves_split_half_self_ref() {
+        // The verb guard must not over-reach: a split-card half-name that is a
+        // noun ("Fire", "Cut", "Assault") is still a genuine self-reference and
+        // must normalize to `~`.
+        assert_eq!(
+            normalize_card_name_refs("Fire deals 2 damage divided as you choose.", "Fire // Ice"),
+            "~ deals 2 damage divided as you choose."
         );
     }
 

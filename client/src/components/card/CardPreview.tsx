@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { ChosenAttribute, GameObject, ManaCost, Zone } from "../../adapter/types.ts";
+import type { ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { abilityLabel } from "../../viewmodel/costLabel.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
@@ -350,6 +350,7 @@ function CardPreviewInner({
         <ParsedAbilitiesPanel
           name={showOtherFace ? (engineBackFace?.name ?? backFaceName ?? "") : (obj?.name ?? engineFrontFace?.name ?? frontFaceName)}
           cardTypes={showOtherFace ? engineBackFace?.card_type : (obj?.card_types ?? engineFrontFace?.card_type)}
+          keywords={showOtherFace ? undefined : obj?.keywords}
           localizedTypeLine={showOtherFace ? engineBackFace?.localized_type_line : engineFrontFace?.localized_type_line}
           parseDetails={showOtherFace && backParseDetails ? backParseDetails : frontParseDetails}
           maxHeight={viewportHeight - margin * 2}
@@ -723,6 +724,9 @@ function SupportSummary({ items }: { items: ParsedItem[] }) {
 interface ParsedAbilitiesPanelProps {
   name: string;
   cardTypes?: { supertypes: string[]; core_types: string[]; subtypes: string[] } | null;
+  /** Live object keywords, used to collapse a Changeling's expanded subtype
+   *  list to "Changeling" in the type line (CR 702.73a). */
+  keywords?: Keyword[];
   /** Localized type line from the content sidecar; preferred over formatting
    *  `cardTypes` when present (non-English locale with a translated card). */
   localizedTypeLine?: string | null;
@@ -730,11 +734,11 @@ interface ParsedAbilitiesPanelProps {
   maxHeight?: number;
 }
 
-function ParsedAbilitiesPanel({ name, cardTypes, localizedTypeLine, parseDetails, maxHeight }: ParsedAbilitiesPanelProps) {
+function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, parseDetails, maxHeight }: ParsedAbilitiesPanelProps) {
   const { t } = useTranslation("game");
   const items = parseDetails ?? [];
   const rulings = useCardRulings(name);
-  const typeLine = localizedTypeLine ?? (cardTypes ? formatTypeLine(cardTypes) : null);
+  const typeLine = localizedTypeLine ?? (cardTypes ? formatTypeLine(cardTypes, keywords) : null);
 
   return (
     <div
@@ -857,7 +861,7 @@ function CardInfoPanel({
       )}
       {/* Type line */}
       <div className="font-semibold text-gray-300">
-        {formatTypeLine(obj.card_types)}
+        {formatTypeLine(obj.card_types, obj.keywords)}
       </div>
 
       {activateLabels.length > 0 && (

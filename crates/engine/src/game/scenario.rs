@@ -7,7 +7,9 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::database::synthesis::{parse_oracle_with_cleave_brackets, synthesize_all};
+use crate::database::synthesis::{
+    merge_extracted_keywords, parse_oracle_with_cleave_brackets, synthesize_all,
+};
 use crate::game::engine::{apply_as_current, EngineError};
 use crate::game::game_object::GameObject;
 use crate::game::printed_cards::apply_card_face_to_object;
@@ -98,10 +100,13 @@ fn build_face_from_oracle(
         &subtype_strings,
     );
 
-    // Merge keywords: parse keyword names into Keyword values (mirroring how
-    // build_oracle_face merges MTGJSON keywords with extracted_keywords).
-    // extract_keyword_line skips exact matches (since MTGJSON already has them),
-    // so we need to parse them here and merge, just like the real pipeline.
+    // Parse the keyword-hint names into base `Keyword` values (the scenario
+    // analog of MTGJSON's keywords array), then delegate the merge of the
+    // parser-extracted keywords to the shared `merge_extracted_keywords`
+    // authority. CR 113.2c: routing through the same helper as the production
+    // pipeline guarantees the scenario path cannot diverge from production —
+    // multi-instance keywords (Cascade/Storm/Myriad/Exalted) keep their printed
+    // multiplicity instead of being presence-deduped.
     let mut keywords: Vec<Keyword> = effective_kw_names
         .iter()
         .filter_map(|s| {
@@ -113,12 +118,7 @@ fn build_face_from_oracle(
             }
         })
         .collect();
-    // Merge parser-extracted keywords, skipping any already present from hints.
-    for kw in parsed.extracted_keywords {
-        if !keywords.contains(&kw) {
-            keywords.push(kw);
-        }
-    }
+    merge_extracted_keywords(&mut keywords, parsed.extracted_keywords);
 
     let mut face = CardFace {
         name: obj.name.clone(),
@@ -2062,6 +2062,33 @@ mod tests {
 
         assert!(obj.keywords.contains(&Keyword::Flying));
         assert!(obj.keywords.contains(&Keyword::Vigilance));
+    }
+
+    /// CR 113.2c / CR 702.116b: the scenario harness routes its keyword merge
+    /// through the shared `merge_extracted_keywords` authority, so a creature whose
+    /// Oracle text prints "Myriad, myriad" must carry two Keyword::Myriad instances
+    /// — locking the scenario path to the production multiplicity behavior.
+    #[test]
+    fn from_oracle_text_recovers_repeated_myriad_instances() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature(P0, "Scurry of Squirrels", 3, 3)
+            .from_oracle_text_with_keywords(
+                &["myriad"],
+                "Myriad, myriad (Whenever this creature attacks, for each opponent other than defending player, you may create a token that's a copy of this creature that's tapped and attacking that player or a planeswalker they control. Then do it again. Exile the tokens at end of combat.)",
+            )
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert_eq!(
+            obj.keywords
+                .iter()
+                .filter(|k| matches!(k, Keyword::Myriad))
+                .count(),
+            2,
+            "scenario face must carry two Myriad instances via the shared merge"
+        );
     }
 
     #[test]

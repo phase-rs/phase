@@ -339,6 +339,7 @@ pub(super) fn handle_harmonize_tap_choice(
         }
     }
 
+    let base_cost = pending.base_cost.clone();
     casting_costs::pay_and_push_adventure(
         state,
         player,
@@ -346,6 +347,7 @@ pub(super) fn handle_harmonize_tap_choice(
         pending.card_id,
         pending.ability,
         &pending.cost,
+        base_cost,
         pending.casting_variant,
         pending.cast_timing_permission,
         pending.distribute,

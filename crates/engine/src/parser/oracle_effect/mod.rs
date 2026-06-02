@@ -115,7 +115,7 @@ use self::imperative::{
 use self::search::parse_search_filter;
 use self::search::{
     parse_multi_search_zones, parse_search_destination, parse_search_library_details,
-    parse_seek_details,
+    parse_seek_details, parse_total_mana_value_comparator,
 };
 use self::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, continuation_absorbs_current,
@@ -15631,6 +15631,16 @@ fn try_parse_put_zone_change_parts(
                 None => target_text,
             };
             let (target_text, choice_count) = strip_put_resolution_choice_quantifier(target_text);
+            // CR 202.3: An interior "with total mana value <X|N> or less" phrase
+            // (Ancient Brass Dragon: "creature cards with total mana value X or
+            // less from graveyards") sits between the type phrase and the zone
+            // suffix, breaking the contiguous "<type> cards from graveyards"
+            // parse that `parse_zone_suffix_nom` needs. Strip it here so the
+            // remaining text is contiguous; the cap itself is recovered as a
+            // `TargetSelectionConstraint::TotalManaValue` on the lowering path
+            // (see `parse_total_mana_value_target_constraint` in `lower.rs`).
+            let stripped_mv = strip_total_mana_value_target_phrase(target_text);
+            let target_text: &str = stripped_mv.as_deref().unwrap_or(target_text);
             let up_to = parse_up_to_one_target_prefix(before.lower) || choice_count.is_some();
             let (target, _) = parse_target(target_text);
             // CR 202.3 + CR 107.3i: A trailing "where X is <expression>"
@@ -15738,9 +15748,13 @@ fn strip_put_resolution_choice_quantifier(target_text: &str) -> (&str, Option<Mu
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(lower.as_str()) {
         let consumed = lower.len() - rest.len();
         let stripped = target_text[consumed..].trim_start();
-        if !target_starts_with_target(&stripped.to_ascii_lowercase()) {
-            return (stripped, Some(MultiTargetSpec::unlimited(0)));
-        }
+        // CR 601.2c + CR 115.1: "any number of target [type] …" is a
+        // variable-count *targeted* selection. Strip only the "any number of "
+        // quantifier so `parse_target` still sees the "target …" phrase (and
+        // builds the proper `Typed` filter + zone suffix), while returning the
+        // unlimited multi-target spec. The non-target form ("any number of
+        // [type] cards") strips the same prefix but feeds a bare type phrase.
+        return (stripped, Some(MultiTargetSpec::unlimited(0)));
     }
 
     if let Ok((after_up_to, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(lower.as_str()) {
@@ -15754,6 +15768,42 @@ fn strip_put_resolution_choice_quantifier(target_text: &str) -> (&str, Option<Mu
     }
 
     (target_text, None)
+}
+
+/// CR 202.3: Strip an interior "with total mana value <N|X> or less" phrase from
+/// a put-clause target text so the type phrase and the zone suffix remain
+/// contiguous for `parse_target` / `parse_zone_suffix_nom`. Returns the
+/// reconstructed text (phrase removed, surrounding whitespace normalized to a
+/// single space) when the phrase is found with an "or less" (LE) comparator;
+/// `None` otherwise (leaving `target_text` borrowed unchanged).
+///
+/// Only the LE comparator is stripped here: `validate_target_constraints` runs
+/// during target-set enumeration where prefix pruning of an over-cap partial
+/// set is only monotonic-safe for LE (mana value is non-negative), so the
+/// target-side parser never emits GE (no GE target card exists). The matched
+/// comparator value is discarded — the cap is recovered as a typed
+/// `TargetSelectionConstraint::TotalManaValue` on the lowering path.
+fn strip_total_mana_value_target_phrase(target_text: &str) -> Option<String> {
+    let lower = target_text.to_ascii_lowercase();
+    let (before, (comparator, _value), rest) =
+        nom_primitives::scan_preceded(lower.as_str(), |input| {
+            preceded(
+                tag::<_, _, OracleError<'_>>("with total mana value "),
+                parse_total_mana_value_comparator,
+            )
+            .parse(input)
+        })?;
+    if comparator != Comparator::LE {
+        return None;
+    }
+    // Slice the original-case text using the byte offsets from the (length-
+    // preserving, ASCII) lowercase scan: everything before the phrase plus
+    // everything after it.
+    let before_len = before.len();
+    let after_start = lower.len() - rest.len();
+    let before_orig = target_text[..before_len].trim_end();
+    let after_orig = target_text[after_start..].trim_start();
+    Some(format!("{before_orig} {after_orig}").trim().to_string())
 }
 
 fn parse_up_to_one_target_prefix(input: &str) -> bool {
@@ -40055,6 +40105,63 @@ mod tests {
             },
         )));
         assert!(!rewrite_recipient_chain(&mut head, &TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn strip_any_number_of_target_keeps_target_phrase_and_returns_unlimited() {
+        // CR 601.2c + CR 115.1: "any number of target …" strips only the
+        // quantifier so `parse_target` still sees the "target …" phrase, and
+        // recovers the unlimited multi-target spec.
+        let (stripped, spec) = strip_put_resolution_choice_quantifier(
+            "any number of target creature cards with total mana value X or less",
+        );
+        assert_eq!(
+            stripped,
+            "target creature cards with total mana value X or less"
+        );
+        assert_eq!(spec, Some(MultiTargetSpec::unlimited(0)));
+    }
+
+    #[test]
+    fn strip_any_number_of_non_target_unchanged() {
+        // Regression: the non-target form strips the same prefix and still
+        // returns the unlimited spec (prior behavior preserved).
+        let (stripped, spec) =
+            strip_put_resolution_choice_quantifier("any number of creature cards");
+        assert_eq!(stripped, "creature cards");
+        assert_eq!(spec, Some(MultiTargetSpec::unlimited(0)));
+    }
+
+    #[test]
+    fn strip_total_mana_value_phrase_makes_zone_suffix_contiguous() {
+        // CR 202.3: the interior "with total mana value X or less" is removed so
+        // "creature cards from graveyards" is contiguous for the zone suffix.
+        let stripped = strip_total_mana_value_target_phrase(
+            "target creature cards with total mana value X or less from graveyards",
+        );
+        assert_eq!(
+            stripped.as_deref(),
+            Some("target creature cards from graveyards")
+        );
+    }
+
+    #[test]
+    fn strip_total_mana_value_phrase_absent_returns_none() {
+        assert_eq!(
+            strip_total_mana_value_target_phrase("target creature cards from graveyards"),
+            None
+        );
+    }
+
+    #[test]
+    fn strip_total_mana_value_phrase_rejects_greater_comparator() {
+        // CR 202.3 / target side accepts LE only — GE is never stripped here.
+        assert_eq!(
+            strip_total_mana_value_target_phrase(
+                "target creature cards with total mana value 3 or greater from graveyards"
+            ),
+            None
+        );
     }
 }
 

@@ -112,6 +112,8 @@ pub enum TriggerEventKey {
     DieOrCoin,
     /// CR 725 (Monarch) + CR 726 (Initiative): Designation changed hands.
     MonarchOrInitiative,
+    /// CR 701.52a + CR 702.159a: An Attraction was visited after rolling to visit.
+    VisitAttraction,
     /// CR 104.3: A player lost the game.
     PlayerLost,
     /// CR 701.30: A clash occurred.
