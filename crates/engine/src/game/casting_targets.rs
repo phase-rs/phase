@@ -77,6 +77,14 @@ pub(crate) fn handle_select_modes(
     // the additional costs — alternative-cost permissions never waive them.
     let total_cost = compute_modal_total_cost(&pending.cost, &modal, &indices);
     let mut pending = pending;
+    // CR 601.2b + CR 601.2f: Fold the chosen modal mode costs (Spree / Entwine
+    // cost increases, computed against a zero base) into the captured base so
+    // any later post-X cost recompute (`concrete_cost_for_x`) includes them.
+    // Without a captured base (legacy / activated) leave it `None`.
+    if let Some(base) = pending.base_cost.as_ref() {
+        let modal_only = compute_modal_total_cost(&ManaCost::zero(), &modal, &indices);
+        pending.base_cost = Some(restrictions::add_mana_cost(base, &modal_only));
+    }
     if let Some(cost) = escalate_cost_for_selected_modes(state, controller, &pending, indices.len())
     {
         pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
@@ -100,6 +108,7 @@ pub(crate) fn handle_select_modes(
     {
         let mut pending_x =
             PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
+        pending_x.base_cost = pending.base_cost.clone();
         pending_x.target_constraints = pending.target_constraints;
         pending_x.casting_variant = pending.casting_variant;
         pending_x.cast_timing_permission = pending.cast_timing_permission;
@@ -174,6 +183,7 @@ pub(crate) fn handle_select_modes(
         )?;
         let mut pending_sel =
             PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
+        pending_sel.base_cost = pending.base_cost.clone();
         pending_sel.target_constraints = pending.target_constraints;
         pending_sel.casting_variant = pending.casting_variant;
         pending_sel.origin_zone = pending.origin_zone;
@@ -243,6 +253,7 @@ pub(crate) fn handle_select_targets(
                 ability,
                 pending.cost.clone(),
             );
+            pending_dist.base_cost = pending.base_cost.clone();
             pending_dist.casting_variant = pending.casting_variant;
             pending_dist.distribute = Some(unit.clone());
             pending_dist.origin_zone = pending.origin_zone;

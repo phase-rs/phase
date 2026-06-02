@@ -950,6 +950,15 @@ pub struct PendingCast {
     pub card_id: CardId,
     pub ability: ResolvedAbility,
     pub cost: ManaCost,
+    /// CR 601.2f: The tax-inclusive base mana cost captured at announcement,
+    /// BEFORE any cost reductions/increases or {X} concretization. Lets the
+    /// full concrete cost be recomputed from scratch for any chosen X with
+    /// floors applied LAST (`concrete_cost_for_x`). `None` for activated /
+    /// mana-ability casts and for legacy/in-flight saved games — those paths
+    /// fall back to flooring the already-reduced `cost`. `NoCost` is a real
+    /// base, so `Option` is the only safe sentinel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_cost: Option<ManaCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cost: Option<AbilityCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1040,6 +1049,7 @@ impl PendingCast {
             card_id,
             ability,
             cost,
+            base_cost: None,
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: Vec::new(),
@@ -5845,6 +5855,7 @@ mod tests {
                     PlayerId(0),
                 ),
                 cost: ManaCost::NoCost,
+                base_cost: None,
                 activation_cost: None,
                 activation_ability_index: None,
                 target_constraints: vec![],
@@ -6169,6 +6180,7 @@ mod tests {
                 PlayerId(0),
             ),
             cost: ManaCost::NoCost,
+            base_cost: None,
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: vec![],

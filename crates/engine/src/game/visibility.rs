@@ -587,6 +587,7 @@ mod tests {
                 caster,
             ),
             cost: ManaCost::NoCost,
+            base_cost: None,
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: vec![],

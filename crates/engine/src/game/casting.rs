@@ -176,6 +176,11 @@ struct PreparedSpellCast {
     /// spell-level effect (creatures, artifacts, etc.).
     ability_def: Option<AbilityDefinition>,
     mana_cost: crate::types::mana::ManaCost,
+    /// CR 601.2f: The tax-inclusive base cost captured BEFORE any cost
+    /// reductions/increases or {X} concretization. Threaded onto
+    /// `PendingCast.base_cost` so the full cost can be recomputed from scratch
+    /// for any chosen X with floors applied LAST.
+    base_mana_cost: crate::types::mana::ManaCost,
     modal: Option<crate::types::ability::ModalChoice>,
     casting_variant: CastingVariant,
     cast_timing_permission: Option<CastTimingPermission>,
@@ -2778,6 +2783,12 @@ fn prepare_spell_cast_with_variant_override_inner(
         }
     }
 
+    // CR 601.2f: Capture the tax-inclusive base BEFORE any cost reductions /
+    // increases or {X} concretization. Threaded onto `PendingCast.base_cost` so
+    // the full concrete cost can be recomputed from scratch for any chosen X with
+    // floors applied LAST (`concrete_cost_for_x`).
+    let base_mana_cost = mana_cost.clone();
+
     // CR 601.2f: Apply every cost modifier (self-spell statics, battlefield statics,
     // affinity, one-shot reductions, cost floor) in CR-correct order.
     apply_all_cost_modifiers(state, player, object_id, &mut mana_cost);
@@ -2812,6 +2823,7 @@ fn prepare_spell_cast_with_variant_override_inner(
         card_id: obj.card_id,
         ability_def,
         mana_cost,
+        base_mana_cost,
         modal: obj.modal.clone(),
         casting_variant,
         cast_timing_permission,
@@ -2820,12 +2832,12 @@ fn prepare_spell_cast_with_variant_override_inner(
     })
 }
 
-/// CR 601.2f: Apply every cost modifier to `mana_cost` in CR-correct order:
-/// self-spell statics → battlefield statics → affinity → one-shot pending
-/// reductions → cost floor (Trinisphere, applied last). Every pass reads
-/// `&GameState` only and is idempotent against a fresh base cost, so this
-/// helper can be re-run after an additional cost (Bargain) is declared.
-fn apply_all_cost_modifiers(
+/// CR 601.2f: Apply every NON-FLOOR cost modifier to `mana_cost` in CR-correct
+/// order: self-spell statics → battlefield statics → affinity → one-shot pending
+/// reductions. Floors (Trinisphere class) are deliberately excluded so callers
+/// can run them LAST against a concrete cost. Every pass reads `&GameState` only
+/// and is idempotent against a fresh base cost.
+fn apply_non_floor_cost_modifiers(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
@@ -2839,29 +2851,104 @@ fn apply_all_cost_modifiers(
     apply_affinity_reduction(state, player, object_id, mana_cost);
     // CR 601.2f: One-shot pending cost reductions ("the next spell costs {N} less").
     apply_pending_spell_cost_reductions(state, player, object_id, mana_cost);
+}
+
+/// CR 601.2f: Apply every cost modifier to `mana_cost` in CR-correct order:
+/// self-spell statics → battlefield statics → affinity → one-shot pending
+/// reductions → cost floor (Trinisphere, applied last). Every pass reads
+/// `&GameState` only and is idempotent against a fresh base cost, so this
+/// helper can be re-run after an additional cost (Bargain) is declared.
+pub(super) fn apply_all_cost_modifiers(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    mana_cost: &mut ManaCost,
+) {
+    apply_non_floor_cost_modifiers(state, player, object_id, mana_cost);
     // CR 601.2b + CR 601.2f: Cost-floor statics (Trinisphere class) — LAST, after
     // every additive/subtractive modifier so the floor sees the final mana
     // component. While the cost still contains `{X}`, X has mana value 0
     // (CR 107.3g), so flooring now would over-count the spell once X is paid
     // (CR 601.2b locks in the chosen X *before* the "directly affect the total
     // cost" step of CR 601.2f). Defer the floor for `{X}` costs to
-    // `apply_post_x_cost_floor`, run from the ChooseX handler once X is concrete.
+    // `apply_post_x_cost_modifiers`, run from the ChooseX handler once X is concrete.
     if !casting_costs::cost_has_x(mana_cost) {
         apply_cost_floor(state, player, object_id, mana_cost);
     }
 }
 
-/// CR 601.2b + CR 601.2f: Apply cost-floor statics (Trinisphere class) to a
-/// pending `{X}` spell's cost AFTER the chosen X has been concretized into the
-/// cost. The floor is skipped during prepare and target selection while X is
-/// still symbolic (mana value 0); this runs the deferred "directly affect the
-/// total cost" lock-in step against the real total once X is known.
+/// CR 601.2f: Apply the target-dependent cost modifiers (NO floor) to
+/// `mana_cost`, in CR-correct order:
+/// Strive per-target surcharge (CR 601.2f cost increase) → self-spell statics
+/// that read the chosen targets → battlefield statics that read the chosen
+/// targets. Floors are deliberately excluded so callers can run them LAST. The
+/// `unselected-targets` case (no `TargetRef` in the static's filter) is a safe
+/// no-op for the selected-targets passes.
+pub(super) fn apply_target_dependent_cost_modifiers(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    ability: &ResolvedAbility,
+    mana_cost: &mut ManaCost,
+) {
+    // CR 601.2f: Strive per-target cost increase. Targets are chosen in
+    // CR 601.2c; costs are determined in CR 601.2f. Add
+    // strive_cost * (num_targets - 1) to the total casting cost.
+    if let Some(strive_cost) = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.strive_cost.clone())
+    {
+        let target_count = super::ability_utils::flatten_targets_in_chain(ability).len();
+        for _ in 1..target_count {
+            *mana_cost = super::restrictions::add_mana_cost(mana_cost, &strive_cost);
+        }
+    }
+    apply_self_spell_cost_modifiers_with_selected_targets(
+        state, player, object_id, ability, mana_cost,
+    );
+    apply_battlefield_cost_modifiers_with_selected_targets(
+        state, player, object_id, ability, mana_cost,
+    );
+}
+
+/// CR 601.2f: Recompute the FULL concrete pending cost for a known X. Floors
+/// run LAST so they lock in against the real total (CR 601.2f "locked in").
+/// Order: base (tax-inclusive) → concretize_x (CR 107.1b) → non-target
+/// reductions → target-dependent reductions + Strive → THEN both floor channels.
 ///
-/// The two floor channels are disjoint — `apply_cost_floor` handles untargeted
-/// floors (the prepare-time channel) and `apply_cost_floor_with_selected_targets`
-/// handles target-dependent floors (the target-selection channel) — so applying
-/// both here floors the concrete cost exactly once.
-pub(super) fn apply_post_x_cost_floor(
+/// X is concrete here, so both floor channels apply (they do not self-gate on
+/// X — only the prepare-path callers gate). Selected targets come from the
+/// cloned pending `ability`; the unselected-targets case no-ops safely.
+pub(super) fn concrete_cost_for_x(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    ability: &ResolvedAbility,
+    base: &ManaCost,
+    x: u32,
+) -> ManaCost {
+    let mut cost = base.clone();
+    cost.concretize_x(x);
+    apply_non_floor_cost_modifiers(state, player, object_id, &mut cost);
+    apply_target_dependent_cost_modifiers(state, player, object_id, ability, &mut cost);
+    apply_cost_floor(state, player, object_id, &mut cost);
+    apply_cost_floor_with_selected_targets(state, player, object_id, ability, &mut cost);
+    cost
+}
+
+/// CR 601.2f + CR 107.3g: Re-derive a pending `{X}` spell's full concrete cost
+/// AFTER the chosen X is known. Rebuilds from the captured tax-inclusive base
+/// via `concrete_cost_for_x`, re-applying all reductions, target-dependent
+/// modifiers, and Strive, with both floor channels run LAST (CR 601.2f locked
+/// in). This replaces the floor-only post-X pass so that reduction capacity
+/// exceeding the fixed non-X generic is no longer clamped at generic=0 while X
+/// was symbolic (mana value 0, CR 107.3g).
+///
+/// Legacy/in-flight saved games (or any path that never threaded `base_cost`)
+/// fall back to flooring the already-concretized `cost` — byte-identical to the
+/// pre-change behavior.
+pub(super) fn apply_post_x_cost_modifiers(
     state: &mut GameState,
     caster: PlayerId,
     object_id: ObjectId,
@@ -2869,12 +2956,24 @@ pub(super) fn apply_post_x_cost_floor(
     let Some(pending) = state.pending_cast.as_ref() else {
         return;
     };
-    let mut cost = pending.cost.clone();
+    let Some(x) = pending.ability.chosen_x else {
+        return;
+    };
     let ability = pending.ability.clone();
-    apply_cost_floor(state, caster, object_id, &mut cost);
-    apply_cost_floor_with_selected_targets(state, caster, object_id, &ability, &mut cost);
+    let new_cost = match pending.base_cost.clone() {
+        Some(base) => concrete_cost_for_x(state, caster, object_id, &ability, &base, x),
+        None => {
+            // Legacy / in-flight saved game without a captured base: behavior
+            // identical to the pre-change floor-only post-X pass.
+            let mut cost = pending.cost.clone();
+            apply_cost_floor(state, caster, object_id, &mut cost);
+            apply_cost_floor_with_selected_targets(state, caster, object_id, &ability, &mut cost);
+            cost
+        }
+    };
+    debug_assert!(!casting_costs::cost_has_x(&new_cost));
     if let Some(pending) = state.pending_cast.as_mut() {
-        pending.cost = cost;
+        pending.cost = new_cost;
     }
 }
 
@@ -5933,6 +6032,7 @@ fn continue_with_prepared(
                     prepared.card_id,
                     placeholder,
                     prepared.mana_cost.clone(),
+                    Some(prepared.base_mana_cost.clone()),
                     prepared.casting_variant,
                     prepared.cast_timing_permission,
                     modal_choice.clone(),
@@ -5960,6 +6060,7 @@ fn continue_with_prepared(
                 placeholder,
                 prepared.mana_cost.clone(),
             );
+            pending_modal.base_cost = Some(prepared.base_mana_cost.clone());
             pending_modal.casting_variant = prepared.casting_variant;
             pending_modal.cast_timing_permission = prepared.cast_timing_permission;
             pending_modal.distribute = ability_def.distribute.clone();
@@ -6037,6 +6138,7 @@ fn continue_with_prepared(
                     prepared.card_id,
                     resolved,
                     &prepared.mana_cost,
+                    Some(prepared.base_mana_cost.clone()),
                     prepared.casting_variant,
                     prepared.cast_timing_permission,
                     prepared.origin_zone,
@@ -6051,6 +6153,7 @@ fn continue_with_prepared(
                     resolved,
                     prepared.mana_cost.clone(),
                 );
+                pending_aura.base_cost = Some(prepared.base_mana_cost.clone());
                 pending_aura.casting_variant = prepared.casting_variant;
                 pending_aura.cast_timing_permission = prepared.cast_timing_permission;
                 pending_aura.distribute = prepared
@@ -6084,6 +6187,7 @@ fn continue_with_prepared(
                 prepared.card_id,
                 resolved,
                 prepared.mana_cost,
+                Some(prepared.base_mana_cost.clone()),
                 required_cost,
                 prepared.casting_variant,
                 prepared.cast_timing_permission,
@@ -6103,6 +6207,7 @@ fn continue_with_prepared(
                 resolved,
                 prepared.mana_cost.clone(),
             );
+            pending_x.base_cost = Some(prepared.base_mana_cost.clone());
             pending_x.casting_variant = prepared.casting_variant;
             pending_x.cast_timing_permission = prepared.cast_timing_permission;
             pending_x.distribute = prepared
@@ -6142,6 +6247,7 @@ fn continue_with_prepared(
                 prepared.card_id,
                 resolved,
                 prepared.mana_cost,
+                Some(prepared.base_mana_cost.clone()),
                 prepared.casting_variant,
                 prepared.cast_timing_permission,
                 prepared
@@ -6167,6 +6273,7 @@ fn continue_with_prepared(
                 prepared.card_id,
                 resolved,
                 prepared.mana_cost,
+                Some(prepared.base_mana_cost.clone()),
                 casualty_cost,
                 prepared.casting_variant,
                 prepared.cast_timing_permission,
@@ -6192,6 +6299,7 @@ fn continue_with_prepared(
                 prepared.card_id,
                 resolved,
                 &prepared.mana_cost,
+                Some(prepared.base_mana_cost.clone()),
                 prepared.casting_variant,
                 prepared.cast_timing_permission,
                 prepared.origin_zone,
@@ -6212,6 +6320,7 @@ fn continue_with_prepared(
             resolved,
             prepared.mana_cost.clone(),
         );
+        pending_targets.base_cost = Some(prepared.base_mana_cost.clone());
         pending_targets.casting_variant = prepared.casting_variant;
         pending_targets.cast_timing_permission = prepared.cast_timing_permission;
         pending_targets.distribute = prepared
@@ -6238,6 +6347,7 @@ fn continue_with_prepared(
         prepared.card_id,
         resolved,
         &prepared.mana_cost,
+        Some(prepared.base_mana_cost.clone()),
         prepared.casting_variant,
         prepared.cast_timing_permission,
         prepared.origin_zone,
@@ -6339,6 +6449,7 @@ fn continue_with_no_ability(
         prepared.card_id,
         placeholder,
         &prepared.mana_cost,
+        Some(prepared.base_mana_cost.clone()),
         prepared.casting_variant,
         prepared.cast_timing_permission,
         prepared.origin_zone,
@@ -12665,6 +12776,12 @@ mod tests {
             },
         );
         pending.activation_ability_index = None;
+        // Mimic a real spell cast: the announce path requires a captured base
+        // (CR 601.2f). The base is the symbolic {X} cost before reductions.
+        pending.base_cost = Some(ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        });
         state.pending_cast = Some(Box::new(pending));
 
         let mut events = Vec::new();
@@ -15121,6 +15238,501 @@ mod tests {
         );
     }
 
+    /// CR 601.2f + CR 702.41a + CR 107.3g: When a granted Affinity reduction
+    /// exceeds the spell's fixed non-X generic, the old probe clamped the
+    /// reduction at generic=0 while X was symbolic (mana value 0) and lost the
+    /// surplus, understating the X cap. The ascending probe recomputes the full
+    /// concrete cost from the captured base for each X, so the surplus reduction
+    /// is applied against the X-contributed generic. Headline regression.
+    #[test]
+    fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{ControllerRef, QuantityRef, TypeFilter, TypedFilter};
+        use crate::types::keywords::Keyword;
+        use crate::types::statics::StaticMode;
+        use crate::types::StaticDefinition;
+
+        // Build a {X}{B}{B} sorcery + a battlefield static granting
+        // Affinity(Creature) to the controller's sorceries, with N creatures.
+        fn build_state(creatures: u64) -> (GameState, ObjectId) {
+            let mut state = setup_game_at_main_phase();
+            // Source of the granting static.
+            let granter = create_object(
+                &mut state,
+                CardId(970),
+                PlayerId(0),
+                "Affinity Granter".to_string(),
+                Zone::Battlefield,
+            );
+            {
+                let obj = state.objects.get_mut(&granter).unwrap();
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                let affected = TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Sorcery],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                });
+                let granted = Keyword::Affinity(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![],
+                });
+                obj.static_definitions = vec![StaticDefinition {
+                    mode: StaticMode::CastWithKeyword { keyword: granted },
+                    affected: Some(affected),
+                    modifications: vec![],
+                    condition: None,
+                    per_player_condition: None,
+                    affected_zone: None,
+                    effect_zone: None,
+                    active_zones: vec![],
+                    characteristic_defining: false,
+                    description: None,
+                }]
+                .into();
+            }
+            for i in 0..creatures {
+                let id = create_object(
+                    &mut state,
+                    CardId(980 + i),
+                    PlayerId(0),
+                    format!("Creature {i}"),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+            }
+            let spell = create_object(
+                &mut state,
+                CardId(960),
+                PlayerId(0),
+                "Affinity X Sorcery".to_string(),
+                Zone::Hand,
+            );
+            {
+                let obj = state.objects.get_mut(&spell).unwrap();
+                obj.card_types.core_types.push(CoreType::Sorcery);
+                Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable {
+                                name: "X".to_string(),
+                            },
+                        },
+                        target: TargetFilter::Controller,
+                    },
+                ));
+                // {X}{B}{B}: fixed non-X generic = 0; only the two black shards.
+                obj.mana_cost = ManaCost::Cost {
+                    shards: vec![ManaCostShard::X, ManaCostShard::Black, ManaCostShard::Black],
+                    generic: 0,
+                };
+            }
+            // Ample mana: 10 black covers BB + any reasonable X.
+            add_mana(&mut state, PlayerId(0), ManaType::Black, 10);
+            (state, spell)
+        }
+
+        let choose_max = |state: &mut GameState, spell: ObjectId| -> u32 {
+            apply_as_current(
+                state,
+                GameAction::CastSpell {
+                    object_id: spell,
+                    card_id: CardId(960),
+                    targets: vec![],
+                },
+            )
+            .unwrap();
+            match state.waiting_for {
+                WaitingFor::ChooseXValue { max, .. } => max,
+                ref other => panic!("expected ChooseXValue, got {other:?}"),
+            }
+        };
+
+        // No affinity-granting creatures beyond the spell itself: baseline.
+        // With pool=10, BB consumes 2, so baseline max X = 10 - 2 = 8.
+        let (mut baseline_state, baseline_spell) = build_state(0);
+        let baseline_max = choose_max(&mut baseline_state, baseline_spell);
+
+        // 3 creatures: affinity reduces the (concretized) generic by 3, so each
+        // affordable X effectively costs 1 less mana — max X is 3 higher.
+        let (mut affinity_state, affinity_spell) = build_state(3);
+        let affinity_max = choose_max(&mut affinity_state, affinity_spell);
+
+        assert_eq!(
+            affinity_max,
+            baseline_max + 3,
+            "granted Affinity for 3 creatures must raise max X by exactly 3 \
+             (reduction surplus beyond the {{0}} fixed generic is no longer lost)"
+        );
+
+        // The chosen max X is actually castable: charge = X + BB - affinity.
+        // At affinity_max, generic after concretize = affinity_max; affinity -3
+        // reduces it; BB remains. mana_value = (affinity_max - 3) + 2.
+        let pool_before = affinity_state.players[0].mana_pool.total();
+        apply_as_current(
+            &mut affinity_state,
+            GameAction::ChooseX {
+                value: affinity_max,
+            },
+        )
+        .unwrap();
+        // CR 601.2f: X is locked in — the post-commit cost is X-free, so the
+        // payment step must never re-enter ChooseXValue.
+        assert!(
+            !matches!(affinity_state.waiting_for, WaitingFor::ChooseXValue { .. }),
+            "post-commit cost must be X-free; no re-loop into ChooseXValue"
+        );
+        // Drive payment to completion (auto-finalize or explicit pass).
+        if matches!(affinity_state.waiting_for, WaitingFor::ManaPayment { .. }) {
+            apply_as_current(&mut affinity_state, GameAction::PassPriority).unwrap();
+        }
+        let pool_after = affinity_state.players[0].mana_pool.total();
+        let spent = pool_before - pool_after;
+        assert_eq!(
+            spent as u32,
+            (affinity_max - 3) + 2,
+            "charged mana = (X - affinity_reduction) + BB"
+        );
+    }
+
+    /// CR 601.2f: An `{X}` spell with a Strive per-target surcharge AND an active
+    /// one-shot cost reduction must, when its full concrete cost is re-derived for
+    /// a known X, include `strive × (targets − 1)` AND apply the reduction — the
+    /// re-derive must NOT drop Strive. Drives the real `concrete_cost_for_x`
+    /// orchestrator (reductions → target-dependent modifiers + Strive → floors)
+    /// against a live GameState with a real `strive_cost` and a real
+    /// `PendingSpellCostReduction`. Guards `apply_target_dependent_cost_modifiers`
+    /// inside `concrete_cost_for_x`.
+    #[test]
+    fn x_cost_strive_surcharge_and_reduction_both_applied_in_concrete_cost() {
+        use crate::types::game_state::PendingSpellCostReduction;
+
+        let mut state = setup_game_at_main_phase();
+        // Two creatures to target with the Strive spell.
+        let target_a = create_object(
+            &mut state,
+            CardId(940),
+            PlayerId(1),
+            "Strive Target A".to_string(),
+            Zone::Battlefield,
+        );
+        let target_b = create_object(
+            &mut state,
+            CardId(941),
+            PlayerId(1),
+            "Strive Target B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [target_a, target_b] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(942),
+            PlayerId(0),
+            "Synthetic Strive X".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            ));
+            // Base {X}{3}; Strive {2} per extra target.
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X],
+                generic: 3,
+            };
+            obj.strive_cost = Some(ManaCost::generic(2));
+        }
+
+        // One-shot reduction of {1} for this controller.
+        state
+            .pending_spell_cost_reductions
+            .push(PendingSpellCostReduction {
+                player: PlayerId(0),
+                amount: 1,
+                spell_filter: None,
+            });
+
+        // Two targets chosen (CR 601.2c), so Strive adds {2} once.
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
+            spell,
+            PlayerId(0),
+        );
+
+        let base = state.objects[&spell].mana_cost.clone();
+        let x = 4u32;
+        let cost = super::super::casting::concrete_cost_for_x(
+            &state,
+            PlayerId(0),
+            spell,
+            &ability,
+            &base,
+            x,
+        );
+        // base generic 3 + X(4) + strive(2)*(2-1) - reduction(1) = 3 + 4 + 2 - 1 = 8.
+        assert_eq!(
+            cost.mana_value(),
+            8,
+            "concrete cost must = base(3) + X(4) + strive(2) − reduction(1); got {cost:?}"
+        );
+    }
+
+    /// CR 601.2f: Cost reductions are applied BEFORE the cost floor (the floor is
+    /// "locked in" last). For an `{X}` Strive spell with ≥2 targets, an active
+    /// reduction, AND a Trinisphere-class `MinimumCost` floor, the locked-in cost
+    /// must be `max(floor, base + X + strive×(targets−1) − reduction)`. This is
+    /// discriminating for floor-LAST ordering: if the floor ran before the
+    /// reduction, the result would differ whenever the floor is not binding.
+    #[test]
+    fn x_cost_strive_reduction_then_floor_ordering() {
+        use crate::types::game_state::PendingSpellCostReduction;
+
+        let mut state = setup_game_at_main_phase();
+        // Trinisphere floors total to mana value 3.
+        add_trinisphere(&mut state, PlayerId(0));
+
+        let target_a = create_object(
+            &mut state,
+            CardId(945),
+            PlayerId(1),
+            "Floor Target A".to_string(),
+            Zone::Battlefield,
+        );
+        let target_b = create_object(
+            &mut state,
+            CardId(946),
+            PlayerId(1),
+            "Floor Target B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [target_a, target_b] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(947),
+            PlayerId(0),
+            "Synthetic Strive Floor X".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            ));
+            // Base {X} only; Strive {1} per extra target.
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X],
+                generic: 0,
+            };
+            obj.strive_cost = Some(ManaCost::generic(1));
+        }
+
+        state
+            .pending_spell_cost_reductions
+            .push(PendingSpellCostReduction {
+                player: PlayerId(0),
+                amount: 2,
+                spell_filter: None,
+            });
+
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(target_a), TargetRef::Object(target_b)],
+            spell,
+            PlayerId(0),
+        );
+
+        let base = state.objects[&spell].mana_cost.clone();
+
+        // X=5: pre-floor total = X(5) + strive(1) − reduction(2) = 4; floor=3 not
+        // binding, so reduction-then-floor yields 4. If the floor ran BEFORE the
+        // reduction, the pre-reduction total X(5)+strive(1)=6 already exceeds the
+        // floor and the result would be 6−2=4 here too — so pick an X where the
+        // ordering is observable below.
+        let cost_high = super::super::casting::concrete_cost_for_x(
+            &state,
+            PlayerId(0),
+            spell,
+            &ability,
+            &base,
+            5,
+        );
+        assert_eq!(
+            cost_high.mana_value(),
+            4,
+            "X=5: max(floor 3, 5 + 1 − 2 = 4) = 4; got {cost_high:?}"
+        );
+
+        // X=2: reduction-then-floor → max(3, 2 + 1 − 2 = 1) = 3 (floor binds).
+        // Floor-then-reduction (WRONG) → max(3, 2+1=3) then −2 = 1, which would
+        // FAIL this assertion. This case discriminates the ordering.
+        let cost_low = super::super::casting::concrete_cost_for_x(
+            &state,
+            PlayerId(0),
+            spell,
+            &ability,
+            &base,
+            2,
+        );
+        assert_eq!(
+            cost_low.mana_value(),
+            3,
+            "X=2: reduction BEFORE floor → max(3, 2 + 1 − 2 = 1) = 3; \
+             floor-before-reduction would wrongly give 1; got {cost_low:?}"
+        );
+    }
+
+    /// CR 118.9d + CR 601.2f: An `{X}` spell cast via an alternative cost whose
+    /// base differs from the printed cost must derive `ChooseXValue.max` AND the
+    /// charged cost from the ALTERNATIVE base (threaded onto `PendingCast.base_cost`),
+    /// never the printed cost. Drives the real Overload variant path: printed
+    /// {2}{R}, overload {X}{R}. With a pool that affords X via the alt base, the X
+    /// cap and locked-in cost must reflect {X}{R}, not {2}{R}. Guards base_cost
+    /// threading through `continue_cast_with_variant` → `enter_payment_step`.
+    #[test]
+    fn x_cost_alt_cost_max_and_charge_derive_from_alt_base() {
+        let mut state = setup_game_at_main_phase();
+        let target = create_object(
+            &mut state,
+            CardId(948),
+            PlayerId(1),
+            "Overload Target".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let spell = create_object(
+            &mut state,
+            CardId(949),
+            PlayerId(0),
+            "Synthetic Overload X".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                },
+            ));
+            // Printed cost: {2}{R}. Overload (alt) cost: {X}{R}.
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 2,
+            };
+            obj.keywords.push(Keyword::Overload(ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 0,
+            }));
+        }
+        // Pool: 5 red. Alt base fixed = R = 1, so max X = 4. Against the PRINTED
+        // {2}{R} this spell is not even X-costed; deriving from printed would
+        // never reach ChooseXValue. So reaching ChooseXValue at all proves the
+        // alt base was used, and max=4 proves the bound came from {X}{R}.
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 5);
+
+        let mut events = Vec::new();
+        let wf = super::super::casting::continue_cast_with_variant(
+            &mut state,
+            PlayerId(0),
+            spell,
+            CastingVariant::Overload,
+            CastPaymentMode::Auto,
+            &mut events,
+        )
+        .expect("overload cast prepares and reaches X announcement");
+        let max = match wf {
+            WaitingFor::ChooseXValue { max, .. } => max,
+            other => panic!("expected ChooseXValue from {{X}}{{R}} overload base, got {other:?}"),
+        };
+        assert_eq!(
+            max, 4,
+            "max X must derive from alt base {{X}}{{R}} (pool 5 − R = 4), not printed {{2}}{{R}}"
+        );
+
+        let pending = state.pending_cast.as_ref().expect("pending overload cast");
+        assert_eq!(
+            pending.base_cost,
+            Some(ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Red],
+                generic: 0,
+            }),
+            "PendingCast.base_cost must be the overload (alt) base {{X}}{{R}}, got {:?}",
+            pending.base_cost
+        );
+
+        // Lock in X=3: charged cost = X(3) + R from the ALT base → mana value 4.
+        // Against the printed {2}{R} the value would instead be 3. Auto-finalize
+        // may consume `pending_cast` and push to the stack, so fall back to the
+        // spent-mana check when the pending cost is no longer readable.
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+        let charged = state.pending_cast.as_ref().map(|p| p.cost.mana_value());
+        if let Some(mv) = charged {
+            assert_eq!(
+                mv, 4,
+                "charged cost from alt base {{X}}{{R}} at X=3 must be mv 4, not printed-derived"
+            );
+        } else {
+            // Auto-finalized: 5 in pool − 4 charged = 1 remaining.
+            assert_eq!(
+                state.players[0].mana_pool.total(),
+                1,
+                "alt-base charge of {{3}}{{R}} (mv 4) must leave 1 of the 5 red mana"
+            );
+        }
+    }
+
     /// Multi-X costs ({X}{X}): each point of X costs 2 mana, so `max_x_value`
     /// must divide remaining capacity by the X-count.
     #[test]
@@ -16452,6 +17064,60 @@ mod tests {
             g_three, 0,
             "3 creatures controlled (Witherbloom + 2 bears) → generic reduced from 3 to 0 \
              by Affinity granted via Witherbloom's static"
+        );
+    }
+
+    /// CR 702.9b (Flying) + CR 702.2b (Deathtouch): Hardening guard for the
+    /// Witherbloom-the-Balancer commander used in the X-cost / granted-Affinity
+    /// regression suite. Witherbloom is a `Legendary Creature — Elder Dragon`
+    /// printed with `["Affinity","Deathtouch","Flying"]`; loading it from the
+    /// real card export must surface BOTH Flying and Deathtouch as object
+    /// keywords. Self-skips when `card-data.json` is absent (e.g. CI Rust job).
+    #[test]
+    fn witherbloom_card_object_has_flying_and_deathtouch() {
+        use crate::types::keywords::KeywordKind;
+        use std::path::PathBuf;
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("client")
+            .join("public")
+            .join("card-data.json");
+        if !path.exists() {
+            eprintln!(
+                "skipping: {} not found (run ./scripts/gen-card-data.sh)",
+                path.display()
+            );
+            return;
+        }
+        let raw = std::fs::read_to_string(&path).expect("card-data.json readable");
+        let map: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&raw).expect("card-data.json is a JSON object");
+        let value = map
+            .get("witherbloom, the balancer")
+            .expect("Witherbloom should be in the export keyed by lowercase name");
+        let face: crate::types::card::CardFace =
+            serde_json::from_value(value.clone()).expect("Witherbloom record parses as CardFace");
+
+        let mut state = setup_game_at_main_phase();
+        let obj_id =
+            crate::game::deck_loading::create_object_from_card_face(&mut state, &face, PlayerId(0));
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Battlefield, &mut Vec::new());
+
+        let obj = state
+            .objects
+            .get(&obj_id)
+            .expect("Witherbloom object exists");
+        assert!(
+            crate::game::keywords::has_keyword_kind(obj, KeywordKind::Flying),
+            "Witherbloom, the Balancer must have Flying; keywords = {:?}",
+            obj.keywords
+        );
+        assert!(
+            crate::game::keywords::has_keyword_kind(obj, KeywordKind::Deathtouch),
+            "Witherbloom, the Balancer must have Deathtouch; keywords = {:?}",
+            obj.keywords
         );
     }
 
@@ -19270,6 +19936,7 @@ mod tests {
                 shards: vec![ManaCostShard::Red],
                 generic: 0,
             },
+            None,
             CastingVariant::Normal,
             None,
             None,
