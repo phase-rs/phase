@@ -1,4 +1,4 @@
-//! Integration tests for Unfinity Attractions (CR 717, CR 701.48, CR 701.52).
+//! Integration tests for Unfinity Attractions (CR 717, CR 701.51, CR 701.52).
 
 #![allow(unused_imports)]
 
@@ -82,6 +82,56 @@ fn open_attraction_moves_top_deck_card_to_battlefield() {
 }
 
 #[test]
+fn open_attractions_does_as_much_as_possible_when_deck_is_short() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+
+    let face = test_attraction_face("Test Ride", "Visit — Draw a card.", vec![1, 2, 3, 4, 5, 6]);
+    create_attraction_deck_card(runner.state_mut(), &face, P0);
+
+    let mut events = Vec::new();
+    open_attractions(runner.state_mut(), P0, 2, &mut events).unwrap();
+
+    assert!(runner.state().players[0].attraction_deck.is_empty());
+    assert_eq!(runner.state().battlefield.len(), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::AttractionOpened { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn attraction_leaving_for_graveyard_redirects_to_command_junkyard() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+
+    let face = test_attraction_face("Test Ride", "Visit — Draw a card.", vec![1, 2, 3, 4, 5, 6]);
+    let attraction_id = create_attraction_deck_card(runner.state_mut(), &face, P0);
+    open_attractions(runner.state_mut(), P0, 1, &mut Vec::new()).unwrap();
+
+    let mut events = Vec::new();
+    zones::move_to_zone(
+        runner.state_mut(),
+        attraction_id,
+        Zone::Graveyard,
+        &mut events,
+    );
+
+    assert_eq!(runner.state().objects[&attraction_id].zone, Zone::Command);
+    assert!(!runner.state().objects[&attraction_id].in_attraction_deck);
+    assert!(runner.state().command_zone.contains(&attraction_id));
+    assert!(!runner.state().players[0].graveyard.contains(&attraction_id));
+    assert!(!runner.state().players[0]
+        .attraction_deck
+        .contains(&attraction_id));
+}
+
+#[test]
 fn roll_to_visit_fires_visit_trigger_when_roll_matches_lights() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -109,6 +159,25 @@ fn roll_to_visit_fires_visit_trigger_when_roll_matches_lights() {
     let hand_before = runner.state().players[0].hand.len();
     let mut events = Vec::new();
     roll_to_visit_attractions(runner.state_mut(), P0, &mut events);
+    let roll = events
+        .iter()
+        .find_map(|e| {
+            if let GameEvent::AttractionsRolledToVisit { roll, .. } = e {
+                Some(*roll)
+            } else {
+                None
+            }
+        })
+        .expect("roll-to-visit event");
+
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::DieRolled {
+            player_id: P0,
+            sides: 6,
+            result,
+        } if *result == roll
+    )));
 
     assert!(
         !runner.state().stack.is_empty(),
@@ -137,8 +206,8 @@ fn parser_open_an_attraction_effect() {
         parsed
             .abilities
             .iter()
-            .any(|a| matches!(*a.effect, Effect::OpenAttraction)),
-        "expected OpenAttraction effect, got {:?}",
+            .any(|a| matches!(*a.effect, Effect::OpenAttractions { count: 1 })),
+        "expected OpenAttractions {{ count: 1 }} effect, got {:?}",
         parsed
             .abilities
             .iter()

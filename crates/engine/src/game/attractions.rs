@@ -1,11 +1,9 @@
-//! CR 717 + CR 701.48 + CR 701.52: Unfinity Attraction deck, open, and visit.
+//! CR 717 + CR 701.51 + CR 701.52: Unfinity Attraction deck, open, and visit.
 //!
 //! Attractions live in a supplementary deck (command zone) tracked per player via
 //! `Player::attraction_deck`. Opening moves the top card to the battlefield; rolling
 //! to visit is a turn-based action at the beginning of the active player's precombat
 //! main phase when they control an Attraction.
-
-use rand::Rng;
 
 use crate::types::ability::{EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
@@ -14,6 +12,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+use super::effects::roll_die;
 use super::game_object::GameObject;
 use super::zones;
 use crate::types::ability::EffectError;
@@ -23,16 +22,21 @@ pub fn default_attraction_lights() -> Vec<u8> {
     vec![1, 6]
 }
 
-pub fn is_attraction_permanent(obj: &GameObject) -> bool {
-    obj.zone == Zone::Battlefield
-        && obj
+pub fn is_attraction_card(obj: &GameObject) -> bool {
+    obj.in_attraction_deck
+        || !obj.attraction_lights.is_empty()
+        || obj
             .card_types
             .subtypes
             .iter()
             .any(|s| s.eq_ignore_ascii_case("Attraction"))
 }
 
-/// CR 701.48: Put the top card of the controller's Attraction deck onto the battlefield.
+pub fn is_attraction_permanent(obj: &GameObject) -> bool {
+    obj.zone == Zone::Battlefield && is_attraction_card(obj)
+}
+
+/// CR 701.51b: Put the top card of the controller's Attraction deck onto the battlefield.
 pub fn open_attractions(
     state: &mut GameState,
     player: PlayerId,
@@ -46,9 +50,9 @@ pub fn open_attractions(
             .find(|p| p.id == player)
             .and_then(|p| p.attraction_deck.pop_front())
         else {
-            return Err(EffectError::InvalidParam(
-                "Attraction deck is empty".to_string(),
-            ));
+            // CR 609.3: If the player has fewer Attractions than requested, open
+            // as many as possible and ignore the impossible remainder.
+            break;
         };
         zones::move_to_zone(state, object_id, Zone::Battlefield, events);
         if let Some(obj) = state.objects.get_mut(&object_id) {
@@ -71,13 +75,12 @@ pub fn roll_to_visit_attractions(
     if !controls_attraction(state, player) {
         return;
     }
-    let roll = state.rng.random_range(1..=6u8);
+    let roll = roll_die::roll_die(state, player, 6, events);
     events.push(GameEvent::AttractionsRolledToVisit {
         player_id: player,
         roll,
     });
     let visited = visited_attraction_ids(state, player, roll);
-    let any_visited = !visited.is_empty();
     for attraction_id in visited {
         events.push(GameEvent::AttractionVisited {
             player_id: player,
@@ -85,9 +88,7 @@ pub fn roll_to_visit_attractions(
             attraction_id,
         });
     }
-    if any_visited {
-        super::triggers::process_triggers(state, events);
-    }
+    super::triggers::process_triggers(state, events);
 }
 
 /// CR 703.4g + CR 717.4: Turn-based action at the beginning of the precombat main phase.
@@ -124,19 +125,6 @@ fn visited_attraction_ids(state: &GameState, player: PlayerId, roll: u8) -> Vec<
 }
 
 pub fn resolve_open(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    open_attractions(state, ability.controller, 1, events)?;
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::OpenAttraction,
-        source_id: ability.source_id,
-    });
-    Ok(())
-}
-
-pub fn resolve_open_count(
     state: &mut GameState,
     ability: &ResolvedAbility,
     count: u32,

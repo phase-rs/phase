@@ -1850,9 +1850,9 @@ pub fn resolve_effect(
             venture::resolve_venture_into(state, ability, *dungeon, events)
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
-        Effect::OpenAttraction
-        | Effect::OpenAttractions { .. }
-        | Effect::RollToVisitAttractions => attractions::resolve(state, ability, events),
+        Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
+            attractions::resolve(state, ability, events)
+        }
         Effect::ProcessRadCounters => rad_counters::resolve(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
         Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),

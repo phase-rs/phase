@@ -5446,8 +5446,18 @@ pub(super) fn parse_imperative_family_ast(
         }
         // CR 701.52: "roll to visit your Attractions" (not a generic d20/d6 roll).
         "roll" | "rolls" => {
-            if lower == "roll to visit your attractions"
-                || lower == "rolls to visit your attractions"
+            if nom_parse_lower(lower, |input| {
+                value(
+                    ImperativeFamilyAst::RollToVisitAttractions,
+                    (
+                        alt((tag("roll"), tag("rolls"))),
+                        tag(" to visit your attractions"),
+                        eof,
+                    ),
+                )
+                .parse(input)
+            })
+            .is_some()
             {
                 Some(ImperativeFamilyAst::RollToVisitAttractions)
             } else {
@@ -5455,7 +5465,7 @@ pub(super) fn parse_imperative_family_ast(
                     .map(|(sides, modifier)| ImperativeFamilyAst::RollDie { sides, modifier })
             }
         }
-        // CR 701.48: "open an Attraction" / "open two Attractions"
+        // CR 701.51b: "open an Attraction" / "open two Attractions"
         "open" | "opens" => parse_open_attraction_imperative(lower),
         // CR 725.1: "become the monarch"
         "become" | "becomes" => {
@@ -6111,7 +6121,7 @@ fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
     Some((sides, after_word))
 }
 
-/// CR 701.48: "open N attraction(s)" after the open/opens prefix.
+/// CR 701.51b: "open N attraction(s)" after the open/opens prefix.
 fn parse_open_attractions_count_imperative(input: &str) -> OracleResult<'_, ImperativeFamilyAst> {
     let (rest, count) = nom_primitives::parse_number(input)?;
     let (rest, _) = space1(rest)?;
@@ -6119,15 +6129,21 @@ fn parse_open_attractions_count_imperative(input: &str) -> OracleResult<'_, Impe
     Ok((rest, ImperativeFamilyAst::OpenAttractions { count }))
 }
 
-/// CR 701.48: "open an Attraction" / "open two Attractions".
+/// CR 701.51b: "open an Attraction" / "open two Attractions".
 fn parse_open_attraction_imperative(lower: &str) -> Option<ImperativeFamilyAst> {
     nom_parse_lower(lower, |input| {
         map(
             (
                 alt((tag("open "), tag("opens "))),
                 alt((
-                    value(ImperativeFamilyAst::OpenAttraction, tag("an attraction")),
-                    value(ImperativeFamilyAst::OpenAttraction, tag("a attraction")),
+                    value(
+                        ImperativeFamilyAst::OpenAttractions { count: 1 },
+                        tag("an attraction"),
+                    ),
+                    value(
+                        ImperativeFamilyAst::OpenAttractions { count: 1 },
+                        tag("a attraction"),
+                    ),
                     parse_open_attractions_count_imperative,
                 )),
                 opt(nom::bytes::complete::take_while(|c: char| {
@@ -6487,7 +6503,6 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             dungeon: crate::game::dungeon::DungeonId::Undercity,
         },
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
-        ImperativeFamilyAst::OpenAttraction => Effect::OpenAttraction,
         ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
         ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,

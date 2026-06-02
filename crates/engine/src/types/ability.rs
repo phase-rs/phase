@@ -6547,10 +6547,8 @@ pub enum Effect {
     /// CR 726.1 + CR 726.2: Take the initiative. Grants the initiative
     /// designation and triggers venture into Undercity.
     TakeTheInitiative,
-    /// CR 701.48: Open an Attraction — put the top card of your Attraction deck
-    /// onto the battlefield.
-    OpenAttraction,
-    /// CR 701.48: Open N Attractions.
+    /// CR 701.51b: Open N Attractions by putting cards from the top of your
+    /// Attraction deck onto the battlefield.
     OpenAttractions {
         count: u32,
     },
@@ -7882,7 +7880,6 @@ impl Effect {
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
             | Effect::TakeTheInitiative
-            | Effect::OpenAttraction
             | Effect::OpenAttractions { .. }
             | Effect::RollToVisitAttractions
             | Effect::ProcessRadCounters
@@ -8050,7 +8047,6 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::VentureIntoDungeon => "VentureIntoDungeon",
         Effect::VentureInto { .. } => "VentureInto",
         Effect::TakeTheInitiative => "TakeTheInitiative",
-        Effect::OpenAttraction => "OpenAttraction",
         Effect::OpenAttractions { .. } => "OpenAttractions",
         Effect::RollToVisitAttractions => "RollToVisitAttractions",
         Effect::ProcessRadCounters => "ProcessRadCounters",
@@ -8233,7 +8229,6 @@ pub enum EffectKind {
     VentureIntoDungeon,
     VentureInto,
     TakeTheInitiative,
-    OpenAttraction,
     OpenAttractions,
     RollToVisitAttractions,
     ProcessRadCounters,
@@ -8422,7 +8417,6 @@ impl From<&Effect> for EffectKind {
             Effect::VentureIntoDungeon => EffectKind::VentureIntoDungeon,
             Effect::VentureInto { .. } => EffectKind::VentureInto,
             Effect::TakeTheInitiative => EffectKind::TakeTheInitiative,
-            Effect::OpenAttraction => EffectKind::OpenAttraction,
             Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
             Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
             Effect::ProcessRadCounters => EffectKind::ProcessRadCounters,

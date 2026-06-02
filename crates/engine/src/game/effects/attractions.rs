@@ -10,9 +10,8 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     match &ability.effect {
-        Effect::OpenAttraction => attractions::resolve_open(state, ability, events),
         Effect::OpenAttractions { count } => {
-            attractions::resolve_open_count(state, ability, *count, events)
+            attractions::resolve_open(state, ability, *count, events)
         }
         Effect::RollToVisitAttractions => {
             attractions::resolve_roll_to_visit(state, ability, events)

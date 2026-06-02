@@ -406,9 +406,7 @@ pub(crate) enum ImperativeFamilyAst {
     VentureIntoUndercity,
     /// CR 725: "take the initiative"
     TakeTheInitiative,
-    /// CR 701.48: "open an Attraction"
-    OpenAttraction,
-    /// CR 701.48: "open N Attractions"
+    /// CR 701.51b: "open N Attractions"
     OpenAttractions {
         count: u32,
     },

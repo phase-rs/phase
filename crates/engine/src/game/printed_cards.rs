@@ -761,7 +761,6 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
-        | Effect::OpenAttraction
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters

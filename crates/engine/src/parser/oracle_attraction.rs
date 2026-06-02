@@ -3,7 +3,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_while1};
 use nom::character::complete::multispace0;
-use nom::combinator::{map, rest as nom_rest, value};
+use nom::combinator::{map, opt, value};
 use nom::sequence::preceded;
 use nom::Parser;
 
@@ -14,8 +14,6 @@ use crate::types::triggers::TriggerMode;
 use super::oracle_effect::parse_effect_chain;
 use super::oracle_util::strip_reminder_text;
 
-const VISIT_EM_DASH_SEP: &str = " — ";
-const VISIT_HYPHEN_SEP: &str = " - ";
 const NUMBERED_VISIT_PIPE: &str = " | ";
 
 /// Parse `"Visit — …"` or `"N—M | …"` / `"N | …"` attraction visit lines.
@@ -83,41 +81,21 @@ fn parse_visit_line_header(input: &str) -> nom::IResult<&str, ()> {
 
 fn strip_visit_effect_text(line: &str) -> Option<&str> {
     let lower = line.to_ascii_lowercase();
-    let (effect_start, effect_end) = nom_parse_lower(&lower, |input| {
+    let effect_body = nom_parse_lower(&lower, |input| {
         let (rest, _) = tag("visit").parse(input)?;
         let (rest, _) = multispace0.parse(rest)?;
-        let effect_start = input.len() - rest.len();
-        let before_effect = rest;
-        let (rest, effect_body) = alt((
-            map(
-                preceded(
-                    alt((
-                        tag(VISIT_EM_DASH_SEP),
-                        tag(VISIT_HYPHEN_SEP),
-                        tag("—"),
-                        tag("-"),
-                        tag(":"),
-                    )),
-                    nom_rest,
-                ),
-                |s: &str| s.trim(),
-            ),
-            map(nom_rest, |s: &str| s.trim()),
-        ))
-        .parse(rest)?;
+        let (rest, _) = opt((alt((tag("—"), tag("-"), tag(":"))), multispace0)).parse(rest)?;
+        let effect_body = rest.trim();
         if effect_body.is_empty() {
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Fail,
             )));
         }
-        let effect_end = effect_start + (before_effect.len() - rest.len());
-        let raw = &lower[effect_start..effect_end];
-        let trim_start = raw.len() - raw.trim_start().len();
-        let trim_end = raw.len() - raw.trim_end().len();
-        Ok((rest, (effect_start + trim_start, effect_end - trim_end)))
+        Ok(("", effect_body))
     })?;
-    Some(&line[effect_start..effect_end])
+    let offset = lower.len() - effect_body.len();
+    Some(line[offset..].trim())
 }
 
 fn parse_attraction_die_face(input: &str) -> nom::IResult<&str, u8> {
@@ -166,16 +144,19 @@ fn parse_numbered_visit_line(lower: &str, original: &str) -> Option<(u8, u8, Str
 mod tests {
     use super::*;
     use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::Effect;
     use crate::types::triggers::TriggerMode;
 
     #[test]
     fn parse_oracle_text_open_an_attraction() {
         let parsed = parse_oracle_text("Open an Attraction.", "Opener", &[], &[], &[]);
         assert!(
-            parsed
-                .abilities
-                .iter()
-                .any(|a| { matches!(*a.effect, crate::types::ability::Effect::OpenAttraction) }),
+            parsed.abilities.iter().any(|a| {
+                matches!(
+                    *a.effect,
+                    crate::types::ability::Effect::OpenAttractions { count: 1 }
+                )
+            }),
             "abilities: {:?}",
             parsed
                 .abilities
@@ -208,7 +189,8 @@ mod tests {
     fn visit_dash_parses_draw() {
         let trigger = parse_visit_trigger("Visit — Draw a card.", "Test Attraction").unwrap();
         assert_eq!(trigger.mode, TriggerMode::VisitAttraction);
-        assert!(trigger.execute.is_some());
+        let execute = trigger.execute.as_ref().expect("visit execute effect");
+        assert!(matches!(*execute.effect, Effect::Draw { .. }));
     }
 
     #[test]

@@ -568,7 +568,7 @@ pub enum GameEvent {
     InitiativeTaken {
         player_id: PlayerId,
     },
-    /// CR 701.48: An Attraction was opened onto the battlefield.
+    /// CR 701.51c: An Attraction was opened onto the battlefield.
     AttractionOpened {
         player_id: PlayerId,
         object_id: ObjectId,
