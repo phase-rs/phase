@@ -12621,6 +12621,247 @@ mod tests {
         );
     }
 
+    /// Exsanguinate (`{X}{B}{B}`) regression — drives the *real* Oracle text
+    /// through the parser→cast→resolve contract, complementing the hand-built
+    /// AST in `x_spell_doubled_lose_life_drains_opponents_and_gains_controller`
+    /// (which only guards the runtime). This locks the parser shape and the
+    /// end-to-end drain in one test:
+    ///   1. parse `"Each opponent loses X life. You gain life equal to the life
+    ///      lost this way."` and assert the produced `AbilityDefinition`:
+    ///      `player_scope == Some(Opponent)`, root `LoseLife { Variable("X") }`,
+    ///      and a `GainLife { PreviousEffectAmount, Controller }` sub-ability
+    ///      that carries NO `player_scope` (so the gain runs once, not once per
+    ///      opponent).
+    ///   2. attach it to a `{X}{B}{B}` sorcery, cast at X=3, and assert each
+    ///      opponent loses 3 and the controller gains the SUM lost this way.
+    ///
+    /// CR 107.3a: X's value is chosen as part of casting the spell.
+    /// CR 119.3: an effect causing life loss/gain adjusts that player's life
+    ///   total accordingly (covers both the loss and the controller's gain).
+    /// CR 608.2c: instructions resolve in written order, so the `LoseLife`
+    ///   parent records the life-lost amount before the `GainLife` sub-ability
+    ///   reads it via `QuantityRef::PreviousEffectAmount`.
+    #[test]
+    fn exsanguinate_oracle_text_drains_each_opponent_and_gains_controller() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{AbilityKind, PlayerFilter, QuantityRef};
+        use crate::types::zones::Zone;
+
+        // --- Parser contract -------------------------------------------------
+        let def = parse_effect_chain(
+            "Each opponent loses X life. You gain life equal to the life lost this way.",
+            AbilityKind::Spell,
+        );
+
+        // "Each opponent loses …" must scope the root effect to opponents.
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::Opponent),
+            "`each opponent loses X life` must set player_scope=Opponent on the root"
+        );
+        match &*def.effect {
+            Effect::LoseLife {
+                amount:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name },
+                    },
+                ..
+            } => assert_eq!(name, "X", "root LoseLife amount must be Variable(\"X\")"),
+            other => panic!("expected root LoseLife of Variable(X), got {other:?}"),
+        }
+
+        // The gain is a sibling sub-ability reading the life lost this way; it
+        // must NOT inherit `player_scope`, or it would run once per opponent and
+        // overpay the controller (sum-vs-per-opponent guard at the AST layer).
+        let gain = def
+            .sub_ability
+            .as_ref()
+            .expect("`You gain life equal to …` must parse as a sub-ability");
+        assert_eq!(
+            gain.player_scope, None,
+            "the GainLife sub-ability must carry no player_scope (runs once)"
+        );
+        match &*gain.effect {
+            Effect::GainLife {
+                amount:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::PreviousEffectAmount,
+                    },
+                player,
+            } => assert_eq!(
+                player,
+                &TargetFilter::Controller,
+                "controller gains the life lost this way"
+            ),
+            other => {
+                panic!("expected GainLife of PreviousEffectAmount to Controller, got {other:?}")
+            }
+        }
+
+        // --- Runtime contract (2-player) ------------------------------------
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Exsanguinate".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(def);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Black, ManaCostShard::Black],
+                generic: 0,
+            };
+        }
+
+        // Concretized cost at X=3 is {3}{B}{B} = 5 mana. BB satisfy the colored
+        // shards; the 3 colorless absorb the generic {X} portion, bounding X at 3.
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        let controller_life_before = state.players[0].life;
+        let opponent_life_before = state.players[1].life;
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(910),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        let max = match result.waiting_for {
+            WaitingFor::ChooseXValue { max, .. } => max,
+            other => panic!("expected ChooseXValue, got {other:?}"),
+        };
+        assert_eq!(
+            max, 3,
+            "3 colorless mana bounds the generic {{X}} portion at 3"
+        );
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+
+        for _ in 0..5 {
+            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            let _ = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        assert_eq!(
+            opponent_life_before - state.players[1].life,
+            3,
+            "the single opponent loses exactly X = 3 life"
+        );
+        // 2-player: only one opponent lost life, so the sum is 3.
+        assert_eq!(
+            state.players[0].life - controller_life_before,
+            3,
+            "controller gains exactly the 3 life lost this way (sum across opponents)"
+        );
+    }
+
+    /// Exsanguinate in a 3-player game locks the SUM-across-opponents semantic
+    /// for the controller's life gain (the discriminating case vs. max/single):
+    /// X=3 with 2 opponents → 6 total life lost → controller gains 6, not 3.
+    ///
+    /// CR 107.3a: X is chosen as part of casting.
+    /// CR 119.3: life loss/gain adjusts each affected player's life total.
+    /// CR 608.2c: the `LoseLife` parent iterates both opponents and accumulates
+    ///   the total before the `GainLife` sub-ability reads it via
+    ///   `QuantityRef::PreviousEffectAmount`.
+    #[test]
+    fn exsanguinate_three_player_controller_gains_sum_across_opponents() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::AbilityKind;
+        use crate::types::format::FormatConfig;
+        use crate::types::zones::Zone;
+
+        // 3-player game positioned at the active player's pre-combat main phase,
+        // mirroring `setup_game_at_main_phase` but with player_count = 3.
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let def = parse_effect_chain(
+            "Each opponent loses X life. You gain life equal to the life lost this way.",
+            AbilityKind::Spell,
+        );
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(0),
+            "Exsanguinate".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            Arc::make_mut(&mut obj.abilities).push(def);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::Black, ManaCostShard::Black],
+                generic: 0,
+            };
+        }
+
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        let controller_life_before = state.players[0].life;
+        let opp1_life_before = state.players[1].life;
+        let opp2_life_before = state.players[2].life;
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(911),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::ChooseXValue { max: 3, .. }
+        ));
+
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+
+        for _ in 0..5 {
+            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            let _ = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        assert_eq!(
+            opp1_life_before - state.players[1].life,
+            3,
+            "opponent 1 loses exactly X = 3 life"
+        );
+        assert_eq!(
+            opp2_life_before - state.players[2].life,
+            3,
+            "opponent 2 loses exactly X = 3 life"
+        );
+        // SUM-across-opponents: 3 + 3 = 6, NOT 3 (max/single opponent).
+        assert_eq!(
+            state.players[0].life - controller_life_before,
+            6,
+            "controller gains the SUM of life lost across both opponents (3+3=6)"
+        );
+    }
+
     /// Passing priority during `ChooseXValue` is illegal — caster must commit
     /// or cancel (CR 601.2f).
     #[test]
