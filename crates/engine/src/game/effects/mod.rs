@@ -12109,6 +12109,93 @@ mod tests {
     }
 
     #[test]
+    fn revealed_has_card_type_chain_uses_card_moved_by_parent_change_zone() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Currency Converter".to_string(),
+            Zone::Battlefield,
+        );
+        let land_card = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&land_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        state.exile_links.push(ExileLink {
+            source_id: source,
+            exiled_id: land_card,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let token_rider = ResolvedAbility::new(
+            Effect::Token {
+                name: "Treasure".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Artifact".to_string(), "Treasure".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::RevealedHasCardType {
+            card_type: CoreType::Land,
+            additional_filter: None,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Graveyard,
+                target: TargetFilter::ExiledBySource,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(token_rider);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.objects[&land_card].zone, Zone::Graveyard);
+        assert_eq!(
+            state
+                .objects
+                .values()
+                .filter(|obj| obj.name == "Treasure" && obj.zone == Zone::Battlefield)
+                .count(),
+            1,
+            "land-card rider must create a Treasure after the parent ChangeZone moved a land",
+        );
+    }
+
+    #[test]
     fn evaluate_cast_during_main_phase_checks_cast_phase_context() {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
