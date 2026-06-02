@@ -25556,6 +25556,44 @@ mod tests {
     }
 
     #[test]
+    fn kicker_leading_instead_destroy_drops_base_mana_value_cap() {
+        let ability = parse_effect_chain(
+            "Destroy target creature or planeswalker with mana value 2 or less. If this spell was kicked, instead destroy target creature or planeswalker",
+            AbilityKind::Spell,
+        );
+        let sub = ability.sub_ability.as_ref().expect("expected sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        );
+
+        fn filter_contains_cmc_prop(filter: &TargetFilter) -> bool {
+            match filter {
+                TargetFilter::Typed(typed) => typed
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::Cmc { .. })),
+                TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                    filters.iter().any(filter_contains_cmc_prop)
+                }
+                TargetFilter::Not { filter } => filter_contains_cmc_prop(filter),
+                _ => false,
+            }
+        }
+
+        let Effect::Destroy { target, .. } = &*sub.effect else {
+            panic!(
+                "expected kicked override to be Destroy, got {:?}",
+                sub.effect
+            );
+        };
+        assert!(
+            !filter_contains_cmc_prop(target),
+            "kicked override target must not keep base mana-value restriction; got {target:?}",
+        );
+    }
+
+    #[test]
     fn rite_of_replication_kicker_creates_five_copies() {
         // CR 702.33d + CR 707.10: Rite of Replication's kicked mode creates
         // five copies instead of one. The "create five of those tokens" sub

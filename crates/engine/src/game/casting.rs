@@ -19761,6 +19761,112 @@ mod tests {
         (spell_id, artifact_id, creature_id)
     }
 
+    fn create_bloodchiefs_thirst_like_spell(
+        state: &mut GameState,
+    ) -> (ObjectId, ObjectId, ObjectId, ObjectId) {
+        let spell_id = create_object(
+            state,
+            CardId(64),
+            PlayerId(0),
+            "Bloodchief's Thirst".to_string(),
+            Zone::Hand,
+        );
+        let two_mv_creature = create_object(
+            state,
+            CardId(65),
+            PlayerId(1),
+            "Two Drop".to_string(),
+            Zone::Battlefield,
+        );
+        let three_mv_creature = create_object(
+            state,
+            CardId(66),
+            PlayerId(1),
+            "Three Drop".to_string(),
+            Zone::Battlefield,
+        );
+        let four_mv_creature = create_object(
+            state,
+            CardId(67),
+            PlayerId(1),
+            "Four Drop".to_string(),
+            Zone::Battlefield,
+        );
+
+        {
+            let obj = state.objects.get_mut(&two_mv_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            };
+        }
+        {
+            let obj = state.objects.get_mut(&three_mv_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 3,
+            };
+        }
+        {
+            let obj = state.objects.get_mut(&four_mv_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 4,
+            };
+        }
+        {
+            let spell = state.objects.get_mut(&spell_id).unwrap();
+            spell.card_types.core_types.push(CoreType::Sorcery);
+            spell.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 0,
+            };
+            spell.additional_cost = Some(AdditionalCost::Kicker {
+                costs: vec![AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::Black],
+                        generic: 2,
+                    },
+                }],
+                repeatable: false,
+            });
+            Arc::make_mut(&mut spell.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Destroy {
+                        target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                value: QuantityExpr::Fixed { value: 2 },
+                            },
+                        ])),
+                        cant_regenerate: false,
+                    },
+                )
+                .sub_ability(
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Destroy {
+                            target: TargetFilter::Typed(TypedFilter::creature()),
+                            cant_regenerate: false,
+                        },
+                    )
+                    .condition(AbilityCondition::AdditionalCostPaidInstead),
+                ),
+            );
+        }
+
+        (
+            spell_id,
+            two_mv_creature,
+            three_mv_creature,
+            four_mv_creature,
+        )
+    }
+
     #[test]
     fn kicker_instead_target_declines_before_base_target_selection() {
         let mut state = setup_game_at_main_phase();
@@ -19865,6 +19971,58 @@ mod tests {
         assert!(target_slots[0]
             .legal_targets
             .contains(&TargetRef::Object(second_creature_id)));
+    }
+
+    #[test]
+    fn kicked_bloodchiefs_thirst_like_spell_targets_three_mv_creature() {
+        let mut state = setup_game_at_main_phase();
+        let (spell_id, two_mv_creature, three_mv_creature, four_mv_creature) =
+            create_bloodchiefs_thirst_like_spell(&mut state);
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(64), &mut events)
+                .expect("kicker-dependent targets should prompt for kicker first");
+
+        let WaitingFor::OptionalCostChoice {
+            pending_cast, cost, ..
+        } = &state.waiting_for
+        else {
+            panic!("expected OptionalCostChoice, got {:?}", state.waiting_for);
+        };
+        let pending_cast = *pending_cast.clone();
+        let cost = cost.clone();
+        state.waiting_for = crate::game::engine_casting::handle_optional_cost_choice(
+            &mut state,
+            PlayerId(0),
+            pending_cast,
+            &cost,
+            true,
+            &mut events,
+        )
+        .expect("paying kicker should continue to replacement target selection");
+
+        let WaitingFor::TargetSelection {
+            target_slots,
+            pending_cast,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("expected TargetSelection, got {:?}", state.waiting_for);
+        };
+        assert!(pending_cast.ability.context.additional_cost_paid);
+        assert_eq!(target_slots.len(), 1);
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(two_mv_creature)));
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(three_mv_creature)));
+        assert!(target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(four_mv_creature)));
     }
 
     #[test]

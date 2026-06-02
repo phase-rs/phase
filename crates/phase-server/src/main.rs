@@ -30,6 +30,7 @@ use lobby_broker::{
     Outbound, NOT_OWNED_RESERVATION,
 };
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
+use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
 use server_core::draft_session::DraftSessionManager;
 use server_core::draft_wire_guard::{
     guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
@@ -2681,6 +2682,15 @@ async fn handle_client_message(
                 return;
             }
 
+            let pc = requested_player_count.clamp(2, MAX_FULL_GAME_PLAYER_COUNT);
+            if let Err(reason) = guard_create_ai_seats(&ai_seats, pc) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             {
                 let mgr = state.lock().await;
                 if mgr.sessions.len() >= MAX_GAMES {
@@ -2733,7 +2743,6 @@ async fn handle_client_message(
                 }
             }
 
-            let pc = requested_player_count.clamp(2, 6);
             let mut ai_requests = Vec::new();
             for seat in &ai_seats {
                 if seat.seat_index == 0 || seat.seat_index >= pc {

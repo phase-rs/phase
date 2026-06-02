@@ -17,7 +17,7 @@ use super::super::oracle_quantity::{
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
 };
-use super::super::oracle_util::{parse_count_expr, strip_after, TextPair};
+use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -4160,7 +4160,7 @@ fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) ->
 pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
     let expression = where_x_expression.trim().trim_end_matches('.');
     let expression_lower = expression.to_ascii_lowercase();
-    // CR 107.3i + CR 117.1: Within a single resolution, X has one value used
+    // CR 107.3i + CR 608.2g: Within a single resolution, X has one value used
     // everywhere it appears. Join Forces ("Each player draws X cards, where
     // X is the total amount of mana paid this way") binds X to the total
     // payments accumulated by the upstream `PayCost { Mana { X } }` loop:
@@ -4174,6 +4174,21 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     if tag::<_, _, OracleError<'_>>("the total amount of mana paid this way")
         .parse(expression_lower.as_str())
         .is_ok_and(|(rest, _)| rest.is_empty())
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+    }
+    // CR 107.3i + CR 608.2g: "where X is less than or equal to <bound>" is a
+    // constraint on the player's chosen X (not a definition of X's exact
+    // value). Well of Lost Dreams pays {X} mana and draws X cards; the bound
+    // only limits what the player may choose — the actual drawn count is the
+    // amount paid (resolved via `chosen_x`). Preserving Variable("X") lets the
+    // existing PayAmountChoice → chosen_x → draw machinery work correctly.
+    if parse_comparator_prefix(expression_lower.as_str())
+        .is_some_and(|(_, bound)| !bound.trim().is_empty())
     {
         return Some(QuantityExpr::Ref {
             qty: QuantityRef::Variable {
@@ -4664,4 +4679,35 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
         nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Verify)),
     )?;
     Ok(("", (counter_type, QuantityExpr::Ref { qty })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_where_x_quantity_expression;
+    use crate::types::ability::{QuantityExpr, QuantityRef};
+
+    fn variable_x() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn where_x_comparator_bounds_preserve_variable_x() {
+        for expression in [
+            "less than or equal to the amount of life you gained",
+            "less than the amount of life you gained",
+            "greater than the number of creatures you control",
+            "greater than or equal to the number of cards in your hand",
+            "equal to the number of opponents",
+        ] {
+            assert_eq!(
+                parse_where_x_quantity_expression(expression),
+                Some(variable_x()),
+                "{expression}"
+            );
+        }
+    }
 }
