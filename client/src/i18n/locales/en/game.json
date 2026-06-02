@@ -910,12 +910,17 @@
       "subtitleBattlefieldUpTo_other": "Choose up to {{count}} cards to put onto the battlefield",
       "subtitleBattlefieldRange_one": "Choose {{min}}-{{count}} card to put onto the battlefield",
       "subtitleBattlefieldRange_other": "Choose {{min}}-{{count}} cards to put onto the battlefield",
+      "subtitleHandUpTo_one": "Choose up to {{count}} permanent to return to its owner's hand",
+      "subtitleHandUpTo_other": "Choose up to {{count}} permanents to return to their owners' hands",
+      "subtitleHandRange_one": "Choose {{min}}-{{count}} permanent to return to its owner's hand",
+      "subtitleHandRange_other": "Choose {{min}}-{{count}} permanents to return to their owners' hands",
       "labelSkip": "Skip",
       "labelDecline": "Decline",
       "labelPutOnTop": "Put on top ({{order}})",
       "labelConfirm": "Confirm ({{selected}}/{{count}})",
       "labelTop": "Top ({{selected}}/{{count}})",
       "labelPut": "Put ({{selected}}/{{count}})",
+      "labelReturn": "Return ({{selected}}/{{count}})",
       "orderTop": "Top"
     },
     "drawnThisTurn": {

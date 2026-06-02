@@ -1297,6 +1297,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const hoverProps = useInspectHoverProps();
   const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
   const isSacrifice = data.zone === "Battlefield" && data.destination == null;
+  const isReturnToHand = data.destination === "Hand";
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
 
@@ -1330,17 +1331,25 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const isReady = isUpTo
     ? selected.size >= minCount && selected.size <= data.count
     : selected.size === data.count;
-  const kind = isSacrifice ? "Sacrifice" : isTopdeck ? "Topdeck" : "Battlefield";
+  const kind = isSacrifice ? "Sacrifice" : isTopdeck ? "Topdeck" : isReturnToHand ? "Hand" : "Battlefield";
   const title = isSacrifice
     ? t("cardChoice.effectZone.titleSacrifice")
     : isTopdeck
       ? t("cardChoice.effectZone.titleTopdeck")
-      : t("cardChoice.effectZone.titleBattlefield");
-  const subtitle = isUpTo
-    ? minCount > 0
-      ? t(`cardChoice.effectZone.subtitle${kind}Range`, { min: minCount, count: data.count })
-      : t(`cardChoice.effectZone.subtitle${kind}UpTo`, { count: data.count })
-    : t(`cardChoice.effectZone.subtitle${kind}Exact`, { count: data.count });
+      : isReturnToHand
+        ? t("cardChoice.returnToHand.title")
+        : t("cardChoice.effectZone.titleBattlefield");
+  const subtitle = isReturnToHand
+    ? isUpTo
+      ? minCount > 0
+        ? t("cardChoice.effectZone.subtitleHandRange", { min: minCount, count: data.count })
+        : t("cardChoice.effectZone.subtitleHandUpTo", { count: data.count })
+      : t("cardChoice.returnToHand.subtitle", { count: data.count })
+    : isUpTo
+      ? minCount > 0
+        ? t(`cardChoice.effectZone.subtitle${kind}Range`, { min: minCount, count: data.count })
+        : t(`cardChoice.effectZone.subtitle${kind}UpTo`, { count: data.count })
+      : t(`cardChoice.effectZone.subtitle${kind}Exact`, { count: data.count });
   const actionLabel = selected.size === 0 && isUpTo && minCount === 0
     ? (isSacrifice ? t("cardChoice.effectZone.labelSkip") : t("cardChoice.effectZone.labelDecline"))
     : isTopdeck && selectedOrderLabels.length > 0
@@ -1349,10 +1358,24 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
         ? t("cardChoice.effectZone.labelConfirm", { selected: selected.size, count: data.count })
         : isTopdeck
           ? t("cardChoice.effectZone.labelTop", { selected: selected.size, count: data.count })
-          : t("cardChoice.effectZone.labelPut", { selected: selected.size, count: data.count });
-  const ringClass = isSacrifice ? "ring-red-400/80" : isTopdeck ? "ring-sky-300/80" : "ring-emerald-400/80";
-  const overlayClass = isSacrifice ? "bg-red-500/20" : isTopdeck ? "bg-sky-500/20" : "bg-emerald-500/20";
-  const badgeClass = isSacrifice ? "bg-red-500/90" : isTopdeck ? "bg-sky-500/90" : "bg-emerald-500/90";
+          : isReturnToHand
+            ? t("cardChoice.effectZone.labelReturn", { selected: selected.size, count: data.count })
+            : t("cardChoice.effectZone.labelPut", { selected: selected.size, count: data.count });
+  const ringClass = isSacrifice
+    ? "ring-red-400/80"
+    : isTopdeck || isReturnToHand
+      ? "ring-sky-300/80"
+      : "ring-emerald-400/80";
+  const overlayClass = isSacrifice
+    ? "bg-red-500/20"
+    : isTopdeck || isReturnToHand
+      ? "bg-sky-500/20"
+      : "bg-emerald-500/20";
+  const badgeClass = isSacrifice
+    ? "bg-red-500/90"
+    : isTopdeck || isReturnToHand
+      ? "bg-sky-500/90"
+      : "bg-emerald-500/90";
 
   return (
     <ChoiceOverlay
@@ -1370,7 +1393,9 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
             ? t("cardChoice.badges.sacrifice")
             : isTopdeck && selectedIndex >= 0
               ? formatTopdeckOrderLabel(selectedIndex, t)
-              : t("cardChoice.badges.put");
+              : isReturnToHand
+                ? t("cardChoice.badges.return")
+                : t("cardChoice.badges.put");
           return (
             <motion.button
               key={id}
