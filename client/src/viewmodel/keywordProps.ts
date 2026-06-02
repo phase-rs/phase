@@ -160,6 +160,17 @@ export function getSaddlePower(keywords: Keyword[]): number | null {
   return null;
 }
 
+/**
+ * CR 702.73a: Changeling makes an object every creature type. The engine
+ * expands the object's subtypes to the full creature-type list at layer
+ * evaluation; the display layer uses this to collapse that list to "Changeling"
+ * rather than rendering the overflow wall of types. Changeling serializes as the
+ * simple string keyword "Changeling".
+ */
+export function isChangeling(keywords: Keyword[]): boolean {
+  return keywords.includes("Changeling");
+}
+
 /** Extract the display name from a Keyword value. */
 export function getKeywordName(kw: Keyword): string {
   if (typeof kw === "string") return splitPascalCase(kw);
