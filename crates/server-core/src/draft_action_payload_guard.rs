@@ -7,7 +7,7 @@
 use draft_core::types::DraftAction;
 use lobby_broker::inbound_guard::{MAX_DECK_CARD_NAME_LEN, MAX_MAIN_DECK_ENTRIES};
 use lobby_broker::validation::{
-    validate_optional_label, validate_token, MAX_DISPLAY_NAME_LEN, MAX_TOKEN_LEN,
+    validate_required_label, validate_token, MAX_DISPLAY_NAME_LEN, MAX_TOKEN_LEN,
 };
 
 fn has_control_char(value: &str) -> bool {
@@ -54,7 +54,11 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
             validate_token("ReportMatchResult.match_id", match_id, MAX_TOKEN_LEN)?;
         }
         DraftAction::ReplaceSeatWithBot { name, .. } => {
-            validate_optional_label("ReplaceSeatWithBot.name", name, MAX_DISPLAY_NAME_LEN)?;
+            if let Some(n) = name {
+                if !n.trim().is_empty() {
+                    validate_required_label("ReplaceSeatWithBot.name", n, MAX_DISPLAY_NAME_LEN)?;
+                }
+            }
         }
         DraftAction::StartDraft
         | DraftAction::AdvanceRound
