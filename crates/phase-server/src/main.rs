@@ -2953,6 +2953,14 @@ async fn handle_client_message(
                 return;
             }
 
+            if let Err(reason) = lobby_broker::validate_deck_payload("deck", &deck) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             if let Err(reason) = lobby_broker::guard_inbound(
                 &lobby_broker::LobbyClientMessage::CreateGameWithSettings {
                     deck: deck.clone(),
@@ -3617,13 +3625,6 @@ async fn handle_client_message(
         } => {
             info!(game = %game_code, joiner = %display_name, "JoinGameWithPassword");
 
-            if reject_joining_current_game(identity, &game_code, socket)
-                .await
-                .is_err()
-            {
-                return;
-            }
-
             // --- Lobby-only broker path ------------------------------
             //
             // The broker runs the build-commit + password gates, the
@@ -3658,6 +3659,14 @@ async fn handle_client_message(
                 return;
             }
 
+            if let Err(reason) = lobby_broker::validate_deck_payload("deck", &deck) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             if let Err(reason) = lobby_broker::guard_inbound(
                 &lobby_broker::LobbyClientMessage::JoinGameWithPassword {
                     game_code: game_code.clone(),
@@ -3671,6 +3680,13 @@ async fn handle_client_message(
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
                 }
+                return;
+            }
+
+            if reject_joining_current_game(identity, &game_code, socket)
+                .await
+                .is_err()
+            {
                 return;
             }
 
