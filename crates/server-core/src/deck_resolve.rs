@@ -192,6 +192,7 @@ mod tests {
     }
 
     mod legacy_deck_guard_tests {
+        use super::deck;
         use crate::legacy_deck_guard::{guard_legacy_deck, MAX_MAIN_DECK_ENTRIES};
 
         #[test]
