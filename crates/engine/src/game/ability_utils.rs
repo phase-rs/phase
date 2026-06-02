@@ -3627,9 +3627,10 @@ fn assign_selected_slots_after_deferred_effect(
 /// CR 115.3: Validate targeting constraints — e.g., different target players must be distinct.
 ///
 /// `ability` is `Some` only on the `_for_ability` validation family (resolution-time
-/// selection), where dynamic constraints (`TotalManaValue` whose cap is a
-/// `QuantityExpr`) can be resolved against game state using the ability's
-/// controller/source provenance. Stack-announcement callsites pass `None`.
+/// selection), where source-relative dynamic constraints can be resolved against
+/// game state using the ability's controller/source provenance. Fixed caps only
+/// need `state`, so stack-announcement/random-selection callsites still enforce
+/// those when a stateful validation path is available.
 fn validate_target_constraints(
     state: Option<&GameState>,
     targets: &[TargetRef],
@@ -3681,23 +3682,27 @@ fn validate_target_constraints(
                 }
             }
             TargetSelectionConstraint::TotalManaValue { comparator, value } => {
-                // Skip when state/ability provenance is unavailable (stack
-                // announcement callsites pass `None`). Only the resolution-time
-                // `_for_ability` family supplies both, and only "or less" (LE)
-                // constraints reach here (the target-side parser emits LE only),
-                // so prefix pruning during enumeration stays monotonic-safe.
-                let (Some(state), Some(ability)) = (state, ability) else {
+                let Some(state) = state else {
                     continue;
                 };
-                // CR 706.2 + CR 706.4: For the where-X die-result cap
-                // (`EventContextAmount`), `resolve_quantity` reads
-                // `state.die_result_this_resolution`.
-                let cap = crate::game::quantity::resolve_quantity(
-                    state,
-                    value,
-                    ability.controller,
-                    ability.source_id,
-                );
+                let cap = match value {
+                    QuantityExpr::Fixed { value } => *value,
+                    _ => {
+                        // Skip dynamic caps when source/controller provenance is
+                        // unavailable. For the where-X die-result cap
+                        // (`EventContextAmount`), `resolve_quantity` reads
+                        // `state.die_result_this_resolution` (CR 706.2 + CR 706.4).
+                        let Some(ability) = ability else {
+                            continue;
+                        };
+                        crate::game::quantity::resolve_quantity(
+                            state,
+                            value,
+                            ability.controller,
+                            ability.source_id,
+                        )
+                    }
+                };
                 // CR 202.3: combined mana value of the chosen object targets.
                 let sum: i32 = targets
                     .iter()
@@ -5320,21 +5325,22 @@ mod tests {
     }
 
     #[test]
-    fn total_mana_value_constraint_skips_without_state_or_ability() {
+    fn total_mana_value_constraint_enforces_fixed_cap_without_ability() {
+        let (state, _ability, ids) = total_mv_fixture(&[2]);
         let constraint = TargetSelectionConstraint::TotalManaValue {
             comparator: Comparator::LE,
             value: QuantityExpr::Fixed { value: 1 },
         };
-        let targets = vec![TargetRef::Object(ObjectId(7))];
-        // No state and no ability → constraint is skipped (Ok), since the
-        // stack-announcement channel cannot resolve a dynamic cap.
+        let targets = vec![TargetRef::Object(ids[0])];
+        // Fixed caps do not need ability provenance; stateful stack/random
+        // selection paths must still reject over-cap choices.
         assert!(validate_target_constraints(
-            None,
+            Some(&state),
             &targets,
             std::slice::from_ref(&constraint),
             None
         )
-        .is_ok());
+        .is_err());
     }
 
     #[test]

@@ -2593,19 +2593,25 @@ fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
 
 /// CR 202.3 + CR 115.1: Detect a "with total mana value <N|X> or less" target-set
 /// constraint anywhere in the clause and build the typed
-/// `TargetSelectionConstraint::TotalManaValue`. The number token is the `X`
-/// placeholder for the where-X form (Ancient Brass Dragon); `apply_where_x_*`
-/// later rebinds `Variable("X")` to the die-result `EventContextAmount`.
+/// `TargetSelectionConstraint::TotalManaValue`. Literal numbers stay fixed;
+/// X remains a variable placeholder for the where-X form (Ancient Brass Dragon)
+/// so `apply_where_x_*` later rebinds it to the die-result `EventContextAmount`.
 ///
 /// Target side accepts only the "or less" (LE) comparator — see
 /// `validate_target_constraints` / the parser strip in `oracle_effect/mod.rs`
 /// for why GE is never emitted for targeting.
 fn parse_total_mana_value_target_constraint(text: &str) -> Option<TargetSelectionConstraint> {
     let lower = text.to_lowercase();
-    let (_, (comparator, _value), _) = nom_primitives::scan_preceded(lower.as_str(), |input| {
+    let (_, (value, comparator), _) = nom_primitives::scan_preceded(lower.as_str(), |input| {
         preceded(
             tag::<_, _, OracleError<'_>>("with total mana value "),
-            super::search::parse_total_mana_value_comparator,
+            (
+                nom_quantity::parse_quantity_expr_number,
+                alt((
+                    value(Comparator::LE, tag(" or less")),
+                    value(Comparator::GE, tag(" or greater")),
+                )),
+            ),
         )
         .parse(input)
     })?;
@@ -2614,9 +2620,7 @@ fn parse_total_mana_value_target_constraint(text: &str) -> Option<TargetSelectio
     }
     Some(TargetSelectionConstraint::TotalManaValue {
         comparator: Comparator::LE,
-        value: QuantityExpr::Ref {
-            qty: QuantityRef::Variable { name: "X".into() },
-        },
+        value,
     })
 }
 
@@ -4854,6 +4858,22 @@ mod where_x_tests {
                     qty: QuantityRef::EventContextAmount,
                 },
             }
+        );
+    }
+
+    #[test]
+    fn parse_total_mana_value_target_constraint_preserves_fixed_cap() {
+        use crate::types::ability::Comparator;
+        use crate::types::game_state::TargetSelectionConstraint;
+
+        assert_eq!(
+            super::parse_total_mana_value_target_constraint(
+                "target creature cards with total mana value 6 or less from graveyards"
+            ),
+            Some(TargetSelectionConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 6 },
+            })
         );
     }
 
