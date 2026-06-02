@@ -504,48 +504,87 @@ fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
     (stripped, true)
 }
 
-/// CR 109.4 + CR 115.1 + CR 506.2: Detect a trigger condition that introduces
-/// a player target — currently the "[subject] attack(s) a player" family
-/// (CR 506.2 / CR 508.1a) and the "[subject] deals [combat] damage to a player"
-/// family (CR 120.3). When this returns true, follow-on possessive references
-/// inside the effect ("that player controls/owns") refer to that introduced
-/// player and the parser pushes a relative-player scope so they emit
-/// `ControllerRef::TargetPlayer`.
-///
-/// Built from composable nom alternatives so adding new condition shapes is a
-/// one-line change to the inner `alt()`. The attack/damage scans both accept
-/// any subject prefix (verb-phrase only), so relative-clause subjects like
-/// "one or more Warriors you control" and "a creature you control" match
-/// without needing an explicit-actor variant per subject shape.
+/// CR 608.2c + CR 506.2: "attack a player" — the attacked player is the
+/// defending player, which resolves via `ControllerRef::DefendingPlayer` at
+/// runtime. Distinct from damage-to-player triggers (which use
+/// `ControllerRef::TargetPlayer` because the damaged player is not necessarily
+/// the defending player in combat). This function specifically detects attack
+/// patterns without matching damage-to-player patterns.
+fn parse_trigger_actor(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("you ")),
+        value((), tag("an opponent ")),
+        value((), tag("a player ")),
+        value((), tag("another player ")),
+    ))
+    .parse(input)
+}
+
+fn parse_attack_verb(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("attack ")),
+        value((), tag("attacks ")),
+    ))
+    .parse(input)
+}
+
+fn parse_referenced_player_phrase(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("one or more of your opponents"),
+        ),
+        value((), tag("one of your opponents")),
+        value((), tag("another player")),
+        value((), tag("an opponent")),
+        value((), tag("a player")),
+    ))
+    .parse(input)
+}
+
+fn condition_introduces_defending_player(cond_lower: &str) -> bool {
+    // Walk word boundaries — the actor/verb pair may be preceded by "whenever",
+    // "when", or quantifiers like "one or more creatures you control".
+    let mut remaining = cond_lower;
+    while !remaining.is_empty() {
+        if let Ok((after_actor, ())) = parse_trigger_actor(remaining) {
+            if let Ok((after_verb, ())) = parse_attack_verb(after_actor) {
+                if parse_referenced_player_phrase(after_verb).is_ok() {
+                    return true;
+                }
+            }
+        }
+        // CR 506.2 + CR 508.1a: "[anything] attack[s] a player" — same subject
+        // permissiveness. Covers cases where the actor is wrapped in a relative
+        // clause that the explicit actor branch above cannot match, e.g. "one or
+        // more Warriors you control attack a player" (Gornog, the Red Reaper) or
+        // "a creature you control attacks a player". The verb phrase alone is
+        // unambiguous in trigger-condition text — "attack" never appears as a
+        // noun before "a player" here.
+        if let Ok((after_verb, ())) = parse_attack_verb(remaining) {
+            if parse_referenced_player_phrase(after_verb).is_ok() {
+                return true;
+            }
+        }
+        // structural: not dispatch — advance to the next word boundary so the
+        // nom alternatives above are retried at every word position (mirrors
+        // `scan_timing_restrictions` in oracle_casting.rs).
+        remaining = match remaining.find(' ') {
+            Some(i) => remaining[i + 1..].trim_start(),
+            None => "",
+        };
+    }
+    false
+}
+
 fn condition_introduces_target_player(cond_lower: &str) -> bool {
-    use nom::bytes::complete::tag;
-    use nom::combinator::value;
-
-    fn parse_actor(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
-        alt((
-            value((), tag::<_, _, OracleError<'_>>("you ")),
-            value((), tag("an opponent ")),
-            value((), tag("a player ")),
-            value((), tag("another player ")),
-        ))
-        .parse(input)
-    }
-
-    fn parse_attack_verb(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
-        alt((
-            value((), tag::<_, _, OracleError<'_>>("attack ")),
-            value((), tag("attacks ")),
-        ))
-        .parse(input)
-    }
-
     /// CR 120.3: "deals [combat] damage to a player" — damage dealt to a player
     /// causes that player to lose life (CR 120.3a) and introduces the damaged
     /// player as the target-referring player, so "that player controls" in the
     /// effect refers to it
     /// (Dokuchi Silencer's "destroy target creature or planeswalker that player
-    /// controls"). Mirrors `parse_attack_verb` — both verbs produce the same
-    /// downstream scope.
+    /// controls"). Attack-player triggers are intentionally handled by
+    /// `condition_introduces_defending_player`.
     fn parse_damage_phrase(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
         alt((
             value((), tag::<_, _, OracleError<'_>>("deals combat damage to ")),
@@ -560,40 +599,12 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
     // "when", or quantifiers like "one or more creatures you control".
     let mut remaining = cond_lower;
     while !remaining.is_empty() {
-        if let Ok((after_actor, ())) = parse_actor(remaining) {
-            if let Ok((after_verb, ())) = parse_attack_verb(after_actor) {
-                if tag::<_, _, OracleError<'_>>("a player")
-                    .parse(after_verb)
-                    .is_ok()
-                {
-                    return true;
-                }
-            }
-        }
-        // CR 506.2 + CR 508.1a: "[anything] attack[s] a player" — same subject
-        // permissiveness as the damage scan below. Covers cases where the
-        // actor is wrapped in a relative clause that the explicit actor branch
-        // above cannot match, e.g. "one or more Warriors you control attack a
-        // player" (Gornog, the Red Reaper) or "a creature you control attacks
-        // a player". The verb phrase alone is unambiguous in trigger-condition
-        // text — "attack" never appears as a noun before "a player" here.
-        if let Ok((after_verb, ())) = parse_attack_verb(remaining) {
-            if tag::<_, _, OracleError<'_>>("a player")
-                .parse(after_verb)
-                .is_ok()
-            {
-                return true;
-            }
-        }
         // CR 120.3: "[anything] deals [combat] damage to a player" — introduces
         // the damaged player as the target-referring player. The subject can be
         // SelfRef ("~"), equipped creature ("equipped creature"), or any typed
         // subject, so match on the verb phrase alone.
         if let Ok((after_damage, ())) = parse_damage_phrase(remaining) {
-            if tag::<_, _, OracleError<'_>>("a player")
-                .parse(after_damage)
-                .is_ok()
-            {
+            if parse_referenced_player_phrase(after_damage).is_ok() {
                 return true;
             }
         }
@@ -736,6 +747,11 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // TargetPlayer resolution inside the trigger effect body.
     if condition_introduces_damage_source_controller_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
+    } else if condition_introduces_defending_player(&cond_lower) {
+        // CR 608.2c: Attack triggers use DefendingPlayer (the attacked player
+        // in combat), not TargetPlayer (which requires a player target to be
+        // bound at runtime).
+        effect_ctx.relative_player_scope = Some(ControllerRef::DefendingPlayer);
     } else if condition_introduces_target_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
     } else if condition_introduces_scoped_phase_player(&cond_lower) {
@@ -1304,6 +1320,30 @@ fn extract_unless_pay_modifier(
         return (cleaned, Some(UnlessPayModifier { cost, payer }));
     }
 
+    // CR 118.12a: "[trigger] ... unless they/that player/that opponent
+    // {sacrifice|discard|pay life} [or ...]" — same disjunctive non-mana
+    // unless-cost shape the resolution-time path handles. Delegate to the
+    // single authority (`parse_unless_they_alt_cost_chain`) so trigger-side
+    // and resolution-side parse identically. The chain requires an explicit
+    // pronoun ("they"/"that player"/"that opponent"), so "you"/mana forms
+    // fall through to the existing blocks unchanged.
+    //
+    // GUARD: the chain's per-branch `unless_branch_boundary` stops at the
+    // first sentence terminator, so it would greedily strip the first
+    // unless-clause of a multi-sentence modal effect ("... unless they
+    // discard a card. If you're the monarch, instead ..." — Court of
+    // Ambition). A later "if"-sentence means the whole effect is not a single
+    // terminal unless-cost; defer to the gap path (mirrors the `unless`
+    // dispatch guard below at the `Unsupported unless clause` site).
+    if !has_later_sentence_if(&lower) {
+        if let Some(cost) = parse_unless_they_alt_cost_chain(after_unless) {
+            let payer = infer_pronoun_unless_payer(&lower[..unless_pos], condition_lower)
+                .unwrap_or(TargetFilter::TriggeringPlayer);
+            let cleaned = text[..unless_pos].trim().to_string();
+            return (cleaned, Some(UnlessPayModifier { cost, payer }));
+        }
+    }
+
     // CR 118.12 + CR 608.2c + CR 119.4: Non-mana alternative costs ("you discard
     // a card", "you sacrifice a [filter]", "you pay N life") map to existing
     // `UnlessCost` variants — the runtime resolver in `engine_payment_choices.rs`
@@ -1465,11 +1505,15 @@ fn infer_pronoun_unless_payer(
     if effect_references_that_player(effect_before_unless) {
         return Some(TargetFilter::TriggeringPlayer);
     }
-    // CR 608.2c: in "each opponent [does X] unless they pay", the lowered
-    // ability has `player_scope = Opponent`; runtime binds `Controller` to
-    // each scoped opponent before presenting the unless-payment choice.
+    // CR 608.2c + CR 608.2f: in "each opponent [does X] unless they pay", the
+    // lowered ability has `player_scope = Opponent`; the runtime fan-out binds
+    // `ability.scoped_player` to each scoped opponent per iteration. The payer
+    // must read that per-iteration binding via `ScopedPlayer` —
+    // `resolve_effect_player_ref` maps `ScopedPlayer -> ability.scoped_player`
+    // (targeting.rs). `Controller` would wrongly resolve to `state.active_player`
+    // (effects/mod.rs), which is not the scoped opponent on a non-active turn.
     if scan_contains(effect_before_unless, "each opponent ") {
-        return Some(TargetFilter::Controller);
+        return Some(TargetFilter::ScopedPlayer);
     }
     if scan_contains(effect_before_unless, "creature's controller ") {
         return Some(TargetFilter::ParentTargetController);
@@ -1810,16 +1854,12 @@ fn parse_unless_they_sacrifice_filter(input: &str) -> Option<(AbilityCost, &str)
     if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
         return None;
     }
-    // CR 109.4 + CR 115.1 + CR 118.12a: "they sacrifice" pins the sacrificed
-    // permanent to the *payer* — the targeted player on the enclosing
-    // activated/triggered ability. `ControllerRef::TargetPlayer` reads the
-    // first `TargetRef::Player` from `ability.targets` at resolution time,
-    // which is exactly the payer the unless-cost surfaces to. Mirrors the
-    // "you sacrifice" branch's controller treatment in
-    // `parse_unless_sacrifice_filter` (which carries `ControllerRef::You`
-    // via the actor dispatch upstream); for the "they" form the actor *is*
-    // the target player and we stamp it explicitly here.
-    let filter = add_controller(filter, ControllerRef::TargetPlayer);
+    // CR 109.5 + CR 118.12a: "they sacrifice" pins the sacrificed permanent
+    // to the player paying the unless-cost. Cost payment evaluates filters with
+    // the payer as the source controller (`FilterContext::from_source_with_controller`),
+    // so `ControllerRef::You` is the payer-relative scope for target-player,
+    // triggering-player, and scoped-player punishers alike.
+    let filter = add_controller(filter, ControllerRef::You);
     Some((
         AbilityCost::Sacrifice {
             target: filter,
@@ -12206,6 +12246,77 @@ mod tests {
         }
     }
 
+    /// CR 700.4 + CR 603.10a: Jackdaw Savior (issue #887) — "Whenever this
+    /// creature or another creature you control with flying dies, return another
+    /// target creature card with lesser mana value from your graveyard to the
+    /// battlefield."
+    ///
+    /// The `valid_card` must be `Or[SelfRef, Typed{Creature, You,
+    /// [WithKeyword(Flying), Another]}]` — not `Or[SelfRef, Typed{..., [Another]}]`
+    /// (missing flying) or `Typed{..., [Flying, Another]}` (missing SelfRef arm).
+    #[test]
+    fn trigger_self_or_another_creature_with_flying_dies() {
+        let def = parse_trigger_line(
+            "Whenever this creature or another creature you control with flying dies, \
+             return another target creature card with lesser mana value from your graveyard \
+             to the battlefield.",
+            "Jackdaw Savior",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        // CR 700.4: "dies" = leaves battlefield → graveyard.
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        // The valid_card filter distinguishes Jackdaw Savior itself (SelfRef) from
+        // other flying creatures you control (Typed + WithKeyword + Another).
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 2, "Or must have exactly two arms");
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::SelfRef,
+                    "first arm must be SelfRef ('this creature')"
+                );
+                match &filters[1] {
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }) => {
+                        assert!(
+                            type_filters.contains(&TypeFilter::Creature),
+                            "second arm must require Creature type"
+                        );
+                        assert_eq!(
+                            *controller,
+                            Some(ControllerRef::You),
+                            "second arm must require 'you control'"
+                        );
+                        assert!(
+                            properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::WithKeyword { value: kw }
+                                if *kw == crate::types::keywords::Keyword::Flying
+                            )),
+                            "second arm must check WithKeyword(Flying); properties={:?}",
+                            properties
+                        );
+                        assert!(
+                            properties.contains(&FilterProp::Another),
+                            "second arm must check Another (not Jackdaw itself); \
+                             properties={:?}",
+                            properties
+                        );
+                    }
+                    other => panic!("second Or arm must be Typed filter, got {other:?}"),
+                }
+            }
+            other => panic!(
+                "valid_card must be Or[SelfRef, Typed{{Creature, You, [Flying, Another]}}], \
+                 got {other:?}"
+            ),
+        }
+    }
+
     // --- Intervening-if condition tests ---
 
     /// CR 608.2h: Haliya, Guided by Light — "draw a card if you've gained 3 or
@@ -14145,6 +14256,39 @@ mod tests {
         assert_eq!(def.spell_cast_origin, OriginConstraint::Any);
     }
 
+    #[test]
+    fn trigger_you_cast_target_player_mill_instead_keeps_chosen_player() {
+        let def = parse_trigger_line(
+            "Whenever you cast an instant or sorcery spell, target player mills three cards. If five or more mana was spent to cast that spell, that player mills ten cards instead.",
+            "Exhibition Tidecaller",
+        );
+
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+
+        let execute = def.execute.as_ref().expect("trigger should have an effect");
+        match &*execute.effect {
+            Effect::Mill { target, .. } => assert_eq!(*target, TargetFilter::Player),
+            other => panic!("expected base target-player Mill, got {other:?}"),
+        }
+
+        let instead = execute
+            .sub_ability
+            .as_ref()
+            .expect("mv>=5 clause should lower as an instead sub-ability");
+        assert!(
+            matches!(
+                instead.condition,
+                Some(AbilityCondition::ConditionInstead { .. })
+            ),
+            "mv>=5 clause should be a ConditionInstead override"
+        );
+        match &*instead.effect {
+            Effect::Mill { target, .. } => assert_eq!(*target, TargetFilter::ParentTarget),
+            other => panic!("expected instead target-player Mill, got {other:?}"),
+        }
+    }
+
     /// CR 601.2a + #538: Ghostly Pilferer. The cast-origin discriminator
     /// "from anywhere other than their hand" must survive parsing as
     /// `NotEquals(Hand)`; without it the trigger fires on every opponent
@@ -15504,6 +15648,61 @@ mod tests {
         assert!(def.optional);
     }
 
+    /// CR 109.4: "other than this card" in an exile target must add
+    /// `FilterProp::Another` so the ability source (Ichorid) cannot be used
+    /// to pay its own recursion cost.
+    #[test]
+    fn trigger_ichorid_exile_target_excludes_self() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, if this card is in your graveyard, you may exile a black creature card other than this card from your graveyard. If you do, return this card to the battlefield.",
+            "Ichorid",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
+        let exec = def
+            .execute
+            .expect("Ichorid upkeep trigger must have execute")
+            .effect;
+        let Effect::ChangeZone {
+            ref target,
+            origin,
+            destination,
+            ..
+        } = *exec
+        else {
+            panic!("expected ChangeZone exile, got {exec:?}")
+        };
+        assert_eq!(origin, Some(Zone::Graveyard));
+        assert_eq!(destination, Zone::Exile);
+        let TargetFilter::Typed(ref tf) = *target else {
+            panic!("expected Typed filter, got {target:?}")
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "exile target must carry FilterProp::Another for 'other than this card'; got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }),
+            "exile target must be scoped to your graveyard; got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasColor {
+                    color: ManaColor::Black
+                }
+            )),
+            "exile target must require black; got {:?}",
+            tf.properties
+        );
+    }
+
     #[test]
     fn trigger_nth_spell_third() {
         let def = parse_trigger_line(
@@ -16510,16 +16709,190 @@ mod tests {
     }
 
     #[test]
-    fn trigger_unless_they_pay_binds_each_opponent_to_scoped_controller() {
+    fn trigger_unless_they_pay_binds_each_opponent_to_scoped_player() {
         let def = parse_trigger_line(
             "When this creature enters, each opponent sacrifices a permanent of their choice unless they pay {2}.",
             "Rishadan Footpad",
         );
 
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
-        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        // CR 608.2f: the per-iteration scoped opponent pays, resolved via
+        // `ability.scoped_player` (not `state.active_player` as `Controller`
+        // would yield on a non-active opponent's behalf).
+        assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
         let execute = def.execute.as_ref().expect("should have execute");
         assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+    }
+
+    // CR 118.12a: Trigger-side delegation to `parse_unless_they_alt_cost_chain`
+    // for the disjunctive non-mana unless-cost shape. The payer-pronoun axis
+    // {they, that player, that opponent} x cost {sacrifice <filter>, discard a
+    // card, pay N life}. Asserts the typed `UnlessPayModifier` and the cleaned
+    // effect text — never card names.
+    #[test]
+    fn trigger_unless_they_sacrifice_filter_binds_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a spell, that player loses 3 life unless they sacrifice a creature.",
+            "Test Punisher",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(unless_pay.cost, AbilityCost::Sacrifice { count: 1, .. }),
+            "cost should be Sacrifice, got {:?}",
+            unless_pay.cost
+        );
+        let AbilityCost::Sacrifice { target, .. } = &unless_pay.cost else {
+            unreachable!("checked sacrifice cost above");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn trigger_unless_that_player_discards_a_card() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a spell, that player loses 3 life unless that player discards a card.",
+            "Test Punisher",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(
+                unless_pay.cost,
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    random: false,
+                    self_ref: false
+                }
+            ),
+            "cost should be DiscardCard, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    #[test]
+    fn trigger_unless_that_opponent_pays_life() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a spell, that opponent loses 3 life unless that opponent pays 4 life.",
+            "Test Punisher",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(
+                unless_pay.cost,
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 4 }
+                }
+            ),
+            "cost should be PayLife(4), got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    #[test]
+    fn trigger_unless_they_disjunctive_sacrifice_or_discard_builds_one_of() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a spell, that player loses 3 life unless they sacrifice a nonland permanent or discard a card.",
+            "Test Punisher",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+            panic!("cost should be OneOf, got {:?}", unless_pay.cost);
+        };
+        assert_eq!(costs.len(), 2, "OneOf should have two branches: {costs:?}");
+        assert!(
+            matches!(costs[0], AbilityCost::Sacrifice { .. }),
+            "first branch should be Sacrifice, got {:?}",
+            costs[0]
+        );
+        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+            unreachable!("checked sacrifice branch above");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            matches!(costs[1], AbilityCost::Discard { .. }),
+            "second branch should be Discard, got {:?}",
+            costs[1]
+        );
+    }
+
+    #[test]
+    fn trigger_unless_each_opponent_sacrifice_binds_scoped_player() {
+        let def = parse_trigger_line(
+            "When this creature enters, each opponent loses 3 life unless they sacrifice a creature.",
+            "Test Scoped Punisher",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        // CR 608.2f: scoped opponent pays via per-iteration `scoped_player`.
+        assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+        assert!(
+            matches!(unless_pay.cost, AbilityCost::Sacrifice { count: 1, .. }),
+            "cost should be Sacrifice, got {:?}",
+            unless_pay.cost
+        );
+        let AbilityCost::Sacrifice { target, .. } = &unless_pay.cost else {
+            unreachable!("checked sacrifice cost above");
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+    }
+
+    // NEGATIVE: documented non-goals must NOT be swallowed as unless-pay.
+    #[test]
+    fn trigger_unless_you_mill_is_not_unless_pay() {
+        let def = parse_trigger_line(
+            "When this creature enters, draw a card unless you mill 3.",
+            "Test Card",
+        );
+        assert!(
+            def.unless_pay.is_none(),
+            "mill is an unpayable unless-cost — must not be extracted, got {:?}",
+            def.unless_pay
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_pay_mana_cost_is_not_unless_pay() {
+        let def = parse_trigger_line(
+            "When this creature enters, draw a card unless you pay its mana cost.",
+            "Test Card",
+        );
+        assert!(
+            def.unless_pay.is_none(),
+            "\"pay its mana cost\" is not a recognized unless-cost, got {:?}",
+            def.unless_pay
+        );
+    }
+
+    // NO-REGRESSION: bare "unless you pay {2}" still routes through the
+    // existing mana block (the "you" pronoun is excluded from the explicit-
+    // pronoun chain), not the new delegation.
+    #[test]
+    fn trigger_unless_you_pay_mana_still_routes_to_mana_block() {
+        let def = parse_trigger_line(
+            "When this creature enters, draw a card unless you pay {2}.",
+            "Test Card",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        assert!(
+            matches!(unless_pay.cost, AbilityCost::Mana { .. }),
+            "cost should be Mana, got {:?}",
+            unless_pay.cost
+        );
     }
 
     #[test]
@@ -17801,6 +18174,7 @@ mod tests {
                 phase: Phase::Upkeep,
                 after: Phase::Upkeep,
                 followed_by,
+                ..
             }) if followed_by.is_empty()
         ));
     }
@@ -22532,11 +22906,11 @@ mod tests {
 
     /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar's first trigger introduces
     /// the attacked player in the condition; "that player controls" inside the
-    /// effect must resolve to `ControllerRef::TargetPlayer` so the runtime
-    /// auto-surfaces a Player target slot (the attacked player) rather than
-    /// defaulting to "you" and offering the trigger controller's own creatures.
+    /// effect must resolve to `ControllerRef::DefendingPlayer` so the runtime
+    /// reads the defending player from the combat state, not from a TargetPlayer
+    /// target slot. Regression test for #1667.
     #[test]
-    fn karazikar_attack_a_player_uses_target_player_controller() {
+    fn karazikar_attack_a_player_uses_defending_player_controller() {
         use crate::types::ability::Effect;
 
         let def = parse_trigger_line(
@@ -22549,8 +22923,8 @@ mod tests {
             Effect::Tap { target } => match target {
                 TargetFilter::Typed(t) => assert_eq!(
                     t.controller,
-                    Some(ControllerRef::TargetPlayer),
-                    "tap target should reference attacked player",
+                    Some(ControllerRef::DefendingPlayer),
+                    "tap target should reference the defending player via DefendingPlayer",
                 ),
                 other => panic!("expected Typed filter, got {other:?}"),
             },
@@ -22562,13 +22936,13 @@ mod tests {
     /// you control attack a player, target creature that player controls
     /// becomes a Coward" introduces the attacked player through a relative-
     /// clause subject ("Warriors you control") rather than a bare actor. The
-    /// effect's "that player controls" must still resolve to
-    /// `ControllerRef::TargetPlayer` so the UI offers the attacked player's
-    /// creatures, not the trigger controller's. Regression test for #1054 — the
-    /// subject-permissive scan in `condition_introduces_target_player` is the
-    /// fix site.
+    /// effect's "that player controls" must resolve to
+    /// `ControllerRef::DefendingPlayer` so the runtime reads the defending
+    /// player from the combat state, not from a TargetPlayer target slot.
+    /// Regression test for #1667 — the parser now emits DefendingPlayer for
+    /// attack triggers instead of TargetPlayer.
     #[test]
-    fn gornog_one_or_more_warriors_attack_uses_target_player_controller() {
+    fn gornog_one_or_more_warriors_attack_uses_defending_player_controller() {
         use crate::types::ability::Effect;
 
         let def = parse_trigger_line(
@@ -22581,12 +22955,111 @@ mod tests {
             Effect::GenericEffect { target, .. } => match target {
                 Some(TargetFilter::Typed(t)) => assert_eq!(
                     t.controller,
-                    Some(ControllerRef::TargetPlayer),
-                    "GenericEffect target should reference the attacked player",
+                    Some(ControllerRef::DefendingPlayer),
+                    "GenericEffect target should reference the defending player via DefendingPlayer",
                 ),
                 other => panic!("expected Some(Typed) target filter, got {other:?}"),
             },
             other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 506.2 + CR 508.1a + CR 608.2c: "attack an opponent" introduces the
+    /// attacked player just like "attack a player"; the effect's "that player"
+    /// anaphor must still bind to `DefendingPlayer`.
+    #[test]
+    fn attack_an_opponent_uses_defending_player_controller() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control attacks an opponent, tap target creature that player controls.",
+            "Test Card",
+        );
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::Tap { target } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::DefendingPlayer),
+                    "tap target should reference the defending player via DefendingPlayer",
+                ),
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected Tap effect, got {other:?}"),
+        }
+    }
+
+    /// CR 506.2 + CR 508.1a + CR 608.2c: plural opponent phrases are the same
+    /// attacked-player anaphor class and must not fall back to TargetPlayer.
+    #[test]
+    fn attack_one_or_more_opponents_uses_defending_player_controller() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control attack one or more of your opponents, tap target creature that player controls.",
+            "Test Card",
+        );
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::Tap { target } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::DefendingPlayer),
+                    "tap target should reference the defending player via DefendingPlayer",
+                ),
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected Tap effect, got {other:?}"),
+        }
+    }
+
+    /// CR 120.3: Damage-to-player triggers (e.g., "Whenever ~ deals combat
+    /// damage to a player, destroy target creature that player controls") must
+    /// continue using `ControllerRef::TargetPlayer`, not `DefendingPlayer`,
+    /// because the damaged player is not necessarily the defending player in
+    /// combat (e.g., trample damage to a planeswalker's controller). Regression
+    /// test for #1667 — ensures the DefendingPlayer fix doesn't break
+    /// damage-to-player triggers.
+    #[test]
+    fn damage_to_player_trigger_uses_target_player() {
+        use crate::types::ability::Effect;
+
+        let def = parse_trigger_line(
+            "Whenever ~ deals combat damage to a player, destroy target creature that player controls.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::Destroy { target, .. } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::TargetPlayer),
+                    "Damage-to-player trigger should use TargetPlayer, not DefendingPlayer",
+                ),
+                other => panic!("expected Typed target filter, got {other:?}"),
+            },
+            other => panic!("expected Destroy effect, got {other:?}"),
+        }
+    }
+
+    /// CR 120.3: Damage-to-opponent triggers introduce the damaged player,
+    /// which remains TargetPlayer even though attack-to-opponent triggers use
+    /// DefendingPlayer.
+    #[test]
+    fn damage_to_opponent_trigger_uses_target_player() {
+        let def = parse_trigger_line(
+            "Whenever ~ deals combat damage to an opponent, destroy target creature that player controls.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::Destroy { target, .. } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::TargetPlayer),
+                    "Damage-to-opponent trigger should use TargetPlayer, not DefendingPlayer",
+                ),
+                other => panic!("expected Typed target filter, got {other:?}"),
+            },
+            other => panic!("expected Destroy effect, got {other:?}"),
         }
     }
 

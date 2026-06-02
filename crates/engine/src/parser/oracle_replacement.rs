@@ -79,6 +79,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     let normalized = replace_self_refs(&text, card_name);
     let norm_lower = normalized.to_lowercase();
 
+    // --- Krark's Thumb: "If you would flip a coin, instead flip two coins and
+    //     ignore one." (CR 705.1 + CR 614.1a) ---
+    // Checked early so the generic "instead" / event-substitution handlers below
+    // don't mis-claim the line.
+    if let Some(def) = parse_krark_coin_flip_replacement(&text, &lower) {
+        return Some(def);
+    }
+
     // --- "As ~ enters, choose a [type]" → Moved replacement with persisted Choose ---
     // Must be checked BEFORE shock lands, which may contain this as a sub-pattern.
     if let Some(def) = parse_as_enters_choose(&norm_lower, &text) {
@@ -634,6 +642,50 @@ fn parse_self_enters_pay_cost_replacement(
 /// Case-insensitive replacement of card name and self-referencing phrases with "~".
 fn replace_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
+}
+
+/// CR 705.1 + CR 614.1a: Krark's Thumb — "If you would flip a coin, instead flip
+/// two coins and ignore one."
+///
+/// Emits a controller-scoped `CoinFlip` replacement whose `execute` doubles the
+/// flip count (`Multiply { factor: 2, EventContextAmount }`). The runtime applier
+/// reads this to set the doubled count; the resolver then performs the keep-1
+/// choice. No `valid_card` filter — the replacement is objectless (it watches the
+/// controller's flips, not a permanent moving), so it must not be skipped by an
+/// object-filter mismatch.
+fn parse_krark_coin_flip_replacement(text: &str, lower: &str) -> Option<ReplacementDefinition> {
+    let ((), rest) = nom_on_lower(text, lower, |i| {
+        let (i, _) = tag("if you would flip a coin, instead flip ").parse(i)?;
+        let (i, _) = alt((tag("two coins"), tag("2 coins"))).parse(i)?;
+        let (i, _) = tag(" and ignore ").parse(i)?;
+        let (i, _) = alt((tag("one"), tag("1"))).parse(i)?;
+        let (i, _) = opt(char('.')).parse(i)?;
+        Ok((i, ()))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::CoinFlip)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            // CR 614.1a: "instead flip two coins" — double the count the
+            // replacement applier sees, then ignore all but one (CR 705.1).
+            Effect::FlipCoins {
+                count: QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                },
+                win_effect: None,
+                lose_effect: None,
+            },
+        ))
+        .description(text.to_string());
+    // CR 614.1a: "If you would flip a coin" — controller-scoped.
+    def.valid_player = Some(ReplacementPlayerScope::You);
+    Some(def)
 }
 
 fn parse_enters_prepared(norm_lower: &str, text: &str) -> Option<ReplacementDefinition> {

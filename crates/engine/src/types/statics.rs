@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     AbilityCost, CardPlayMode, CostCategory, QuantityExpr, QuantityRef, TargetFilter,
 };
+use super::identifiers::ObjectId;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost, StepEndManaAction};
 use super::phase::Phase;
@@ -592,6 +593,16 @@ pub enum StaticMode {
     PlayerProtection(super::keywords::ProtectionTarget),
     MustAttack,
     MustBlock,
+    /// CR 702.39a / CR 509.1c: This creature must block a *specific* attacker if
+    /// able (Provoke; "target creature blocks ~ this turn if able"). Unlike the
+    /// generic [`MustBlock`] (block *any* attacker), this carries the `ObjectId`
+    /// of the attacker that must be blocked. Data-carrying variant — not
+    /// registry-registered (see `coverage::is_data_carrying_static`); enforced by
+    /// direct pattern-match in `combat.rs` declare-blockers validation. The
+    /// `ObjectId` is stable for the end-of-turn lifetime of the granting effect.
+    MustBlockAttacker {
+        attacker: ObjectId,
+    },
     CantDraw {
         who: ProhibitionScope,
     },
@@ -808,6 +819,14 @@ pub enum StaticMode {
     CantBeBlockedBy {
         filter: TargetFilter,
     },
+    /// CR 509.1b: This creature can't be blocked by more than `max` creatures
+    /// (Stalking Tiger, Outland Colossus). A per-creature blocker *maximum* — the
+    /// inverse of menace (`CantBeBlockedExceptBy { MinBlockers }`, a minimum) and
+    /// distinct from `MaxBlockersEachCombat` (a global per-combat cap). Enforced
+    /// in `combat.rs` declare-blockers validation.
+    CantBeBlockedByMoreThan {
+        max: u32,
+    },
     /// CR 702.16: Protection prevents targeting, blocking, damage, and attachment.
     Protection,
     /// CR 702.12: Indestructible — prevents destruction by lethal damage and destroy effects.
@@ -841,8 +860,15 @@ pub enum StaticMode {
     // -- Tier 2: Rule-modification statics --
     CantTap,
     CantUntap,
-    /// CR 509.1c: This creature must be blocked if able.
+    /// CR 509.1c: This creature must be blocked if able — the defending player
+    /// must assign at least one legal blocker to it.
     MustBeBlocked,
+    /// CR 509.1c: "All creatures able to block this creature do so" (Lure,
+    /// Prized Unicorn, Breaker of Armies, …). Unlike [`MustBeBlocked`], this
+    /// places a block requirement on *every* creature able to block it: each
+    /// such untapped defender must be declared as a blocker of this attacker,
+    /// not merely one.
+    MustBeBlockedByAll,
     /// CR 701.15b: This creature is goaded for as long as the static applies.
     /// The source controller is the goading player for the "attack another
     /// player if able" requirement.
@@ -1010,6 +1036,7 @@ impl Hash for StaticMode {
                 cost_category.hash(state);
             }
             StaticMode::ExtraBlockers { count } => count.hash(state),
+            StaticMode::MustBlockAttacker { attacker } => attacker.hash(state),
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
@@ -1019,6 +1046,7 @@ impl Hash for StaticMode {
                 BlockExceptionKind::MinBlockers { min } => min.hash(state),
             },
             StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
+            StaticMode::CantBeBlockedByMoreThan { max } => max.hash(state),
             StaticMode::AdditionalLandDrop { count } => count.hash(state),
             StaticMode::StepEndUnspentMana { filter, action } => {
                 filter.hash(state);
@@ -1137,6 +1165,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::MustAttack => write!(f, "MustAttack"),
             StaticMode::MustBlock => write!(f, "MustBlock"),
+            StaticMode::MustBlockAttacker { attacker } => {
+                write!(f, "MustBlockAttacker({attacker:?})")
+            }
             StaticMode::CantDraw { who } => write!(f, "CantDraw({who})"),
             StaticMode::DoubleTriggers { cause } => write!(f, "DoubleTriggers({cause})"),
             StaticMode::IgnoreHexproof => write!(f, "IgnoreHexproof"),
@@ -1224,6 +1255,9 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeBlockedBy { filter } => {
                 write!(f, "CantBeBlockedBy({filter:?})")
             }
+            StaticMode::CantBeBlockedByMoreThan { max } => {
+                write!(f, "CantBeBlockedByMoreThan({max})")
+            }
             StaticMode::Protection => write!(f, "Protection"),
             StaticMode::Indestructible => write!(f, "Indestructible"),
             StaticMode::CantBeDestroyed => write!(f, "CantBeDestroyed"),
@@ -1241,6 +1275,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantTap => write!(f, "CantTap"),
             StaticMode::CantUntap => write!(f, "CantUntap"),
             StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
+            StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
             StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
@@ -1313,6 +1348,11 @@ impl FromStr for StaticMode {
             s if parse_static_mode_u32_arg(s, "MaxBlockersEachCombat").is_some() => {
                 StaticMode::MaxBlockersEachCombat {
                     max: parse_static_mode_u32_arg(s, "MaxBlockersEachCombat").unwrap(),
+                }
+            }
+            s if parse_static_mode_u32_arg(s, "CantBeBlockedByMoreThan").is_some() => {
+                StaticMode::CantBeBlockedByMoreThan {
+                    max: parse_static_mode_u32_arg(s, "CantBeBlockedByMoreThan").unwrap(),
                 }
             }
             "CantBeTargeted" => StaticMode::CantBeTargeted,
@@ -1536,6 +1576,7 @@ impl FromStr for StaticMode {
             "CantTap" => StaticMode::CantTap,
             "CantUntap" => StaticMode::CantUntap,
             "MustBeBlocked" => StaticMode::MustBeBlocked,
+            "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
             "Goaded" => StaticMode::Goaded,
             "CantAttackAlone" => StaticMode::CantAttackAlone,
             "CantBlockAlone" => StaticMode::CantBlockAlone,
@@ -1769,15 +1810,17 @@ pub fn deserialize_static_mode_fwd<'de, D>(d: D) -> Result<StaticMode, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::Deserialize as _;
     let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
     match raw {
         serde_json::Value::String(ref s) => {
-            // Unit variant path. Try the derived deserializer first so all
-            // known unit variants (e.g. "SpendManaAsAnyColor", "Flying", …)
-            // round-trip correctly. If the derived impl rejects the string
-            // (unknown variant from a newer engine build), fall back to
-            // Other(s) so the card still loads without a hard error.
+            // Unit variant path. Handle legacy cost-modify unit variants first.
+            if let Some(mode) = deserialize_legacy_cost_modify_string(s) {
+                return Ok(mode);
+            }
+            // Try the derived deserializer so all known unit variants
+            // (e.g. "SpendManaAsAnyColor", "Flying", …) round-trip correctly.
+            // If the derived impl rejects the string (unknown variant from a newer
+            // engine build), fall back to Other(s) so the card still loads.
             match serde_json::from_value::<StaticMode>(serde_json::Value::String(s.clone())) {
                 Ok(mode) => Ok(mode),
                 Err(_) => Ok(StaticMode::Other(s.clone())),
@@ -1792,6 +1835,21 @@ where
             serde_json::from_value::<StaticMode>(other).map_err(serde::de::Error::custom)
         }
     }
+}
+
+fn deserialize_legacy_cost_modify_string(s: &str) -> Option<StaticMode> {
+    let mode = match s {
+        "ReduceCost" => CostModifyMode::Reduce,
+        "RaiseCost" => CostModifyMode::Raise,
+        "MinimumCost" => CostModifyMode::Minimum,
+        _ => return None,
+    };
+    Some(StaticMode::ModifyCost {
+        mode,
+        amount: ManaCost::zero(),
+        spell_filter: None,
+        dynamic_count: None,
+    })
 }
 
 #[derive(Deserialize)]
@@ -1898,6 +1956,7 @@ mod tests {
             StaticMode::ExtraBlockers { count: Some(1) },
             StaticMode::MaxAttackersEachCombat { max: 2 },
             StaticMode::MaxBlockersEachCombat { max: 3 },
+            StaticMode::CantBeBlockedByMoreThan { max: 2 },
             StaticMode::RevealTopOfLibrary { all_players: false },
             StaticMode::RevealTopOfLibrary { all_players: true },
             // Tier 1: keyword/evasion statics
@@ -2090,6 +2149,35 @@ mod tests {
                 StaticMode::ModifyCost {
                     mode: expected_mode,
                     amount: ManaCost::generic(2),
+                    spell_filter: None,
+                    dynamic_count: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn fwd_compat_legacy_cost_modify_strings_map_to_modify_cost() {
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_static_mode_fwd")]
+            mode: StaticMode,
+        }
+
+        let cases = [
+            ("ReduceCost", CostModifyMode::Reduce),
+            ("RaiseCost", CostModifyMode::Raise),
+            ("MinimumCost", CostModifyMode::Minimum),
+        ];
+
+        for (legacy_name, expected_mode) in cases {
+            let json = format!(r#"{{"mode":"{legacy_name}"}}"#);
+            let wrapper: Wrapper = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                wrapper.mode,
+                StaticMode::ModifyCost {
+                    mode: expected_mode,
+                    amount: ManaCost::zero(),
                     spell_filter: None,
                     dynamic_count: None,
                 }

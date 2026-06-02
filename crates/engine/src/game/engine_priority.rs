@@ -65,12 +65,11 @@ pub(super) fn run_post_action_pipeline(
 
     // CR 603.3b: Triggered abilities parked while a resolution choice was open
     // (e.g. "whenever you scry, ..." deferred above so it couldn't clobber the
-    // choice's WaitingFor) go on the stack now that the action has settled and a
-    // player is about to receive priority. Gated on `Priority` so it never fires
-    // mid-trigger-pause (where `dispatch_collected_triggers` parks remaining
-    // contexts under a non-Priority WaitingFor and a dedicated site drains them
-    // after the active trigger resolves). A drained trigger that itself needs
-    // input returns its own WaitingFor, handled by the check below.
+    // choice's WaitingFor) go on the stack once resolution truly settles. The
+    // drain is gated inside `drain_deferred_trigger_queue` (no mid-continuation
+    // / mid-spell settles; same-controller groups get `OrderTriggers` first).
+    // A drained trigger that itself needs input returns its own WaitingFor,
+    // handled by the check below.
     if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !state.deferred_triggers.is_empty()
     {

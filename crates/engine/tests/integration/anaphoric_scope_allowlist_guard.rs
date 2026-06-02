@@ -448,7 +448,8 @@ fn anaphoric_scope_set_is_frozen() {
          through the recipient/subject rewrite. The category-2 'it deals damage \
          equal to its power' trigger-subject class (#512) then moved 10 more \
          cards (Warstorm Surge, Stalking Vengeance, Mage Slayer, et al.) onto \
-         `Power {{ scope: EventSource }}`, dropping 257 -> 247. Count moved to \
+         `Power {{ scope: EventSource }}`; Sly Spy remains a legitimate \
+         reveal-referent case. Count moved to \
          {}.",
         observed.len()
     );

@@ -68,7 +68,7 @@ expression: "&lowered"
             "type_filters": [
               "Planeswalker"
             ],
-            "controller": "You",
+            "controller": "TargetPlayer",
             "properties": []
           }
         },

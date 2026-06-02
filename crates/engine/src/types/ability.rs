@@ -1295,6 +1295,13 @@ pub enum ManaSpendRestriction {
     SpellWithKeywordKind(KeywordKind),
     /// "Spend this mana only to cast spells with flashback from a graveyard."
     SpellWithKeywordKindFromZone { kind: KeywordKind, zone: Zone },
+    /// CR 106.6: "Spend this mana only to cast spells with mana value N or
+    /// greater" (or "or less"). Parameterized over [`Comparator`] so a single
+    /// variant covers every mana-value threshold reading rather than
+    /// proliferating per-threshold siblings ("parameterize, don't proliferate").
+    /// `value` is the printed threshold N; `comparator` applies
+    /// `spell_mana_value <cmp> value`.
+    SpellWithManaValue { comparator: Comparator, value: u32 },
 }
 
 /// Duration for temporary effects.
@@ -1472,6 +1479,21 @@ pub enum CastingPermission {
         /// `ManaValue`-constrained standing permission at finalize time.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolution_cleanup: Option<ResolutionCastCleanup>,
+        /// CR 611.2a: Optional durational scope. When `Some(...)`, this
+        /// permission is pruned by the corresponding `layers::prune_*` helpers
+        /// at the same timing points as `PlayFromExile { duration, .. }`.
+        /// `None` (the common case) preserves the standing behavior: the
+        /// permission persists until the object leaves exile (Airbending,
+        /// Suspend, Discover, Cascade, etc., handled by
+        /// `zones::apply_zone_exit_cleanup`).
+        ///
+        /// CR 702.88a (Rebound): used by the Rebound recast permission with
+        /// `Duration::UntilEndOfTurn` so the granted "cast this card from
+        /// exile without paying its mana cost" offer expires at the cleanup
+        /// step of the upkeep on which it was offered if the controller
+        /// declines or fails to cast.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<Duration>,
     },
     /// CR 400.7i: Play from exile until duration expires (impulse draw).
     /// Building block for "exile top N, choose one, you may play it this turn" patterns.
@@ -3011,6 +3033,11 @@ pub enum QuantityRef {
     /// Only valid during sub-ability chain resolution; returns 0 outside that context.
     /// The caller (token resolver) is responsible for consuming the tracked set after use.
     TrackedSetSize,
+    /// CR 608.2c + CR 400.7: Count of members of the most recent tracked set that
+    /// additionally satisfy the inner filter. Used for "for each nontoken creature
+    /// you controlled that was destroyed this way" patterns where the tracked set
+    /// holds all affected objects but only a filtered subset is relevant.
+    FilteredTrackedSetSize { filter: Box<TargetFilter> },
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the immediately
     /// preceding `Effect::ChangeZoneAll` resolution. Read by Deadly Cover-Up's
     /// "draws a card for each card exiled from their hand this way." The counter
@@ -3498,10 +3525,13 @@ pub enum PlayerFilter {
     /// `count` is boxed to break the `QuantityExpr → QuantityRef::PlayerCount →
     /// PlayerFilter::ControlsCount → QuantityExpr` reference cycle that would
     /// otherwise give the enum infinite size.
+    #[serde(alias = "ControlsPermanent")]
     ControlsCount {
         relation: PlayerRelation,
         filter: TargetFilter,
+        #[serde(default = "default_comparator_ge")]
         comparator: Comparator,
+        #[serde(default = "default_controls_count_one")]
         count: Box<QuantityExpr>,
     },
     /// CR 402.1 (hand) / CR 119.1 (life) / CR 122.1f (poison) / CR 404.1
@@ -5310,7 +5340,8 @@ pub enum Effect {
         /// CR 119.3: Who gains the life. Defaults to Controller (omitted from JSON).
         #[serde(
             default = "default_target_filter_controller",
-            skip_serializing_if = "is_target_filter_controller"
+            skip_serializing_if = "is_target_filter_controller",
+            deserialize_with = "deserialize_gain_life_player"
         )]
         player: TargetFilter,
     },
@@ -6362,6 +6393,15 @@ pub enum Effect {
         /// to the spell being cast from the granted zone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         constraint: Option<CastPermissionConstraint>,
+        /// CR 611.2a: Optional durational scope propagated onto the granted
+        /// `CastingPermission::ExileWithAltCost { duration, .. }` so the
+        /// permission is pruned by the standard layer prune helpers.
+        /// CR 702.88a (Rebound): set to `Some(Duration::UntilEndOfTurn)` by
+        /// the Rebound arming flow so the next-upkeep recast offer expires
+        /// at end of turn if not used. `None` for all standing cast-from-zone
+        /// grants (Discover, Suspend, Nashi, etc.).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<Duration>,
     },
     /// CR 615: Prevent damage to a target.
     PreventDamage {
@@ -6818,6 +6858,10 @@ pub enum Effect {
     /// before `phase`, so "additional combat followed by an additional main phase"
     /// resolves in printed order while preserving CR 500.8 LIFO ordering.
     /// CR 500.10a: Only adds steps/phases to the affected player's own turn.
+    /// `count` resolves at resolution time so dynamic quantities such as Obeka,
+    /// Splitter of Seconds' "that many additional upkeep steps" thread the
+    /// triggering event amount through `QuantityRef::EventContextAmount`. Legacy
+    /// callers and explicit "an additional" wording deserialize to a Fixed 1.
     AdditionalPhase {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
@@ -6825,6 +6869,8 @@ pub enum Effect {
         after: Phase,
         #[serde(default)]
         followed_by: Vec<Phase>,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
     },
     /// CR 701.10d-f: Double counters on a permanent, a player's life total, or mana pool.
     /// Uses `DoubleTarget` enum per D-05 to distinguish the three variants.
@@ -7017,6 +7063,40 @@ fn default_player_filter_controller() -> PlayerFilter {
 
 fn default_quantity_one() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
+}
+
+fn default_comparator_ge() -> Comparator {
+    Comparator::GE
+}
+
+fn default_controls_count_one() -> Box<QuantityExpr> {
+    Box::new(QuantityExpr::Fixed { value: 1 })
+}
+
+/// Backward-compat deserializer for GainLife.player field.
+/// Legacy card-data.json used the GainLifePlayer enum with string variants
+/// ("controller", "targeted_controller", "target_player"). New code uses
+/// TargetFilter directly. This maps the legacy strings to the corresponding
+/// TargetFilter values.
+fn deserialize_gain_life_player<'de, D>(d: D) -> Result<TargetFilter, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
+    match raw {
+        // Legacy string format from GainLifePlayer enum
+        serde_json::Value::String(s) => match s.as_str() {
+            "controller" => Ok(TargetFilter::Controller),
+            "targeted_controller" => Ok(TargetFilter::ParentTargetController),
+            "target_player" => Ok(TargetFilter::Player),
+            other => Err(de::Error::unknown_variant(
+                other,
+                &["controller", "targeted_controller", "target_player"],
+            )),
+        },
+        // New TargetFilter object format — delegate to derived deserializer
+        other => serde_json::from_value::<TargetFilter>(other).map_err(serde::de::Error::custom),
+    }
 }
 
 fn default_quantity_four() -> QuantityExpr {
@@ -9298,8 +9378,12 @@ pub enum AbilityCondition {
     /// CR 601.2h + CR 608.2c: "if {C} was spent to cast this spell" gates
     /// resolution on the source object's recorded paid-mana colors.
     ManaColorSpent { color: ManaColor, minimum: u32 },
-    /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last revealed card's type.
-    /// Evaluated at resolution time by inspecting `state.last_revealed_ids[0]`.
+    /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last
+    /// revealed card's type, or on the just-moved card when the parent effect
+    /// changed zones without revealing.
+    /// Evaluated at resolution time by inspecting `state.last_revealed_ids[0]`,
+    /// falling back to `state.last_zone_changed_ids[0]` only when no reveal
+    /// occurred in the current resolution.
     /// `additional_filter` holds optional extra filter properties (e.g., `IsChosenCreatureType`
     /// for "creature card of the chosen type"). For "if it's a nonland card" patterns,
     /// wrap with `AbilityCondition::Not`.
@@ -11371,6 +11455,7 @@ pub enum ContinuousModification {
     /// Grants a rule-modification static mode (e.g. MustBeBlocked, CantBeBlocked)
     /// to the affected object. Applied at layer 6 (ability-modifying).
     AddStaticMode {
+        #[serde(deserialize_with = "crate::types::statics::deserialize_static_mode_fwd")]
         mode: StaticMode,
     },
     /// CR 113.3d + CR 604.1 + CR 613.1f: Grant a full static ability to the
@@ -12720,6 +12805,25 @@ mod tests {
     }
 
     #[test]
+    fn player_filter_legacy_controls_permanent_alias_defaults_to_presence_check() {
+        let json = r#"{
+            "type": "ControlsPermanent",
+            "relation": { "type": "Opponent" },
+            "filter": { "type": "Any" }
+        }"#;
+        let deserialized: PlayerFilter = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            deserialized,
+            PlayerFilter::ControlsCount {
+                relation: PlayerRelation::Opponent,
+                filter: TargetFilter::Any,
+                comparator: Comparator::GE,
+                count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            }
+        );
+    }
+
+    #[test]
     fn ability_definition_with_sub_ability_chain_roundtrip() {
         let ability = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -12895,6 +12999,37 @@ mod tests {
                 expiry: None,
                 target: None,
             }
+        );
+    }
+
+    #[test]
+    fn gain_life_legacy_player_strings_deserialize() {
+        let cases = [
+            ("controller", TargetFilter::Controller),
+            ("targeted_controller", TargetFilter::ParentTargetController),
+            ("target_player", TargetFilter::Player),
+        ];
+
+        for (legacy_player, expected) in cases {
+            let json = format!(r#"{{"type":"GainLife","player":"{legacy_player}"}}"#);
+            let deserialized: Effect = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                deserialized,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: expected,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn gain_life_unknown_player_string_errors() {
+        let err = serde_json::from_str::<Effect>(r#"{"type":"GainLife","player":"nobody"}"#)
+            .expect_err("unknown legacy GainLife.player strings must not silently default");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "expected unknown-variant error, got: {err}"
         );
     }
 

@@ -6,13 +6,18 @@
 # Existing non-combinator code in the parser is frozen in amber — this check
 # only flags *newly added* offending lines in the diff.
 #
-# Three forbidden pattern families:
+# Four forbidden pattern families:
 #   (A) String-method dispatch: .strip_prefix / .contains("...") / .split_once
 #       / .find("...") / etc. Use nom combinators (tag, alt, take_until) instead.
 #   (B) Match-arm dispatch on string literals: `match expr { "foo" => ..., }`.
 #       Discriminant is parser text; arms are literals. Use alt((tag(...))).
 #   (C) Chained `if let Ok((rest, _)) = tag("…")(input)` blocks (≥2 in one
 #       file). Sequential tag tries should compose into a single alt(()).
+#   (D) Un-factored cross-product alt: a flat `alt` whose ≥4 `tag` arms share a
+#       long common prefix AND suffix (e.g. "in addition to {its,their,...} other
+#       [creature ]types"). Factor each varying axis into its own alt()/opt()
+#       inside a sequence; see PATTERNS.md section 8b. Multi-line structural
+#       check delegated to scripts/lib/detect-cross-product-alts.py.
 #
 # Exempt: lines (or the line immediately above) with
 #     // allow-noncombinator: <reason>
@@ -27,6 +32,9 @@
 # target branch's SHA explicitly.
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CROSS_PRODUCT_DETECTOR="$SCRIPT_DIR/lib/detect-cross-product-alts.py"
 
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
 SCOPE='crates/engine/src/parser'
@@ -64,6 +72,7 @@ FAIL=0
 report_methods=""
 report_match_arm=""
 report_iflet_tag=""
+report_crossprod=""
 
 # Filter a per-file candidate list against the allow-noncombinator escape
 # hatch. Reads candidate lines (each prefixed by '+') on stdin, prints the
@@ -151,6 +160,21 @@ while IFS= read -r file; do
         done <<< "$iflet_clean"
         FAIL=1
     fi
+
+    # (D) Un-factored cross-product alt. Multi-line structural check: feed the
+    # unified=0 diff for this file to the Python detector, which maps added
+    # lines onto post-image `alt` blocks and flags those with >=4 tag arms
+    # sharing a long common prefix AND suffix. Skipped (not failed) if python3
+    # is unavailable, so the gate degrades gracefully outside CI.
+    if command -v python3 >/dev/null 2>&1 && [ -f "$CROSS_PRODUCT_DETECTOR" ]; then
+        crossprod_hits=$(git diff $DIFF_MODE --unified=0 "$BASE" -- "$file" \
+            | python3 "$CROSS_PRODUCT_DETECTOR" "$file" 2>/dev/null || true)
+        if [ -n "$crossprod_hits" ]; then
+            report_crossprod="${report_crossprod}
+${crossprod_hits}"
+            FAIL=1
+        fi
+    fi
 done <<< "$files"
 
 if [ "$FAIL" -eq 1 ]; then
@@ -207,6 +231,24 @@ A single if-let-tag for an optional prefix is fine.
 
 Forbidden in added files (diff vs ${BASE}):
 ${report_iflet_tag}
+
+EOF
+    fi
+
+    if [ -n "$report_crossprod" ]; then
+        cat >&2 <<EOF
+(D) Un-factored cross-product alt — factor each varying axis (PATTERNS.md §8b):
+    alt((                                      ->  recognize((
+        tag("in addition to its other types"),     tag("in addition to "),
+        tag("in addition to their other types"),   alt((tag("its"), tag("their"), ...)),
+        tag("in addition to his other types"),      tag(" other "),
+        ... (8 arms = 4 pronouns x 2 scopes)        opt(tag("creature ")),
+    ))                                              tag("types"),
+                                                ))
+The arm count should be the SUM of per-axis choices, never the PRODUCT.
+
+Flagged blocks (diff vs ${BASE}):
+${report_crossprod}
 
 EOF
     fi

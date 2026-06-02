@@ -69,6 +69,13 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedBy { .. }
             // CR 509.1b: CantBeBlockedExceptBy carries `kind`.
             | StaticMode::CantBeBlockedExceptBy { .. }
+            // CR 702.39a + CR 509.1c: MustBlockAttacker carries the `ObjectId` of
+            // the attacker that must be blocked (Provoke). Enforced by direct
+            // match in combat.rs declare-blockers validation.
+            | StaticMode::MustBlockAttacker { .. }
+            // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
+            // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
+            | StaticMode::CantBeBlockedByMoreThan { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }
             // CR 602.5 + CR 117.1b: CantActivateDuring carries `who`, `when`, and `exemption`.
@@ -1039,6 +1046,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::PreviousEffectAmount => "amount from preceding effect".into(),
         QuantityRef::TrackedSetSize => "cards moved".into(),
+        QuantityRef::FilteredTrackedSetSize { filter } => {
+            format!("filtered tracked set ({})", fmt_target(filter))
+        }
         QuantityRef::ExiledFromHandThisResolution => "cards exiled from hand this way".into(),
         QuantityRef::LifeLostThisTurn { player } => {
             format!("life lost this turn ({})", fmt_player_scope(player))
@@ -2265,12 +2275,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             phase,
             after,
             followed_by,
+            count,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("phase".into(), format!("{phase:?}")));
             d.push(("after".into(), format!("{after:?}")));
             if !followed_by.is_empty() {
                 d.push(("followed by".into(), format!("{followed_by:?}")));
+            }
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), format!("{count:?}")));
             }
         }
         Effect::Double {
@@ -5132,11 +5146,18 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::ZoneChangeObjectMatchesFilter { .. } => {
             ("ZoneChangeObjectMatchesFilter", Handled)
         }
-        // Variants below are parsed but have no runtime resolver today.
-        AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Unhandled),
-        AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
-        AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Unhandled),
-        AbilityCondition::SourceIsTapped => ("SourceIsTapped", Unhandled),
+        // CR 400.7 + CR 608.2c: Target filter conditions — resolved by
+        // `evaluate_condition` (effects/mod.rs) with current-state and optional
+        // LKI paths.
+        AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Handled),
+        // CR 608.2c: Source filter conditions — resolved by `evaluate_condition`
+        // against the ability source object.
+        AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Handled),
+        // CR 608.2c: Zone-change-this-way — resolved by `evaluate_condition`
+        // against `state.last_zone_changed_ids`.
+        AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Handled),
+        // CR 608.2c: Source tapped check — resolved by `evaluate_condition`.
+        AbilityCondition::SourceIsTapped => ("SourceIsTapped", Handled),
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
@@ -5237,6 +5258,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DistinctCounterKindsAmong { .. } => ("DistinctCounterKindsAmong", Handled),
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
         QuantityRef::TrackedSetSize => ("TrackedSetSize", Handled),
+        QuantityRef::FilteredTrackedSetSize { .. } => ("FilteredTrackedSetSize", Handled),
         QuantityRef::ExiledFromHandThisResolution => ("ExiledFromHandThisResolution", Handled),
         QuantityRef::LifeLostThisTurn { .. } => ("LifeLostThisTurn", Handled),
         QuantityRef::EventContextAmount => ("EventContextAmount", Handled),
@@ -6640,7 +6662,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             } = &*a.effect
             {
                 static_abilities.iter().any(|s| match &s.mode {
-                    StaticMode::MustBeBlocked => {
+                    // CR 509.1c: "All creatures able to block ~ do so" lowers to the
+                    // lure-strength MustBeBlockedByAll (not the one-blocker MustBeBlocked).
+                    StaticMode::MustBeBlockedByAll => {
                         effective_lower.contains("able to block")
                             && effective_lower.contains("do so")
                     }
@@ -7859,7 +7883,6 @@ fn is_keyword_line(lower: &str) -> bool {
         "gravestorm",
         "conspire",
         "retrace",
-        "rebound",
         "miracle ",
         "cipher",
         "extort",
@@ -8372,6 +8395,7 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
         }
@@ -9834,6 +9858,42 @@ mod tests {
     }
 
     #[test]
+    fn resolved_ability_conditions_are_marked_handled() {
+        let conditions = [
+            (
+                AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Any,
+                    use_lki: false,
+                },
+                "TargetMatchesFilter",
+            ),
+            (
+                AbilityCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Any,
+                },
+                "SourceMatchesFilter",
+            ),
+            (
+                AbilityCondition::ZoneChangedThisWay {
+                    filter: TargetFilter::Any,
+                },
+                "ZoneChangedThisWay",
+            ),
+            (AbilityCondition::SourceIsTapped, "SourceIsTapped"),
+        ];
+
+        for (condition, expected_name) in conditions {
+            let (name, support) = condition_feature(&condition);
+            assert_eq!(name, expected_name);
+            assert_eq!(
+                support,
+                FeatureSupport::Handled,
+                "AbilityCondition::{expected_name} is resolved by effects::evaluate_condition",
+            );
+        }
+    }
+
+    #[test]
     fn unless_pay_static_condition_is_marked_handled() {
         let condition = StaticCondition::UnlessPay {
             cost: crate::types::mana::ManaCost::generic(1),
@@ -9985,6 +10045,33 @@ mod tests {
         assert!(
             gaps.is_empty(),
             "CantBeBlockedExceptBy variants should be fully supported, but got gaps: {:?}",
+            gaps
+        );
+    }
+
+    /// CR 702.39a + CR 509.1b-c: data-carrying combat statics are enforced by
+    /// direct combat validation rather than exact registry-key lookup.
+    #[test]
+    fn data_carrying_combat_statics_have_no_coverage_gap() {
+        let mut face = make_face();
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::MustBlockAttacker {
+                attacker: ObjectId(42),
+            })
+            .description("Target creature blocks this creature this turn if able.".to_string()),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::CantBeBlockedByMoreThan { max: 1 })
+                .affected(TargetFilter::SelfRef)
+                .description(
+                    "This creature can't be blocked by more than one creature.".to_string(),
+                ),
+        );
+
+        let gaps = card_face_gaps(&face);
+        assert!(
+            gaps.is_empty(),
+            "Data-carrying combat statics should be fully supported, but got gaps: {:?}",
             gaps
         );
     }

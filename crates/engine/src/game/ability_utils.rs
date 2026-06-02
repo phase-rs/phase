@@ -5413,6 +5413,7 @@ mod tests {
                 cast_transformed: false,
                 alt_ability_cost: None,
                 constraint: None,
+                duration: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -5424,6 +5425,43 @@ mod tests {
         assert!(
             slots.is_empty(),
             "typed linked-exile filters are resolved from source links, not chosen as targets"
+        );
+    }
+
+    #[test]
+    fn build_target_slots_skips_cast_from_hand_permission() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Card)
+                        .controller(ControllerRef::You)
+                        .properties(vec![
+                            FilterProp::InZone { zone: Zone::Hand },
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                value: QuantityExpr::Fixed { value: 4 },
+                            },
+                        ]),
+                ),
+                without_paying_mana_cost: true,
+                mode: crate::types::ability::CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+
+        assert!(
+            slots.is_empty(),
+            "cast-from-hand permissions are resolution-time picks, not stack-time targets"
         );
     }
 
@@ -5443,6 +5481,7 @@ mod tests {
                 cast_transformed: false,
                 alt_ability_cost: None,
                 constraint: None,
+                duration: None,
             },
             Vec::new(),
             ObjectId(1),

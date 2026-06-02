@@ -114,6 +114,17 @@ pub fn resolve_combat_damage(
 
         // CR 510.4: SBAs and triggers run between first-strike and regular damage sub-steps.
         process_combat_damage_triggers(state, &damage_events, events);
+
+        // CR 510.4 + CR 603.3b: if the first-strike sub-step produced a same-
+        // controller trigger-ordering prompt, surface it now — before the regular
+        // sub-step's own trigger processing clobbers/orphans it. Returning here
+        // leaves `regular_damage_done == false`; the mandatory second (regular)
+        // combat-damage sub-step is resumed by the priority-pass completeness gate
+        // in priority.rs, which re-enters this function once the order is submitted
+        // and the resulting triggers resolve.
+        if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+            return Some(state.waiting_for.clone());
+        }
     }
 
     // --- Regular damage sub-step ---
@@ -3017,6 +3028,61 @@ mod tests {
             "blocker took lethal (2) and should have died"
         );
         assert_eq!(state.players[1].life, 17);
+    }
+
+    #[test]
+    fn trample_multi_blocker_power_below_combined_lethal_no_excess_is_legal() {
+        // CR 702.19b + CR 510.1c: a 4/4 trample attacker blocked by two 3/3s has
+        // combined lethal 6 > power 4, so the controller cannot assign lethal to
+        // both AND send excess to the player.  The controller MUST be allowed to
+        // freely distribute all 4 damage among the two blockers with trample_damage=0.
+        // (The frontend #1491 bug: trampleLethalMet unconditionally required lethal
+        // to every blocker, deadlocking combat here.)
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Rampager", 4, 4);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker_a = create_creature(&mut state, PlayerId(1), "Guard A", 3, 3);
+        let blocker_b = create_creature(&mut state, PlayerId(1), "Guard B", 3, 3);
+        setup_combat(
+            &mut state,
+            vec![attacker],
+            vec![(attacker, vec![blocker_a, blocker_b])],
+        );
+
+        let mut events = Vec::new();
+        let waiting =
+            resolve_combat_damage(&mut state, &mut events).expect("2 blockers must always prompt");
+        state.waiting_for = waiting;
+
+        // Assign 2 to each blocker, 0 trample through; this must succeed even though
+        // neither blocker gets lethal (CR 702.19b: lethal gating only applies when
+        // excess is being sent to the player/PW).
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::AssignCombatDamage {
+                mode: CombatDamageAssignmentMode::Normal,
+                assignments: vec![(blocker_a, 2), (blocker_b, 2)],
+                trample_damage: 0,
+                controller_damage: 0,
+            },
+        )
+        .expect("distributing all damage among blockers with trample_damage=0 is legal");
+
+        // Neither blocker takes lethal; both survive. Defending player untouched.
+        assert!(
+            state.battlefield.contains(&blocker_a),
+            "blocker_a took 2 < lethal (3) and must survive"
+        );
+        assert!(
+            state.battlefield.contains(&blocker_b),
+            "blocker_b took 2 < lethal (3) and must survive"
+        );
+        assert_eq!(state.players[1].life, 20, "no trample damage to player");
     }
 
     #[test]

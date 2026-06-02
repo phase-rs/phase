@@ -2685,11 +2685,15 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanents(filter)?,
             cant_regenerate: true,
         },
-        Action::DestroyEachPermanent(filter) => Effect::Destroy {
+        // CR 701.8a: "Destroy all X" — mass destruction uses DestroyAll, not
+        // the single-target Destroy resolver, so the full matching set is
+        // processed and the tracked set is populated correctly for downstream
+        // "for each X destroyed this way" sub-abilities.
+        Action::DestroyEachPermanent(filter) => Effect::DestroyAll {
             target: convert_permanents(filter)?,
             cant_regenerate: false,
         },
-        Action::DestroyEachPermanentNoRegen(filter) => Effect::Destroy {
+        Action::DestroyEachPermanentNoRegen(filter) => Effect::DestroyAll {
             target: convert_permanents(filter)?,
             cant_regenerate: true,
         },
@@ -3235,6 +3239,19 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::PutACounterOfTypeOnEachPermanent(ct, filter) => Effect::AddCounter {
             counter_type: counter_type_name(ct),
             count: QuantityExpr::Fixed { value: 1 },
+            target: convert_permanents(filter)?,
+        },
+
+        // CR 122.1: Mass counter placement with an explicit count — "Put N
+        // [counter] on each [filter]." Numbered sibling of
+        // `PutACounterOfTypeOnEachPermanent`; same multi-match `TargetFilter`
+        // semantics, with the count lowered through `quantity::convert` so
+        // X-quantities (e.g. Oracle's Gift: "put X +1/+1 counters on each
+        // Fractal you control") become `QuantityRef::Variable { "X" }` and
+        // resolve from the spell's paid X at resolution.
+        Action::PutNumberCountersOfTypeOnEachPermanent(g, ct, filter) => Effect::AddCounter {
+            counter_type: counter_type_name(ct),
+            count: quantity::convert(g)?,
             target: convert_permanents(filter)?,
         },
 
@@ -6658,6 +6675,29 @@ mod tests {
         assert_eq!(*payer, TargetFilter::ParentTargetController);
         let sub = ability.sub_ability.as_ref().expect("expected paid body");
         assert!(matches!(sub.effect.as_ref(), Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn put_number_counters_on_each_permanent_lowers_to_add_counter_with_x() {
+        // CR 122.1 + CR 107.1b: "Put X +1/+1 counters on each [filter]"
+        // (Oracle's Gift, Jadzi's prepare spell) lowers to a multi-match
+        // AddCounter whose count is the spell's paid X.
+        let effect = convert(&Action::PutNumberCountersOfTypeOnEachPermanent(
+            Box::new(GameNumber::ValueX),
+            CounterType::PTCounter(1, 1),
+            Box::new(Permanents::IsCardtype(CardType::Creature)),
+        ))
+        .unwrap();
+
+        let Effect::AddCounter { count, .. } = effect else {
+            panic!("expected AddCounter, got {effect:?}");
+        };
+        assert!(matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name }
+            } if name == "X"
+        ));
     }
 
     #[test]

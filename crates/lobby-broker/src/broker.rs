@@ -139,6 +139,9 @@ impl Broker {
         msg: LobbyClientMessage,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
+        if let Err(reason) = crate::inbound_guard::guard_inbound(&msg) {
+            return vec![error(&reason)];
+        }
         match msg {
             LobbyClientMessage::ClientHello {
                 client_version,
@@ -188,6 +191,7 @@ impl Broker {
                 host_peer_id,
                 draft_metadata,
                 start_when_full: _,
+                ranked,
             } => self.handle_create_game(
                 conn,
                 display_name,
@@ -200,6 +204,7 @@ impl Broker {
                 room_name,
                 host_peer_id,
                 draft_metadata,
+                ranked,
                 env,
             ),
 
@@ -321,6 +326,7 @@ impl Broker {
         room_name: Option<String>,
         host_peer_id: Option<String>,
         draft_metadata: Option<crate::protocol::DraftLobbyMetadata>,
+        ranked: bool,
         env: &impl BrokerEnv,
     ) -> Vec<Outbound> {
         let peer_id = match host_peer_id
@@ -396,6 +402,7 @@ impl Broker {
                     .map(str::to_string),
                 host_peer_id: peer_id,
                 draft_metadata,
+                ranked,
             },
             env,
         );
@@ -820,6 +827,7 @@ mod tests {
                 host_peer_id: Some("peer-1".into()),
                 draft_metadata: None,
                 start_when_full: true,
+                ranked: false,
             },
             env,
         )
@@ -1250,6 +1258,39 @@ mod tests {
                 host_peer_id: None,
                 draft_metadata: None,
                 start_when_full: true,
+                ranked: false,
+            },
+            &env,
+        );
+        assert!(matches!(
+            out.as_slice(),
+            [Outbound::ToSelf(LobbyServerMessage::Error { .. })]
+        ));
+        assert!(conn.host_game.is_none());
+    }
+
+    #[test]
+    fn handle_rejects_oversized_display_name_without_parse() {
+        let env = FakeEnv::new();
+        let mut broker = Broker::new();
+        let mut conn = ConnState::default();
+        hello(&mut conn, &mut broker, &env);
+        let out = broker.handle(
+            &mut conn,
+            LobbyClientMessage::CreateGameWithSettings {
+                deck: test_deck(),
+                display_name: "a".repeat(21),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                player_count: 4,
+                match_config: Default::default(),
+                format_config: None,
+                room_name: None,
+                host_peer_id: Some("peer-host".into()),
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
             },
             &env,
         );

@@ -108,6 +108,7 @@ pub mod pump;
 pub mod put_on_top;
 pub mod put_on_top_or_bottom;
 pub mod rad_counters;
+pub mod rebound;
 pub mod regenerate;
 pub mod register_bending;
 pub mod remove_from_combat;
@@ -614,14 +615,15 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // landed us back at Priority (no further replacement choice), B1-drain the
         // deferred observer triggers parked during earlier pause segments plus the
         // ones this resume produced; otherwise leave them parked for the next drain.
+        let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+            .iter()
+            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .cloned()
+            .collect();
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
             crate::game::triggers::drain_deferred_trigger_queue(state, events);
         } else {
-            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
-                .iter()
-                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-                .cloned()
-                .collect();
             crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
         }
     }
@@ -915,6 +917,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::ScryChoice { .. }
+            | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
@@ -1979,7 +1982,12 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => matches!(qty, QuantityRef::TrackedSetSize),
+        QuantityExpr::Ref { qty } => {
+            matches!(
+                qty,
+                QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
+            )
+        }
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
@@ -2062,6 +2070,29 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
+        // CR 701.26a + CR 608.2c: Tap publishes the tapped set for downstream
+        // "each of those <type>" continuations (Urge to Feed class).
+        Effect::Tap { .. } | Effect::Untap { .. } => {
+            let from_events: Vec<ObjectId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::PermanentTapped { object_id, .. }
+                    | GameEvent::PermanentUntapped { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            if !from_events.is_empty() {
+                from_events
+            } else {
+                fallback_targets
+                    .iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            }
+        }
         _ => {
             let dest_zone = match effect {
                 Effect::ChangeZone { destination, .. }
@@ -4273,20 +4304,45 @@ fn resolve_chain_body(
             return Ok(());
         }
 
-        // Apply forward_result: moved object becomes sub's source, original source becomes target.
-        // This wires "put onto the battlefield attached to [source]" so Attach sees the
-        // moved card as source_id (the attachment) and the original source as target (the host).
+        // Apply forward_result: moved object becomes sub's source.
+        //
+        // CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
+        // CR 301.5b: Equipment entering attached via "put onto the battlefield attached to" wiring.
+        // For the Attach shape (Armored Skyhunter, Quest for the Holy Relic),
+        // the moved card is the attachment and the original source is the
+        // host, so we additionally push the original source into the sub's
+        // targets.
+        //
+        // CR 608.2c: For non-Attach shapes (Emperor of Bones' "It gains
+        // haste. Sacrifice it." after a `ChangeZone` to Battlefield),
+        // pushing the original source as a target would mis-bind any
+        // downstream `ParentTarget` consumer — the delayed Sacrifice
+        // would target Emperor itself instead of the just-returned
+        // creature. Instead, when the sub has no targets of its own and
+        // the parent ability has no targets to inherit (and the sub
+        // isn't an implicit tracked-set consumer), prepend the moved
+        // card as a target so `ParentTarget` consumers downstream
+        // resolve to it.
         if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
             sub_with_context.source_id = forwarded_objects[0];
-            if !sub_with_context
-                .targets
-                .iter()
-                .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+            if matches!(sub.effect, Effect::Attach { .. }) {
+                if !sub_with_context
+                    .targets
+                    .iter()
+                    .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+                {
+                    sub_with_context
+                        .targets
+                        .push(TargetRef::Object(ability.source_id));
+                }
+            } else if sub_with_context.targets.is_empty()
+                && ability.targets.is_empty()
+                && !effect_uses_implicit_tracked_set_targets(&sub.effect)
             {
                 sub_with_context
                     .targets
-                    .push(TargetRef::Object(ability.source_id));
+                    .insert(0, TargetRef::Object(forwarded_objects[0]));
             }
             apply_parent_chain_context(
                 &mut sub_with_context,
@@ -4434,25 +4490,32 @@ pub(crate) fn evaluate_condition(
         // CR 608.2c: "If it's a [type] card" — check the revealed card's type.
         // CR 205.3m: Optional additional_filter checks extra properties like
         // "of the chosen type" (IsChosenCreatureType).
+        // CR 700.1 + CR 406.6: When no reveal occurred but the parent effect
+        // moved a card between zones (e.g. Currency Converter's
+        // "Put a card exiled with ~ into its owner's graveyard. If it's a
+        // land card, ..." — issue #1545), fall back to the just-moved card in
+        // `last_zone_changed_ids`. The reveal-driven path still wins when both
+        // trackers are populated, so existing reveal+rider cards keep their
+        // pre-fix behavior.
         AbilityCondition::RevealedHasCardType {
             card_type,
             additional_filter,
         } => {
-            let type_matches = state
+            let subject_id = state
                 .last_revealed_ids
                 .first()
-                .map(|id| super::printed_cards::object_has_core_type(state, *id, *card_type))
+                .or_else(|| state.last_zone_changed_ids.first())
+                .copied();
+            let type_matches = subject_id
+                .map(|id| super::printed_cards::object_has_core_type(state, id, *card_type))
                 .unwrap_or(false);
             let filter_matches = match additional_filter {
                 // CR 205.3m: "of the chosen type" — check the revealed card's subtype
                 // against the source permanent's chosen creature type.
                 Some(FilterProp::IsChosenCreatureType) => {
                     let source = state.objects.get(&ability.source_id);
-                    let revealed = state
-                        .last_revealed_ids
-                        .first()
-                        .and_then(|id| state.objects.get(id));
-                    match (source, revealed) {
+                    let subject = subject_id.and_then(|id| state.objects.get(&id));
+                    match (source, subject) {
                         (Some(src), Some(obj)) => {
                             src.chosen_creature_type().is_some_and(|chosen_type| {
                                 obj.card_types
@@ -4570,10 +4633,31 @@ pub(crate) fn evaluate_condition(
             .is_some_and(|obj| obj.has_keyword(keyword)),
         // CR 400.7 + CR 608.2c: "if that creature was a [type]" — check target or its LKI.
         AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
-            let target_id = ability.targets.iter().find_map(|t| match t {
-                TargetRef::Object(id) => Some(*id),
-                _ => None,
-            });
+            // CR 109.4 + CR 603.2: "that creature" / "it" is the ability's first
+            // object target, OR — for subject-based triggers that carry no chosen
+            // target (e.g. "Whenever one or more -1/-1 counters are put on a
+            // creature, draw a card if you control that creature.") — the
+            // triggering event's subject object. Mirror the `ParentTargetController`
+            // fallback (targeting.rs): when `targets` has no object, resolve the
+            // anaphor against `TriggeringSource` from the current trigger event.
+            let target_id = ability
+                .targets
+                .iter()
+                .find_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+                .or_else(|| {
+                    crate::game::targeting::resolve_event_context_target(
+                        state,
+                        &TargetFilter::TriggeringSource,
+                        ability.source_id,
+                    )
+                    .and_then(|t| match t {
+                        TargetRef::Object(id) => Some(id),
+                        TargetRef::Player(_) => None,
+                    })
+                });
             let matched = if let Some(id) = target_id {
                 if *use_lki {
                     if let Some(GameEvent::ZoneChanged { record, .. }) =
@@ -4903,6 +4987,13 @@ fn resolve_unless_payer(
         // `TargetFilter::Player` arm which scans `ability.targets` for the
         // first `TargetRef::Player`.
         TargetFilter::Player => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        }
+        // CR 118.12a + CR 608.2f: "Each player/each opponent ... unless they pay" —
+        // the payer is the player_scope iteration's scoped player, not a chosen
+        // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player
+        // (bound per-iteration by the fan-out at effects/mod.rs:3015-3069).
+        TargetFilter::ScopedPlayer => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
         _ => None,
@@ -5928,6 +6019,30 @@ mod tests {
         );
     }
 
+    // CR 118.12a + CR 608.2f: "each opponent ... unless they pay" — the payer
+    // is the per-iteration scoped player bound by the fan-out, read through
+    // `ScopedPlayer`, not a chosen target. Without this arm the resolver
+    // returns `None` and the punisher fires unconditionally.
+    #[test]
+    fn resolve_unless_payer_scoped_player_reads_ability_scoped_player() {
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: Some(TargetFilter::ScopedPlayer),
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        // Simulate the fan-out binding the scoped opponent for this iteration.
+        ability.scoped_player = Some(PlayerId(1));
+        assert_eq!(
+            resolve_unless_payer(&state, &ability, &TargetFilter::ScopedPlayer),
+            Some(PlayerId(1))
+        );
+    }
+
     #[test]
     fn expand_per_counter_zero_returns_zero_mana() {
         let base = AbilityCost::Mana {
@@ -6726,6 +6841,94 @@ mod tests {
         assert_eq!(state.players[0].life, 12);
     }
 
+    #[test]
+    fn forward_result_non_attach_parent_target_binds_moved_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Returned Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let sacrifice_moved = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut reanimate = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(sacrifice_moved);
+        reanimate.forward_result = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &reanimate, &mut events, 0).unwrap();
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == creature)),
+            "parent ChangeZone must move the creature before forwarding it"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::PermanentSacrificed { object_id, .. } if *object_id == creature
+            )),
+            "forward_result must bind ParentTarget to the moved creature"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PermanentSacrificed { object_id, .. } if *object_id == source
+            )),
+            "ParentTarget must not fall back to the source permanent"
+        );
+    }
+
     /// CR 608.2c + CR 400.7j + CR 608.2k: a non-targeted `ChangeZone` with 2+
     /// eligible objects raises `WaitingFor::EffectZoneChoice`. After the player
     /// picks a card, the `EffectZoneChoice` handler stamps parent-referent
@@ -7519,6 +7722,102 @@ mod tests {
         assert_eq!(treasures0, 0, "Empty chain must mint zero tokens");
     }
 
+    /// CR 608.2c + CR 400.7: a mass-destroy parent must publish the destroyed
+    /// set so a token-count follow-up can count only the filtered subset.
+    #[test]
+    fn destroy_all_chain_counts_filtered_tracked_set_for_token_followup() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Ceaseless Conflict".to_string(),
+            Zone::Graveyard,
+        );
+        let controller_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Controller Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let controller_token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Controller Token".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [controller_creature, controller_token, opponent_creature] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+        state.objects.get_mut(&controller_token).unwrap().is_token = true;
+
+        let token_sub = ResolvedAbility::new(
+            Effect::Token {
+                name: "Spirit".to_string(),
+                power: PtValue::Fixed(3),
+                toughness: PtValue::Fixed(2),
+                types: vec!["Creature".to_string(), "Spirit".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![FilterProp::NonToken]),
+                        )),
+                    },
+                },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(token_sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        for id in [controller_creature, controller_token, opponent_creature] {
+            assert_eq!(state.objects[&id].zone, Zone::Graveyard);
+        }
+        let spirits = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|object| object.name == "Spirit")
+            .count();
+        assert_eq!(
+            spirits, 1,
+            "only the controller's nontoken destroyed creature should be counted"
+        );
+    }
+
     #[test]
     fn put_counter_all_publishes_countered_objects_for_tracked_set_followup() {
         let mut state = GameState::new_two_player(42);
@@ -7676,6 +7975,104 @@ mod tests {
             .is_some_and(|objects| objects.is_empty()));
     }
 
+    /// CR 608.2c + CR 701.26a: a tapped-object set published by `Tap` must
+    /// bind a downstream filtered "each of those <type>" counter effect.
+    #[test]
+    fn tap_chain_publishes_filtered_tracked_set_for_counter_followup() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Urge to Feed".to_string(),
+            Zone::Graveyard,
+        );
+        let vampire = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vampire".to_string(),
+            Zone::Battlefield,
+        );
+        let other_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Swamp".to_string(),
+            Zone::Battlefield,
+        );
+
+        state
+            .objects
+            .get_mut(&vampire)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        state.objects.get_mut(&vampire).unwrap().card_types.subtypes = vec!["Vampire".to_string()];
+        state
+            .objects
+            .get_mut(&other_creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
+        state.objects.get_mut(&land).unwrap().card_types.subtypes = vec!["Swamp".to_string()];
+
+        let counter = ResolvedAbility::new(
+            Effect::PutCounterAll {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::creature().subtype("Vampire".to_string()),
+                    )),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::Typed(TypedFilter::creature().subtype("Vampire".to_string())),
+            },
+            vec![TargetRef::Object(vampire)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(counter);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(state.objects[&vampire].tapped);
+        assert_eq!(
+            state.objects[&vampire]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1)
+        );
+        for id in [other_creature, land] {
+            assert_eq!(
+                state.objects[&id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied(),
+                None,
+                "only the tapped Vampire should receive the counter"
+            );
+        }
+    }
+
     #[test]
     fn airbend_chain_exiles_all_creatures_when_no_target_is_chosen() {
         let mut state = GameState::new_two_player(42);
@@ -7739,6 +8136,7 @@ mod tests {
                         constraint: None,
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -7828,6 +8226,7 @@ mod tests {
                         constraint: None,
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -7891,6 +8290,7 @@ mod tests {
                     constraint: None,
                     granted_to: None,
                     resolution_cleanup: None,
+                    duration: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -11606,6 +12006,198 @@ mod tests {
             &state,
             &opponent_ability,
         ));
+    }
+
+    /// CR 608.2c + CR 700.1: Currency Converter — "Put a card exiled with this
+    /// artifact into its owner's graveyard. If it's a land card, create a
+    /// Treasure token. If it's a nonland card, create a 2/2 black Rogue
+    /// creature token." (issue #1545)
+    ///
+    /// The parser lowers "If it's a [type] card" to `RevealedHasCardType`, but
+    /// the parent effect here is a `ChangeZone` (Exile -> Graveyard), not a
+    /// reveal. With no preceding reveal, `last_revealed_ids` is empty and the
+    /// pre-fix evaluator returns `false` for both branches, so neither the
+    /// Treasure nor the Rogue token is ever created.
+    ///
+    /// CR 406.6: This shape (linked-exile consumer + conditional rider on the
+    /// moved card's type) is a class: Splinter Twin-style "if it's a creature
+    /// card", reanimate-conditional riders, and any future
+    /// "Put a card exiled with ~ into [zone]. If it's a [type] card, ..."
+    /// printing all benefit from the fallback to `last_zone_changed_ids`.
+    #[test]
+    fn revealed_has_card_type_falls_back_to_last_zone_changed_when_no_reveal() {
+        let mut state = GameState::new_two_player(42);
+        let land_card = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&land_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let nonland_card = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Goblin Guide".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&nonland_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Currency Converter style sub-ability: parent ChangeZone moved a card,
+        // sub clause reads "If it's a land card, ...". No reveal happened.
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let land_cond = AbilityCondition::RevealedHasCardType {
+            card_type: CoreType::Land,
+            additional_filter: None,
+        };
+
+        // Empty trackers — no reveal, no zone change: condition is false.
+        assert!(state.last_revealed_ids.is_empty());
+        assert!(state.last_zone_changed_ids.is_empty());
+        assert!(!evaluate_condition(&land_cond, &state, &ability));
+
+        // Parent ChangeZone moved the land card. The land branch of the
+        // "If it's a [type] card" rider must fire.
+        state.last_zone_changed_ids.push(land_card);
+        assert!(
+            evaluate_condition(&land_cond, &state, &ability),
+            "land-card branch must fire when parent ChangeZone moved a land",
+        );
+
+        // Nonland branch must NOT fire on the same moved land card. Equivalent
+        // to the parsed `Not { RevealedHasCardType { Land } }` rider that gates
+        // Currency Converter's Rogue token.
+        let nonland_cond = AbilityCondition::Not {
+            condition: Box::new(land_cond.clone()),
+        };
+        assert!(!evaluate_condition(&nonland_cond, &state, &ability));
+
+        // Swap: parent ChangeZone moved a nonland card instead.
+        state.last_zone_changed_ids.clear();
+        state.last_zone_changed_ids.push(nonland_card);
+        assert!(
+            !evaluate_condition(&land_cond, &state, &ability),
+            "land-card branch must NOT fire when parent ChangeZone moved a nonland",
+        );
+        assert!(
+            evaluate_condition(&nonland_cond, &state, &ability),
+            "nonland-card branch must fire when parent ChangeZone moved a nonland",
+        );
+
+        // CR 700.1 + CR 701.20: A real reveal still wins over the zone-change
+        // fallback so existing reveal-driven cards (Goblin Guide, dig effects)
+        // are not regressed by the fallback path.
+        state.last_zone_changed_ids.clear();
+        state.last_zone_changed_ids.push(nonland_card);
+        state.last_revealed_ids.push(land_card);
+        assert!(
+            evaluate_condition(&land_cond, &state, &ability),
+            "reveal must take precedence over the zone-change fallback",
+        );
+    }
+
+    #[test]
+    fn revealed_has_card_type_chain_uses_card_moved_by_parent_change_zone() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Currency Converter".to_string(),
+            Zone::Battlefield,
+        );
+        let land_card = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&land_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        state.exile_links.push(ExileLink {
+            source_id: source,
+            exiled_id: land_card,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let token_rider = ResolvedAbility::new(
+            Effect::Token {
+                name: "Treasure".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Artifact".to_string(), "Treasure".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::RevealedHasCardType {
+            card_type: CoreType::Land,
+            additional_filter: None,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Graveyard,
+                target: TargetFilter::ExiledBySource,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(token_rider);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.objects[&land_card].zone, Zone::Graveyard);
+        assert_eq!(
+            state
+                .objects
+                .values()
+                .filter(|obj| obj.name == "Treasure" && obj.zone == Zone::Battlefield)
+                .count(),
+            1,
+            "land-card rider must create a Treasure after the parent ChangeZone moved a land",
+        );
     }
 
     #[test]

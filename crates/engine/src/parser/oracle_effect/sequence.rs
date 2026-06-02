@@ -1360,6 +1360,29 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
                 alt((tag("gains "), tag("gets "), tag("has "), tag("loses "))),
             ),
         ),
+        // CR 602.5 + CR 603.2a + CR 608.2c: Possessive-anaphor activation
+        // prohibition conjunct — "[X gets -3/-0] and its activated abilities
+        // can't be activated" (Dovin Baan). The possessive subject axis ("its"/
+        // "their"/"that creature's"/"that permanent's") is composed with the
+        // fixed predicate so the split routes the conjunct through
+        // `parse_clause_ast` → `try_parse_subject_restriction_clause`. Safe to
+        // split: a possessive subject followed by "activated abilities can't be
+        // activated" is always a subject-predicate restriction clause, never a
+        // noun-phrase continuation of the prior conjunct.
+        value(
+            (),
+            (
+                alt((
+                    tag("its "),
+                    tag("their "),
+                    tag("that creature's "),
+                    tag("that creature\u{2019}s "),
+                    tag("that permanent's "),
+                    tag("that permanent\u{2019}s "),
+                )),
+                tag("activated abilities can't be activated"),
+            ),
+        ),
     )))
     .parse(s)
     .is_ok();
@@ -1453,6 +1476,7 @@ fn combat_requirement_conjunct_prepend(
     let remainder_lower = remainder_trimmed.to_ascii_lowercase();
     if !super::imperative::is_standalone_combat_requirement(&remainder_lower)
         && !super::subject::is_can_block_extra_predicate(&remainder_lower)
+        && !super::subject::is_can_attack_despite_defender_predicate(&remainder_lower)
     {
         return None;
     }

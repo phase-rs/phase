@@ -1920,6 +1920,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         // the ability controller at grant time.
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -4563,8 +4564,11 @@ fn rebind_controller_to_triggering_source(mut clause: ParsedEffectClause) -> Par
 /// CR 205.1a: An object retains types explicitly stated by the effect.
 /// CR 509.1c: "All creatures able to block [target/~] [this turn] do so."
 ///
-/// Semantically equivalent to "[target/~] must be blocked this turn if able."
-/// Produces a GenericEffect with `MustBeBlocked` AddStaticMode on the referenced object.
+/// This is the "lure" requirement: *every* creature able to block the referenced
+/// object must block it, not merely one. It is therefore NOT equivalent to
+/// "[target/~] must be blocked if able" (which `MustBeBlocked` models, satisfied
+/// by a single blocker). Produces a GenericEffect with the stronger
+/// `MustBeBlockedByAll` AddStaticMode on the referenced object.
 ///
 /// Patterns:
 /// - "all creatures able to block target creature this turn do so"
@@ -4606,10 +4610,10 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
 
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
+            static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlockedByAll)
                 .affected(target.clone())
                 .modifications(vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustBeBlocked,
+                    mode: StaticMode::MustBeBlockedByAll,
                 }])],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(target),
@@ -9005,6 +9009,20 @@ fn has_anaphoric_reference(lower: &str) -> bool {
     false
 }
 
+/// CR 608.2c: "that player" / "the player" after an earlier explicit player
+/// target binds to that chosen player, not to the triggering-event player and
+/// not to the controller of an object target.
+fn has_player_anaphoric_reference(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, |input| {
+        alt((
+            tag::<_, _, OracleError<'_>>("that player"),
+            tag("the player"),
+        ))
+        .parse(input)
+    })
+    .is_some()
+}
+
 fn explicit_any_target_clause(effect: &Effect, lower: &str) -> bool {
     matches!(effect.target_filter(), Some(TargetFilter::Any))
         && nom_primitives::scan_contains(lower, "any target")
@@ -9130,6 +9148,17 @@ fn replace_target_with_self(effect: &mut Effect) {
             // stay as-is.
         }
     }
+}
+
+fn replace_player_anaphor_with_parent_target(effect: &mut Effect) {
+    each_target_filter_mut(effect, &mut |filter| {
+        if matches!(
+            filter,
+            TargetFilter::TriggeringPlayer | TargetFilter::ParentTargetController
+        ) {
+            *filter = TargetFilter::ParentTarget;
+        }
+    });
 }
 
 /// CR 608.2k (issue #319): True when `ctx` carries a *typed* trigger subject
@@ -9268,6 +9297,95 @@ fn has_typed_target(effect: &Effect) -> bool {
     )
 }
 
+fn target_filter_is_explicit_player_target(filter: &TargetFilter) -> bool {
+    if filter.is_context_ref() {
+        return false;
+    }
+    match filter {
+        TargetFilter::Player | TargetFilter::SpecificPlayer { .. } => true,
+        TargetFilter::Typed(tf) => tf.type_filters.is_empty(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_is_explicit_player_target)
+        }
+        TargetFilter::Not { filter } => target_filter_is_explicit_player_target(filter),
+        _ => false,
+    }
+}
+
+/// CR 608.2c: An earlier clause whose target filter is a compound shape
+/// (`And` / `Or` wrapping a `Typed` branch) still introduces a typed object
+/// referent for a sibling bare-"it" anaphor.
+///
+/// The leaf `TargetFilter::Typed` check used by `has_typed_target` doesn't
+/// see compound shapes — so a chain whose originating clause selects a
+/// creature via `And[Typed(Creature), ExiledBySource]` (Emperor of Bones'
+/// "put a creature card exiled with this creature onto the battlefield")
+/// would fall back to `SelfRef` for the trailing "it gains haste. sacrifice
+/// it." This helper recognizes those compound filters.
+///
+/// Quantifier semantics: `And` uses `.any()` — one `Typed` branch suffices
+/// because every And-branch must hold during resolution, so a Typed branch
+/// pins the referent kind. `Or` uses `.all()` — every branch must be typed
+/// for a bare "it" to have a single referent kind across the player's
+/// choice. `Not` introduces no positive referent.
+fn filter_introduces_typed_object(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(_) => true,
+        TargetFilter::And { filters } => filters.iter().any(filter_introduces_typed_object),
+        TargetFilter::Or { filters } => filters.iter().all(filter_introduces_typed_object),
+        TargetFilter::Not { .. } => false,
+        _ => false,
+    }
+}
+
+fn has_explicit_player_target(effect: &Effect) -> bool {
+    effect
+        .target_filter()
+        .is_some_and(target_filter_is_explicit_player_target)
+}
+
+/// CR 608.2c: Variant of `has_typed_target` that accepts compound filter
+/// shapes (`And` / `Or` wrapping a `Typed`). Effect-kind whitelist mirrors
+/// `has_typed_target` exactly — only the filter-shape recognition is
+/// widened. Used by the chain walk so a `ChangeZone` whose target is
+/// `And[Typed(Creature), ExiledBySource]` (Emperor of Bones) counts as
+/// introducing the moved card as the anaphor referent.
+///
+/// `has_typed_target` is kept as the leaf check; its other call sites
+/// (e.g., the immediate-prior-clause anaphor rewrite) depend on the
+/// leaf-only semantics.
+fn has_typed_target_widened(effect: &Effect) -> bool {
+    let target = match effect {
+        Effect::PutCounter { target, .. }
+        | Effect::Pump { target, .. }
+        | Effect::DealDamage { target, .. }
+        | Effect::Destroy { target, .. }
+        | Effect::Tap { target, .. }
+        | Effect::Untap { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::GainControl { target, .. }
+        | Effect::Attach { target, .. }
+        | Effect::UnattachAll { target, .. }
+        | Effect::ChangeZone { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::TargetOnly { target, .. }
+        | Effect::CastFromZone { target, .. }
+        | Effect::Counter { target, .. } => target,
+        Effect::GenericEffect {
+            target: Some(target),
+            ..
+        } => target,
+        // ExileFromTopUntil { NextMatches } has no compound-filter axis to
+        // widen — the referent is the just-exiled card, not a TargetFilter.
+        Effect::ExileFromTopUntil {
+            until: UntilCondition::NextMatches { .. },
+            ..
+        } => return true,
+        _ => return false,
+    };
+    filter_introduces_typed_object(target)
+}
+
 /// CR 608.2c: Does an earlier clause in the chain establish a typed (chosen)
 /// object referent that the current anaphor binds to — looking PAST intermediate
 /// clauses that merely carry that referent forward via `ParentTarget`?
@@ -9287,12 +9405,39 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr]) -> bool {
         if prev.condition.is_some() {
             return false;
         }
-        if has_typed_target(&prev.parsed.effect) {
+        // CR 608.2c: Chain clauses resolve in written order; an earlier typed referent is visible to a later anaphor.
+        // `has_typed_target_widened` mirrors `has_typed_target`'s effect-kind
+        // whitelist but also accepts a compound (`And` / `Or` over `Typed`)
+        // filter as a typed-referent introducer (Emperor of Bones'
+        // `And[Typed(Creature), ExiledBySource]`). The narrower
+        // `has_typed_target` is still used at its other call sites
+        // (immediate-prior-clause anaphor rewrite) because they depend on
+        // the leaf-only semantics.
+        if has_typed_target_widened(&prev.parsed.effect) {
             return true;
         }
         if matches!(
             prev.parsed.effect.target_filter(),
             Some(TargetFilter::ParentTarget)
+        ) {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
+    for prev in clauses.iter().rev() {
+        if prev.condition.is_some() {
+            return false;
+        }
+        if has_explicit_player_target(&prev.parsed.effect) {
+            return true;
+        }
+        if matches!(
+            prev.parsed.effect.target_filter(),
+            Some(TargetFilter::ParentTarget | TargetFilter::ParentTargetController)
         ) {
             continue;
         }
@@ -10691,6 +10836,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10724,6 +10870,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
     // CR 610.3 + CR 118.9 + CR 608.2c + CR 701.13a: "Cast [quantifier] [filter]
@@ -10744,6 +10891,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
     if scan_contains_phrase(rest, "from among them")
@@ -10758,6 +10906,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10809,6 +10958,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10834,6 +10984,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10845,6 +10996,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         cast_transformed: false,
         alt_ability_cost: None,
         constraint,
+        duration: None,
     })
 }
 
@@ -13217,6 +13369,23 @@ pub(crate) fn fold_speed_floor_sentences(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 109.4 + CR 608.2c: True when a clause's leading/suffix condition is an
+/// anaphoric-control check on the subject — `TargetMatchesFilter` over a
+/// controlled-by-`You` typed filter (the positive antecedent of an inverse
+/// "if you don't control it, …" else-connector). Used to gate the inverse-
+/// control "otherwise" routing so it only engages with a matching positive
+/// antecedent. Accepts both `use_lki` tenses (present "control" / past
+/// "controlled").
+fn clause_has_anaphoric_control_condition(clause: &ClauseIr) -> bool {
+    matches!(
+        clause.condition.as_ref(),
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(tf),
+            ..
+        }) if tf.controller == Some(ControllerRef::You)
+    )
+}
+
 /// Produce an intermediate representation of an effect chain from Oracle text.
 ///
 /// This is the IR-production half of the parse/lower split (Phase 48).
@@ -13443,6 +13612,49 @@ pub(crate) fn parse_effect_chain_ir(
                     is_otherwise: false,
                     unless_pay: None,
                     special: Some(SpecialClause::ManaRetention(expiry)),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                });
+                continue;
+            }
+        }
+
+        // CR 109.4 + CR 608.2c: Inverse anaphoric-control "otherwise" connector —
+        // "If you don't control it, [effect]" following a positively-control-gated
+        // clause ("draw a card if you control that creature."). The negated second
+        // sentence is the `else_ability` of the first over the SAME subject, not an
+        // independent sibling instruction — without this routing the runtime would
+        // either fire both branches or neither (issue #1510, Auntie Ool). Requires a
+        // prior clause to carry an anaphoric-control condition so this only engages
+        // as a genuine else over a matching positive antecedent.
+        if clauses.iter().any(clause_has_anaphoric_control_condition) {
+            if let Some(else_text) = strip_inverse_control_otherwise_connector(normalized_text) {
+                let else_def = {
+                    let ir = parse_effect_chain_ir(&else_text, kind, ctx);
+                    lower_effect_chain_ir(&ir)
+                };
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "otherwise_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: true,
+                    unless_pay: None,
+                    special: Some(SpecialClause::Otherwise(Box::new(else_def))),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
                 });
@@ -14309,7 +14521,8 @@ pub(crate) fn parse_effect_chain_ir(
         let is_decline_consequence = matches!(decline_dispatch, DeclineDispatch::Prepositional)
             || decline_consequence_active;
 
-        let (text, mut unless_pay) = extract_resolution_unless_pay_modifier(&text);
+        let (text, mut unless_pay) =
+            extract_resolution_unless_pay_modifier(&text, player_scope.as_ref());
 
         // CR 701.21a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -14757,6 +14970,11 @@ pub(crate) fn parse_effect_chain_ir(
             )
         {
             replace_target_with_parent(&mut clause.effect);
+        }
+        if chain_has_prior_player_target_referent(&clauses)
+            && has_player_anaphoric_reference(&text_lower)
+        {
+            replace_player_anaphor_with_parent_target(&mut clause.effect);
         }
         if clauses
             .last()
@@ -15706,7 +15924,10 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     Some(AbilityCost::Mana { cost })
 }
 
-fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>) {
+fn extract_resolution_unless_pay_modifier(
+    text: &str,
+    player_scope: Option<&PlayerFilter>,
+) -> (String, Option<UnlessPayModifier>) {
     let lower = text.to_lowercase();
     if tag::<_, _, OracleError<'_>>("counter ")
         .parse(lower.trim_start())
@@ -15734,13 +15955,21 @@ fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessP
             // just before " unless "; trim trailing whitespace there to
             // produce the cleaned effect.
             let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
-            return (
-                cleaned,
-                Some(UnlessPayModifier {
-                    cost,
-                    payer: TargetFilter::Player,
-                }),
-            );
+            // CR 118.12a + CR 608.2f: select the payer for "they X". A
+            // permanent's controller in the pre-"unless" text (Fade Away)
+            // takes precedence. Otherwise, when this chunk carries a
+            // `player_scope` ("each opponent/each player ... unless they X"),
+            // the payer is the per-iteration scoped player (`ScopedPlayer`,
+            // bound by the fan-out) rather than a chosen player target.
+            // Non-scoped punishers (Tergrid's Lantern) keep `Player`.
+            let payer = if nom_primitives::scan_contains(before_unless, "controller") {
+                TargetFilter::ParentTargetController
+            } else if player_scope.is_some() {
+                TargetFilter::ScopedPlayer
+            } else {
+                TargetFilter::Player
+            };
+            return (cleaned, Some(UnlessPayModifier { cost, payer }));
         }
     }
 
@@ -15754,18 +15983,26 @@ fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessP
         return (text.to_string(), None);
     };
 
-    // CR 118.12a: "unless they pay ..." surfaces `they` as `TargetFilter::Player`
-    // provisionally. When the effect text before "unless" taxes a permanent's
-    // controller ("its controller", "that land's controller" — Fade Away, Stench
-    // of Evil) rather than a player target (Flay), `they` resolves to that
-    // controller. `Player` is unique to the "they pay" arm, so this rewrite is
-    // unambiguous.
-    let payer =
-        if payer == TargetFilter::Player && nom_primitives::scan_contains(before, "controller") {
+    // CR 118.12a + CR 608.2f: "unless they pay ..." surfaces `they` as
+    // `TargetFilter::Player` provisionally. When the effect text before "unless"
+    // taxes a permanent's controller ("its controller", "that land's controller"
+    // — Fade Away, Stench of Evil) rather than a player target (Flay), `they`
+    // resolves to that controller. Otherwise, when this chunk carries a
+    // `player_scope` ("each opponent/each player ... unless they pay"), the payer
+    // is the per-iteration scoped player (`ScopedPlayer`) rather than a chosen
+    // player target. Non-scoped punishers keep `Player`. `Player` is unique to
+    // the "they pay" arm, so these rewrites are unambiguous.
+    let payer = if payer == TargetFilter::Player {
+        if nom_primitives::scan_contains(before, "controller") {
             TargetFilter::ParentTargetController
+        } else if player_scope.is_some() {
+            TargetFilter::ScopedPlayer
         } else {
-            payer
-        };
+            TargetFilter::Player
+        }
+    } else {
+        payer
+    };
 
     let cleaned = text[..before.trim_end().len()].trim().to_string();
     (cleaned, Some(UnlessPayModifier { cost, payer }))
@@ -18826,6 +19063,75 @@ mod tests {
         );
     }
 
+    /// CR 702.3b + CR 613: the Walls-that-attack compound — "<self> gets +N/-M
+    /// until end of turn and can attack this turn as though it didn't have
+    /// defender" (Wall of Wonder, Mobile Fort, Nivix Cyclops). The sequence
+    /// splitter peels the subjectless "can attack ... as though it didn't have
+    /// defender" conjunct off the P/T conjunct;
+    /// `combat_requirement_conjunct_prepend` re-attaches the lifted `~` subject so
+    /// `try_parse_can_attack_with_defender` fires. The parsed chain must carry
+    /// BOTH a P/T modification (Pump) AND a `CanAttackWithDefender` static grant —
+    /// a regression that drops either half fails here.
+    #[test]
+    fn walls_that_attack_compound_yields_pump_and_can_attack() {
+        for (text, plus, minus) in [
+            (
+                "~ gets +4/-4 until end of turn and can attack this turn as though it didn't have defender",
+                4i32,
+                -4i32,
+            ),
+            (
+                "~ gets +3/-1 until end of turn and can attack this turn as though it didn't have defender",
+                3,
+                -1,
+            ),
+            (
+                "~ gets +2/-2 until end of turn and can attack this turn as though they didn't have defender",
+                2,
+                -2,
+            ),
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Activated);
+
+            // Collect every effect in the chain (primary + chained sub_abilities).
+            let mut effects: Vec<&Effect> = Vec::new();
+            let mut node = Some(&def);
+            while let Some(d) = node {
+                effects.push(&d.effect);
+                node = d.sub_ability.as_deref();
+            }
+
+            let has_pump = effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::Pump {
+                        target: TargetFilter::SelfRef,
+                        power: PtValue::Fixed(p),
+                        toughness: PtValue::Fixed(t),
+                    } if *p == plus && *t == minus
+                )
+            });
+            assert!(
+                has_pump,
+                "{text:?}: expected a self Pump({plus}/{minus}); chain effects: {effects:?}"
+            );
+
+            let has_can_attack = effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::GenericEffect { static_abilities, .. }
+                        if static_abilities
+                            .iter()
+                            .any(|s| s.mode == StaticMode::CanAttackWithDefender)
+                )
+            });
+            assert!(
+                has_can_attack,
+                "{text:?}: expected a CanAttackWithDefender grant; chain effects: {effects:?}"
+            );
+        }
+    }
+
     #[test]
     fn destroy_target_was_dealt_damage_preserves_relative_clause() {
         let def = parse_effect_chain(
@@ -19520,7 +19826,13 @@ mod tests {
         match &unless_pay.cost {
             AbilityCost::OneOf { costs } => {
                 assert_eq!(costs.len(), 2, "expected Sacrifice|Discard, got {costs:?}");
-                assert!(matches!(costs[0], AbilityCost::Sacrifice { .. }));
+                let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+                    panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+                };
+                let TargetFilter::Typed(tf) = target else {
+                    panic!("sacrifice target should be typed, got {target:?}");
+                };
+                assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert!(matches!(costs[1], AbilityCost::Discard { .. }));
             }
             other => panic!("expected OneOf disjunctive cost, got {other:?}"),
@@ -19542,6 +19854,47 @@ mod tests {
             &unless_pay.cost,
             AbilityCost::OneOf { costs } if costs.len() == 2
         ));
+        let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+            unreachable!("checked OneOf cost above");
+        };
+        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+            panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        // CR 118.12a: non-scoped "target player" punisher keeps `Player`
+        // (the chosen player target), NOT `ScopedPlayer`. No regression.
+        assert_eq!(unless_pay.payer, TargetFilter::Player);
+    }
+
+    /// CR 608.2f: "Each opponent ... unless they sacrifice ... or discard a
+    /// card" — the `player_scope` makes the payer the per-iteration scoped
+    /// player (`ScopedPlayer`), resolved via `ability.scoped_player`, not a
+    /// chosen player target. This is the symmetric-payer fix.
+    #[test]
+    fn effect_unless_each_opponent_sacrifice_or_discard_binds_scoped_player() {
+        let def = parse_effect_chain(
+            "Each opponent loses 3 life unless they sacrifice a nonland permanent of their choice or discard a card",
+            AbilityKind::Activated,
+        );
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+        assert!(matches!(
+            &unless_pay.cost,
+            AbilityCost::OneOf { costs } if costs.len() == 2
+        ));
+        let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+            unreachable!("checked OneOf cost above");
+        };
+        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+            panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
     }
 
     #[test]
@@ -25211,6 +25564,44 @@ mod tests {
     }
 
     #[test]
+    fn kicker_leading_instead_destroy_drops_base_mana_value_cap() {
+        let ability = parse_effect_chain(
+            "Destroy target creature or planeswalker with mana value 2 or less. If this spell was kicked, instead destroy target creature or planeswalker",
+            AbilityKind::Spell,
+        );
+        let sub = ability.sub_ability.as_ref().expect("expected sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        );
+
+        fn filter_contains_cmc_prop(filter: &TargetFilter) -> bool {
+            match filter {
+                TargetFilter::Typed(typed) => typed
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::Cmc { .. })),
+                TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                    filters.iter().any(filter_contains_cmc_prop)
+                }
+                TargetFilter::Not { filter } => filter_contains_cmc_prop(filter),
+                _ => false,
+            }
+        }
+
+        let Effect::Destroy { target, .. } = &*sub.effect else {
+            panic!(
+                "expected kicked override to be Destroy, got {:?}",
+                sub.effect
+            );
+        };
+        assert!(
+            !filter_contains_cmc_prop(target),
+            "kicked override target must not keep base mana-value restriction; got {target:?}",
+        );
+    }
+
+    #[test]
     fn rite_of_replication_kicker_creates_five_copies() {
         // CR 702.33d + CR 707.10: Rite of Replication's kicked mode creates
         // five copies instead of one. The "create five of those tokens" sub
@@ -26113,6 +26504,143 @@ mod tests {
         );
     }
 
+    /// CR 602.5 + CR 603.2a: Standalone EFFECT-form activation prohibition.
+    /// "target creature's activated abilities can't be activated" emits a
+    /// GenericEffect carrying `StaticMode::CantBeActivated { who: AllPlayers }`.
+    /// The selection lives on the outer `target` slot (the chosen creature); the
+    /// per-static `affected` is `ParentTarget` (the runtime-bound application
+    /// spec, per the `static_affected_for_application` convention), NOT a
+    /// SelfRef-of-the-source.
+    #[test]
+    fn cant_be_activated_effect_standalone_targets_creature() {
+        use crate::types::statics::{ActivationExemption, ProhibitionScope, StaticMode};
+        let def = parse_effect_chain(
+            "target creature's activated abilities can't be activated",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                duration,
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                assert_eq!(static_abilities.len(), 1);
+                let sd = &static_abilities[0];
+                assert!(
+                    matches!(
+                        &sd.mode,
+                        StaticMode::CantBeActivated {
+                            who: ProhibitionScope::AllPlayers,
+                            source_filter: TargetFilter::SelfRef,
+                            exemption: ActivationExemption::None,
+                        }
+                    ),
+                    "expected CantBeActivated(AllPlayers), got {:?}",
+                    sd.mode
+                );
+                assert!(
+                    sd.modifications
+                        .contains(&ContinuousModification::AddStaticMode {
+                            mode: sd.mode.clone()
+                        }),
+                    "expected AddStaticMode modification, got {:?}",
+                    sd.modifications
+                );
+                assert_eq!(
+                    sd.affected,
+                    Some(TargetFilter::ParentTarget),
+                    "affected must be the runtime-bound ParentTarget, not SelfRef"
+                );
+                // The selection filter rides on the outer target slot.
+                let outer = target.as_ref().expect("outer target slot must be set");
+                assert!(
+                    matches!(
+                        outer,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Creature))
+                    ),
+                    "outer target must be the creature selection filter, got {outer:?}"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 602.5 + CR 605.1a: EFFECT-form activation prohibitions preserve the
+    /// shared mana-ability exemption suffix instead of defaulting every
+    /// transient `CantBeActivated` static to `ActivationExemption::None`.
+    #[test]
+    fn cant_be_activated_effect_standalone_preserves_mana_exemption() {
+        use crate::types::statics::{ActivationExemption, StaticMode};
+        let def = parse_effect_chain(
+            "target creature's activated abilities can't be activated unless they're mana abilities",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        let sd = static_abilities
+            .first()
+            .expect("expected transient CantBeActivated static");
+        assert!(
+            matches!(
+                &sd.mode,
+                StaticMode::CantBeActivated {
+                    exemption: ActivationExemption::ManaAbilities,
+                    ..
+                }
+            ),
+            "expected mana-ability exemption, got {:?}",
+            sd.mode
+        );
+    }
+
+    /// CR 602.5 + CR 603.2a + CR 608.2c: Dovin Baan's +1 — "up to one target
+    /// creature gets -3/-0 and its activated abilities can't be activated."
+    /// The compound splits into a Pump primary and a CantBeActivated conjunct
+    /// chained as a sub_ability whose `affected` binds to the same chosen
+    /// creature via `ParentTarget`.
+    #[test]
+    fn dovin_baan_compound_yields_pump_and_cant_be_activated() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "up to one target creature gets -3/-0 and its activated abilities can't be activated",
+            AbilityKind::Activated,
+        );
+        // Walk the primary + sub_ability chain collecting the two effects.
+        let mut saw_pump = false;
+        let mut saw_cant_be_activated = false;
+        let mut node = Some(&def);
+        while let Some(current) = node {
+            match &*current.effect {
+                Effect::Pump { .. } => saw_pump = true,
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => {
+                    saw_cant_be_activated |= static_abilities.iter().any(|sd| {
+                        matches!(&sd.mode, StaticMode::CantBeActivated { .. })
+                            && sd.affected == Some(TargetFilter::ParentTarget)
+                    });
+                }
+                _ => {}
+            }
+            node = current.sub_ability.as_deref();
+        }
+        assert!(
+            saw_pump,
+            "expected a Pump (-3/-0) in the chain, got {:?}",
+            def.effect
+        );
+        assert!(
+            saw_cant_be_activated,
+            "expected a GenericEffect CantBeActivated (affected=ParentTarget) in the chain"
+        );
+    }
+
     #[test]
     fn pump_compound_with_extra_blockers() {
         // Give No Ground: the trailing blocking permission is a second
@@ -26208,15 +26736,16 @@ mod tests {
     #[test]
     fn mass_forced_block_target_creature() {
         // "All creatures able to block target creature this turn do so" (Alluring Scent)
-        // CR 509.1c: Semantically equivalent to "target creature must be blocked"
+        // CR 509.1c: the lure requirement forces *every* able creature to block,
+        // so it lowers to MustBeBlockedByAll, not the one-blocker MustBeBlocked.
         let e = parse_effect("All creatures able to block target creature this turn do so");
         assert!(
             matches!(&e, Effect::GenericEffect { static_abilities, .. }
                 if static_abilities.iter().any(|sd|
-                    sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                    sd.mode == crate::types::statics::StaticMode::MustBeBlockedByAll
                 )
             ),
-            "Expected GenericEffect with MustBeBlocked, got {:?}",
+            "Expected GenericEffect with MustBeBlockedByAll, got {:?}",
             e
         );
     }
@@ -26228,10 +26757,10 @@ mod tests {
         assert!(
             matches!(&e, Effect::GenericEffect { static_abilities, .. }
                 if static_abilities.iter().any(|sd|
-                    sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                    sd.mode == crate::types::statics::StaticMode::MustBeBlockedByAll
                 )
             ),
-            "Expected GenericEffect with MustBeBlocked, got {:?}",
+            "Expected GenericEffect with MustBeBlockedByAll, got {:?}",
             e
         );
     }
@@ -31318,6 +31847,67 @@ mod tests {
         .expect("it condition should parse");
         let AbilityCondition::TargetMatchesFilter { filter, use_lki } = it else {
             panic!("expected TargetMatchesFilter condition");
+        };
+        assert!(use_lki);
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.is_empty());
+            }
+            other => panic!("expected controller-only typed filter, got {other:?}"),
+        }
+
+        let present = try_nom_condition_as_ability_condition(
+            "you control that creature",
+            &mut ParseContext::default(),
+        )
+        .expect("present-tense condition should parse");
+        let AbilityCondition::TargetMatchesFilter {
+            filter: present_filter,
+            use_lki,
+        } = present
+        else {
+            panic!("expected TargetMatchesFilter condition");
+        };
+        assert!(!use_lki);
+        match present_filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected typed creature filter, got {other:?}"),
+        }
+
+        let negative_present = try_nom_condition_as_ability_condition(
+            "you don't control it",
+            &mut ParseContext::default(),
+        )
+        .expect("negative present-tense condition should parse");
+        let AbilityCondition::Not { condition } = negative_present else {
+            panic!("expected negated condition");
+        };
+        let AbilityCondition::TargetMatchesFilter { filter, use_lki } = *condition else {
+            panic!("expected inner TargetMatchesFilter condition");
+        };
+        assert!(!use_lki);
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.is_empty());
+            }
+            other => panic!("expected controller-only typed filter, got {other:?}"),
+        }
+
+        let negative_past = try_nom_condition_as_ability_condition(
+            "you didn't control it",
+            &mut ParseContext::default(),
+        )
+        .expect("negative past-tense condition should parse");
+        let AbilityCondition::Not { condition } = negative_past else {
+            panic!("expected negated condition");
+        };
+        let AbilityCondition::TargetMatchesFilter { filter, use_lki } = *condition else {
+            panic!("expected inner TargetMatchesFilter condition");
         };
         assert!(use_lki);
         match filter {
@@ -38482,6 +39072,123 @@ mod tests {
         assert!(
             !any_forward_result(&def),
             "ChangeZone-only (no Attach sub) must not be marked forward_result"
+        );
+    }
+
+    /// CR 608.2c: Emperor of Bones class — a ChangeZone-to-Battlefield
+    /// followed by sibling clauses that anaphorically reference the just-
+    /// moved card ("it gains haste. sacrifice it ...") must mark
+    /// `forward_result: true` on the ChangeZone parent so the runtime
+    /// rewrites the sub-chain's `source_id` to the moved card. Without
+    /// this, the trailing GenericEffect/Pump and CreateDelayedTrigger
+    /// subs target Emperor itself (via `SelfRef`) instead of the
+    /// returned creature.
+    ///
+    /// Building-block test: the same pattern covers any
+    /// "[move a card to the battlefield]. it gains [keyword].
+    /// sacrifice it at the beginning of the next end step." chain
+    /// (Emperor of Bones plus any future card with the same shape).
+    #[test]
+    fn change_zone_to_battlefield_anaphor_subchain_sets_forward_result() {
+        let def = parse_effect_chain(
+            "put a creature card exiled with this creature onto the battlefield under your control with a finality counter on it. it gains haste. sacrifice it at the beginning of the next end step.",
+            AbilityKind::Spell,
+        );
+
+        // Find the outer ChangeZone-to-Battlefield node (the post-pass
+        // recurses, so the rewire may sit on any descendant of the root).
+        fn find_change_zone_to_battlefield(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            if matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                } | Effect::Dig {
+                    destination: Some(Zone::Battlefield),
+                    ..
+                }
+            ) {
+                return Some(def);
+            }
+            if let Some(sub) = def.sub_ability.as_ref() {
+                if let Some(found) = find_change_zone_to_battlefield(sub) {
+                    return Some(found);
+                }
+            }
+            if let Some(else_branch) = def.else_ability.as_ref() {
+                if let Some(found) = find_change_zone_to_battlefield(else_branch) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        let parent = find_change_zone_to_battlefield(&def)
+            .expect("expected a ChangeZone|Dig to Battlefield parent in the parsed chain");
+
+        // CR 608.2c: the bare-"it" anaphor sub-chain must trigger the
+        // rewire, so the runtime rebinds the sub's source_id to the
+        // moved card.
+        assert!(
+            parent.forward_result,
+            "ChangeZone-to-Battlefield with bare-\"it\" sub-chain must mark forward_result"
+        );
+
+        // Discriminating sub-shape check: the sub-chain must contain a
+        // haste-granting clause (GenericEffect/Pump granting Haste, or
+        // GainKeyword) AND a deeper CreateDelayedTrigger whose inner
+        // effect is a Sacrifice. Both must be present so we know the
+        // rewire was set for the right reason (an anaphor sub-chain).
+        fn finds_haste_grant_and_delayed_sacrifice(def: &AbilityDefinition) -> (bool, bool) {
+            let mut found_haste = false;
+            let mut found_delayed_sacrifice = false;
+            fn walk(
+                def: &AbilityDefinition,
+                found_haste: &mut bool,
+                found_delayed_sacrifice: &mut bool,
+            ) {
+                match &*def.effect {
+                    Effect::GenericEffect {
+                        static_abilities, ..
+                    } if static_abilities.iter().any(|s| {
+                        s.modifications.iter().any(|m| {
+                            matches!(
+                                m,
+                                ContinuousModification::AddKeyword { keyword }
+                                    if matches!(keyword, Keyword::Haste)
+                            )
+                        })
+                    }) =>
+                    {
+                        *found_haste = true;
+                    }
+                    Effect::CreateDelayedTrigger { effect, .. } => {
+                        if matches!(&*effect.effect, Effect::Sacrifice { .. }) {
+                            *found_delayed_sacrifice = true;
+                        }
+                        walk(effect, found_haste, found_delayed_sacrifice);
+                    }
+                    _ => {}
+                }
+                if let Some(sub) = def.sub_ability.as_ref() {
+                    walk(sub, found_haste, found_delayed_sacrifice);
+                }
+                if let Some(else_branch) = def.else_ability.as_ref() {
+                    walk(else_branch, found_haste, found_delayed_sacrifice);
+                }
+            }
+            walk(def, &mut found_haste, &mut found_delayed_sacrifice);
+            (found_haste, found_delayed_sacrifice)
+        }
+
+        let (haste, delayed_sacrifice) = finds_haste_grant_and_delayed_sacrifice(&def);
+        assert!(
+            haste,
+            "expected a haste-granting sub-clause in the parsed chain"
+        );
+        assert!(
+            delayed_sacrifice,
+            "expected a CreateDelayedTrigger with Sacrifice inside in the parsed chain"
         );
     }
 
