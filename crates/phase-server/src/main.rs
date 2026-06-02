@@ -5014,6 +5014,7 @@ mod mode_gate_tests {
 mod handshake_tests {
     use super::*;
     use engine::types::actions::GameAction;
+    use lobby_broker::validation::MAX_TOKEN_LEN;
     use server_core::protocol::DeckData;
 
     fn empty_identity() -> SocketIdentity {
@@ -5144,8 +5145,6 @@ mod handshake_tests {
 
     #[test]
     fn rejects_oversized_client_hello_fields() {
-        use lobby_broker::validation::MAX_TOKEN_LEN;
-
         let outcome = classify_hello_gate(
             false,
             &ClientMessage::ClientHello {
