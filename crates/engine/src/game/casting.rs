@@ -19837,12 +19837,12 @@ mod tests {
                 AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::Destroy {
-                        target: TargetFilter::Typed(
-                            TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                        target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                            FilterProp::Cmc {
                                 comparator: Comparator::LE,
                                 value: QuantityExpr::Fixed { value: 2 },
-                            }]),
-                        ),
+                            },
+                        ])),
                         cant_regenerate: false,
                     },
                 )
@@ -19859,7 +19859,12 @@ mod tests {
             );
         }
 
-        (spell_id, two_mv_creature, three_mv_creature, four_mv_creature)
+        (
+            spell_id,
+            two_mv_creature,
+            three_mv_creature,
+            four_mv_creature,
+        )
     }
 
     #[test]

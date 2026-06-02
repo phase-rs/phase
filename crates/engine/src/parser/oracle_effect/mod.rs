@@ -25582,7 +25582,10 @@ mod tests {
         }
 
         let Effect::Destroy { target, .. } = &*sub.effect else {
-            panic!("expected kicked override to be Destroy, got {:?}", sub.effect);
+            panic!(
+                "expected kicked override to be Destroy, got {:?}",
+                sub.effect
+            );
         };
         assert!(
             !filter_contains_cmc_prop(target),
