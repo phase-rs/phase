@@ -66,6 +66,14 @@ fn resolve_sacrifice_scope(
                 .map(|pid| vec![pid])
                 .unwrap_or_default()
         }
+        // CR 613.1: Player persisted on the source via an "as ~ enters, choose
+        // a player" replacement.
+        Some(ControllerRef::SourceChosenPlayer) => state
+            .objects
+            .get(&ability.source_id)
+            .and_then(|o| o.chosen_player())
+            .map(|pid| vec![pid])
+            .unwrap_or_default(),
         // CR 608.2c + CR 109.4: Player chosen by an earlier `Choose(Player)`
         // in this resolution.
         Some(ControllerRef::ChosenPlayer { index }) => ability

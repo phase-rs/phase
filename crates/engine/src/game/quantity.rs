@@ -1784,6 +1784,12 @@ fn resolve_ref(
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == obj.controller)
                         }
+                        // CR 613.1: Land controlled by the source's chosen player.
+                        ControllerRef::SourceChosenPlayer => state
+                            .objects
+                            .get(&ctx.source)
+                            .and_then(|o| o.chosen_player())
+                            .is_some_and(|pid| pid == obj.controller),
                         // CR 608.2c + CR 109.4: Land controlled by a chosen player.
                         ControllerRef::ChosenPlayer { index } => ability
                             .and_then(|a| a.chosen_players.get(*index as usize).copied())
@@ -2151,6 +2157,12 @@ fn resolve_ref(
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                                 .is_some_and(|pid| pid == snap.controller)
                         }
+                        // CR 613.1: Attachment controlled by the source's chosen player.
+                        Some(ControllerRef::SourceChosenPlayer) => state
+                            .objects
+                            .get(&ctx.source)
+                            .and_then(|o| o.chosen_player())
+                            .is_some_and(|pid| pid == snap.controller),
                         // CR 608.2c + CR 109.4: Attachment controlled by a chosen player.
                         Some(ControllerRef::ChosenPlayer { index }) => ability
                             .and_then(|a| a.chosen_players.get(*index as usize).copied())
@@ -2204,6 +2216,12 @@ fn damage_source_controller_matches(
             crate::game::combat::defending_player_for_attacker(state, ctx.source)
                 .is_some_and(|player| actual == player)
         }
+        // CR 613.1: Damage source controlled by the source's chosen player.
+        ControllerRef::SourceChosenPlayer => state
+            .objects
+            .get(&ctx.source)
+            .and_then(|o| o.chosen_player())
+            .is_some_and(|player| actual == player),
         // CR 608.2c + CR 109.4: Damage source controlled by a chosen player.
         ControllerRef::ChosenPlayer { index } => ability
             .and_then(|ability| ability.chosen_players.get(*index as usize).copied())
@@ -2947,6 +2965,12 @@ fn resolve_single_player_scope(
         PlayerScope::ParentObjectTargetController => {
             ability.and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
         }
+        // CR 613.1: the player persisted on the source via an "as ~ enters,
+        // choose a player" replacement (Entropic Specter, Sewer Nemesis).
+        PlayerScope::SourceChosenPlayer => state
+            .objects
+            .get(&ctx.source)
+            .and_then(|o| o.chosen_player()),
         // Aggregate scopes have no single-player reading.
         PlayerScope::Opponent { .. } | PlayerScope::AllPlayers { .. } => None,
     }
@@ -3019,6 +3043,14 @@ where
         // CR 109.4 + CR 608.2c: controller of the parent object target.
         PlayerScope::ParentObjectTargetController => ability
             .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+            .map_or(0, &mut extract),
+        // CR 613.1: the player persisted on the source via an "as ~ enters,
+        // choose a player" replacement (Entropic Specter, Sewer Nemesis).
+        PlayerScope::SourceChosenPlayer => state
+            .objects
+            .get(&ctx.source)
+            .and_then(|o| o.chosen_player())
             .and_then(|pid| state.players.iter().find(|p| p.id == pid))
             .map_or(0, &mut extract),
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
@@ -5218,6 +5250,67 @@ mod tests {
         assert_eq!(
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(99)),
             4
+        );
+    }
+
+    /// CR 613.1: `SourceChosenPlayer` resolves to the player persisted on the
+    /// source via `ChosenAttribute::Player`, so a CDA P/T tracks the chosen
+    /// player's zones (Sewer Nemesis — graveyard; Entropic Specter — hand).
+    #[test]
+    fn resolve_quantity_source_chosen_player_zone_counts() {
+        let mut state = GameState::new_two_player(42);
+        // The CDA source, controlled by player 0, with player 1 chosen.
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sewer Nemesis".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::Player(PlayerId(1)));
+        // Player 1: 2 cards in hand, 3 in graveyard.
+        for i in 0..2 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                format!("H{i}"),
+                Zone::Hand,
+            );
+        }
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(20 + i),
+                PlayerId(1),
+                format!("G{i}"),
+                Zone::Graveyard,
+            );
+        }
+        let hand = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::SourceChosenPlayer,
+            },
+        };
+        let gy = QuantityExpr::Ref {
+            qty: QuantityRef::GraveyardSize {
+                player: PlayerScope::SourceChosenPlayer,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &hand, PlayerId(0), src),
+            2,
+            "chosen player's hand"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &gy, PlayerId(0), src),
+            3,
+            "chosen player's graveyard"
         );
     }
 

@@ -1205,6 +1205,16 @@ impl GameObject {
         if !self.card_types.core_types.contains(&CoreType::Battle) {
             return None;
         }
+        self.chosen_player()
+    }
+
+    /// CR 613.1: The player persisted on this permanent via
+    /// `ChosenAttribute::Player` — the player chosen by an "as ~ enters the
+    /// battlefield, choose a player" replacement. Single authority for the
+    /// durable chosen player: used by `protector` (Battles) and by the
+    /// `SourceChosenPlayer` controller-ref / player-scope for CDAs such as
+    /// Sewer Nemesis and Skyshroud War Beast.
+    pub fn chosen_player(&self) -> Option<PlayerId> {
         self.chosen_attributes.iter().find_map(|a| match a {
             ChosenAttribute::Player(p) => Some(*p),
             _ => None,

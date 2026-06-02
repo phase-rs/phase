@@ -151,6 +151,9 @@ fn find_legal_targets_with_context(
                     Some(ControllerRef::TargetPlayer) => false,
                     Some(ControllerRef::ParentTargetController) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
+                    // CR 613.1: a persisted chosen player isn't a target
+                    // candidate here. Fail closed.
+                    Some(ControllerRef::SourceChosenPlayer) => false,
                     // CR 109.4: A chosen player is fixed during resolution, not
                     // enumerated as a target candidate. Fail closed.
                     Some(ControllerRef::ChosenPlayer { .. }) => false,
