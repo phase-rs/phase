@@ -5,6 +5,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, StaticDefinition,
     TargetFilter, TargetRef,
 };
+use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -4094,7 +4095,6 @@ pub fn handle_impending_cost_choice_with_payment_mode(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    use crate::types::actions::AlternativeCastDecision;
     match decision {
         AlternativeCastDecision::Alternative => {
             let mut prepared = prepare_spell_cast_with_variant_override(

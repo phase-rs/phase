@@ -3838,6 +3838,11 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
             .unwrap_or(false),
+        // CR 702.176a + CR 603.4: Impending's end-step trigger checks that the
+        // impending cost was paid, not that it was paid this turn.
+        TriggerCondition::CastVariantPaidPersistent { variant } => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_some_and(|obj| obj.cast_variant_paid.is_some_and(|(v, _)| v == *variant)),
         // CR 605.1a: "that isn't a mana ability" gate on activated-ability
         // trigger events. `KeywordAbilityActivated` carries the explicit flag
         // (Exhaust mana abilities still emit this event). `AbilityActivated`

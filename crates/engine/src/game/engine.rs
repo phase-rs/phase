@@ -1657,6 +1657,7 @@ fn apply_action(
                     )?
                 }
                 AlternativeCastKeyword::Impending => {
+                    // CR 702.176a: Handle the impending alternative cost choice during casting.
                     casting::handle_impending_cost_choice_with_payment_mode(
                         state,
                         *player,

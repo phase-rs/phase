@@ -574,6 +574,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::DayNightIs { .. }
         | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::SourceAttackingAlone
@@ -687,6 +688,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::DayNightIs { .. }
         | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::SourceAttackingAlone
@@ -840,6 +842,12 @@ fn evaluate_condition_with_context(
             .get(&source_id)
             .map(|obj| counter_condition_matches(obj, counters, *minimum, *maximum))
             .unwrap_or(false),
+        // CR 702.176a + CR 611.3a: Persistent alternative-cost marker on the
+        // source permanent. This is intentionally not turn-scoped.
+        StaticCondition::CastVariantPaid { variant } => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.cast_variant_paid.is_some_and(|(v, _)| v == *variant)),
         StaticCondition::RecipientHasCounters {
             counters,
             minimum,
@@ -1273,11 +1281,6 @@ pub fn evaluate_layers(state: &mut GameState) {
 
         if *layer == Layer::Type {
             apply_intrinsic_basic_land_mana_abilities(state, &bf_ids);
-            // CR 702.176a (Layer 4): Strip Creature type from Impending permanents
-            // that still have time counters. Applied here so every Layer-4 effect
-            // (including AddType / SetType from other sources) is fully resolved
-            // before the strip runs — mirrors the Changeling post-fixup pattern.
-            apply_impending_not_creature(state, &bf_ids);
         }
         if matches!(*layer, Layer::Control | Layer::Type) {
             super::pairing::cleanup_invalid_pairs(state);
@@ -3641,35 +3644,6 @@ fn apply_continuous_effect_filtered(
     }
 }
 
-/// CR 702.176a (Layer 4 post-fixup): "As long as this permanent's impending cost
-/// was paid and it has a time counter on it, it's not a creature."
-///
-/// Runs after all Layer-4 continuous effects have been applied so that
-/// `AddType`/`SetType` grants from other sources are already present before we
-/// strip — the strip is the final word for this layer pass.
-fn apply_impending_not_creature(state: &mut GameState, battlefield_ids: &[ObjectId]) {
-    use crate::types::ability::CastVariantPaid;
-    use crate::types::card_type::CoreType;
-    use crate::types::counter::CounterType;
-    for &id in battlefield_ids {
-        let Some(obj) = state.objects.get_mut(&id) else {
-            continue;
-        };
-        let impending_paid = obj
-            .cast_variant_paid
-            .is_some_and(|(v, _)| v == CastVariantPaid::Impending);
-        if !impending_paid {
-            continue;
-        }
-        let has_time_counter = obj.counters.get(&CounterType::Time).copied().unwrap_or(0) > 0;
-        if has_time_counter {
-            obj.card_types
-                .core_types
-                .retain(|t| !matches!(t, CoreType::Creature));
-        }
-    }
-}
-
 /// CR 305.6: After layer 4 establishes final land types, derive each land's
 /// intrinsic basic-land mana abilities before layer 6 ability effects apply.
 fn apply_intrinsic_basic_land_mana_abilities(state: &mut GameState, battlefield_ids: &[ObjectId]) {
@@ -3838,13 +3812,14 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, CommanderOwnership,
-        Comparator, ContinuousModification, ControllerRef, CountScope, Duration, Effect,
-        FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
-        ZoneRef,
+        AbilityDefinition, AbilityKind, BasicLandType, CastVariantPaid, ChosenSubtypeKind,
+        CommanderOwnership, Comparator, ContinuousModification, ControllerRef, CountScope,
+        Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::{StaticSourceIndex, TransientContinuousEffect};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -5827,6 +5802,60 @@ mod tests {
         assert_eq!(obj.trigger_definitions.len(), 1);
         assert_eq!(obj.replacement_definitions.len(), 1);
         assert_eq!(obj.static_definitions.len(), 1);
+    }
+
+    #[test]
+    fn impending_not_creature_participates_in_layer_timestamp_ordering() {
+        let mut state = setup();
+        let impending = make_creature(&mut state, "Impending Permanent", 3, 3, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&impending).unwrap();
+            obj.timestamp = 5;
+            obj.cast_variant_paid = Some((CastVariantPaid::Impending, 1));
+            obj.counters.insert(CounterType::Time, 1);
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .condition(StaticCondition::And {
+                        conditions: vec![
+                            StaticCondition::CastVariantPaid {
+                                variant: CastVariantPaid::Impending,
+                            },
+                            StaticCondition::HasCounters {
+                                counters: CounterMatch::OfType(CounterType::Time),
+                                minimum: 1,
+                                maximum: None,
+                            },
+                        ],
+                    })
+                    .modifications(vec![ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    }]),
+            );
+        }
+
+        let animator = make_creature(&mut state, "Later Animator", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&animator).unwrap();
+            obj.timestamp = 10;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: impending })
+                    .modifications(vec![ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    }]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&impending]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "CR 613.1d + CR 613.7: a later Layer 4 AddType must apply after Impending's RemoveType"
+        );
     }
 
     #[test]
