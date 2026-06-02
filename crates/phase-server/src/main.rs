@@ -42,8 +42,8 @@ use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::lobby::RegisterGameRequest;
 use server_core::lookup_join_guard::guard_lookup_join_target;
 use server_core::protocol::{
-    build_commit, ClientMessage, ServerMessage, ServerMode, MIN_SUPPORTED_PROTOCOL,
-    PROTOCOL_VERSION,
+    build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
+    MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
 use server_core::session::{ActionResult, GameSession, SessionManager};
@@ -724,6 +724,7 @@ async fn main() {
                         let msg = ServerMessage::GameOver {
                             winner: None,
                             reason: "Opponent disconnected (grace period expired)".to_string(),
+                            ranked_result: None,
                         };
                         for sender in players.values() {
                             let _ = sender.send(msg.clone());
@@ -1370,6 +1371,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             host_peer_id,
             draft_metadata,
             start_when_full,
+            ranked,
         } => L::CreateGameWithSettings {
             deck: deck.clone(),
             display_name: display_name.clone(),
@@ -1383,6 +1385,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             host_peer_id: host_peer_id.clone(),
             draft_metadata: draft_metadata.clone(),
             start_when_full: *start_when_full,
+            ranked: *ranked,
         },
         ClientMessage::JoinGameWithPassword {
             game_code,
@@ -1600,6 +1603,86 @@ fn delete_session_async(game_db: &SharedGameDb, game_code: &str) {
             error!(game = %code, error = %e, "failed to delete persisted session");
         }
     });
+}
+
+fn normalize_player_key(name: &str) -> String {
+    let trimmed = name.trim().to_lowercase();
+    if trimmed.is_empty() {
+        "anonymous".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn expected_score(a: i32, b: i32) -> f64 {
+    1.0 / (1.0 + 10f64.powf((b - a) as f64 / 400.0))
+}
+
+fn k_factor(rating: i32) -> i32 {
+    if rating < 1200 { 40 } else { 24 }
+}
+
+fn ranked_result_for_duel(
+    game_db: &SharedGameDb,
+    game_code: &str,
+    player_a_name: &str,
+    player_b_name: &str,
+    winner: Option<PlayerId>,
+) -> Option<Vec<RankedPlayerResult>> {
+    let score_a = match winner {
+        Some(PlayerId(0)) => 1.0,
+        Some(PlayerId(1)) => 0.0,
+        _ => 0.5,
+    };
+    let score_b = 1.0 - score_a;
+    let key_a = normalize_player_key(player_a_name);
+    let key_b = normalize_player_key(player_b_name);
+
+    let ra = game_db.load_rating(&key_a).ok().flatten().unwrap_or(1200);
+    let rb = game_db.load_rating(&key_b).ok().flatten().unwrap_or(1200);
+    let ea = expected_score(ra, rb);
+    let eb = expected_score(rb, ra);
+    let da = (k_factor(ra) as f64 * (score_a - ea)).round() as i32;
+    let db = (k_factor(rb) as f64 * (score_b - eb)).round() as i32;
+    let ra_next = ra + da;
+    let rb_next = rb + db;
+    let deltas = vec![
+        persistence::RatingDelta {
+            player_key: key_a,
+            game_code: game_code.to_string(),
+            opponent_key: key_b.clone(),
+            won: score_a > score_b,
+            rating_before: ra,
+            rating_after: ra_next,
+            rating_delta: da,
+        },
+        persistence::RatingDelta {
+            player_key: key_b,
+            game_code: game_code.to_string(),
+            opponent_key: normalize_player_key(player_a_name),
+            won: score_b > score_a,
+            rating_before: rb,
+            rating_after: rb_next,
+            rating_delta: db,
+        },
+    ];
+    if game_db.save_ranked_result(&deltas).is_err() {
+        return None;
+    }
+    Some(vec![
+        RankedPlayerResult {
+            player_id: 0,
+            rating_before: ra,
+            rating_after: ra_next,
+            rating_delta: da,
+        },
+        RankedPlayerResult {
+            player_id: 1,
+            rating_before: rb,
+            rating_after: rb_next,
+            rating_delta: db,
+        },
+    ])
 }
 
 /// If this game_code belongs to a draft tournament, auto-report the match
@@ -2612,6 +2695,7 @@ async fn handle_client_message(
             host_peer_id,
             draft_metadata,
             start_when_full,
+            ranked,
         } => {
             info!(
                 display_name = %display_name,
@@ -2647,6 +2731,7 @@ async fn handle_client_message(
                         host_peer_id: host_peer_id.clone(),
                         draft_metadata: draft_metadata.clone(),
                         start_when_full,
+                        ranked,
                     },
                     lobby,
                     lobby_subscribers,
@@ -2672,6 +2757,7 @@ async fn handle_client_message(
                     host_peer_id: None,
                     draft_metadata: None,
                     start_when_full,
+                    ranked,
                 },
             ) {
                 let msg = ServerMessage::Error { message: reason };
@@ -2871,6 +2957,7 @@ async fn handle_client_message(
 
                 if let Some(session) = mgr.sessions.get_mut(&game_code) {
                     session.start_when_full = start_when_full;
+                    session.ranked = ranked;
                     for (seat_index, difficulty, deck) in &ai_requests {
                         let seat = *seat_index as usize;
                         session.display_names[seat] = format!("AI ({difficulty:?})");
@@ -2946,6 +3033,7 @@ async fn handle_client_message(
                         // Draft metadata is P2P-only for now; Full-mode
                         // servers don't host draft pods.
                         draft_metadata: None,
+                        ranked,
                     },
                     &SysEnv,
                 );
@@ -2958,6 +3046,7 @@ async fn handle_client_message(
                         password,
                         timer_seconds,
                         start_when_full,
+                        ranked,
                     });
                     persist_session_async(game_db, &game_code, session);
                 }
@@ -3662,7 +3751,7 @@ async fn handle_client_message(
             let conceded_msg = ServerMessage::Conceded { player: player_id };
             // In 2-player, the opponent wins. In multiplayer, game continues unless only 1 remains.
             let mgr_ref = state.lock().await;
-            let winner = if let Some(session) = mgr_ref.sessions.get(&game_code) {
+            let (winner, ranked_result) = if let Some(session) = mgr_ref.sessions.get(&game_code) {
                 let living: Vec<_> = session
                     .state
                     .players
@@ -3670,13 +3759,25 @@ async fn handle_client_message(
                     .filter(|p| p.id != player_id && !p.is_eliminated)
                     .map(|p| p.id)
                     .collect();
-                if living.len() == 1 {
+                let winner = if living.len() == 1 {
                     Some(living[0])
                 } else {
                     None
-                }
+                };
+                let ranked_result = if session.ranked && session.player_count == 2 {
+                    ranked_result_for_duel(
+                        game_db,
+                        &game_code,
+                        session.display_names.first().map(String::as_str).unwrap_or(""),
+                        session.display_names.get(1).map(String::as_str).unwrap_or(""),
+                        winner,
+                    )
+                } else {
+                    None
+                };
+                (winner, ranked_result)
             } else {
-                None
+                (None, None)
             };
             drop(mgr_ref);
 
@@ -3685,6 +3786,7 @@ async fn handle_client_message(
             let game_over_msg = ServerMessage::GameOver {
                 winner,
                 reason: "Opponent conceded".to_string(),
+                ranked_result,
             };
 
             let conns = connections.lock().await;
@@ -4079,6 +4181,7 @@ async fn handle_client_message(
                             draft_kind: format!("{kind:?}"),
                             cube_name: None,
                         }),
+                        ranked: false,
                     },
                     &SysEnv,
                 );

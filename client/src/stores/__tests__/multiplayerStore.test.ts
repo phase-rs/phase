@@ -98,6 +98,7 @@ describe("multiplayerStore", () => {
           { seatIndex: 3, difficulty: "Easy", deckName: "My Deck" },
         ],
         startWhenFull: false,
+        ranked: false,
         roomName: "Test room",
       },
       {
@@ -155,6 +156,7 @@ describe("multiplayerStore", () => {
         matchType: "Bo1",
         aiSeats: [],
         startWhenFull: false,
+        ranked: false,
         roomName: "Test room",
       },
       {

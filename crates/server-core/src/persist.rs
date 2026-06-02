@@ -29,6 +29,8 @@ pub struct PersistedSession {
     /// Whether the room should auto-start when every configured seat is occupied.
     #[serde(default = "default_true")]
     pub start_when_full: bool,
+    #[serde(default)]
+    pub ranked: bool,
     /// Lobby metadata for games still waiting for players.
     pub lobby_meta: Option<PersistedLobbyMeta>,
 }
@@ -42,6 +44,8 @@ pub struct PersistedLobbyMeta {
     pub timer_seconds: Option<u32>,
     #[serde(default = "default_true")]
     pub start_when_full: bool,
+    #[serde(default)]
+    pub ranked: bool,
 }
 
 fn default_true() -> bool {

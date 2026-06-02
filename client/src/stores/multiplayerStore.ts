@@ -140,6 +140,7 @@ export interface RememberedHostConfig {
   matchType: MatchType;
   isPublic: boolean;
   startWhenFull: boolean;
+  ranked: boolean;
   /** AI seat layout (seat index + difficulty). Deck choices are resolved fresh
    *  from the catalog at host time, so only the picker-level config persists. */
   aiSeats: AiSeatConfig[];
@@ -157,6 +158,8 @@ export interface HostingSettings {
   /** Optional per-match label shown in the lobby, distinct from `displayName`
    * (the player's global identity). `null` means "use the player's name". */
   roomName: string | null;
+  /** Enable ranked rating updates for the room. */
+  ranked: boolean;
 }
 
 /** Snapshot of the host's session config, captured at startHosting time.
@@ -812,6 +815,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               ai_seats: settings.aiSeats,
               room_name: settings.roomName,
               start_when_full: settings.startWhenFull,
+              ranked: settings.ranked,
             },
           }),
           attemptHostReconnect,
@@ -937,6 +941,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               roomName: opts.roomName ?? null,
               draftMetadata: null,
               startWhenFull: settings.startWhenFull,
+              ranked: settings.ranked,
             });
             brokerGameCode = registered.gameCode;
             activeBroker = broker;
