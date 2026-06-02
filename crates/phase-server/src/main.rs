@@ -32,6 +32,7 @@ use lobby_broker::{
 };
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
+use server_core::client_hello_guard::guard_client_hello;
 use server_core::draft_action_payload_guard::guard_draft_action_payload;
 use server_core::draft_session::DraftSessionManager;
 use server_core::draft_wire_guard::{
@@ -394,6 +395,8 @@ enum HelloGateOutcome {
     /// ClientHello arrived but declares an incompatible protocol version.
     /// Send Error with this (client, server) pair and drop the frame.
     RejectProtocol { client: u32, server: u32 },
+    /// ClientHello fields failed wire validation. Send Error with this reason.
+    RejectInvalidHello(String),
     /// A non-hello frame arrived before the handshake completed. Send Error
     /// ("ClientHello required before any other message") and drop.
     RejectHandshakeRequired,
@@ -427,6 +430,8 @@ fn classify_hello_gate(
                     client: *protocol_version,
                     server: *server_protocol_range.end(),
                 }
+            } else if let Err(reason) = guard_client_hello(client_version, build_commit) {
+                HelloGateOutcome::RejectInvalidHello(reason)
             } else {
                 HelloGateOutcome::Accept(ClientHelloInfo {
                     client_version: client_version.clone(),
@@ -2199,6 +2204,14 @@ async fn handle_client_message(
                 "ClientHello accepted"
             );
             identity.client_hello = Some(info);
+            return;
+        }
+        HelloGateOutcome::RejectInvalidHello(reason) => {
+            warn!(%reason, "ClientHello rejected at wire guard");
+            let msg = ServerMessage::Error { message: reason };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
             return;
         }
         HelloGateOutcome::RejectProtocol { client, server } => {
@@ -5001,6 +5014,7 @@ mod mode_gate_tests {
 mod handshake_tests {
     use super::*;
     use engine::types::actions::GameAction;
+    use lobby_broker::validation::MAX_TOKEN_LEN;
     use server_core::protocol::DeckData;
 
     fn empty_identity() -> SocketIdentity {
@@ -5127,6 +5141,20 @@ mod handshake_tests {
             MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
         );
         assert!(matches!(outcome, HelloGateOutcome::RejectProtocol { .. }));
+    }
+
+    #[test]
+    fn rejects_oversized_client_hello_fields() {
+        let outcome = classify_hello_gate(
+            false,
+            &ClientMessage::ClientHello {
+                client_version: "v".repeat(MAX_TOKEN_LEN + 1),
+                build_commit: "abc1234".into(),
+                protocol_version: PROTOCOL_VERSION,
+            },
+            MIN_SUPPORTED_PROTOCOL..=PROTOCOL_VERSION,
+        );
+        assert!(matches!(outcome, HelloGateOutcome::RejectInvalidHello(_)));
     }
 
     #[test]

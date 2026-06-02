@@ -487,6 +487,7 @@ fn block_restriction_statics_against<'a>(
                 StaticMode::CantBeBlocked
                     | StaticMode::CantBeBlockedExceptBy { .. }
                     | StaticMode::CantBeBlockedBy { .. }
+                    | StaticMode::CantBeBlockedByMoreThan { .. }
             )
         })
         .filter(move |(src, def)| match def.affected.as_ref() {
@@ -839,6 +840,17 @@ pub fn validate_blockers_for_player(
                 "{:?} must be blocked by {} or more creatures",
                 attacker_id, required
             ));
+        }
+        // CR 509.1b: "can't be blocked by more than N creatures" — a per-creature
+        // blocker maximum (Stalking Tiger). Inverse of the menace minimum above;
+        // an attacker with both must satisfy both.
+        if let Some(max) = max_blockers_allowed(state, *attacker_id) {
+            if (blockers.len() as u32) > max {
+                return Err(format!(
+                    "{:?} can't be blocked by more than {} creature(s)",
+                    attacker_id, max
+                ));
+            }
         }
     }
 
@@ -2315,6 +2327,21 @@ pub fn min_blockers_required(state: &GameState, attacker_id: ObjectId) -> u32 {
         }
     }
     min
+}
+
+/// CR 509.1b: The maximum number of creatures that may block `attacker_id`, if
+/// any `CantBeBlockedByMoreThan` restriction applies (Stalking Tiger, "can't be
+/// blocked by more than N creatures"). When multiple such restrictions apply,
+/// the most restrictive (smallest) maximum wins. `None` means unrestricted.
+/// This is the inverse of [`min_blockers_required`]; an attacker carrying both a
+/// minimum and a maximum must satisfy both.
+pub fn max_blockers_allowed(state: &GameState, attacker_id: ObjectId) -> Option<u32> {
+    block_restriction_statics_against(state, attacker_id)
+        .filter_map(|(_src, sd)| match sd.mode {
+            StaticMode::CantBeBlockedByMoreThan { max } => Some(max),
+            _ => None,
+        })
+        .min()
 }
 
 /// For one defending player, the per-attacker minimum-blocker requirement for
@@ -5305,6 +5332,35 @@ mod tests {
         assert!(
             validate_blockers(&state, &[(b1, attacker), (b2, attacker), (b3, attacker)]).is_ok()
         );
+    }
+
+    /// CR 509.1b: Stalking Tiger — "can't be blocked by more than one creature."
+    /// A per-creature blocker maximum: one blocker is legal, two is illegal.
+    #[test]
+    fn cant_be_blocked_by_more_than_one_rejects_extra_blocker() {
+        use crate::types::ability::StaticDefinition;
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Stalking Tiger", 3, 3);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBeBlockedByMoreThan {
+                max: 1,
+            }));
+
+        let b1 = create_creature(&mut state, PlayerId(1), "Bear1", 2, 2);
+        let b2 = create_creature(&mut state, PlayerId(1), "Bear2", 2, 2);
+
+        // Unblocked: legal (the maximum is a ceiling, not a requirement).
+        assert!(validate_blockers(&state, &[]).is_ok());
+        // One blocker: legal.
+        assert!(validate_blockers(&state, &[(b1, attacker)]).is_ok());
+        // Two blockers: illegal — exceeds the maximum.
+        assert!(validate_blockers(&state, &[(b1, attacker), (b2, attacker)]).is_err());
     }
 
     #[test]

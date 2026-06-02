@@ -1,4 +1,5 @@
 pub mod ai_seats_wire_guard;
+pub mod client_hello_guard;
 pub mod deck_resolve;
 pub mod draft_action_payload_guard;
 pub mod draft_session;
@@ -21,6 +22,7 @@ pub mod spectator_wire_guard;
 pub mod starter_decks;
 
 pub use ai_seats_wire_guard::guard_create_ai_seats;
+pub use client_hello_guard::guard_client_hello;
 pub use deck_resolve::resolve_deck;
 pub use draft_action_payload_guard::guard_draft_action_payload;
 pub use draft_session::{generate_draft_code, DraftSession, DraftSessionManager};

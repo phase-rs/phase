@@ -995,6 +995,29 @@ pub(crate) fn parse_static_line_inner(
                 .trim()
                 .trim_end_matches('.');
 
+            // CR 509.1b: "can't be blocked by more than N creature(s)" — a
+            // per-creature blocker MAXIMUM (Stalking Tiger). Must be tried before
+            // the generic "by <filter>" branch below, which would otherwise read
+            // "more than one creature" as a blocker quality filter.
+            if let Ok((rest, _)) =
+                tag::<_, _, OracleError<'_>>("by more than ").parse(after_blocked)
+            {
+                if let Ok((rest, max)) = nom_primitives::parse_number(rest) {
+                    if let Ok((rest, _)) =
+                        alt((tag::<_, _, OracleError<'_>>(" creatures"), tag(" creature")))
+                            .parse(rest)
+                    {
+                        if rest.trim().is_empty() {
+                            return Some(
+                                StaticDefinition::new(StaticMode::CantBeBlockedByMoreThan { max })
+                                    .affected(TargetFilter::SelfRef)
+                                    .description(text.to_string()),
+                            );
+                        }
+                    }
+                }
+            }
+
             // CR 509.1b: "can't be blocked by <filter>" — extract blocker restriction filter.
             if let Ok((by_rest, _)) = tag::<_, _, OracleError<'_>>("by ").parse(after_blocked) {
                 // CR 105.4 + CR 608.2c (issue #327): Try the chosen-qualifier
