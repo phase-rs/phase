@@ -4301,20 +4301,45 @@ fn resolve_chain_body(
             return Ok(());
         }
 
-        // Apply forward_result: moved object becomes sub's source, original source becomes target.
-        // This wires "put onto the battlefield attached to [source]" so Attach sees the
-        // moved card as source_id (the attachment) and the original source as target (the host).
+        // Apply forward_result: moved object becomes sub's source.
+        //
+        // CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
+        // CR 301.5b: Equipment entering attached via "put onto the battlefield attached to" wiring.
+        // For the Attach shape (Armored Skyhunter, Quest for the Holy Relic),
+        // the moved card is the attachment and the original source is the
+        // host, so we additionally push the original source into the sub's
+        // targets.
+        //
+        // CR 608.2c: For non-Attach shapes (Emperor of Bones' "It gains
+        // haste. Sacrifice it." after a `ChangeZone` to Battlefield),
+        // pushing the original source as a target would mis-bind any
+        // downstream `ParentTarget` consumer — the delayed Sacrifice
+        // would target Emperor itself instead of the just-returned
+        // creature. Instead, when the sub has no targets of its own and
+        // the parent ability has no targets to inherit (and the sub
+        // isn't an implicit tracked-set consumer), prepend the moved
+        // card as a target so `ParentTarget` consumers downstream
+        // resolve to it.
         if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
             sub_with_context.source_id = forwarded_objects[0];
-            if !sub_with_context
-                .targets
-                .iter()
-                .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+            if matches!(sub.effect, Effect::Attach { .. }) {
+                if !sub_with_context
+                    .targets
+                    .iter()
+                    .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+                {
+                    sub_with_context
+                        .targets
+                        .push(TargetRef::Object(ability.source_id));
+                }
+            } else if sub_with_context.targets.is_empty()
+                && ability.targets.is_empty()
+                && !effect_uses_implicit_tracked_set_targets(&sub.effect)
             {
                 sub_with_context
                     .targets
-                    .push(TargetRef::Object(ability.source_id));
+                    .insert(0, TargetRef::Object(forwarded_objects[0]));
             }
             apply_parent_chain_context(
                 &mut sub_with_context,
@@ -6804,6 +6829,94 @@ mod tests {
 
         assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
         assert_eq!(state.players[0].life, 12);
+    }
+
+    #[test]
+    fn forward_result_non_attach_parent_target_binds_moved_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Returned Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let sacrifice_moved = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut reanimate = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(sacrifice_moved);
+        reanimate.forward_result = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &reanimate, &mut events, 0).unwrap();
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == creature)),
+            "parent ChangeZone must move the creature before forwarding it"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::PermanentSacrificed { object_id, .. } if *object_id == creature
+            )),
+            "forward_result must bind ParentTarget to the moved creature"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PermanentSacrificed { object_id, .. } if *object_id == source
+            )),
+            "ParentTarget must not fall back to the source permanent"
+        );
     }
 
     /// CR 608.2c + CR 400.7j + CR 608.2k: a non-targeted `ChangeZone` with 2+
