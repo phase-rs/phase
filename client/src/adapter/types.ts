@@ -39,6 +39,7 @@ export type GameFormat =
   | "PauperCommander"
   | "DuelCommander"
   | "TinyLeaders"
+  | "Oathbreaker"
   | "Brawl"
   | "HistoricBrawl"
   | "FreeForAll"

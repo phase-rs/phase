@@ -177,7 +177,15 @@
     "setAsCommander": "Définir comme commandant :",
     "cardCount": "{{count}}/{{expected}} cartes",
     "singletonViolations": "Violations du singleton : {{cards}}",
-    "colorViolations": "Violations de l'identité de couleur : {{cards}}"
+    "colorViolations": "Violations de l'identité de couleur : {{cards}}",
+    "signatureSpell": {
+      "heading": "Sort signature",
+      "noSignatureSpell": "Aucun sort signature sélectionné",
+      "setAsSignatureSpell": "Définir comme sort signature :",
+      "remove": "Supprimer le sort signature",
+      "mustBeInstantOrSorcery": "Le sort signature doit être un éphémère ou un rituel",
+      "outsideColorIdentity": "{{name}} : hors de l'identité de couleur du Briseur de serment"
+    }
   },
   "manaCurve": {
     "title": "Courbe de mana",

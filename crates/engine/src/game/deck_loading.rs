@@ -30,6 +30,11 @@ pub struct PlayerDeckPayload {
     /// CR 717.2: Optional supplementary Attraction deck (typically 10 cards).
     #[serde(default)]
     pub attraction_deck: Vec<DeckEntry>,
+    /// Oathbreaker RC: the signature spell (instant/sorcery within the
+    /// Oathbreaker's color identity) placed in the command zone alongside
+    /// the Oathbreaker. Empty for all non-Oathbreaker formats.
+    #[serde(default)]
+    pub signature_spell: Vec<DeckEntry>,
     /// The declared bracket tier for this player's deck. Defaults to `Core`
     /// so that existing serialized payloads and test fixtures that omit the
     /// field continue to deserialize correctly.
@@ -62,6 +67,9 @@ pub struct PlayerDeckList {
     pub commander: Vec<String>,
     #[serde(default)]
     pub attraction_deck: Vec<String>,
+    /// Oathbreaker RC: the signature spell card name. Empty for all non-Oathbreaker formats.
+    #[serde(default)]
+    pub signature_spell: Vec<String>,
     /// Declared bracket tier for this player's deck. Defaults to `Core` for
     /// backward-compatible deserialization (payloads that predate this field
     /// omit it, which `#[serde(default)]` handles transparently).
@@ -117,6 +125,7 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
         attraction_deck: resolve_names(db, &list.attraction_deck),
+        signature_spell: resolve_names(db, &list.signature_spell),
         bracket_tier: list.bracket_tier,
     }
 }
@@ -135,6 +144,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sideboard: resolve_names(db, &list.player.sideboard),
             commander: resolve_names(db, &list.player.commander),
             attraction_deck: resolve_names(db, &list.player.attraction_deck),
+            signature_spell: resolve_names(db, &list.player.signature_spell),
             bracket_tier: list.player.bracket_tier,
         },
         opponent: PlayerDeckPayload {
@@ -142,6 +152,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             sideboard: resolve_names(db, &list.opponent.sideboard),
             commander: resolve_names(db, &list.opponent.commander),
             attraction_deck: resolve_names(db, &list.opponent.attraction_deck),
+            signature_spell: resolve_names(db, &list.opponent.signature_spell),
             bracket_tier: list.opponent.bracket_tier,
         },
         ai_decks: list
@@ -152,6 +163,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
                 sideboard: resolve_names(db, &deck.sideboard),
                 commander: resolve_names(db, &deck.commander),
                 attraction_deck: resolve_names(db, &deck.attraction_deck),
+                signature_spell: resolve_names(db, &deck.signature_spell),
                 bracket_tier: deck.bracket_tier,
             })
             .collect(),
@@ -222,6 +234,24 @@ fn load_player_attraction_deck(state: &mut GameState, entries: &[DeckEntry], own
     }
 }
 
+/// Oathbreaker RC: Place a signature spell in the command zone.
+/// The `signature_spell` marker drives zone-return, the Oathbreaker-present
+/// casting gate, and commander-tax tracking via `commander_cast_count`.
+pub fn create_signature_spell_from_card_face(
+    state: &mut GameState,
+    card_face: &CardFace,
+    owner: PlayerId,
+) -> crate::types::identifiers::ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Command);
+
+    let obj = state.objects.get_mut(&obj_id).expect("just created");
+    apply_card_face_to_object(obj, card_face);
+    obj.mark_signature_spell();
+
+    obj_id
+}
+
 /// Load deck data into a GameState, creating GameObjects in each player's library and shuffling.
 pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     state.deck_pools.clear();
@@ -253,6 +283,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     let p0_main = std::sync::Arc::new(payload.player.main_deck.clone());
     let p0_side = std::sync::Arc::new(sideboard_for(&payload.player.sideboard));
     let p0_cmdr = std::sync::Arc::new(payload.player.commander.clone());
+    let p0_sig = std::sync::Arc::new(payload.player.signature_spell.clone());
     state
         .deck_pools
         .push(crate::types::game_state::PlayerDeckPool {
@@ -263,11 +294,14 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_sideboard: p0_side,
             registered_commander: std::sync::Arc::clone(&p0_cmdr),
             current_commander: p0_cmdr,
+            registered_signature_spell: std::sync::Arc::clone(&p0_sig),
+            current_signature_spell: p0_sig,
             bracket_tier: payload.player.bracket_tier,
         });
     let p1_main = std::sync::Arc::new(payload.opponent.main_deck.clone());
     let p1_side = std::sync::Arc::new(sideboard_for(&payload.opponent.sideboard));
     let p1_cmdr = std::sync::Arc::new(payload.opponent.commander.clone());
+    let p1_sig = std::sync::Arc::new(payload.opponent.signature_spell.clone());
     state
         .deck_pools
         .push(crate::types::game_state::PlayerDeckPool {
@@ -278,6 +312,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             current_sideboard: p1_side,
             registered_commander: std::sync::Arc::clone(&p1_cmdr),
             current_commander: p1_cmdr,
+            registered_signature_spell: std::sync::Arc::clone(&p1_sig),
+            current_signature_spell: p1_sig,
             bracket_tier: payload.opponent.bracket_tier,
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
@@ -285,6 +321,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         let main = std::sync::Arc::new(ai_deck.main_deck.clone());
         let side = std::sync::Arc::new(sideboard_for(&ai_deck.sideboard));
         let cmdr = std::sync::Arc::new(ai_deck.commander.clone());
+        let sig = std::sync::Arc::new(ai_deck.signature_spell.clone());
         state
             .deck_pools
             .push(crate::types::game_state::PlayerDeckPool {
@@ -295,6 +332,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 current_sideboard: side,
                 registered_commander: std::sync::Arc::clone(&cmdr),
                 current_commander: cmdr,
+                registered_signature_spell: std::sync::Arc::clone(&sig),
+                current_signature_spell: sig,
                 bracket_tier: ai_deck.bracket_tier,
             });
     }
@@ -348,6 +387,29 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     load_player_attraction_deck(state, &payload.opponent.attraction_deck, PlayerId(1));
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         load_player_attraction_deck(state, &ai_deck.attraction_deck, PlayerId((2 + i) as u8));
+    }
+
+    // Oathbreaker RC: Place signature spells in the command zone at game start.
+    let sig_decks: Vec<(PlayerId, &[DeckEntry])> =
+        std::iter::once((PlayerId(0), payload.player.signature_spell.as_slice()))
+            .chain(std::iter::once((
+                PlayerId(1),
+                payload.opponent.signature_spell.as_slice(),
+            )))
+            .chain(
+                payload
+                    .ai_decks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| (PlayerId((2 + i) as u8), d.signature_spell.as_slice())),
+            )
+            .collect();
+    for (owner, entries) in sig_decks {
+        for entry in entries {
+            for _ in 0..entry.count {
+                create_signature_spell_from_card_face(state, &entry.card, owner);
+            }
+        }
     }
 
     // Collect all creature subtypes for Changeling CDA expansion.
@@ -515,6 +577,7 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            is_oathbreaker: false,
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
@@ -566,6 +629,7 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            is_oathbreaker: false,
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),

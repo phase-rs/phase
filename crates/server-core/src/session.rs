@@ -375,6 +375,7 @@ impl GameSession {
                 sideboard: deck.sideboard.clone(),
                 commander: deck.commander.clone(),
                 attraction_deck: deck.attraction_deck.clone(),
+                signature_spell: deck.signature_spell.clone(),
                 bracket_tier: deck.bracket_tier,
             };
             // The resolver (`ServerDeckResolver::resolve` in phase-server)
@@ -1304,6 +1305,7 @@ mod tests {
                     parse_warnings: vec![],
                     brawl_commander: false,
                     is_commander: false,
+                    is_oathbreaker: false,
                     deck_copy_limit: None,
                     metadata: Default::default(),
                     rarities: Default::default(),

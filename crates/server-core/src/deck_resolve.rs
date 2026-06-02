@@ -58,6 +58,9 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
     let (attraction_deck, mut attraction_missing) =
         resolve_entries(db, &deck.attraction_deck, "attraction_deck");
     missing.append(&mut attraction_missing);
+    let (signature_spell, mut sig_missing) =
+        resolve_entries(db, &deck.signature_spell, "signature_spell");
+    missing.append(&mut sig_missing);
 
     if !missing.is_empty() {
         missing.sort();
@@ -73,6 +76,7 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
         sideboard,
         commander,
         attraction_deck,
+        signature_spell,
         bracket_tier: deck.bracket_tier,
     })
 }

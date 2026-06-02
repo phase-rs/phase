@@ -21,7 +21,7 @@ pub fn commander_tax(state: &GameState, commander_id: ObjectId) -> u32 {
 pub fn record_commander_cast(state: &mut GameState, commander_id: ObjectId) {
     *state.commander_cast_count.entry(commander_id).or_insert(0) += 1;
     if let Some(obj) = state.objects.get(&commander_id) {
-        if obj.is_commander {
+        if obj.uses_command_zone_rules() {
             state.commander_cast_owners.insert(commander_id, obj.owner);
         }
     }
@@ -52,7 +52,7 @@ fn cast_owner_for_command_zone_count(
     state
         .objects
         .get(&commander_id)
-        .filter(|obj| obj.is_commander)
+        .filter(|obj| obj.uses_command_zone_rules())
         .map(|obj| obj.owner)
 }
 
@@ -120,7 +120,9 @@ pub fn commander_lethal_headroom(
 /// deep interception of every `move_to_zone` call site.
 pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId, PlayerId, Zone)> {
     state.objects.values().find_map(|obj| {
-        if !obj.is_commander {
+        // Oathbreaker RC: signature spells return to the command zone just like
+        // commanders.
+        if !obj.uses_command_zone_rules() {
             return None;
         }
         // CR 903.9a: graveyard or exile; CR 903.9b: hand or library.
@@ -425,6 +427,28 @@ mod tests {
 
         assert_eq!(commander_casts_from_command_zone(&state, PlayerId(0)), 3);
         assert_eq!(commander_casts_from_command_zone(&state, PlayerId(1)), 1);
+    }
+
+    #[test]
+    fn command_zone_cast_count_includes_signature_spells() {
+        let mut state = setup_commander_game();
+        let sig_id = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Signature Spell".to_string(),
+            Zone::Command,
+        );
+        state
+            .objects
+            .get_mut(&sig_id)
+            .expect("signature object exists")
+            .mark_signature_spell();
+
+        record_commander_cast(&mut state, sig_id);
+
+        assert_eq!(commander_tax(&state, sig_id), 2);
+        assert_eq!(commander_casts_from_command_zone(&state, PlayerId(0)), 1);
     }
 
     // --- Zone Return Eligibility Tests (CR 903.9a/b) ---
@@ -1409,6 +1433,7 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: true,
+            is_oathbreaker: false,
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),

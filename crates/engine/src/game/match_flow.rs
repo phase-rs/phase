@@ -101,6 +101,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             sideboard: (*p.current_sideboard).clone(),
             commander: (*p.current_commander).clone(),
             attraction_deck: Vec::new(),
+            signature_spell: (*p.current_signature_spell).clone(),
             bracket_tier: p.bracket_tier,
         })
         .collect();
@@ -111,6 +112,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             sideboard: (*p0.current_sideboard).clone(),
             commander: (*p0.current_commander).clone(),
             attraction_deck: Vec::new(),
+            signature_spell: (*p0.current_signature_spell).clone(),
             bracket_tier: p0.bracket_tier,
         },
         opponent: PlayerDeckPayload {
@@ -118,6 +120,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
             sideboard: (*p1.current_sideboard).clone(),
             commander: (*p1.current_commander).clone(),
             attraction_deck: Vec::new(),
+            signature_spell: (*p1.current_signature_spell).clone(),
             bracket_tier: p1.bracket_tier,
         },
         ai_decks,
@@ -332,6 +335,7 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            is_oathbreaker: false,
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),

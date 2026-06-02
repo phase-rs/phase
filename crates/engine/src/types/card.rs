@@ -168,6 +168,12 @@ pub struct CardFace {
     /// `brawl_commander` so we stay correct when MTGJSON is missing or stale.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_commander: bool,
+    /// Oathbreaker RC: Whether this card can serve as an Oathbreaker.
+    /// Derived from MTGJSON `leadershipSkills.oathbreaker` UNION type-line
+    /// analysis (legendary Planeswalker). Mirrors the `is_commander` /
+    /// `brawl_commander` synthesis pattern.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_oathbreaker: bool,
     /// CR 100.2a / CR 903.5b: Per-card override to the default constructed copy
     /// limit, parsed from deck-construction Oracle text ("A deck can have any
     /// number of cards named ~." / "A deck can have up to N cards named ~." /

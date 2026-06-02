@@ -2065,6 +2065,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
             sideboard: deck.sideboard,
             commander: deck.commander,
             attraction_deck: deck.attraction_deck,
+            signature_spell: deck.signature_spell,
             bracket_tier: deck.bracket_tier,
         })
     }
