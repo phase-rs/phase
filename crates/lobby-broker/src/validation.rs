@@ -222,6 +222,9 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inbound_guard::{
+        guard_inbound, MAX_DECK_CARD_NAME_LEN, MAX_MAIN_DECK_ENTRIES, MAX_SIDEBOARD_ENTRIES,
+    };
     use crate::protocol::{DraftLobbyMetadata, LobbyClientMessage as M};
     use engine::starter_decks::DeckData;
 
@@ -243,6 +246,16 @@ mod tests {
             host_peer_id: None,
             draft_metadata: None,
             start_when_full: true,
+        }
+    }
+
+    fn join_with(display_name: &str) -> M {
+        M::JoinGameWithPassword {
+            game_code: "ABC123".into(),
+            deck: empty_deck(),
+            display_name: display_name.to_string(),
+            password: None,
+            reservation_token: None,
         }
     }
 
@@ -393,8 +406,6 @@ mod tests {
 
     #[test]
     fn guard_rejects_oversized_main_deck() {
-        use crate::inbound_guard::{guard_inbound, MAX_MAIN_DECK_ENTRIES};
-
         let mut msg = create_with("Alice");
         if let M::CreateGameWithSettings { deck, .. } = &mut msg {
             deck.main_deck = vec!["Card".to_string(); MAX_MAIN_DECK_ENTRIES + 1];
@@ -404,11 +415,18 @@ mod tests {
 
     #[test]
     fn guard_rejects_oversized_card_name_in_deck() {
-        use crate::inbound_guard::{guard_inbound, MAX_DECK_CARD_NAME_LEN};
-
         let mut msg = create_with("Alice");
         if let M::CreateGameWithSettings { deck, .. } = &mut msg {
             deck.main_deck = vec!["x".repeat(MAX_DECK_CARD_NAME_LEN + 1)];
+        }
+        assert!(guard_inbound(&msg).is_err());
+    }
+
+    #[test]
+    fn guard_rejects_oversized_join_sideboard() {
+        let mut msg = join_with("Bob");
+        if let M::JoinGameWithPassword { deck, .. } = &mut msg {
+            deck.sideboard = vec!["Card".to_string(); MAX_SIDEBOARD_ENTRIES + 1];
         }
         assert!(guard_inbound(&msg).is_err());
     }
