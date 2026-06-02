@@ -1860,10 +1860,9 @@ pub(super) fn match_becomes_target(
         let targeting_entry = state.stack.iter().find(|entry| {
             entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id
         });
-        // If not found on the stack, check resolving_stack_entry as a fallback.
-        // This handles the case where a triggered ability is resolving and emits
-        // BecomesTarget events during effect execution, after the entry has been
-        // popped from the stack (stack.rs::resolve_top pops before executing effect).
+        // CR 608.2: A resolving spell or ability follows its resolution steps even
+        // after the local stack entry has been popped and saved in `resolving_stack_entry`.
+        // Triggered abilities can emit BecomesTarget events during that effect execution.
         let targeting_entry = targeting_entry.or_else(|| {
             state.resolving_stack_entry.as_ref().filter(|entry| {
                 entry.id == *targeting_spell_id || entry.source_id == *targeting_spell_id
@@ -7888,9 +7887,9 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        // Simulate a triggered ability stack entry (like Innkeeper's Talent)
+        // Simulate a triggered ability currently resolving (like Innkeeper's Talent)
         let entry_id = ObjectId(60);
-        state.stack.push_back(StackEntry {
+        state.resolving_stack_entry = Some(StackEntry {
             id: entry_id,
             source_id: innkeepers_talent_id,
             controller: PlayerId(0), // Same player as trigger owner
