@@ -17424,6 +17424,31 @@ mod tests {
     }
 
     #[test]
+    fn trigger_becomes_target_pawpatch_recruit_pattern() {
+        // Pawpatch Recruit pattern: "whenever a creature you control becomes the target
+        // of a spell or ability an opponent controls"
+        // This test verifies both valid_card (creature you control) and valid_source
+        // (opponent controls) are set correctly — the exact pattern from bug #1569.
+        let def = parse_trigger_line(
+            "Whenever a creature you control becomes the target of a spell or ability an opponent controls, put a +1/+1 counter on target creature you control other than that creature.",
+            "Pawpatch Recruit",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        // "a creature you control" → valid_card with ControllerRef::You
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        );
+        // "an opponent controls" → valid_source with ControllerRef::Opponent
+        assert_eq!(
+            def.valid_source,
+            Some(becomes_target_source_filter(ControllerRef::Opponent))
+        );
+    }
+
+    #[test]
     fn trigger_becomes_target_of_aura_spell_only() {
         let def = parse_trigger_line(
             "Whenever this creature becomes the target of an Aura spell, you draw a card.",
