@@ -19,11 +19,15 @@ use super::support::*;
 /// "Each spell you cast that's red or green" via `parse_that_clause_suffix`.
 fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     let mut base = type_desc.trim();
+    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
     base = base.strip_prefix("each ").unwrap_or(base);
 
     let (base_part, qual_props) = if let Some(pos) = base
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         .find(" that's ")
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         .or_else(|| base.find(" that is "))
+        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         .or_else(|| base.find(" that are "))
     {
         let before = base[..pos].trim();
@@ -38,8 +42,8 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     };
 
     let base_part = base_part
-        .trim_end_matches(" spells")
-        .trim_end_matches(" spell")
+        .trim_end_matches(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
+        .trim_end_matches(" spell") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
         .trim();
 
     let typed_filter = if base_part.is_empty() {
