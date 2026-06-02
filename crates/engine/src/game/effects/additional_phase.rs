@@ -1,3 +1,4 @@
+use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -11,13 +12,14 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target, phase, after, followed_by) = match &ability.effect {
+    let (target, phase, after, followed_by, count_expr) = match &ability.effect {
         Effect::AdditionalPhase {
             target,
             phase,
             after,
             followed_by,
-        } => (target, *phase, *after, followed_by),
+            count,
+        } => (target, *phase, *after, followed_by, count),
         _ => return Err(EffectError::MissingParam("expected AdditionalPhase".into())),
     };
 
@@ -49,18 +51,36 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 500.8 + CR 510.2: Resolve the count against the triggering combat
+    // damage event so Obeka, Splitter of Seconds (and any future "for that
+    // many additional <step>" wording) pushes N copies of the extra phase
+    // bundle instead of one. Fixed quantities preserve legacy single-push.
+    let count =
+        resolve_quantity(state, count_expr, ability.controller, ability.source_id).max(0) as usize;
+    if count == 0 {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::AdditionalPhase,
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     // CR 500.8: Push follow-up phases before the primary phase so the
-    // `advance_phase` LIFO scan consumes the primary phase first.
-    for &follow_up in followed_by.iter().rev() {
+    // `advance_phase` LIFO scan consumes the primary phase first. Repeat
+    // the bundle `count` times so each scheduled occurrence still fires
+    // its own anchor → primary → follow_up sequence.
+    for _ in 0..count {
+        for &follow_up in followed_by.iter().rev() {
+            state.extra_phases.push(ExtraPhase {
+                anchor: after,
+                phase: follow_up,
+            });
+        }
         state.extra_phases.push(ExtraPhase {
             anchor: after,
-            phase: follow_up,
+            phase,
         });
     }
-    state.extra_phases.push(ExtraPhase {
-        anchor: after,
-        phase,
-    });
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::AdditionalPhase,
@@ -73,7 +93,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, SpellContext, TargetFilter};
+    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, TargetFilter};
     use crate::types::identifiers::ObjectId;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
@@ -85,12 +105,31 @@ mod tests {
         followed_by: Vec<Phase>,
         controller: PlayerId,
     ) -> ResolvedAbility {
+        make_ability_with_count(
+            target,
+            phase,
+            after,
+            followed_by,
+            controller,
+            QuantityExpr::Fixed { value: 1 },
+        )
+    }
+
+    fn make_ability_with_count(
+        target: TargetFilter,
+        phase: Phase,
+        after: Phase,
+        followed_by: Vec<Phase>,
+        controller: PlayerId,
+        count: QuantityExpr,
+    ) -> ResolvedAbility {
         ResolvedAbility {
             effect: Effect::AdditionalPhase {
                 target,
                 phase,
                 after,
                 followed_by,
+                count,
             },
             controller,
             original_controller: None,
@@ -283,6 +322,50 @@ mod tests {
                 anchor: Phase::Upkeep,
                 phase: Phase::Upkeep,
             }]
+        );
+    }
+
+    /// CR 500.8 + CR 510.2: Obeka, Splitter of Seconds — "you get that many
+    /// additional upkeep steps after this phase" must push one ExtraPhase per
+    /// point of combat damage, not a single phase.
+    #[test]
+    fn additional_phase_count_from_event_context_amount_pushes_n_phases() {
+        use crate::types::ability::QuantityRef;
+        use crate::types::identifiers::ObjectId as Oid;
+
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            current_trigger_event: Some(GameEvent::DamageDealt {
+                source_id: Oid(1),
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 5,
+                is_combat: true,
+                excess: 0,
+            }),
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let ability = make_ability_with_count(
+            TargetFilter::Controller,
+            Phase::Upkeep,
+            Phase::Upkeep,
+            vec![],
+            PlayerId(0),
+            crate::types::ability::QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let expected = ExtraPhase {
+            anchor: Phase::Upkeep,
+            phase: Phase::Upkeep,
+        };
+        assert_eq!(
+            state.extra_phases,
+            vec![expected, expected, expected, expected, expected],
+            "5 combat damage should schedule 5 additional upkeep steps"
         );
     }
 }

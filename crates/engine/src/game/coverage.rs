@@ -2272,12 +2272,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             phase,
             after,
             followed_by,
+            count,
         } => {
             d.push(("player".into(), fmt_target(target)));
             d.push(("phase".into(), format!("{phase:?}")));
             d.push(("after".into(), format!("{after:?}")));
             if !followed_by.is_empty() {
                 d.push(("followed by".into(), format!("{followed_by:?}")));
+            }
+            if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+                d.push(("count".into(), format!("{count:?}")));
             }
         }
         Effect::Double {

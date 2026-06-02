@@ -43,13 +43,24 @@ use super::{
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     collapse_ephemeral_color_choice_mana, contains_explicit_tracked_set_pronoun,
-    contains_implicit_tracked_set_pronoun, fold_cast_copy_of_card_defs, mark_uses_tracked_set,
-    parse_effect_clause, parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
-    publishes_tracked_set_from_resolution, refine_damage_target_remainder,
+    contains_implicit_tracked_set_pronoun, fold_cast_copy_of_card_defs, has_explicit_player_target,
+    mark_uses_tracked_set, parse_effect_clause, parse_event_context_ref_with_ctx,
+    parse_for_each_object_copy_parts, publishes_tracked_set_from_resolution,
+    refine_damage_target_remainder, replace_player_anaphor_with_parent_target,
     rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
     scan_contains_phrase, stamp_delayed_returns, target_filter_controller_ref,
     try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
+
+fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
+    replace_player_anaphor_with_parent_target(def.effect.as_mut());
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rewrite_player_anaphor_targets_in_definition(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_deref_mut() {
+        rewrite_player_anaphor_targets_in_definition(else_ability);
+    }
+}
 
 pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
@@ -158,6 +169,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                                 &root.effect,
                             ) {
                                 instead.target_choice_timing = root.target_choice_timing;
+                            }
+                            if has_explicit_player_target(root.effect.as_ref()) {
+                                rewrite_player_anaphor_targets_in_definition(&mut instead);
                             }
                             instead.else_ability = root.sub_ability.take();
                             root.sub_ability = Some(Box::new(instead));
@@ -759,11 +773,20 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // Party (a Saga is not Equipment), wrong for Quest for the Holy Relic and
     // Stonehewer Giant (the searcher is not the moved Equipment).
     //
+    // CR 608.2c: The same flag also wires sub-chains whose own clauses
+    // anchor on the just-moved card via the bare-"it" anaphor
+    // (`TargetFilter::SelfRef`) — Emperor of Bones' "[…] put a creature
+    // card exiled with this creature onto the battlefield […]. It gains
+    // haste. Sacrifice it at the beginning of the next end step." The
+    // trailing GenericEffect/Pump and CreateDelayedTrigger subs target
+    // `SelfRef` so the runtime's `source_id` rewrite resolves them to the
+    // moved card instead of Emperor itself.
+    //
     // The `forward_result` flag makes the runtime forward the just-moved
     // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
     // forward_result branch), so `Attach::resolve` operates on the correct
     // attaching object.
-    rewire_attach_forward_result(&mut result);
+    rewire_result_anchored_subchain(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
         result.optional = false;
@@ -825,17 +848,31 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
     }
 }
 
-/// CR 303.4f / CR 301.5b / CR 603.7d: Walk the chain and set
-/// `forward_result: true` on every `Dig`/`ChangeZone` whose `destination`
-/// is `Battlefield` and whose chained sub-ability is an `Attach` carrying
-/// the `ZoneChangedThisWay` condition. The condition is the parser-side
-/// signal that the Oracle text said "If a[n] [type] is/was put onto the
-/// battlefield this way, [attach it]" — i.e. the just-moved card must
-/// become the attaching object.
+/// CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
+/// CR 301.5b: Equipment entering attached via "put onto the battlefield attached to" wiring.
+/// CR 603.7d: A delayed trigger's source/controller is the parent ability's at creation time.
+/// CR 608.2c: Bare "it" anaphor in a later clause binds to the typed referent of an earlier clause.
+///
+/// Walk the chain and set `forward_result: true` on every `Dig`/`ChangeZone`
+/// whose `destination` is `Battlefield` and whose chained sub-ability anchors
+/// on the just-moved card. Two anchor shapes are recognized:
+///
+/// 1. `Attach` sub with a `ZoneChangedThisWay` condition — the Oracle text
+///    said "If a[n] [type] is/was put onto the battlefield this way,
+///    [attach it]" (Armored Skyhunter, Stonehewer Giant). The just-moved
+///    card becomes the attaching object.
+/// 2. A non-Attach sub whose own target slot (or a nested
+///    GenericEffect/CreateDelayedTrigger inside it) is `SelfRef` — the
+///    Oracle text used a bare-"it" anaphor for the just-moved card
+///    (Emperor of Bones: "put a creature card exiled with this creature
+///    onto the battlefield […]. It gains haste. Sacrifice it at the
+///    beginning of the next end step."). The runtime forward_result branch
+///    rewrites `sub.source_id` to the moved object, so `SelfRef` in the
+///    sub naturally resolves to it.
 ///
 /// Recurses through nested sub-abilities so chains of arbitrary depth
 /// (e.g. Skyhunter's Dig → Attach → PutAtLibraryPosition) are covered.
-fn rewire_attach_forward_result(def: &mut AbilityDefinition) {
+fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     if let Some(sub) = def.sub_ability.as_ref() {
         let sub_is_attach_with_zone_changed_cond = matches!(*sub.effect, Effect::Attach { .. })
             && matches!(
@@ -852,16 +889,77 @@ fn rewire_attach_forward_result(def: &mut AbilityDefinition) {
                 ..
             }
         );
-        if sub_is_attach_with_zone_changed_cond && parent_moves_to_battlefield {
+        if parent_moves_to_battlefield
+            && (sub_is_attach_with_zone_changed_cond || sub_targets_moved_card(sub))
+        {
             def.forward_result = true;
         }
     }
     if let Some(sub) = def.sub_ability.as_mut() {
-        rewire_attach_forward_result(sub);
+        rewire_result_anchored_subchain(sub);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
-        rewire_attach_forward_result(else_branch);
+        rewire_result_anchored_subchain(else_branch);
     }
+}
+
+/// CR 608.2c: True when a sub-ability anchors on the just-moved card via
+/// the bare-"it" anaphor. Two encodings are recognized:
+///
+/// - `TargetFilter::SelfRef` — encoded when the anaphor's antecedent is
+///   the source itself; the runtime `forward_result` branch rewrites
+///   `sub.source_id` to the moved object before resolution, so `SelfRef`
+///   resolves to it.
+/// - `TargetFilter::ParentTarget` — encoded when the upstream chunk-loop
+///   anaphor rewrite (`chain_has_prior_typed_referent` →
+///   `replace_target_with_parent`) already redirected the "it" to the
+///   parent's chosen-object slot. The parent for this pattern is a
+///   `ChangeZone` whose typed target is a compound filter
+///   (`And[Typed(<type>), ExiledBySource]`) — a description, not a
+///   targeting "target" keyword — so `ability.targets` is empty at
+///   resolution time. The runtime `forward_result` branch inserts the
+///   moved object into the sub's targets so `ParentTarget` resolves to
+///   it.
+///
+/// Walks the sub's leaf target slot, `GenericEffect`'s grant list
+/// (each `StaticDefinition.affected`), `CreateDelayedTrigger`'s inner
+/// `AbilityDefinition`, and nested `sub_ability` / `else_ability`.
+fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
+    if matches!(
+        sub.effect.target_filter(),
+        Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
+    ) {
+        return true;
+    }
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*sub.effect
+    {
+        if static_abilities.iter().any(|s| {
+            matches!(
+                s.affected.as_ref(),
+                Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
+            )
+        }) {
+            return true;
+        }
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*sub.effect {
+        if sub_targets_moved_card(effect) {
+            return true;
+        }
+    }
+    if let Some(nested) = sub.sub_ability.as_ref() {
+        if sub_targets_moved_card(nested) {
+            return true;
+        }
+    }
+    if let Some(else_branch) = sub.else_ability.as_ref() {
+        if sub_targets_moved_card(else_branch) {
+            return true;
+        }
+    }
+    false
 }
 
 /// CR 702.33d + CR 608.2e: Resolve "create [N] of those tokens [instead]"

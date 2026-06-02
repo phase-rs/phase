@@ -344,6 +344,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         | WaitingFor::UnlessBounceChoice { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
+        // CR 705.1 + CR 614.1a: Krark's Thumb keep choice — keep the first
+        // `keep_count` flips (always in range, since keep_count <= results.len()).
+        WaitingFor::CoinFlipKeepChoice { keep_count, .. } => Some(GameAction::SelectCoinFlips {
+            keep_indices: (0..*keep_count).collect(),
+        }),
         // CR 608.2d: SearchPartitionChoice requires EXACTLY primary_count cards —
         // an empty selection is illegal. Deterministically take the first
         // primary_count of the found set for the battlefield (rest auto-route).

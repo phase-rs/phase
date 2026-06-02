@@ -1454,5 +1454,16 @@
   "counterMoveDistribution": {
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
+  },
+  "coinFlip": {
+    "keep": {
+      "title": "Krark's Thumb",
+      "subtitle": "Flip two coins and ignore one — choose which result to keep.",
+      "heads": "Heads",
+      "tails": "Tails"
+    },
+    "buttons": {
+      "keep": "Keep this"
+    }
   }
 }

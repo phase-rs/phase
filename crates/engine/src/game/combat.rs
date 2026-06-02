@@ -1632,14 +1632,23 @@ pub fn declare_attackers(
         }
     }
 
-    // CR 701.15b: Goaded creatures must attack a player other than the goading player
-    // if able. If all legal attack targets are goading players, the creature can still
-    // attack any of them.
-    let non_eliminated_opponents: Vec<PlayerId> = state
-        .players
-        .iter()
-        .filter(|p| p.id != state.active_player && !state.eliminated_players.contains(&p.id))
-        .map(|p| p.id)
+    // CR 701.15b: a goaded creature must attack a player other than the goading
+    // player *if able*. "Able" is measured against the players this creature
+    // could legally be declared attacking: `get_valid_attack_targets` already
+    // applies CR 506.2/506.3 plus the exclusions for the active player,
+    // eliminated players, teammates, phased-out players, and players with
+    // protection from everything. A non-goading player who is not a legal attack
+    // target (e.g. a phased-out opponent or a teammate) does not make the
+    // creature able to attack elsewhere, so attacking a goading player stays
+    // legal. The previous check counted every non-eliminated player, wrongly
+    // forcing the creature off a goading player toward a target it could not
+    // actually attack.
+    let attackable_players: Vec<PlayerId> = get_valid_attack_targets(state)
+        .into_iter()
+        .filter_map(|target| match target {
+            AttackTarget::Player(pid) => Some(pid),
+            _ => None,
+        })
         .collect();
 
     for (attacker_id, target) in attacks {
@@ -1648,13 +1657,13 @@ pub fn declare_attackers(
             if goading_players.is_empty() {
                 continue;
             }
-            // Check if this creature is attacking a goading player
+            // Only enforce the redirect if a non-goading player is actually a
+            // legal attack target for this creature.
             if goading_players.contains(defending_pid) {
-                // CR 701.15b: Check if there's at least one non-goading opponent
-                let has_non_goading_target = non_eliminated_opponents
+                let has_attackable_non_goading_target = attackable_players
                     .iter()
                     .any(|pid| !goading_players.contains(pid));
-                if has_non_goading_target {
+                if has_attackable_non_goading_target {
                     return Err(format!(
                         "{:?} is goaded by {:?} and must attack a different player if able (CR 701.15b)",
                         attacker_id, defending_pid
@@ -5103,6 +5112,67 @@ mod tests {
         );
         // In a 2-player game, player 1 is the only valid attack target, so this is fine.
         assert!(result.is_ok());
+    }
+
+    /// Build a multiplayer DeclareAttackers state (FFA, no teams).
+    fn setup_multiplayer_combat(player_count: u8) -> GameState {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::standard(),
+            player_count,
+            42,
+        );
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::DeclareAttackers;
+        state
+    }
+
+    #[test]
+    fn goad_allows_attacking_goading_player_when_only_other_opponent_is_unattackable() {
+        // 3-player game: P0 (active) controls a creature goaded by P1; the only
+        // other opponent, P2, is phased out and therefore not a legal attack
+        // target. CR 701.15b: with no *attackable* non-goading player, attacking
+        // the goading player P1 is legal.
+        let mut state = setup_multiplayer_combat(3);
+        let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(2))
+            .unwrap()
+            .status = crate::types::player::PlayerStatus::PhasedOut;
+
+        let result = declare_attackers(
+            &mut state,
+            &[(goaded, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![],
+        );
+        assert!(
+            result.is_ok(),
+            "phased-out P2 is not attackable, so attacking goading P1 is legal: {result:?}"
+        );
+    }
+
+    #[test]
+    fn goad_still_forces_redirect_when_an_attackable_non_goading_player_exists() {
+        // 3-player game: creature goaded only by P1, while P2 is a normal,
+        // attackable opponent. CR 701.15b: the creature must attack P2, so
+        // declaring it against the goading player P1 is illegal.
+        let mut state = setup_multiplayer_combat(3);
+        let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
+
+        let result = declare_attackers(
+            &mut state,
+            &[(goaded, AttackTarget::Player(PlayerId(1)))],
+            &mut vec![],
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("must attack a different player if able"),
+            "an attackable non-goading opponent (P2) must still force the redirect"
+        );
     }
 
     #[test]

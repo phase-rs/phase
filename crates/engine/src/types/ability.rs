@@ -6834,6 +6834,10 @@ pub enum Effect {
     /// before `phase`, so "additional combat followed by an additional main phase"
     /// resolves in printed order while preserving CR 500.8 LIFO ordering.
     /// CR 500.10a: Only adds steps/phases to the affected player's own turn.
+    /// `count` resolves at resolution time so dynamic quantities such as Obeka,
+    /// Splitter of Seconds' "that many additional upkeep steps" thread the
+    /// triggering event amount through `QuantityRef::EventContextAmount`. Legacy
+    /// callers and explicit "an additional" wording deserialize to a Fixed 1.
     AdditionalPhase {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
@@ -6841,6 +6845,8 @@ pub enum Effect {
         after: Phase,
         #[serde(default)]
         followed_by: Vec<Phase>,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
     },
     /// CR 701.10d-f: Double counters on a permanent, a player's life total, or mana pool.
     /// Uses `DoubleTarget` enum per D-05 to distinguish the three variants.
@@ -9349,8 +9355,12 @@ pub enum AbilityCondition {
     /// CR 601.2h + CR 608.2c: "if {C} was spent to cast this spell" gates
     /// resolution on the source object's recorded paid-mana colors.
     ManaColorSpent { color: ManaColor, minimum: u32 },
-    /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last revealed card's type.
-    /// Evaluated at resolution time by inspecting `state.last_revealed_ids[0]`.
+    /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last
+    /// revealed card's type, or on the just-moved card when the parent effect
+    /// changed zones without revealing.
+    /// Evaluated at resolution time by inspecting `state.last_revealed_ids[0]`,
+    /// falling back to `state.last_zone_changed_ids[0]` only when no reveal
+    /// occurred in the current resolution.
     /// `additional_filter` holds optional extra filter properties (e.g., `IsChosenCreatureType`
     /// for "creature card of the chosen type"). For "if it's a nonland card" patterns,
     /// wrap with `AbilityCondition::Not`.

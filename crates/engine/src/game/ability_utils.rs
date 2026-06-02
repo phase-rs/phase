@@ -5428,6 +5428,42 @@ mod tests {
     }
 
     #[test]
+    fn build_target_slots_skips_cast_from_hand_permission() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .with_type(TypeFilter::Card)
+                        .controller(ControllerRef::You)
+                        .properties(vec![
+                            FilterProp::InZone { zone: Zone::Hand },
+                            FilterProp::Cmc {
+                                comparator: Comparator::LE,
+                                value: QuantityExpr::Fixed { value: 4 },
+                            },
+                        ]),
+                ),
+                without_paying_mana_cost: true,
+                mode: crate::types::ability::CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+
+        assert!(
+            slots.is_empty(),
+            "cast-from-hand permissions are resolution-time picks, not stack-time targets"
+        );
+    }
+
+    #[test]
     fn build_target_slots_keeps_or_filter_with_non_context_branch_targeted() {
         let state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
