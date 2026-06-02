@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, DelayedTriggerCondition,
-    Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant, ModalChoice,
-    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
-    TargetFilter, TargetRef, TriggerCondition,
+    ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
+    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
+    ModalChoice, QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
+    StaticCondition, TargetFilter, TargetRef, TriggerCondition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -1333,6 +1333,17 @@ pub enum TargetSelectionConstraint {
     DifferentTargetPlayers,
     /// CR 115.1 + CR 601.2c: Object targets must be controlled by different players.
     DifferentObjectControllers,
+    /// CR 202.3 + CR 601.2c: the chosen target set's combined mana value must
+    /// satisfy `comparator` against `value`. `value` is a `QuantityExpr` (not
+    /// `i32` like `SearchSelectionConstraint::TotalManaValue`) because the bound
+    /// is the dynamic where-X die result (`EventContextAmount`). NOT unified with
+    /// `SearchSelectionConstraint::TotalManaValue` — different CR section
+    /// (CR 115.1 / CR 601.2c target declaration vs CR 701.23 search-set) and a
+    /// different value type.
+    TotalManaValue {
+        comparator: Comparator,
+        value: QuantityExpr,
+    },
 }
 
 /// CR 508.1d + CR 509.1c: Which combat step a `WaitingFor::CombatTaxPayment` belongs to.

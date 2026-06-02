@@ -201,21 +201,38 @@ fn scan_total_mana_value_constraint(lower: &str) -> Option<SearchSelectionConstr
     .map(|(constraint, _)| constraint)
 }
 
-fn parse_total_mana_value_constraint(
+/// CR 202.3: Shared combinator for the `"<N> or less" / "<N> or greater"`
+/// mana-value bound that follows a "total mana value" phrase. Parses the number
+/// token (the parser treats `X` as `0` here) followed by the comparator suffix.
+///
+/// Used by both the search-set constraint (`SearchSelectionConstraint::TotalManaValue`,
+/// LE/GE) and the target-set constraint detection/strip on the put-from-graveyard
+/// path (target side accepts LE only — see `validate_target_constraints`).
+pub(crate) fn parse_total_mana_value_comparator(
     input: &str,
-) -> Result<(&str, SearchSelectionConstraint), nom::Err<OracleError<'_>>> {
-    let (rest, amount) = nom_primitives::parse_number.parse(input)?;
+) -> OracleResult<'_, (Comparator, i32)> {
+    // `parse_number_or_x` (X → 0) rather than `parse_number`: the where-X target
+    // form (Ancient Brass Dragon: "with total mana value X or less") uses the
+    // literal `X` token here. On the search side the value is always a literal
+    // digit, so accepting X is a harmless superset (X → 0); on the target side
+    // the parsed value is discarded — the cap is carried as `Variable("X")` and
+    // rebound to the die result on the lowering path.
+    let (rest, amount) = nom_primitives::parse_number_or_x.parse(input)?;
     let (rest, comparator) = alt((
         value(Comparator::LE, tag::<_, _, OracleError<'_>>(" or less")),
         value(Comparator::GE, tag(" or greater")),
     ))
     .parse(rest)?;
+    Ok((rest, (comparator, amount as i32)))
+}
+
+fn parse_total_mana_value_constraint(
+    input: &str,
+) -> Result<(&str, SearchSelectionConstraint), nom::Err<OracleError<'_>>> {
+    let (rest, (comparator, value)) = parse_total_mana_value_comparator(input)?;
     Ok((
         rest,
-        SearchSelectionConstraint::TotalManaValue {
-            comparator,
-            value: amount as i32,
-        },
+        SearchSelectionConstraint::TotalManaValue { comparator, value },
     ))
 }
 
@@ -4221,6 +4238,26 @@ mod tests {
             )),
             "total mana value is a set-level search constraint, got {:?}",
             ctx.diagnostics
+        );
+    }
+
+    #[test]
+    fn shared_total_mana_value_comparator_parses_le_and_ge() {
+        // CR 202.3: shared combinator used by both search-set and target-set
+        // mana-value bounds.
+        assert_eq!(
+            parse_total_mana_value_comparator("3 or less").map(|(_, v)| v),
+            Ok((Comparator::LE, 3))
+        );
+        assert_eq!(
+            parse_total_mana_value_comparator("3 or greater").map(|(_, v)| v),
+            Ok((Comparator::GE, 3))
+        );
+        // X (lowercase, as the parser lowercases dispatch text) resolves to 0 at
+        // parse time; the where-X binding rebinds it to the die result later.
+        assert_eq!(
+            parse_total_mana_value_comparator("x or less").map(|(_, v)| v),
+            Ok((Comparator::LE, 0))
         );
     }
 

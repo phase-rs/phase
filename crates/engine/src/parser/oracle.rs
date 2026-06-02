@@ -10136,6 +10136,105 @@ mod tests {
         }
     }
 
+    /// CR 110.2a + CR 202.3 + CR 603.12: Ancient Brass Dragon's reflexive "put
+    /// any number of target creature cards with total mana value X or less from
+    /// graveyards onto the battlefield under your control, where X is the
+    /// result" must parse into a `ChangeZone` whose target is a graveyard
+    /// creature filter, with an unlimited multi-target spec and a
+    /// `TotalManaValue` constraint bound to the die result (issue #1602,
+    /// Deliverable 2).
+    #[test]
+    fn ancient_brass_dragon_reflexive_graveyard_reanimation() {
+        use crate::types::ability::{
+            AbilityDefinition, Effect, MultiTargetSpec, QuantityExpr, QuantityRef, TargetFilter,
+        };
+        use crate::types::game_state::TargetSelectionConstraint;
+        use crate::types::zones::Zone;
+
+        // Find the AbilityDefinition node whose effect is the reanimation
+        // `ChangeZone`, walking the RollDie result branches and sub/else chains.
+        fn find_change_zone_def(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+            if matches!(def.effect.as_ref(), Effect::ChangeZone { .. }) {
+                return Some(def);
+            }
+            if let Effect::RollDie { results, .. } = def.effect.as_ref() {
+                for branch in results {
+                    if let Some(found) = find_change_zone_def(&branch.effect) {
+                        return Some(found);
+                    }
+                }
+            }
+            if let Some(found) = def.sub_ability.as_deref().and_then(find_change_zone_def) {
+                return Some(found);
+            }
+            def.else_ability.as_deref().and_then(find_change_zone_def)
+        }
+
+        let r = parse(
+            "Flying\nWhenever this creature deals combat damage to a player, roll a \
+             d20. When you do, put any number of target creature cards with total \
+             mana value X or less from graveyards onto the battlefield under your \
+             control, where X is the result.",
+            "Ancient Brass Dragon",
+            &[],
+            &["Creature"],
+            &["Elder", "Dragon"],
+        );
+
+        let trigger = r
+            .triggers
+            .iter()
+            .find(|t| t.execute.is_some())
+            .expect("Ancient Brass Dragon should produce a combat-damage trigger");
+        let execute = trigger.execute.as_deref().unwrap();
+        let cz_def =
+            find_change_zone_def(execute).expect("reflexive ChangeZone reanimation must parse");
+
+        let Effect::ChangeZone {
+            destination,
+            target,
+            enters_under,
+            up_to,
+            ..
+        } = cz_def.effect.as_ref()
+        else {
+            panic!("expected ChangeZone, got {:?}", cz_def.effect);
+        };
+
+        // CR 110.2a: onto the battlefield under your control.
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(
+            *enters_under,
+            Some(crate::types::ability::ControllerRef::You)
+        );
+        // The MV phrase strip must not have eaten the zone suffix: the filter
+        // still resolves the graveyard origin.
+        assert_eq!(
+            target.extract_in_zone(),
+            Some(Zone::Graveyard),
+            "target must carry InZone(Graveyard) after the MV-phrase strip; got {target:?}"
+        );
+        assert!(
+            matches!(target, TargetFilter::Typed(_)),
+            "target should be a Typed creature filter, got {target:?}"
+        );
+        // "any number of target" → unlimited multi-target.
+        assert_eq!(cz_def.multi_target, Some(MultiTargetSpec::unlimited(0)));
+        // "up to / any number of" makes the selection optional.
+        assert!(*up_to);
+        // CR 202.3: TotalManaValue cap bound to the die result.
+        assert_eq!(
+            cz_def.target_constraints,
+            vec![TargetSelectionConstraint::TotalManaValue {
+                comparator: crate::types::ability::Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            }],
+            "target_constraints must carry the where-X-bound MV cap"
+        );
+    }
+
     /// CR 706.2 + CR 706.4 + CR 603.12: Ancient Bronze Dragon's reflexive
     /// "put X +1/+1 counters on each of up to two target creatures, where X is
     /// the result" must bind X to the die roll via `EventContextAmount`, NOT to

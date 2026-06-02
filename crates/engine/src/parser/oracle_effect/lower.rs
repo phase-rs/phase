@@ -483,6 +483,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         if parse_controlled_by_different_players_target_constraint(&clause_ir.source_text) {
             def = def.target_constraint(TargetSelectionConstraint::DifferentObjectControllers);
         }
+        if let Some(constraint) = parse_total_mana_value_target_constraint(&clause_ir.source_text) {
+            def = def.target_constraint(constraint);
+        }
         // CR 601.2d: Propagate distribute flag.
         if let Some(ref unit) = clause_ir.parsed.distribute {
             def = def.distribute(unit.clone());
@@ -2588,6 +2591,35 @@ fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
     parser.parse(lower.as_str()).is_ok()
 }
 
+/// CR 202.3 + CR 115.1: Detect a "with total mana value <N|X> or less" target-set
+/// constraint anywhere in the clause and build the typed
+/// `TargetSelectionConstraint::TotalManaValue`. The number token is the `X`
+/// placeholder for the where-X form (Ancient Brass Dragon); `apply_where_x_*`
+/// later rebinds `Variable("X")` to the die-result `EventContextAmount`.
+///
+/// Target side accepts only the "or less" (LE) comparator — see
+/// `validate_target_constraints` / the parser strip in `oracle_effect/mod.rs`
+/// for why GE is never emitted for targeting.
+fn parse_total_mana_value_target_constraint(text: &str) -> Option<TargetSelectionConstraint> {
+    let lower = text.to_lowercase();
+    let (_, (comparator, _value), _) = nom_primitives::scan_preceded(lower.as_str(), |input| {
+        preceded(
+            tag::<_, _, OracleError<'_>>("with total mana value "),
+            super::search::parse_total_mana_value_comparator,
+        )
+        .parse(input)
+    })?;
+    if comparator != Comparator::LE {
+        return None;
+    }
+    Some(TargetSelectionConstraint::TotalManaValue {
+        comparator: Comparator::LE,
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name: "X".into() },
+        },
+    })
+}
+
 pub(super) fn extract_deal_damage_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
     let after_each_of = strip_after(&lower, "damage to each of ")?;
@@ -4483,6 +4515,21 @@ pub(crate) fn apply_where_x_to_filter(
     }
 }
 
+/// CR 107.3i + CR 202.3: Substitute the X binding into a target-set constraint's
+/// dynamic bound. Mirrors `apply_where_x_to_filter_prop`: maps the
+/// `TotalManaValue.value` `QuantityExpr` through `apply_where_x_quantity_expression`
+/// so `Variable("X")` + where-X `"the result"` becomes `EventContextAmount`.
+/// Constraints without a quantity bound (`DifferentTargetPlayers`,
+/// `DifferentObjectControllers`) are left unchanged.
+fn apply_where_x_to_target_constraint(
+    constraint: &mut TargetSelectionConstraint,
+    where_x_expression: Option<&str>,
+) {
+    if let TargetSelectionConstraint::TotalManaValue { value, .. } = constraint {
+        *value = apply_where_x_quantity_expression(value.clone(), where_x_expression);
+    }
+}
+
 fn apply_where_x_to_filter_prop(prop: FilterProp, where_x_expression: Option<&str>) -> FilterProp {
     match prop {
         FilterProp::Cmc { comparator, value } => FilterProp::Cmc {
@@ -4518,6 +4565,14 @@ pub(super) fn apply_where_x_ability_expression(
     }
     if let Some(spec) = def.multi_target.as_mut() {
         spec.map_quantities(|expr| apply_where_x_quantity_expression(expr, where_x_expression));
+    }
+    // CR 107.3i + CR 202.3: Rebind X in the target-set constraints (e.g. the
+    // `TotalManaValue` cap on Ancient Brass Dragon, whose bound is the
+    // `where X is the result` die value). Without this, the reflexive sub
+    // inherits `Variable("X")` with no defining expression and the cap is
+    // effectively unbounded.
+    for constraint in def.target_constraints.iter_mut() {
+        apply_where_x_to_target_constraint(constraint, where_x_expression);
     }
     apply_where_x_effect_expression(def.effect.as_mut(), where_x_expression);
     if let Some(sub) = def.sub_ability.as_mut() {
@@ -4773,6 +4828,45 @@ mod where_x_tests {
             }),
             "the number-of phrase must route through parse_cda_quantity, not the \
              event-context delegation"
+        );
+    }
+
+    /// CR 107.3i + CR 202.3: the where-X traversal rebinds a `TotalManaValue`
+    /// target constraint's `Variable("X")` cap to the die-result
+    /// `EventContextAmount` (Ancient Brass Dragon's "where X is the result").
+    #[test]
+    fn apply_where_x_to_target_constraint_binds_total_mana_value_cap() {
+        use crate::types::ability::Comparator;
+        use crate::types::game_state::TargetSelectionConstraint;
+
+        let mut constraint = TargetSelectionConstraint::TotalManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+        };
+        super::apply_where_x_to_target_constraint(&mut constraint, Some("the result"));
+        assert_eq!(
+            constraint,
+            TargetSelectionConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            }
+        );
+    }
+
+    /// Constraints without a quantity bound are left untouched.
+    #[test]
+    fn apply_where_x_to_target_constraint_leaves_non_quantity_unchanged() {
+        use crate::types::game_state::TargetSelectionConstraint;
+
+        let mut constraint = TargetSelectionConstraint::DifferentObjectControllers;
+        super::apply_where_x_to_target_constraint(&mut constraint, Some("the result"));
+        assert_eq!(
+            constraint,
+            TargetSelectionConstraint::DifferentObjectControllers
         );
     }
 }

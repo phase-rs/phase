@@ -4181,7 +4181,7 @@ fn resolve_chain_body(
                         let chosen = crate::game::ability_utils::random_select_targets_for_ability(
                             state,
                             &target_slots,
-                            &[],
+                            &sub.target_constraints,
                         )
                         .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
                         let mut reflexive = sub.as_ref().clone();
@@ -4207,7 +4207,7 @@ fn resolve_chain_body(
                         state,
                         sub,
                         &target_slots,
-                        &[],
+                        &sub.target_constraints,
                     )
                     .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
 
@@ -4236,7 +4236,7 @@ fn resolve_chain_body(
                         condition: None,
                         ability: reflexive,
                         timestamp: state.turn_number,
-                        target_constraints: vec![],
+                        target_constraints: sub.target_constraints.clone(),
                         distribute: None,
                         trigger_event: state.current_trigger_event.clone(),
                         modal: None,
@@ -4268,7 +4268,7 @@ fn resolve_chain_body(
                         player: ability.controller,
                         target_slots,
                         mode_labels: Vec::new(),
-                        target_constraints: vec![],
+                        target_constraints: sub.target_constraints.clone(),
                         selection,
                         source_id: Some(ability.source_id),
                         description: trigger_description,
