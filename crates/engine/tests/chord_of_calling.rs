@@ -136,6 +136,11 @@ fn chord_of_calling_parses_x_mana_value_search_shape() {
     let mut builder =
         scenario.add_spell_to_hand_from_oracle(P0, "Chord of Calling", true, CHORD_ORACLE);
     builder.with_mana_cost(chord_cost());
+    // Re-run synthesis with the Convoke keyword hint so the leading "Convoke
+    // (reminder)" line is recognized as the keyword rather than glued onto the
+    // search clause (which otherwise parses to Effect::Unimplemented). This mirrors
+    // how card-data supplies Convoke for the real card, and the convoke test below.
+    builder.from_oracle_text_with_keywords(&["Convoke"], CHORD_ORACLE);
     let spell_id = builder.id();
 
     let runner = scenario.build();
@@ -202,6 +207,11 @@ fn chord_x_four_offers_only_mv_le_four_then_battlefield() {
     let mut builder =
         scenario.add_spell_to_hand_from_oracle(P0, "Chord of Calling", true, CHORD_ORACLE);
     builder.with_mana_cost(chord_cost());
+    // Re-run synthesis with the Convoke keyword hint so the leading "Convoke
+    // (reminder)" line is recognized as the keyword rather than glued onto the
+    // search clause (which otherwise parses to Effect::Unimplemented). This mirrors
+    // how card-data supplies Convoke for the real card, and the convoke test below.
+    builder.from_oracle_text_with_keywords(&["Convoke"], CHORD_ORACLE);
     let spell_id = builder.id();
 
     let mut runner = scenario.build();
@@ -430,6 +440,11 @@ fn chord_x_zero_offers_only_mv_zero_and_fails_to_find_cleanly() {
     let mut builder =
         scenario.add_spell_to_hand_from_oracle(P0, "Chord of Calling", true, CHORD_ORACLE);
     builder.with_mana_cost(chord_cost());
+    // Re-run synthesis with the Convoke keyword hint so the leading "Convoke
+    // (reminder)" line is recognized as the keyword rather than glued onto the
+    // search clause (which otherwise parses to Effect::Unimplemented). This mirrors
+    // how card-data supplies Convoke for the real card, and the convoke test below.
+    builder.from_oracle_text_with_keywords(&["Convoke"], CHORD_ORACLE);
     let spell_id = builder.id();
 
     let mut runner = scenario.build();
