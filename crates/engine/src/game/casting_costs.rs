@@ -3329,6 +3329,16 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             ));
         }
     }
+    // CR 702.176a: Tag the stack object so stack resolution can read the impending
+    // cost-paid marker and place time counters when the permanent enters.
+    if casting_variant == CastingVariant::Impending {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.cast_variant_paid = Some((
+                crate::types::ability::CastVariantPaid::Impending,
+                state.turn_number,
+            ));
+        }
+    }
 
     // CR 601.2i: Update the existing stack entry (pushed at announcement) with
     // the finalized ability and the actual mana spent. The entry must still be

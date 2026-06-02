@@ -5,6 +5,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, StaticDefinition,
     TargetFilter, TargetRef,
 };
+use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -2537,6 +2538,18 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.176a: When the caller explicitly opted into Impending (via
+    // `variant_override = Some(CastingVariant::Impending)`), substitute the
+    // impending mana cost taken from `Keyword::Impending { cost, .. }`.
+    // Mirrors Overload / Bestow / Cleave / Awaken cost substitution.
+    let impending_cost = if casting_variant == CastingVariant::Impending {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Impending { cost, .. } => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
     let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from hand. Auto-application is restricted to `Unlimited` sources
@@ -2658,6 +2671,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(bestow_cost)
             .or(awaken_cost)
             .or(cleave_cost)
+            .or(impending_cost)
             .or(effective_escape_cost_for_path)
             .or(effective_harmonize_cost_for_path)
             .or(effective_flashback_mana_cost_for_path)
@@ -4037,6 +4051,57 @@ pub fn handle_awaken_cost_choice_with_payment_mode(
                 player,
                 object_id,
                 Some(CastingVariant::Awaken),
+            )?;
+            prepared.payment_mode = payment_mode;
+            continue_with_prepared(state, player, prepared, events)
+        }
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+        }
+    }
+}
+
+/// CR 702.176a: Player chose the normal cast path for an Impending card.
+pub fn handle_impending_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    handle_impending_cost_choice_with_payment_mode(
+        state,
+        player,
+        object_id,
+        card_id,
+        decision,
+        CastPaymentMode::Auto,
+        events,
+    )
+}
+
+/// CR 702.176a: Route an Impending alternative-cost decision into the casting
+/// pipeline. `Alternative` substitutes the impending mana cost (via
+/// `CastingVariant::Impending`); `Normal` proceeds as a standard creature cast.
+/// The ETB time-counter placement and "not a creature" handling occur at stack
+/// resolution in `stack.rs`, not here.
+pub fn handle_impending_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match decision {
+        AlternativeCastDecision::Alternative => {
+            let mut prepared = prepare_spell_cast_with_variant_override(
+                state,
+                player,
+                object_id,
+                Some(CastingVariant::Impending),
             )?;
             prepared.payment_mode = payment_mode;
             continue_with_prepared(state, player, prepared, events)
@@ -5628,6 +5693,55 @@ pub fn handle_cast_spell_with_payment_mode(
                 }
                 // Otherwise (normal-only / no legal land / neither affordable):
                 // fall through to the normal cast path.
+            }
+        }
+    }
+
+    // CR 702.176a: Impending — when a hand card has `Keyword::Impending { cost, .. }`
+    // and both costs are affordable, present a choice. Auto-skip when only one cost
+    // is viable. Impending is opt-in via `variant_override` so a fall-through
+    // proceeds as a normal creature cast with no time counters.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand {
+            if let Some(impending_cost) = obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Impending { cost, .. } => Some(cost.clone()),
+                _ => None,
+            }) {
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let impending_cost_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, impending_cost.clone())
+                        .unwrap_or_else(|| impending_cost.clone());
+                let normal_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+                let impending_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &impending_cost_eff);
+                if normal_affordable && impending_affordable {
+                    return Ok(WaitingFor::AlternativeCastChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        payment_mode,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Impending,
+                        normal_cost,
+                        alternative_cost: Some(impending_cost_eff),
+                        alternative_additional_cost: None,
+                    });
+                }
+                if !normal_affordable && impending_affordable {
+                    // Only impending cost is payable — proceed via the impending path.
+                    return handle_impending_cost_choice_with_payment_mode(
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        payment_mode,
+                        events,
+                    );
+                }
+                // Otherwise (normal-only or neither): fall through to normal cast.
             }
         }
     }

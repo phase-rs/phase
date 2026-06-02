@@ -15,9 +15,9 @@ use crate::types::ability::{
     KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
     ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
     PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
+    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -4675,6 +4675,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // ability that exiles self and grants a Plotted casting permission for
     // free-cast on a later turn. Runs after Suspend; idempotent.
     synthesize_plot(face);
+    // CR 702.176a: Impending — static "not a creature" effect plus end-step
+    // trigger removing one time counter while the impending cost was paid and a
+    // counter remains. Idempotent.
+    synthesize_impending(face);
     synthesize_siege_intrinsics(face);
     synthesize_tribute_intrinsics(face);
     // CR 702.124j: Partner with — ETB trigger letting target player fetch the
@@ -4693,6 +4697,113 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.165: Backup — ETB trigger placing +1/+1 counters and granting
     // non-Backup abilities printed below Backup until end of turn.
     synthesize_backup(face);
+}
+
+/// CR 702.176a: Synthesize Impending's battlefield static and end-step trigger.
+///
+/// "At the beginning of your end step, if this permanent's impending cost was
+/// paid and it has a time counter on it, remove a time counter from it."
+///
+/// The static is a Layer 4 `RemoveType(Creature)` continuous effect gated on:
+/// - `StaticCondition::CastVariantPaid { Impending }` — impending cost was paid
+/// - `StaticCondition::HasCounters { Time, minimum: 1 }` — still has counters
+///
+/// The trigger is a battlefield-zone, end-step trigger gated on:
+/// - `TriggerCondition::CastVariantPaidPersistent { Impending }` — impending cost was paid
+/// - `TriggerCondition::HasCounters { Time, minimum: 1 }` — still has counters
+///
+/// Combined with `TriggerConstraint::OnlyDuringYourTurn` to enforce "your" end step.
+/// Idempotent: skips if the trigger shape is already present.
+pub fn synthesize_impending(face: &mut CardFace) {
+    if !face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::Impending { .. }))
+    {
+        return;
+    }
+    let static_condition = StaticCondition::And {
+        conditions: vec![
+            StaticCondition::CastVariantPaid {
+                variant: CastVariantPaid::Impending,
+            },
+            StaticCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                minimum: 1,
+                maximum: None,
+            },
+        ],
+    };
+    let already_has_static = face.static_abilities.iter().any(|static_def| {
+        static_def.affected == Some(TargetFilter::SelfRef)
+            && static_def.condition == Some(static_condition.clone())
+            && static_def
+                .modifications
+                .contains(&ContinuousModification::RemoveType {
+                    core_type: CoreType::Creature,
+                })
+    });
+    if !already_has_static {
+        face.static_abilities.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .condition(static_condition)
+                .modifications(vec![ContinuousModification::RemoveType {
+                    core_type: CoreType::Creature,
+                }])
+                .description(
+                    "CR 702.176a: As long as this permanent's impending cost was paid and it has a time counter on it, it's not a creature.".to_string(),
+                ),
+        );
+    }
+
+    // Idempotency: skip if the end-step counter-removal trigger is already present.
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::Phase)
+            && t.phase == Some(Phase::End)
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::RemoveCounter {
+                    counter_type: Some(CounterType::Time),
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    let remove_one = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RemoveCounter {
+            counter_type: Some(CounterType::Time),
+            count: 1,
+            target: TargetFilter::SelfRef,
+        },
+    );
+    // CR 702.176a: gated on impending cost paid AND has a time counter.
+    let condition = TriggerCondition::And {
+        conditions: vec![
+            TriggerCondition::CastVariantPaidPersistent {
+                variant: CastVariantPaid::Impending,
+            },
+            TriggerCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Time),
+                minimum: 1,
+                maximum: None,
+            },
+        ],
+    };
+    let trigger = TriggerDefinition::new(TriggerMode::Phase)
+        .phase(Phase::End)
+        .condition(condition)
+        .constraint(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn)
+        .execute(remove_one)
+        .description(
+            "CR 702.176a: At the beginning of your end step, if this permanent's impending cost was paid and it has a time counter on it, remove a time counter from it.".to_string(),
+        );
+    face.triggers.push(trigger);
 }
 
 /// CR 702.124j: Synthesize the "Partner with [Name]" ETB trigger.
@@ -5843,6 +5954,115 @@ mod evoke_synthesis_tests {
         face.keywords.push(Keyword::Flying);
         synthesize_evoke(&mut face);
         assert!(face.triggers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod impending_synthesis_tests {
+    use super::*;
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    fn impending_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Impending {
+            counters: 3,
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
+            },
+        });
+        face
+    }
+
+    /// CR 702.176a: Impending synthesizes both battlefield abilities: a static
+    /// Layer 4 type-removal effect while the permanent has a time counter, and
+    /// a recurring end-step trigger that removes those counters.
+    #[test]
+    fn synthesize_impending_adds_static_and_persistent_end_step_trigger() {
+        let mut face = impending_face();
+
+        synthesize_impending(&mut face);
+
+        let static_def = face
+            .static_abilities
+            .iter()
+            .find(|static_def| {
+                static_def.affected == Some(TargetFilter::SelfRef)
+                    && static_def
+                        .modifications
+                        .contains(&ContinuousModification::RemoveType {
+                            core_type: CoreType::Creature,
+                        })
+            })
+            .expect("impending should add a not-creature static");
+        assert!(matches!(
+            static_def.condition,
+            Some(StaticCondition::And { ref conditions })
+                if conditions.contains(&StaticCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Impending,
+                }) && conditions.contains(&StaticCondition::HasCounters {
+                    counters: CounterMatch::OfType(CounterType::Time),
+                    minimum: 1,
+                    maximum: None,
+                })
+        ));
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|trigger| {
+                matches!(trigger.mode, TriggerMode::Phase) && trigger.phase == Some(Phase::End)
+            })
+            .expect("impending should add an end-step trigger");
+        assert!(matches!(
+            trigger.condition,
+            Some(TriggerCondition::And { ref conditions })
+                if conditions.contains(&TriggerCondition::CastVariantPaidPersistent {
+                    variant: CastVariantPaid::Impending,
+                }) && conditions.contains(&TriggerCondition::HasCounters {
+                    counters: CounterMatch::OfType(CounterType::Time),
+                    minimum: 1,
+                    maximum: None,
+                })
+        ));
+        assert!(matches!(
+            trigger.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::RemoveCounter {
+                counter_type: Some(CounterType::Time),
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn synthesize_impending_is_idempotent() {
+        let mut face = impending_face();
+
+        synthesize_impending(&mut face);
+        synthesize_impending(&mut face);
+
+        let static_count = face
+            .static_abilities
+            .iter()
+            .filter(|static_def| {
+                static_def
+                    .modifications
+                    .contains(&ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    })
+            })
+            .count();
+        let trigger_count = face
+            .triggers
+            .iter()
+            .filter(|trigger| {
+                matches!(trigger.mode, TriggerMode::Phase) && trigger.phase == Some(Phase::End)
+            })
+            .count();
+
+        assert_eq!(static_count, 1);
+        assert_eq!(trigger_count, 1);
     }
 }
 

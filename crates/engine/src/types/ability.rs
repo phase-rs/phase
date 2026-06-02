@@ -3910,6 +3910,13 @@ pub enum StaticCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         maximum: Option<u32>,
     },
+    /// CR 702.176a + CR 611.3a: True while the source permanent carries the
+    /// persistent marker that its named alternative cost was paid. This is not
+    /// turn-scoped; Impending's "not a creature" static must continue across
+    /// turns until its last time counter is removed.
+    CastVariantPaid {
+        variant: CastVariantPaid,
+    },
     /// CR 122.1 + CR 613.4c: True when the object currently receiving an
     /// attached-object static has at least `minimum` (and at most `maximum`, if
     /// specified) counters matching `counters`. Used for Aura/Equipment
@@ -4427,6 +4434,11 @@ pub enum CastVariantPaid {
     /// "if its bestow cost was paid" and by display layers that need to
     /// distinguish a bestow-cast permanent from a hard-cast creature.
     Bestow,
+    /// CR 702.176a: The spell was cast for its impending alternative cost.
+    /// The permanent entered with N time counters and is not a creature
+    /// while any remain. Read by the end-step counter-removal trigger and
+    /// the "not a creature" layer fixup.
+    Impending,
 }
 
 /// CR 601.3b + CR 702.8a: A timing permission actually used to cast a spell.
@@ -9891,6 +9903,11 @@ pub enum TriggerCondition {
     /// specified cast/activation variant this turn. Negation ("unless it escaped")
     /// is expressed via `Not { Box::new(CastVariantPaid { variant }) }`.
     CastVariantPaid { variant: CastVariantPaid },
+    /// CR 702.176a + CR 603.4: True while the source permanent carries the
+    /// persistent marker that its named alternative cost was paid. Used for
+    /// recurring battlefield triggers such as Impending's end-step time-counter
+    /// removal, which must continue across turns.
+    CastVariantPaidPersistent { variant: CastVariantPaid },
 
     /// CR 605.1a + CR 603.4: Event qualifier for "that isn't a mana ability"
     /// on activated-ability trigger events.

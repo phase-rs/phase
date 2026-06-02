@@ -2294,6 +2294,14 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             })
         }
 
+        // CR 702.176a + CR 603.4: Impending's battlefield trigger checks the
+        // persistent alternative-cost marker, not whether it was paid this turn.
+        StaticCondition::CastVariantPaid { variant } => {
+            Some(TriggerCondition::CastVariantPaidPersistent {
+                variant: *variant,
+            })
+        }
+
         // CR 716.2a: Class level condition.
         StaticCondition::ClassLevelGE { level } => {
             Some(TriggerCondition::ClassLevelGE { level: *level })
@@ -2353,6 +2361,11 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
                     }),
                 })
             }
+            StaticCondition::CastVariantPaid { variant } => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::CastVariantPaidPersistent {
+                    variant: *variant,
+                }),
+            }),
             _ => None,
         },
 

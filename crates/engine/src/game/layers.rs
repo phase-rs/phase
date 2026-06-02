@@ -574,6 +574,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::DayNightIs { .. }
         | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::SourceAttackingAlone
@@ -687,6 +688,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::DayNightIs { .. }
         | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::SourceAttackingAlone
@@ -840,6 +842,12 @@ fn evaluate_condition_with_context(
             .get(&source_id)
             .map(|obj| counter_condition_matches(obj, counters, *minimum, *maximum))
             .unwrap_or(false),
+        // CR 702.176a + CR 611.3a: Persistent alternative-cost marker on the
+        // source permanent. This is intentionally not turn-scoped.
+        StaticCondition::CastVariantPaid { variant } => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.cast_variant_paid.is_some_and(|(v, _)| v == *variant)),
         StaticCondition::RecipientHasCounters {
             counters,
             minimum,
@@ -3804,13 +3812,14 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, CommanderOwnership,
-        Comparator, ContinuousModification, ControllerRef, CountScope, Duration, Effect,
-        FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
-        ZoneRef,
+        AbilityDefinition, AbilityKind, BasicLandType, CastVariantPaid, ChosenSubtypeKind,
+        CommanderOwnership, Comparator, ContinuousModification, ControllerRef, CountScope,
+        Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::{StaticSourceIndex, TransientContinuousEffect};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -5793,6 +5802,60 @@ mod tests {
         assert_eq!(obj.trigger_definitions.len(), 1);
         assert_eq!(obj.replacement_definitions.len(), 1);
         assert_eq!(obj.static_definitions.len(), 1);
+    }
+
+    #[test]
+    fn impending_not_creature_participates_in_layer_timestamp_ordering() {
+        let mut state = setup();
+        let impending = make_creature(&mut state, "Impending Permanent", 3, 3, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&impending).unwrap();
+            obj.timestamp = 5;
+            obj.cast_variant_paid = Some((CastVariantPaid::Impending, 1));
+            obj.counters.insert(CounterType::Time, 1);
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .condition(StaticCondition::And {
+                        conditions: vec![
+                            StaticCondition::CastVariantPaid {
+                                variant: CastVariantPaid::Impending,
+                            },
+                            StaticCondition::HasCounters {
+                                counters: CounterMatch::OfType(CounterType::Time),
+                                minimum: 1,
+                                maximum: None,
+                            },
+                        ],
+                    })
+                    .modifications(vec![ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    }]),
+            );
+        }
+
+        let animator = make_creature(&mut state, "Later Animator", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&animator).unwrap();
+            obj.timestamp = 10;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: impending })
+                    .modifications(vec![ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    }]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&impending]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "CR 613.1d + CR 613.7: a later Layer 4 AddType must apply after Impending's RemoveType"
+        );
     }
 
     #[test]

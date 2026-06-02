@@ -1148,7 +1148,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Plot(_) => "plot".to_string(),
         Keyword::Craft(_) => "craft".to_string(),
         Keyword::Offspring(_) => "offspring".to_string(),
-        Keyword::Impending(_) => "impending".to_string(),
+        Keyword::Impending { counters, .. } => format!("impending {counters}"),
         Keyword::LevelUp(_) => "level up".to_string(),
         Keyword::Hideaway(_) => "hideaway".to_string(),
         Keyword::Casualty(n) => format!("casualty {n}"),

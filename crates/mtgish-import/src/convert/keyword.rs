@@ -339,11 +339,11 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         // permanent's impending cost was paid and it has a time counter
         // on it, it's not a creature" + "At the beginning of your end
         // step, if this permanent's impending cost was paid and it has
-        // a time counter on it, remove a time counter from it." Engine
-        // stores only the mana cost; the N (time-counter count) is
-        // dropped — the engine derives it from a separate metadata
-        // pipeline.
-        Rule::Impending(_n, c) => Keyword::Impending(pure_mana(c, "Rule::Impending", path)?),
+        // a time counter on it, remove a time counter from it."
+        Rule::Impending(n, c) => Keyword::Impending {
+            cost: pure_mana(c, "Rule::Impending", path)?,
+            counters: int_or_gap(n, "Rule::Impending.count", path)?,
+        },
 
         // CR 702.173a: Freerunning {cost} — alternative cost. Mana-only.
         Rule::Freerunning(c) => Keyword::Freerunning(pure_mana(c, "Rule::Freerunning", path)?),
