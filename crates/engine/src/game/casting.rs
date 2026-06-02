@@ -12644,7 +12644,6 @@ mod tests {
     ///   reads it via `QuantityRef::PreviousEffectAmount`.
     #[test]
     fn exsanguinate_oracle_text_drains_each_opponent_and_gains_controller() {
-        use super::super::engine::apply_as_current;
         use crate::types::ability::{AbilityKind, PlayerFilter, QuantityRef};
         use crate::types::zones::Zone;
 
@@ -12700,6 +12699,9 @@ mod tests {
         }
 
         // --- Runtime contract (2-player) ------------------------------------
+        // Driven through the canonical `GameRunner::cast` pipeline so the
+        // drain/gain life deltas are read from `CastOutcome` rather than
+        // hand-picked snapshots.
         let mut state = setup_game_at_main_phase();
         let obj_id = create_object(
             &mut state,
@@ -12723,47 +12725,14 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
 
-        let controller_life_before = state.players[0].life;
-        let opponent_life_before = state.players[1].life;
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+        let outcome = runner.cast(obj_id).x(3).resolve();
 
-        let result = apply_as_current(
-            &mut state,
-            GameAction::CastSpell {
-                object_id: obj_id,
-                card_id: CardId(910),
-                targets: vec![],
-            },
-        )
-        .unwrap();
-        let max = match result.waiting_for {
-            WaitingFor::ChooseXValue { max, .. } => max,
-            other => panic!("expected ChooseXValue, got {other:?}"),
-        };
-        assert_eq!(
-            max, 3,
-            "3 colorless mana bounds the generic {{X}} portion at 3"
-        );
-
-        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
-
-        for _ in 0..5 {
-            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                break;
-            }
-            let _ = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-        }
-
-        assert_eq!(
-            opponent_life_before - state.players[1].life,
-            3,
-            "the single opponent loses exactly X = 3 life"
-        );
-        // 2-player: only one opponent lost life, so the sum is 3.
-        assert_eq!(
-            state.players[0].life - controller_life_before,
-            3,
-            "controller gains exactly the 3 life lost this way (sum across opponents)"
-        );
+        // CR 119.3: the single opponent loses exactly X = 3 life.
+        outcome.assert_life_delta(PlayerId(1), -3);
+        // 2-player: only one opponent lost life, so the controller's gain (the
+        // sum across opponents) is exactly 3 (CR 608.2c PreviousEffectAmount).
+        outcome.assert_life_delta(PlayerId(0), 3);
     }
 
     /// Exsanguinate in a 3-player game locks the SUM-across-opponents semantic
@@ -12777,7 +12746,6 @@ mod tests {
     ///   `QuantityRef::PreviousEffectAmount`.
     #[test]
     fn exsanguinate_three_player_controller_gains_sum_across_opponents() {
-        use super::super::engine::apply_as_current;
         use crate::types::ability::AbilityKind;
         use crate::types::format::FormatConfig;
         use crate::types::zones::Zone;
@@ -12818,49 +12786,17 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
 
-        let controller_life_before = state.players[0].life;
-        let opp1_life_before = state.players[1].life;
-        let opp2_life_before = state.players[2].life;
+        // Drive the cast through the canonical pipeline; assert the SUM-vs-
+        // per-opponent discriminator via `CastOutcome` life deltas.
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+        let outcome = runner.cast(obj_id).x(3).resolve();
 
-        let result = apply_as_current(
-            &mut state,
-            GameAction::CastSpell {
-                object_id: obj_id,
-                card_id: CardId(911),
-                targets: vec![],
-            },
-        )
-        .unwrap();
-        assert!(matches!(
-            result.waiting_for,
-            WaitingFor::ChooseXValue { max: 3, .. }
-        ));
-
-        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
-
-        for _ in 0..5 {
-            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                break;
-            }
-            let _ = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-        }
-
-        assert_eq!(
-            opp1_life_before - state.players[1].life,
-            3,
-            "opponent 1 loses exactly X = 3 life"
-        );
-        assert_eq!(
-            opp2_life_before - state.players[2].life,
-            3,
-            "opponent 2 loses exactly X = 3 life"
-        );
+        // CR 119.3: each opponent loses exactly X = 3 life.
+        outcome.assert_life_delta(PlayerId(1), -3);
+        outcome.assert_life_delta(PlayerId(2), -3);
         // SUM-across-opponents: 3 + 3 = 6, NOT 3 (max/single opponent).
-        assert_eq!(
-            state.players[0].life - controller_life_before,
-            6,
-            "controller gains the SUM of life lost across both opponents (3+3=6)"
-        );
+        // CR 608.2c: the GainLife sub-ability reads the accumulated life lost.
+        outcome.assert_life_delta(PlayerId(0), 6);
     }
 
     /// Passing priority during `ChooseXValue` is illegal — caster must commit
@@ -16476,51 +16412,22 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
 
-        // CR 601.2b: X for the additional cost is announced as the spell is cast.
-        let waiting = handle_cast_spell(
-            &mut state,
-            PlayerId(0),
-            spell,
-            CardId(15404),
-            &mut Vec::new(),
-        )
-        .expect("pay-X-life additional cost should prompt for X");
-        state.waiting_for = waiting;
-        match state.waiting_for {
-            // CR 119.4: the maximum payable life equals the full life total (20).
-            WaitingFor::ChooseXValue { max, .. } => assert_eq!(max, 20),
-            ref other => panic!("expected ChooseXValue, got {other:?}"),
-        }
+        // CR 601.2b: X for the additional pay-life cost is announced as the spell
+        // is cast; the fluent driver announces X=3 and resolves the DestroyAll.
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+        let outcome = runner.cast(spell).x(3).resolve();
 
-        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
-        // CR 119.4: 3 life actually paid; CR 601.2f: the mana cost is also paid.
-        assert_eq!(state.players[0].life, 17);
-        assert_eq!(state.players[0].mana_pool.total(), 0);
-        assert_eq!(state.stack.len(), 1);
-        // CR 107.3: the announced X is locked onto the spell on the stack.
-        match &state.stack[0].kind {
-            StackEntryKind::Spell {
-                ability: Some(ability),
-                ..
-            } => assert_eq!(ability.chosen_x, Some(3)),
-            other => panic!("expected spell on stack, got {other:?}"),
-        }
-
-        for _ in 0..5 {
-            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                break;
-            }
-            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
-        }
+        // CR 119.4: exactly 3 life paid for the additional cost (shared X = 3).
+        outcome.assert_life_delta(PlayerId(0), -3);
+        // CR 601.2f: the mana cost is fully paid (pool drained).
+        assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
 
         // CR 701.8a + CR 202.3: at X=3, artifact MV2 and creature MV3 (LE bound)
-        // are destroyed to the owner's graveyard.
-        assert_eq!(state.objects[&artifact_mv2].zone, Zone::Graveyard);
-        assert_eq!(state.objects[&creature_mv3].zone, Zone::Graveyard);
-        // Creature MV4 exceeds X=3 and survives on the battlefield.
-        assert_eq!(state.objects[&creature_mv4].zone, Zone::Battlefield);
-        // The land matches neither Or branch (not artifact/creature) and survives.
-        assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+        // are destroyed to the owner's graveyard; creature MV4 exceeds X=3 and
+        // the land matches neither Or branch — both survive on the battlefield.
+        // This proves the single shared X (CR 107.3) drives the DestroyAll filter.
+        outcome.assert_zone(&[artifact_mv2, creature_mv3], Zone::Graveyard);
+        outcome.assert_zone(&[creature_mv4, land], Zone::Battlefield);
     }
 
     #[test]
@@ -22241,67 +22148,24 @@ mod tests {
         let big = add_creature_with_mv(&mut state, CardId(63), PlayerId(1), "Three Drop", 3);
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 4);
 
-        let mut events = Vec::new();
-        state.waiting_for =
-            handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(61), &mut events).unwrap();
-        // Modes 0 (tokens) and 2 (exile target creature with MV X or less).
-        state.waiting_for =
-            handle_select_modes(&mut state, PlayerId(0), vec![0, 2], &mut events).unwrap();
-        assert!(
-            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
-            "X must be announced before mode-2 target legality (CR 601.2b), got {:?}",
-            state.waiting_for
-        );
-
-        state.waiting_for = apply_as_current(&mut state, GameAction::ChooseX { value: 2 })
-            .unwrap()
-            .waiting_for;
-        // Mode 0 (tokens) targets a player; mode 2 targets a creature. After X is
-        // chosen, the deferred target slots are built with the resolved X.
-        let WaitingFor::TargetSelection { target_slots, .. } = &state.waiting_for else {
-            panic!(
-                "expected target selection after choosing X, got {:?}",
-                state.waiting_for
-            );
-        };
-        // The creature slot must include the MV<=2 creature and exclude the MV-3
-        // creature (CR 202.3 + X = 2). Locate the slot whose legal set contains
-        // the small creature (the other slot is the player-owner slot for tokens).
-        let creature_slot = target_slots
-            .iter()
-            .find(|slot| slot.legal_targets.contains(&TargetRef::Object(small)))
-            .expect("a target slot must offer the MV<=2 creature as a legal exile target");
-        assert!(
-            !creature_slot
-                .legal_targets
-                .contains(&TargetRef::Object(big)),
-            "with X = 2, the MV-3 creature must NOT be a legal exile target"
-        );
-
-        // Select the targeted player (controller) for the token owner and the
-        // small creature for the exile. Walk slots in order, matching each to the
-        // legal target it offers.
-        let mut chosen = Vec::new();
-        for slot in target_slots.iter() {
-            if slot.legal_targets.contains(&TargetRef::Object(small)) {
-                chosen.push(TargetRef::Object(small));
-            } else if slot.legal_targets.contains(&TargetRef::Player(PlayerId(0))) {
-                chosen.push(TargetRef::Player(PlayerId(0)));
-            } else {
-                chosen.push(
-                    slot.legal_targets
-                        .first()
-                        .cloned()
-                        .expect("each slot must offer at least one legal target"),
-                );
-            }
-        }
-        state.waiting_for =
-            apply_as_current(&mut state, GameAction::SelectTargets { targets: chosen })
-                .unwrap()
-                .waiting_for;
-
-        stack::resolve_top(&mut state, &mut events);
+        // Drive the modal cast through the canonical pipeline: choose modes
+        // 0 (tokens) and 2 (exile target creature with MV X or less), announce
+        // X = 2, then declare the exile target (small) and the token owner (P0).
+        // The driver matches each declared intent to its slot, so no flat
+        // target vector is hand-built (CR 601.2c). NOTE: this test declares only
+        // `small` as the exile target, so `big` surviving below proves the cast
+        // resolved correctly — NOT that the MV<=X slot filter excluded it. That
+        // slot-legality exclusion is covered separately by
+        // `activated_modal_x_target_selection_carries_labels_and_pays_mana`.
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+        let outcome = runner
+            .cast(spell_id)
+            .modes(&[0, 2])
+            .x(2)
+            .target_object(small)
+            .target_player(PlayerId(0))
+            .resolve();
+        let state = outcome.state();
 
         // CR 701.13 + CR 406: the targeted creature is exiled.
         assert_eq!(
@@ -22312,7 +22176,7 @@ mod tests {
         assert_eq!(
             state.objects[&big].zone,
             Zone::Battlefield,
-            "the untargeted MV-3 creature must remain on the battlefield"
+            "the untargeted MV-3 creature must remain on the battlefield (it was never declared as a target)"
         );
         // Mode 0: the targeted player (P0) receives exactly X = 2 Eldrazi Spawn
         // tokens, each a 0/1 with a Sacrifice: Add {C} ability.
@@ -22402,113 +22266,31 @@ mod tests {
         }
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 4);
 
-        let mut events = Vec::new();
-        state.waiting_for =
-            handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(71), &mut events).unwrap();
-        // Modes 1 (scry X, draw) and 3 (exile up to X target cards from graveyards).
-        state.waiting_for =
-            handle_select_modes(&mut state, PlayerId(0), vec![1, 3], &mut events).unwrap();
-        // CR 601.2b: the mode-3 "up to X" multi-target maximum references X, so
-        // target selection must be deferred until X is announced — proving the
-        // multi_target branch of `ability_target_legality_needs_chosen_x`.
-        assert!(
-            matches!(state.waiting_for, WaitingFor::ChooseXValue { .. }),
-            "mode-3 'up to X' must defer target selection until X is chosen \
-             (CR 601.2b), got {:?}",
-            state.waiting_for
-        );
+        // Drive the modal cast through the canonical pipeline: choose modes
+        // 1 (scry X, draw) and 3 (exile up to X target cards from graveyards),
+        // announce X = 2, then declare the scry player (P0) and both graveyard
+        // cards as the mode-3 "up to X = 2" targets. That both graveyard cards
+        // are accepted proves the "up to X" maximum resolved to 2
+        // (resolve_multi_target_bounds); the driver matches each declared
+        // intent to its slot in written order (CR 601.2c). The driver auto-
+        // answers the mid-resolution scry ordering prompt (CR 701.22a), keeping
+        // the looked-at cards on top.
+        let mut runner = crate::game::scenario::GameRunner::from_state(state);
+        let outcome = runner
+            .cast(spell_id)
+            .modes(&[1, 3])
+            .x(2)
+            .target_player(PlayerId(0))
+            .target_objects(&[gy_a, gy_b])
+            .resolve();
 
-        state.waiting_for = apply_as_current(&mut state, GameAction::ChooseX { value: 2 })
-            .unwrap()
-            .waiting_for;
-        // The deferred target slot for mode 3 must offer the graveyard cards and
-        // resolve the "up to X" maximum to 2 (resolve_multi_target_bounds).
-        let WaitingFor::TargetSelection { target_slots, .. } = &state.waiting_for else {
-            panic!(
-                "expected mode-3 graveyard target selection after choosing X, got {:?}",
-                state.waiting_for
-            );
-        };
-        let gy_slot = target_slots
-            .iter()
-            .find(|slot| slot.legal_targets.contains(&TargetRef::Object(gy_a)))
-            .expect("mode-3 slot must offer graveyard card A");
-        assert!(
-            gy_slot.legal_targets.contains(&TargetRef::Object(gy_b)),
-            "mode-3 slot must offer both graveyard cards as legal targets"
-        );
-
-        // CR 601.2c: targets are declared slot-by-slot in written order. Mode 1
-        // ("Target player scries X") contributes a player slot that precedes the
-        // mode-3 graveyard slots, so the flat target vector must cover every slot:
-        // the caster for the player slot (so the scry+draw below is observed on
-        // P0) and the two graveyard cards for the mode-3 "up to X = 2" slots.
-        let mut remaining_gy = vec![gy_a, gy_b];
-        let mut chosen: Vec<TargetRef> = Vec::new();
-        for slot in target_slots {
-            if let Some(pos) = remaining_gy
-                .iter()
-                .position(|&g| slot.legal_targets.contains(&TargetRef::Object(g)))
-            {
-                chosen.push(TargetRef::Object(remaining_gy.remove(pos)));
-            } else if slot.legal_targets.contains(&TargetRef::Player(PlayerId(0))) {
-                chosen.push(TargetRef::Player(PlayerId(0)));
-            } else {
-                chosen.push(
-                    slot.legal_targets
-                        .first()
-                        .cloned()
-                        .expect("each target slot must offer at least one legal target"),
-                );
-            }
-        }
-        // Both graveyard cards must be assignable, proving the mode-3 "up to X"
-        // maximum resolved to 2 (resolve_multi_target_bounds).
-        assert!(
-            remaining_gy.is_empty(),
-            "mode-3 'up to X = 2' must accept both graveyard cards"
-        );
-
-        state.waiting_for =
-            apply_as_current(&mut state, GameAction::SelectTargets { targets: chosen })
-                .unwrap()
-                .waiting_for;
-
-        // Baseline captured immediately before resolution: the only hand change
-        // during the resolve loop is mode 1's draw (+1) — scry does not change
-        // hand size and the mode-3 exile moves graveyard->exile, never the hand.
-        let hand_before = state.players[0].hand.len();
-
-        // Resolve the spell, submitting any scry ordering prompt that surfaces
-        // mid-resolution (CR 701.22a). Keep the looked-at cards on top.
-        for _ in 0..8 {
-            stack::resolve_top(&mut state, &mut events);
-            if let WaitingFor::ScryChoice { cards, .. } = state.waiting_for.clone() {
-                state.waiting_for = apply_as_current(&mut state, GameAction::SelectCards { cards })
-                    .unwrap()
-                    .waiting_for;
-                continue;
-            }
-            break;
-        }
-
-        // CR 701.22a + draw: the player scried then drew exactly one card.
-        assert_eq!(
-            state.players[0].hand.len(),
-            hand_before + 1,
-            "mode 1 must scry then draw exactly one card"
-        );
+        // CR 701.22a + draw + CR 601.2a: the hand baseline is captured at stack
+        // commit, so the only hand change during resolution is mode 1's single
+        // draw (scry never changes hand size; the mode-3 exile moves
+        // graveyard->exile, never the hand).
+        outcome.assert_hand_drawn(PlayerId(0), 1);
         // CR 701.13 + CR 406: both selected graveyard cards are exiled.
-        assert_eq!(
-            state.objects[&gy_a].zone,
-            Zone::Exile,
-            "mode-3 exile must move graveyard card A to exile"
-        );
-        assert_eq!(
-            state.objects[&gy_b].zone,
-            Zone::Exile,
-            "mode-3 exile must move graveyard card B to exile"
-        );
+        outcome.assert_zone(&[gy_a, gy_b], Zone::Exile);
     }
 
     /// CR 700.2 + CR 700.2d: Kozilek's Command is a "Choose two —" spell, so

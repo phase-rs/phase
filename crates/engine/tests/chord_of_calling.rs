@@ -29,7 +29,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{ConvokeMode, WaitingFor};
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -224,29 +224,13 @@ fn chord_x_four_offers_only_mv_le_four_then_battlefield() {
     // X=4 → total cost {4}{G}{G}{G} = 7 green sources from pool.
     add_mana(&mut runner, ManaType::Green, 7);
 
-    let card_id = runner.state().objects[&spell_id].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: spell_id,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting Chord of Calling must be accepted");
-
-    // CR 107.3a + CR 601.2b: X is announced before mana is paid.
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::ChooseXValue { .. }),
-        "expected ChooseXValue, got {:?}",
-        runner.state().waiting_for
-    );
-    runner
-        .act(GameAction::ChooseX { value: 4 })
-        .expect("announcing X=4 must be accepted");
-
-    runner.advance_until_stack_empty();
+    // CR 107.3a + CR 601.2b: announce X=4 through the fluent driver; the pool
+    // auto-pays the {4}{G}{G}{G} cost and the driver halts at the mid-resolution
+    // SearchChoice (the discriminating prompt for this test).
+    let outcome = runner.cast(spell_id).x(4).resolve();
 
     // CR 701.23a: the offer must be exactly the MV-≤-4 creatures.
-    match &runner.state().waiting_for {
+    match outcome.final_waiting_for() {
         WaitingFor::SearchChoice { cards, .. } => {
             assert_eq!(
                 cards.len(),
@@ -335,58 +319,21 @@ fn chord_convoke_paid_x_does_not_corrupt_announced_x() {
         "Chord must carry the Convoke keyword"
     );
 
-    let card_id = runner.state().objects[&spell_id].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: spell_id,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting Chord with Convoke must be accepted");
-
-    // CR 601.2f + CR 702.51b: X is announced first; convoke applies afterward.
-    let convoke_mode = match runner.state().waiting_for.clone() {
-        WaitingFor::ChooseXValue { convoke_mode, .. } => convoke_mode,
-        other => panic!("expected ChooseXValue, got {other:?}"),
-    };
-    assert_eq!(
-        convoke_mode,
-        Some(ConvokeMode::Convoke),
-        "Convoke keyword must thread through ChooseXValue (CR 702.51b)"
-    );
-
-    runner
-        .act(GameAction::ChooseX { value: 4 })
-        .expect("announcing X=4 must be accepted");
-
-    // Pay {G}{G}{G} via convoke (green) and the {4} X-generic via convoke
-    // (colorless). Every shard of the {X}{G}{G}{G} cost is convoke-paid.
-    for &c in convokers.iter().take(3) {
-        runner
-            .act(GameAction::TapForConvoke {
-                object_id: c,
-                mana_type: ManaType::Green,
-            })
-            .expect("convoke-tapping a green creature for {G} must be accepted");
-    }
-    for &c in convokers.iter().skip(3) {
-        runner
-            .act(GameAction::TapForConvoke {
-                object_id: c,
-                mana_type: ManaType::Colorless,
-            })
-            .expect("convoke-tapping a creature for the {4} X-generic must be accepted");
-    }
-
-    runner
-        .act(GameAction::PassPriority)
-        .expect("finalizing the convoke payment must be accepted");
-
-    runner.advance_until_stack_empty();
+    // CR 601.2f + CR 702.51b: X is announced first, then the ENTIRE
+    // {X}{G}{G}{G} cost is convoke-paid. The fluent driver announces X=4 and
+    // taps every convoke creature for mana of its color (green) — 3 cover the
+    // {G}{G}{G} colored shards and the remaining 4 green pay the {4} X-generic
+    // (CR 702.51b: a tapped creature pays {1} or one mana of its color, and a
+    // colored payment is a legal payment for a generic shard).
+    let outcome = runner
+        .cast(spell_id)
+        .x(4)
+        .convoke_with(&convokers)
+        .resolve();
 
     // THE DISCRIMINATOR: convoke-toward-X must not have shifted the announced X.
     // The offer must still be exactly MV-≤-4.
-    match &runner.state().waiting_for {
+    match outcome.final_waiting_for() {
         WaitingFor::SearchChoice { cards, .. } => {
             assert_eq!(
                 cards.len(),
@@ -456,35 +403,20 @@ fn chord_x_zero_offers_only_mv_zero_and_fails_to_find_cleanly() {
     // X=0 → total cost {G}{G}{G} = 3 green sources.
     add_mana(&mut runner, ManaType::Green, 3);
 
-    let card_id = runner.state().objects[&spell_id].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: spell_id,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting Chord must be accepted");
-
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::ChooseXValue { .. }),
-        "expected ChooseXValue, got {:?}",
-        runner.state().waiting_for
-    );
-    runner
-        .act(GameAction::ChooseX { value: 0 })
-        .expect("announcing X=0 must be accepted");
-
-    runner.advance_until_stack_empty();
+    // CR 107.3a (X=0): announce X=0 via the fluent driver; the pool auto-pays
+    // {G}{G}{G} and the spell resolves to completion (no SearchChoice surfaces).
+    let outcome = runner.cast(spell_id).x(0).resolve();
 
     // CR 701.23a: with no MV-0 creature, the search finds nothing — it must
-    // resolve cleanly rather than pause on a non-empty SearchChoice.
+    // resolve cleanly rather than pause on a non-empty SearchChoice. The driver
+    // halts at the post-resolution Priority window, never a SearchChoice.
     assert!(
-        !matches!(runner.state().waiting_for, WaitingFor::SearchChoice { .. }),
+        !matches!(outcome.final_waiting_for(), WaitingFor::SearchChoice { .. }),
         "X=0 with no MV-0 creatures must fail to find (no SearchChoice prompt), got {:?}",
-        runner.state().waiting_for
+        outcome.final_waiting_for()
     );
     assert!(
-        runner.state().stack.is_empty(),
+        outcome.state().stack.is_empty(),
         "the stack must drain after the fail-to-find resolution"
     );
 }
