@@ -14,3 +14,25 @@ pub fn guard_spectator_join(game_code: &str) -> Result<(), String> {
 pub fn guard_spectate_draft(draft_code: &str) -> Result<(), String> {
     validate_token("draft_code", draft_code, MAX_GAME_CODE_LEN)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spectator_join_accepts_valid_code() {
+        assert!(guard_spectator_join("ABC123").is_ok());
+    }
+
+    #[test]
+    fn spectator_join_rejects_oversized_code() {
+        let err = guard_spectator_join(&"x".repeat(MAX_GAME_CODE_LEN + 1)).unwrap_err();
+        assert!(err.contains("game_code"));
+    }
+
+    #[test]
+    fn spectate_draft_rejects_oversized_code() {
+        let err = guard_spectate_draft(&"x".repeat(MAX_GAME_CODE_LEN + 1)).unwrap_err();
+        assert!(err.contains("draft_code"));
+    }
+}

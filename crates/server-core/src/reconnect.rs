@@ -191,25 +191,4 @@ mod tests {
         let result = mgr.attempt_reconnect("DRAFT01", PlayerId(1));
         assert!(matches!(result, ReconnectResult::Ok { .. }));
     }
-
-    mod spectator_wire_guard_tests {
-        use crate::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
-
-        #[test]
-        fn spectator_join_accepts_valid_code() {
-            assert!(guard_spectator_join("ABC123").is_ok());
-        }
-
-        #[test]
-        fn spectator_join_rejects_oversized_code() {
-            let err = guard_spectator_join(&"x".repeat(65)).unwrap_err();
-            assert!(err.contains("game_code"));
-        }
-
-        #[test]
-        fn spectate_draft_rejects_oversized_code() {
-            let err = guard_spectate_draft(&"x".repeat(65)).unwrap_err();
-            assert!(err.contains("draft_code"));
-        }
-    }
 }
