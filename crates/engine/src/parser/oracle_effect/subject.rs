@@ -1,8 +1,8 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till};
+use nom::bytes::complete::{tag, take_till, take_until};
 use nom::combinator::{all_consuming, map, opt, value, verify};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::animation::{
@@ -18,7 +18,7 @@ use crate::types::ability::{
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{ProhibitionScope, StaticMode};
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
 use super::super::oracle_nom::error::OracleResult;
@@ -28,7 +28,8 @@ use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
-    parse_chosen_qualifier_subject, parse_continuous_modifications, parse_static_line_multi,
+    parse_cant_be_activated_exemption_in_text, parse_chosen_qualifier_subject,
+    parse_continuous_modifications, parse_static_line_multi,
 };
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase};
 use super::super::oracle_util::{
@@ -354,6 +355,45 @@ fn try_parse_subject_restriction_clause(
                     .modifications(vec![ContinuousModification::AddStaticMode {
                         mode: StaticMode::MustBeBlocked,
                     }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: application.target,
+            },
+            distribute: None,
+            multi_target: None,
+            duration: Some(Duration::UntilEndOfTurn),
+            sub_ability: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
+    // CR 602.5 + CR 603.2a: "[subject] activated abilities can't be activated" —
+    // the EFFECT/predicate form (Dovin Baan, Xathrid Gorgon, Braided Net), mirror
+    // of the static dispatch in `oracle_static/dispatch.rs` (`StaticMode::CantBeActivated`).
+    // Splits the same way as the `must be blocked` arm: `before` is the subject
+    // ("its", "that creature", "target creature", "~"). Bare possessive/pronoun
+    // anaphors ("its"/"it"/"their"/"that creature"/"~") refer back to a previously
+    // targeted permanent in the same conjunction (Dovin Baan: "up to one target
+    // creature gets -3/-0 and its activated abilities can't be activated"), so they
+    // bind to `ParentTarget`; `parse_subject_application` resolves the typed-subject
+    // forms ("target creature's", "each creature you control").
+    if let Some((before, _)) = tp.split_around(" activated abilities can't be activated") {
+        let subject = before.original.trim();
+        let application = subject_application_for_cant_be_activated(subject, ctx)?;
+        let affected = static_affected_for_application(&application);
+        // CR 605.1a: "unless they're mana abilities" exemption rides on the mode.
+        let exemption = parse_cant_be_activated_exemption_in_text(&lower);
+        let mode = StaticMode::CantBeActivated {
+            who: ProhibitionScope::AllPlayers,
+            source_filter: TargetFilter::SelfRef,
+            exemption,
+        };
+        return Some(ParsedEffectClause {
+            effect: Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(mode.clone())
+                    .affected(affected)
+                    .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: application.target,
             },
@@ -1208,6 +1248,62 @@ pub(super) fn parse_leading_subject_application(
 ) -> Option<SubjectApplication> {
     let subject_text = extract_subject_text(text)?;
     parse_subject_application(&subject_text, ctx)
+}
+
+/// CR 602.5 + CR 603.2a + CR 608.2c: Resolve the subject of an EFFECT-form
+/// "[subject] activated abilities can't be activated" clause.
+///
+/// The predicate is grammatically a possessive ("its activated abilities"), so
+/// the subject is the *possessor* of the abilities, not a standalone noun
+/// phrase. `parse_subject_application` does not recognize the bare possessive
+/// anaphors "its"/"their" (it handles "it" but not its possessive form). These
+/// anaphors back-reference a permanent targeted earlier in the same conjunction
+/// (Dovin Baan: "up to one target creature gets -3/-0 and its activated
+/// abilities can't be activated") — so they resolve to `ParentTarget`, the same
+/// chosen object the sibling pump conjunct targets. This mirrors how the
+/// must-be-blocked / extra-blockers conjuncts thread `ParentTarget` onto the
+/// trailing combat-requirement clause. Typed subjects ("target creature's",
+/// "each creature you control") and the explicit self-reference "~" delegate to
+/// `parse_subject_application` for the full grammar.
+fn subject_application_for_cant_be_activated(
+    subject: &str,
+    ctx: &mut ParseContext,
+) -> Option<SubjectApplication> {
+    let lower = subject.to_lowercase();
+    if matches!(
+        lower.as_str(),
+        "its" | "it" | "their" | "that creature" | "that permanent"
+    ) {
+        return Some(SubjectApplication {
+            affected: TargetFilter::ParentTarget,
+            target: Some(TargetFilter::ParentTarget),
+            multi_target: None,
+            inherits_parent: true,
+            is_optional: false,
+        });
+    }
+    // Typed possessor noun phrases carry a trailing "'s" ("target creature's",
+    // "~'s", "each creature you control's"). Strip the possessive marker so the
+    // remaining noun phrase routes through the full subject grammar.
+    let possessor = strip_possessive_subject_suffix(subject);
+    parse_subject_application(possessor, ctx)
+}
+
+fn strip_possessive_subject_suffix(subject: &str) -> &str {
+    type VE<'a> = OracleError<'a>;
+
+    let mut parser = alt((
+        all_consuming(terminated(take_until::<_, _, VE>("'s"), tag("'s"))),
+        all_consuming(terminated(
+            take_until::<_, _, VE>("\u{2019}s"),
+            tag("\u{2019}s"),
+        )),
+    ));
+
+    parser
+        .parse(subject)
+        .map(|(_, possessor)| possessor.trim())
+        .unwrap_or(subject)
 }
 
 /// CR 608.2k: Resolve bare pronoun "they" based on parser context.

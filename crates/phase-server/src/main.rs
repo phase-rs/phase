@@ -45,6 +45,7 @@ use server_core::protocol::{
 };
 use server_core::resolve_deck;
 use server_core::session::{ActionResult, GameSession, SessionManager};
+use server_core::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
@@ -3694,6 +3695,14 @@ async fn handle_client_message(
         }
 
         ClientMessage::SpectatorJoin { game_code } => {
+            if let Err(reason) = guard_spectator_join(&game_code) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             debug!(game = %game_code, "spectator join request");
             // Spectator support is planned but not yet implemented
             let msg = ServerMessage::Error {
@@ -4345,6 +4354,14 @@ async fn handle_client_message(
         }
 
         ClientMessage::SpectateDraft { draft_code } => {
+            if let Err(reason) = guard_spectate_draft(&draft_code) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             let drafts = draft_state.lock().await;
             if let Some(session) = drafts.sessions.get(&draft_code) {
                 // Derive visibility from session config (host-configured, per D-07)

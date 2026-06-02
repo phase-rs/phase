@@ -26458,6 +26458,143 @@ mod tests {
         );
     }
 
+    /// CR 602.5 + CR 603.2a: Standalone EFFECT-form activation prohibition.
+    /// "target creature's activated abilities can't be activated" emits a
+    /// GenericEffect carrying `StaticMode::CantBeActivated { who: AllPlayers }`.
+    /// The selection lives on the outer `target` slot (the chosen creature); the
+    /// per-static `affected` is `ParentTarget` (the runtime-bound application
+    /// spec, per the `static_affected_for_application` convention), NOT a
+    /// SelfRef-of-the-source.
+    #[test]
+    fn cant_be_activated_effect_standalone_targets_creature() {
+        use crate::types::statics::{ActivationExemption, ProhibitionScope, StaticMode};
+        let def = parse_effect_chain(
+            "target creature's activated abilities can't be activated",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                duration,
+            } => {
+                assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+                assert_eq!(static_abilities.len(), 1);
+                let sd = &static_abilities[0];
+                assert!(
+                    matches!(
+                        &sd.mode,
+                        StaticMode::CantBeActivated {
+                            who: ProhibitionScope::AllPlayers,
+                            source_filter: TargetFilter::SelfRef,
+                            exemption: ActivationExemption::None,
+                        }
+                    ),
+                    "expected CantBeActivated(AllPlayers), got {:?}",
+                    sd.mode
+                );
+                assert!(
+                    sd.modifications
+                        .contains(&ContinuousModification::AddStaticMode {
+                            mode: sd.mode.clone()
+                        }),
+                    "expected AddStaticMode modification, got {:?}",
+                    sd.modifications
+                );
+                assert_eq!(
+                    sd.affected,
+                    Some(TargetFilter::ParentTarget),
+                    "affected must be the runtime-bound ParentTarget, not SelfRef"
+                );
+                // The selection filter rides on the outer target slot.
+                let outer = target.as_ref().expect("outer target slot must be set");
+                assert!(
+                    matches!(
+                        outer,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Creature))
+                    ),
+                    "outer target must be the creature selection filter, got {outer:?}"
+                );
+            }
+            other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 602.5 + CR 605.1a: EFFECT-form activation prohibitions preserve the
+    /// shared mana-ability exemption suffix instead of defaulting every
+    /// transient `CantBeActivated` static to `ActivationExemption::None`.
+    #[test]
+    fn cant_be_activated_effect_standalone_preserves_mana_exemption() {
+        use crate::types::statics::{ActivationExemption, StaticMode};
+        let def = parse_effect_chain(
+            "target creature's activated abilities can't be activated unless they're mana abilities",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        let sd = static_abilities
+            .first()
+            .expect("expected transient CantBeActivated static");
+        assert!(
+            matches!(
+                &sd.mode,
+                StaticMode::CantBeActivated {
+                    exemption: ActivationExemption::ManaAbilities,
+                    ..
+                }
+            ),
+            "expected mana-ability exemption, got {:?}",
+            sd.mode
+        );
+    }
+
+    /// CR 602.5 + CR 603.2a + CR 608.2c: Dovin Baan's +1 — "up to one target
+    /// creature gets -3/-0 and its activated abilities can't be activated."
+    /// The compound splits into a Pump primary and a CantBeActivated conjunct
+    /// chained as a sub_ability whose `affected` binds to the same chosen
+    /// creature via `ParentTarget`.
+    #[test]
+    fn dovin_baan_compound_yields_pump_and_cant_be_activated() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "up to one target creature gets -3/-0 and its activated abilities can't be activated",
+            AbilityKind::Activated,
+        );
+        // Walk the primary + sub_ability chain collecting the two effects.
+        let mut saw_pump = false;
+        let mut saw_cant_be_activated = false;
+        let mut node = Some(&def);
+        while let Some(current) = node {
+            match &*current.effect {
+                Effect::Pump { .. } => saw_pump = true,
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => {
+                    saw_cant_be_activated |= static_abilities.iter().any(|sd| {
+                        matches!(&sd.mode, StaticMode::CantBeActivated { .. })
+                            && sd.affected == Some(TargetFilter::ParentTarget)
+                    });
+                }
+                _ => {}
+            }
+            node = current.sub_ability.as_deref();
+        }
+        assert!(
+            saw_pump,
+            "expected a Pump (-3/-0) in the chain, got {:?}",
+            def.effect
+        );
+        assert!(
+            saw_cant_be_activated,
+            "expected a GenericEffect CantBeActivated (affected=ParentTarget) in the chain"
+        );
+    }
+
     #[test]
     fn pump_compound_with_extra_blockers() {
         // Give No Ground: the trailing blocking permission is a second
