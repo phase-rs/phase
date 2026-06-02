@@ -40,6 +40,7 @@ use server_core::draft_wire_guard::{
     guard_reconnect_draft,
 };
 use server_core::emote_guard::guard_emote;
+use server_core::game_action_payload_guard::guard_game_action_payload;
 use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::legacy_join_guard::guard_legacy_join_game;
@@ -2494,6 +2495,17 @@ async fn handle_client_message(
             };
 
             debug!(game = %game_code, player = ?identity.player_id, action = ?action, "Action");
+
+            // Bound client-supplied action payload sizes before the clone-heavy
+            // engine reducers process them (mirrors guard_draft_action_payload
+            // for draft actions).
+            if let Err(reason) = guard_game_action_payload(&action) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
 
             // Apply human action and collect AI follow-up results while holding the lock.
             // Filtering is deferred until after the lock is dropped to reduce contention.

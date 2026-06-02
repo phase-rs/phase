@@ -11380,6 +11380,70 @@ mod tests {
     }
 
     #[test]
+    fn mana_spend_restriction_color_count_exactly() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with exactly three colors",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithColorCount {
+                comparator: Comparator::EQ,
+                count: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_color_count_exactly_one_color() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast a spell with exactly one color",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithColorCount {
+                comparator: Comparator::EQ,
+                count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_color_count_or_more() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with two or more colors",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_color_count_or_fewer() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with two or fewer colors",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithColorCount {
+                comparator: Comparator::LE,
+                count: 2,
+            })
+        );
+    }
+
+    #[test]
     fn mana_spend_restriction_from_graveyard() {
         assert_eq!(
             crate::parser::oracle_effect::mana::parse_mana_spend_restriction(

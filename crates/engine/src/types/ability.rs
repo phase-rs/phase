@@ -1302,6 +1302,10 @@ pub enum ManaSpendRestriction {
     /// `value` is the printed threshold N; `comparator` applies
     /// `spell_mana_value <cmp> value`.
     SpellWithManaValue { comparator: Comparator, value: u32 },
+    /// CR 105.2 + CR 106.6: "Spend this mana only to cast spells with exactly N
+    /// colors" (also "N or more / N or fewer"; colorless = 0). Parameterized over
+    /// [`Comparator`] — one variant per color-count reading. `count` is N.
+    SpellWithColorCount { comparator: Comparator, count: u32 },
     /// CR 106.6 + CR 400.7: "Spend this mana only to cast spells from your
     /// graveyard" / "from exile". Gates spending on the spell's cast-from zone
     /// alone — a distinct axis from [`ManaSpendRestriction::SpellWithKeywordKindFromZone`],
