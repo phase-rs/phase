@@ -5,41 +5,10 @@
 //! reducers unless bounded here.
 
 use draft_core::types::DraftAction;
-use lobby_broker::inbound_guard::{MAX_DECK_CARD_NAME_LEN, MAX_MAIN_DECK_ENTRIES};
+use lobby_broker::inbound_guard::{validate_deck_list, MAX_MAIN_DECK_ENTRIES};
 use lobby_broker::validation::{
     validate_required_label, validate_token, MAX_DISPLAY_NAME_LEN, MAX_TOKEN_LEN,
 };
-
-fn has_control_char(value: &str) -> bool {
-    value.chars().any(|c| c.is_control())
-}
-
-fn validate_card_name(field: &str, name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err(format!("{field} must not be empty"));
-    }
-    if name.len() > MAX_DECK_CARD_NAME_LEN {
-        return Err(format!(
-            "{field} must be at most {MAX_DECK_CARD_NAME_LEN} bytes"
-        ));
-    }
-    if has_control_char(name) {
-        return Err(format!("{field} must not contain control characters"));
-    }
-    Ok(())
-}
-
-fn validate_main_deck_list(main_deck: &[String]) -> Result<(), String> {
-    if main_deck.len() > MAX_MAIN_DECK_ENTRIES {
-        return Err(format!(
-            "SubmitDeck.main_deck must contain at most {MAX_MAIN_DECK_ENTRIES} entries"
-        ));
-    }
-    for (index, name) in main_deck.iter().enumerate() {
-        validate_card_name(&format!("SubmitDeck.main_deck[{index}]"), name)?;
-    }
-    Ok(())
-}
 
 /// Validate client-supplied `DraftAction` payload fields before session dispatch.
 pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
@@ -49,7 +18,9 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
         } => {
             validate_token("Pick.card_instance_id", card_instance_id, MAX_TOKEN_LEN)?;
         }
-        DraftAction::SubmitDeck { main_deck, .. } => validate_main_deck_list(main_deck)?,
+        DraftAction::SubmitDeck { main_deck, .. } => {
+            validate_deck_list("SubmitDeck.main_deck", main_deck, MAX_MAIN_DECK_ENTRIES)?;
+        }
         DraftAction::ReportMatchResult { match_id, .. } => {
             validate_token("ReportMatchResult.match_id", match_id, MAX_TOKEN_LEN)?;
         }
@@ -100,5 +71,25 @@ mod tests {
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
         assert!(err.contains("main_deck"));
+    }
+
+    #[test]
+    fn submit_deck_rejects_invalid_card_name() {
+        let action = DraftAction::SubmitDeck {
+            seat: 0,
+            main_deck: vec!["Forest\nIsland".to_string()],
+        };
+        let err = guard_draft_action_payload(&action).unwrap_err();
+        assert!(err.contains("control characters"));
+    }
+
+    #[test]
+    fn replace_seat_with_bot_rejects_oversized_name() {
+        let action = DraftAction::ReplaceSeatWithBot {
+            seat: 0,
+            name: Some("x".repeat(MAX_DISPLAY_NAME_LEN + 1)),
+        };
+        let err = guard_draft_action_payload(&action).unwrap_err();
+        assert!(err.contains("ReplaceSeatWithBot.name"));
     }
 }
