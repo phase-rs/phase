@@ -36,11 +36,20 @@ use engine::types::phase::Phase;
 use super::rules::run_combat;
 
 /// "Whenever this creature deals combat damage to a player, you may draw a
-/// card." — a per-creature combat-damage trigger. Two creatures with the same
-/// controller carrying this trigger fire two simultaneous, same-controller
-/// triggers when both connect, which is the exact CR 603.3b ordering case.
+/// card." — a per-creature combat-damage trigger. Pairing it with a DISTINCT
+/// combat-damage trigger (`GAIN_ON_COMBAT_DAMAGE`) on the second creature keeps
+/// the two simultaneous same-controller triggers distinguishable, so the
+/// CR 603.3b ordering prompt still fires (identical no-input triggers now
+/// auto-order — see `group_is_order_independent`).
 const DRAW_ON_COMBAT_DAMAGE: &str =
     "Whenever this creature deals combat damage to a player, you may draw a card.";
+
+/// Distinct optional companion to `DRAW_ON_COMBAT_DAMAGE`: a different effect
+/// (gain life vs. draw) so the two triggers are NOT indistinguishable and the
+/// CR 603.3b prompt still fires. Gains affect P0's life, leaving the P1
+/// combat-damage life assertions untouched.
+const GAIN_ON_COMBAT_DAMAGE: &str =
+    "Whenever this creature deals combat damage to a player, you may gain 1 life.";
 
 /// Mandatory variant (no "you may") for the first-strike re-entry test. A
 /// per-creature combat-damage trigger with NO optional choice: it resolves with
@@ -52,6 +61,14 @@ const DRAW_ON_COMBAT_DAMAGE: &str =
 const DRAW_ON_COMBAT_DAMAGE_MANDATORY: &str =
     "Whenever this creature deals combat damage to a player, draw a card.";
 
+/// Distinct mandatory companion to `DRAW_ON_COMBAT_DAMAGE_MANDATORY`: a
+/// different effect (gain life vs. draw) so the two first-strike triggers stay
+/// distinguishable and the CR 603.3b prompt still fires, while remaining
+/// non-optional so the stack-drain helper never stalls on an
+/// `OptionalEffectChoice`.
+const GAIN_ON_COMBAT_DAMAGE_MANDATORY: &str =
+    "Whenever this creature deals combat damage to a player, gain 1 life.";
+
 /// Primary regression — two same-controller creatures with combat-damage
 /// triggers attack unblocked, both deal combat damage to P1, and the resulting
 /// two simultaneous same-controller triggers MUST surface a CR 603.3b
@@ -61,17 +78,19 @@ fn two_same_controller_combat_damage_triggers_surface_order_prompt_then_progress
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // Two attackers, both P0-controlled, each with the draw-on-combat-damage
-    // trigger. Distinct names so the harness can disambiguate.
+    // Two attackers, both P0-controlled, carrying DISTINCT combat-damage
+    // triggers (draw vs. gain life) so they remain distinguishable and the
+    // CR 603.3b ordering prompt still fires (identical no-input triggers now
+    // auto-order). Distinct names so the harness can disambiguate.
     let bear_a = scenario
         .add_creature_from_oracle(P0, "Tide Raider A", 2, 2, DRAW_ON_COMBAT_DAMAGE)
         .id();
     let bear_b = scenario
-        .add_creature_from_oracle(P0, "Tide Raider B", 2, 2, DRAW_ON_COMBAT_DAMAGE)
+        .add_creature_from_oracle(P0, "Tide Raider B", 2, 2, GAIN_ON_COMBAT_DAMAGE)
         .id();
 
-    // Stock P0's library so the optional draws (if taken later) are observable
-    // and never trigger a draw-from-empty loss.
+    // Stock P0's library so the optional draw (if taken later) is observable
+    // and never triggers a draw-from-empty loss.
     for name in ["Lib 1", "Lib 2", "Lib 3", "Lib 4"] {
         scenario.add_card_to_library_top(P0, name);
     }
@@ -157,11 +176,14 @@ fn order_prompt_contents_track_pending_trigger_order_state() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
+    // DISTINCT combat-damage triggers (draw vs. gain life) keep the two
+    // same-controller triggers distinguishable so the CR 603.3b prompt fires
+    // (identical no-input triggers now auto-order).
     let bear_a = scenario
         .add_creature_from_oracle(P0, "Tide Raider A", 2, 2, DRAW_ON_COMBAT_DAMAGE)
         .id();
     let bear_b = scenario
-        .add_creature_from_oracle(P0, "Tide Raider B", 2, 2, DRAW_ON_COMBAT_DAMAGE)
+        .add_creature_from_oracle(P0, "Tide Raider B", 2, 2, GAIN_ON_COMBAT_DAMAGE)
         .id();
     for name in ["Lib 1", "Lib 2", "Lib 3", "Lib 4"] {
         scenario.add_card_to_library_top(P0, name);
@@ -228,11 +250,12 @@ fn first_strike_order_prompt_does_not_skip_regular_combat_damage_substep() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // Two P0 first-strike 2/2s, each with the combat-damage trigger → the
-    // first-strike sub-step produces a CR 603.3b ordering prompt. The builder
-    // borrows `&mut state`, so each creature must be built in its own scope
-    // (a fluent `.first_strike().id()` chain or multiple live builders won't
-    // compile).
+    // Two P0 first-strike 2/2s carrying DISTINCT mandatory combat-damage
+    // triggers (draw vs. gain life) → the first-strike sub-step produces a
+    // CR 603.3b ordering prompt (identical no-input triggers now auto-order, so
+    // the two triggers must differ to still prompt). The builder borrows
+    // `&mut state`, so each creature must be built in its own scope (a fluent
+    // `.first_strike().id()` chain or multiple live builders won't compile).
     let fs_a = {
         let mut b = scenario.add_creature_from_oracle(
             P0,
@@ -250,7 +273,7 @@ fn first_strike_order_prompt_does_not_skip_regular_combat_damage_substep() {
             "FS Raider B",
             2,
             2,
-            DRAW_ON_COMBAT_DAMAGE_MANDATORY,
+            GAIN_ON_COMBAT_DAMAGE_MANDATORY,
         );
         b.first_strike();
         b.id()

@@ -16,6 +16,7 @@ use crate::types::ability::{
     SpellCastingOption, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
     TriggerDefinition, TypedFilter,
 };
+use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{ActivationCadence, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -25,6 +26,7 @@ use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_inner_condition;
+use super::oracle_nom::primitives::parse_number as nom_parse_number;
 use super::oracle_nom::primitives::scan_contains;
 
 use super::oracle_casting::{
@@ -218,14 +220,21 @@ fn parse_replacement_sentence(input: &str) -> OracleResult<'_, &str> {
 
 // CR 100.2a / CR 903.5b: Deck-construction overrides like "A deck can have
 // any number of cards named X." (Tempest Hawk, Rat Colony, Relentless Rats,
-// Persistent Petitioners, Shadowborn Apostle, etc.) are deck-construction
-// metadata that override CR 100.2a's four-of limit and the CR 903.5b
-// Commander singleton rule. They have no runtime effect to resolve. The
-// recognizer matches this exact phrase shape to avoid false-positives
-// against legitimate "up to N cards named ..." patterns (e.g. Seven Dwarves).
-fn parse_deck_can_have_any_number_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    let (input, _) = tag("a deck can have any number of cards named ").parse(input)?;
-    let (input, subject) = take_while(|c: char| {
+// Persistent Petitioners, Shadowborn Apostle, etc.) and bounded variants like
+// "A deck can have up to seven cards named Seven Dwarves." (also Nazgûl → 9)
+// are deck-construction metadata that override CR 100.2a's four-of limit and
+// the CR 903.5b Commander singleton rule. They have no runtime effect to
+// resolve. The same combinator both extracts the typed `DeckCopyLimit` (for
+// deck validation) and recognizes the line so it does not fall through to
+// `Effect::Unimplemented { name: "static_structure", .. }`.
+
+/// Consume the trailing card-name subject of a deck-construction sentence.
+///
+/// Rejects an empty subject so "... named ." cannot match. The predicate
+/// accepts the raw card name, the engine's normalized self-reference "~", and
+/// Unicode letters (Rust `char::is_alphanumeric` accepts "û" in "Nazgûl").
+fn parse_deck_limit_subject(input: &str) -> OracleResult<'_, &str> {
+    let (rest, subject) = take_while(|c: char| {
         c.is_alphanumeric() || c == ' ' || c == '\'' || c == ',' || c == '-' || c == '~'
     })
     .parse(input)?;
@@ -235,19 +244,104 @@ fn parse_deck_can_have_any_number_sentence(input: &str) -> nom::IResult<&str, ()
             nom::error::ErrorKind::Fail,
         )));
     }
-    let (input, _) = opt(tag(".")).parse(input)?;
-    Ok((input, ()))
+    Ok((rest, subject))
 }
 
-/// Recognizer for "A deck can have any number of cards named X." —
-/// deck-construction text consumed silently by the parser so it does not
-/// fall through to `Effect::Unimplemented { name: "static_structure", .. }`.
-pub(crate) fn is_deck_construction_any_number_sentence(line: &str) -> bool {
+/// Consume " card named " / " cards named " (plural tried first; `tag` is
+/// all-or-nothing so the singular cannot shadow the plural).
+fn parse_card_s_named(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag(" cards named "), tag(" card named ")))).parse(input)
+}
+
+/// CR 100.2a / CR 903.5b: Parse a single deck-construction copy-limit sentence
+/// into a typed [`DeckCopyLimit`]. Accepts the optional "DCI ruling — " /
+/// "DCI ruling - " prefix (Once More with Feeling). The caller wraps this in
+/// `all_consuming` so the subject must be fully consumed (no trailing remainder
+/// regresses the card to Unimplemented).
+fn parse_deck_copy_limit(input: &str) -> OracleResult<'_, DeckCopyLimit> {
+    let (input, _) = opt(alt((tag("dci ruling \u{2014} "), tag("dci ruling - ")))).parse(input)?;
+    let (input, limit) = alt((
+        // Variant 1: "a deck can have any number of cards named X" — Unlimited.
+        (
+            tag("a deck can have any number of cards named "),
+            parse_deck_limit_subject,
+        )
+            .map(|_| DeckCopyLimit::Unlimited),
+        // Variants 2/3/4: "a deck can have {up to|only} N card(s) named X" — UpTo(N).
+        preceded(
+            tag("a deck can have "),
+            (
+                alt((value((), tag("up to ")), value((), tag("only ")))),
+                nom_parse_number,
+                parse_card_s_named,
+                parse_deck_limit_subject,
+            ),
+        )
+        .map(|(_, n, _, _)| DeckCopyLimit::UpTo(n)),
+        // Variant 5: Megalegendary reminder body — singleton, no subject.
+        value(
+            DeckCopyLimit::UpTo(1),
+            tag("your deck can have only one copy of this card"),
+        ),
+    ))
+    .parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    Ok((input, limit))
+}
+
+/// CR 100.2a / CR 903.5b: Run the copy-limit combinator over a single
+/// lowercased fragment, tolerating leading prose by trying each sentence within
+/// it. The deck-limit sentence is sometimes its own line ("...\nA deck can
+/// have...") and sometimes the tail sentence of a multi-sentence line
+/// ("...you control. A deck can have..."), so both must be reachable.
+fn copy_limit_from_fragment(fragment: &str) -> Option<DeckCopyLimit> {
+    let lower = fragment.trim().to_ascii_lowercase();
+    // Each ". "-separated sentence is a candidate; the combinator's trailing
+    // `opt(".")` absorbs a present period and tolerates its absence.
+    for sentence in lower.split(". ") {
+        if let Ok((_, limit)) =
+            all_consuming(parse_deck_copy_limit).parse(sentence.trim_end_matches('.').trim())
+        {
+            return Some(limit);
+        }
+    }
+    None
+}
+
+/// CR 100.2a / CR 903.5b: Extract the deck-construction copy limit from a card's
+/// full Oracle text, scanning each line AND each parenthesized reminder-text
+/// body (Vazal, the Compleat's Megalegendary limit lives only in the reminder
+/// body). The first match wins.
+pub(crate) fn compute_deck_copy_limit_from_text(text: &str) -> Option<DeckCopyLimit> {
+    for line in text.lines() {
+        if let Some(limit) = copy_limit_from_fragment(line) {
+            return Some(limit);
+        }
+        // Reminder-text bodies, e.g. "Megalegendary (Your deck can have ...)".
+        let mut rest = line;
+        while let Some(open) = rest.find('(') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find(')') else { break };
+            if let Some(limit) = copy_limit_from_fragment(&after[..close]) {
+                return Some(limit);
+            }
+            rest = &after[close + 1..];
+        }
+    }
+    None
+}
+
+/// Recognizer for deck-construction copy-limit sentences — deck-construction
+/// text consumed silently by the parser so it does not fall through to
+/// `Effect::Unimplemented { name: "static_structure", .. }`. Also matches the
+/// bare "Megalegendary" keyword line, whose copy limit lives in the reminder
+/// body of the same logical line (handled by `compute_deck_copy_limit_from_text`).
+pub(crate) fn is_deck_construction_copy_limit_sentence(line: &str) -> bool {
     let lower = line.trim().to_ascii_lowercase();
-    let parsed = all_consuming(parse_deck_can_have_any_number_sentence)
+    all_consuming(parse_deck_copy_limit)
         .parse(lower.as_str())
-        .is_ok();
-    parsed
+        .is_ok()
+        || lower.trim() == "megalegendary"
 }
 
 /// Whether Oracle text explicitly permits this card to be a commander.
@@ -936,7 +1030,7 @@ fn is_spell_resolution_instruction_line(
     let is_loyalty = try_parse_loyalty_line(line, ctx).is_some();
     ctx.diagnostics.truncate(loyalty_snap);
     if is_commander_permission_sentence(line)
-        || is_deck_construction_any_number_sentence(line)
+        || is_deck_construction_copy_limit_sentence(line)
         || is_loyalty
     {
         return false;
@@ -1879,7 +1973,7 @@ pub(crate) fn parse_oracle_ir(
             continue;
         }
 
-        if is_deck_construction_any_number_sentence(&line) {
+        if is_deck_construction_copy_limit_sentence(&line) {
             i += 1;
             continue;
         }
@@ -5296,48 +5390,125 @@ mod tests {
         assert!(r.replacements.is_empty());
     }
 
-    // CR 100.2a / CR 903.5b: "A deck can have any number of cards named X."
-    // is deck-construction metadata, not an in-game ability. The recognizer
-    // must accept the raw card name, the engine's normalized self-reference
-    // "~", and reject "up to N" patterns (Seven Dwarves).
+    // CR 100.2a / CR 903.5b: deck-construction copy-limit sentences parse into a
+    // typed `DeckCopyLimit`. The combinator both extracts the value (for deck
+    // validation) and recognizes the line so it does not fall through to
+    // `Effect::Unimplemented`. Tested over all five real phrase shapes, with the
+    // trailing period present (the real Oracle text always carries it).
     #[test]
-    fn deck_construction_any_number_sentence_positive_cases() {
-        assert!(is_deck_construction_any_number_sentence(
-            "A deck can have any number of cards named Tempest Hawk."
-        ));
-        assert!(is_deck_construction_any_number_sentence(
-            "A deck can have any number of cards named Relentless Rats."
-        ));
-        // After normalize_self_refs_for_static rewrites the card name to "~".
-        assert!(is_deck_construction_any_number_sentence(
-            "A deck can have any number of cards named ~."
-        ));
-        // Trailing period is optional.
-        assert!(is_deck_construction_any_number_sentence(
-            "A deck can have any number of cards named Tempest Hawk"
-        ));
+    fn parse_deck_copy_limit_all_phrase_shapes() {
+        // Variant 1: "any number" → Unlimited (Relentless Rats).
+        assert_eq!(
+            all_consuming(parse_deck_copy_limit)
+                .parse("a deck can have any number of cards named relentless rats.")
+                .unwrap()
+                .1,
+            DeckCopyLimit::Unlimited
+        );
+        // Variant 2: "up to seven" → UpTo(7) (Seven Dwarves).
+        assert_eq!(
+            all_consuming(parse_deck_copy_limit)
+                .parse("a deck can have up to seven cards named seven dwarves.")
+                .unwrap()
+                .1,
+            DeckCopyLimit::UpTo(7)
+        );
+        // Variant 3: "up to nine" → UpTo(9) (Nazgûl — Unicode subject).
+        assert_eq!(
+            all_consuming(parse_deck_copy_limit)
+                .parse("a deck can have up to nine cards named nazgûl.")
+                .unwrap()
+                .1,
+            DeckCopyLimit::UpTo(9)
+        );
+        // Variant 4: "only one card named" with DCI em-dash prefix → UpTo(1)
+        // (Once More with Feeling). Exercises the singular "card named" matcher.
+        assert_eq!(
+            all_consuming(parse_deck_copy_limit)
+                .parse(
+                    "dci ruling \u{2014} a deck can have only one card named once more with feeling."
+                )
+                .unwrap()
+                .1,
+            DeckCopyLimit::UpTo(1)
+        );
+        // Shared singular/plural matcher proof: "up to one card named".
+        assert_eq!(
+            all_consuming(parse_deck_copy_limit)
+                .parse("a deck can have up to one card named x.")
+                .unwrap()
+                .1,
+            DeckCopyLimit::UpTo(1)
+        );
+        // Variant 5: Megalegendary reminder body → UpTo(1) (Vazal). No subject.
+        assert_eq!(
+            all_consuming(parse_deck_copy_limit)
+                .parse("your deck can have only one copy of this card.")
+                .unwrap()
+                .1,
+            DeckCopyLimit::UpTo(1)
+        );
     }
 
     #[test]
-    fn deck_construction_any_number_sentence_negative_cases() {
-        // Wrong determiner — must be "A deck", not "Your deck".
-        assert!(!is_deck_construction_any_number_sentence(
-            "Your deck can have any number of cards named X."
+    fn vazal_copy_limit_extracted_from_reminder_body() {
+        // Vazal's limit lives only inside the Megalegendary reminder body, so the
+        // line scanner must descend into parenthesized text.
+        assert_eq!(
+            compute_deck_copy_limit_from_text(
+                "Megalegendary (Your deck can have only one copy of this card.)"
+            ),
+            Some(DeckCopyLimit::UpTo(1))
+        );
+    }
+
+    #[test]
+    fn deck_construction_copy_limit_sentence_positive_cases() {
+        // All five variants are recognized (consumed silently, not Unimplemented).
+        assert!(is_deck_construction_copy_limit_sentence(
+            "A deck can have any number of cards named Tempest Hawk."
         ));
-        // "Up to seven" is a different deck-construction pattern (Seven Dwarves).
-        // It must NOT be silently consumed by this recognizer.
-        assert!(!is_deck_construction_any_number_sentence(
+        // Engine's normalized self-reference "~".
+        assert!(is_deck_construction_copy_limit_sentence(
+            "A deck can have any number of cards named ~."
+        ));
+        // Trailing period is optional.
+        assert!(is_deck_construction_copy_limit_sentence(
+            "A deck can have any number of cards named Tempest Hawk"
+        ));
+        // "up to N" is now ACCEPTED (was rejected before typed-limit support).
+        assert!(is_deck_construction_copy_limit_sentence(
             "A deck can have up to seven cards named Seven Dwarves."
         ));
+        assert!(is_deck_construction_copy_limit_sentence(
+            "A deck can have up to nine cards named Nazgûl."
+        ));
+        // DCI singleton and the bare Megalegendary keyword line.
+        assert!(is_deck_construction_copy_limit_sentence(
+            "DCI ruling \u{2014} A deck can have only one card named Once More with Feeling."
+        ));
+        assert!(is_deck_construction_copy_limit_sentence("Megalegendary"));
+    }
+
+    #[test]
+    fn deck_construction_copy_limit_sentence_negative_cases() {
+        // Wrong determiner — "Your deck ... cards named" is not a supported shape.
+        assert!(!is_deck_construction_copy_limit_sentence(
+            "Your deck can have any number of cards named X."
+        ));
+        // "can contain" is a different (unsupported) phrasing — out of scope.
+        assert!(!is_deck_construction_copy_limit_sentence(
+            "A deck can contain any number of cards named X."
+        ));
         // Unrelated static lines must not match.
-        assert!(!is_deck_construction_any_number_sentence(
+        assert!(!is_deck_construction_copy_limit_sentence(
             "Creatures you control get +1/+1."
         ));
         // Empty subject after the "named " prefix.
-        assert!(!is_deck_construction_any_number_sentence(
+        assert!(!is_deck_construction_copy_limit_sentence(
             "A deck can have any number of cards named ."
         ));
-        assert!(!is_deck_construction_any_number_sentence(
+        assert!(!is_deck_construction_copy_limit_sentence(
             "A deck can have any number of cards named"
         ));
     }
@@ -5378,6 +5549,39 @@ mod tests {
             static_unimplemented
         );
     }
+
+    #[test]
+    fn vazal_megalegendary_line_consumed_and_limit_extracted() {
+        // CR 100.2a / CR 903.5b: Vazal's "Megalegendary (Your deck can have only
+        // one copy of this card.)" line must not surface as Unimplemented, and
+        // its UpTo(1) limit must be extractable from the full Oracle text (the
+        // limit lives only in the reminder body).
+        let vazal_text = "Megalegendary (Your deck can have only one copy of this card.)\n\
+             Vigilance, trample\n\
+             Vazal, the Compleat has the activated abilities of all other permanents on the battlefield.";
+        let r = parse(
+            vazal_text,
+            "Vazal, the Compleat",
+            &[Keyword::Vigilance, Keyword::Trample],
+            &["Creature"],
+            &["Phyrexian", "Praetor"],
+        );
+        let megalegendary_unimplemented = r.abilities.iter().any(|a| {
+            matches!(
+                &*a.effect,
+                Effect::Unimplemented { name, .. } if name.eq_ignore_ascii_case("megalegendary")
+            )
+        });
+        assert!(
+            !megalegendary_unimplemented,
+            "Megalegendary line must be consumed silently, not Unimplemented"
+        );
+        assert_eq!(
+            compute_deck_copy_limit_from_text(vazal_text),
+            Some(DeckCopyLimit::UpTo(1))
+        );
+    }
+
     #[test]
     fn oracle_text_allows_commander_uses_commander_permission_parser() {
         assert!(oracle_text_allows_commander(
@@ -10942,6 +11146,63 @@ mod tests {
                 zone: Zone::Graveyard,
             })
         );
+    }
+
+    #[test]
+    fn mana_spend_restriction_mana_value_ge() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with mana value 5 or greater",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithManaValue {
+                comparator: Comparator::GE,
+                value: 5,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_mana_value_le() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with mana value 3 or less",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithManaValue {
+                comparator: Comparator::LE,
+                value: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_mana_value_singular_spell_ge() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast a spell with mana value 4 or greater",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithManaValue {
+                comparator: Comparator::GE,
+                value: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_mana_value_rejects_trailing_text() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with mana value 5 or greater nonsense",
+        );
+        assert_eq!(result, None);
     }
 
     #[test]

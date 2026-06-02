@@ -2147,6 +2147,83 @@ enum TriggerOrderingDisposition {
     NoChoiceNeeded(Vec<PendingTriggerContext>),
 }
 
+/// CR 603.3b: Strip per-instance object identity so two triggers produced by
+/// distinct sources can be compared for genuine indistinguishability. Mirrors
+/// `ResolvedAbility::set_may_trigger_origin_recursive`'s traversal — `sub_ability`
+/// and `else_ability` are the only nested `ResolvedAbility` fields. `controller`
+/// is intentionally left intact (it is the group partition key, already equal
+/// across a group). The recursion is load-bearing: derived `PartialEq` descends
+/// into `sub_ability`/`else_ability`, so their `source_id`s must also be zeroed.
+fn normalize_ability_identity(ability: &mut ResolvedAbility) {
+    ability.source_id = ObjectId(0);
+    if let Some(sub) = ability.sub_ability.as_mut() {
+        normalize_ability_identity(sub);
+    }
+    if let Some(else_branch) = ability.else_ability.as_mut() {
+        normalize_ability_identity(else_branch);
+    }
+}
+
+/// CR 603.3c/603.3d + CR 601.2c/601.2d: A trigger requires ordering-relevant
+/// player input only when it announces a mode, targets, or a division as it goes
+/// on the stack. A trigger with none of those is placed with no observable
+/// choice, so its position relative to an identical sibling cannot matter.
+/// (CR 603.5: optional / "unless pay" choices are made at RESOLUTION, not
+/// placement, so they are NOT gated here — they ride inside the normalized
+/// ability equality instead.)
+fn trigger_has_no_ordering_input(t: &PendingTrigger) -> bool {
+    t.ability.targets.is_empty()
+        && t.target_constraints.is_empty()
+        && t.distribute.is_none()
+        && t.modal.is_none()
+        && t.mode_abilities.is_empty()
+        && t.ability.multi_target.is_none()
+        && t.ability.distribution.is_none()
+}
+
+/// CR 603.3b: Returns true when every trigger in `group` is mutually
+/// INDISTINGUISHABLE, so the controller's CR 603.3b freedom to place them "in
+/// any order they choose" is genuinely immaterial and the engine may auto-order
+/// them with no prompt (matching MTG Arena). Conservative by construction: any
+/// field divergence makes this return false and the group still prompts (a safe
+/// false-negative); it can never auto-order order-sensitive triggers.
+///
+/// Two triggers are indistinguishable when both require no ordering input and
+/// they match on: the normalized ability (CR 603.4 intervening-`if` rides in
+/// `condition`; all outcome fields ride in the derived `ResolvedAbility` `==`),
+/// the trigger-level `condition`, the firing event-context (`trigger_event` and
+/// `subject_match_count` — CR 603.2c: one event with multiple occurrences fires
+/// a batched trigger once per occurrence, each carrying its own subject; these
+/// live on `PendingTrigger`, NOT the ability, and are read at resolution, so
+/// identical abilities with different event context resolve differently and
+/// must NOT be collapsed), and the `may_trigger_origin`.
+fn group_is_order_independent(group: &[PendingTriggerContext]) -> bool {
+    let Some((first, rest)) = group.split_first() else {
+        return false;
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    if !trigger_has_no_ordering_input(&first.pending) {
+        return false;
+    }
+    let mut reference = first.pending.ability.clone();
+    normalize_ability_identity(&mut reference);
+    rest.iter().all(|ctx| {
+        let t = &ctx.pending;
+        trigger_has_no_ordering_input(t)
+            && t.condition == first.pending.condition
+            && t.trigger_event == first.pending.trigger_event
+            && t.subject_match_count == first.pending.subject_match_count
+            && t.may_trigger_origin == first.pending.may_trigger_origin
+            && {
+                let mut candidate = t.ability.clone();
+                normalize_ability_identity(&mut candidate);
+                candidate == reference
+            }
+    })
+}
+
 /// CR 603.3b: Partition `pending` by controller (preserving the APNAP
 /// placement order produced by `collect_pending_triggers`), populate
 /// `state.pending_trigger_order` with one `TriggerOrderGroup` per controller,
@@ -2183,9 +2260,13 @@ fn begin_trigger_ordering(
         });
     }
 
-    // Single-trigger groups are trivially in final order.
+    // CR 603.3b: A group needs an ordering choice only when permuting it is
+    // observable. Singleton groups, and groups of genuinely indistinguishable
+    // no-input triggers, commute under any permutation — auto-order them so the
+    // player isn't prompted for an immaterial choice (matching MTG Arena). Any
+    // field divergence is a safe false-negative: the group still prompts.
     for g in groups.iter_mut() {
-        if g.triggers.len() <= 1 {
+        if g.triggers.len() <= 1 || group_is_order_independent(&g.triggers) {
             g.ordered = true;
         }
     }
@@ -13857,31 +13938,16 @@ pub mod tests {
             }
         }
 
-        // CR 603.3b: at P0's upkeep the engine MUST surface the ordering prompt
-        // for the two suspend triggers — not a bare Priority. This is the
-        // assertion that fails without the `auto_advance` fix.
-        match &state.waiting_for {
-            WaitingFor::OrderTriggers { player, triggers } => {
-                assert_eq!(*player, PlayerId(0), "controller orders own triggers");
-                assert_eq!(
-                    triggers.len(),
-                    2,
-                    "both suspend upkeep triggers must be in the ordering prompt"
-                );
-            }
-            other => panic!(
-                "expected OrderTriggers prompt for the two suspend triggers, got {other:?} \
-                 (pending_trigger_order = {:?})",
-                state.pending_trigger_order.is_some()
-            ),
-        }
-
-        // Submit an order, then drain the two triggers off the stack.
-        crate::game::engine::apply_as_current(
-            &mut state,
-            GameAction::OrderTriggers { order: vec![0, 1] },
-        )
-        .expect("submit suspend trigger order");
+        // CR 603.3b + CR 603.4: the two suspend upkeep triggers are identical
+        // no-input triggers (each re-checks its OWN `SelfRef` `HasCounters` and
+        // its `RemoveCounter{SelfRef}` touches only its own card → the result is
+        // independent of placement order), so they now auto-order and reach the
+        // stack via `NoChoiceNeeded` with NO OrderTriggers prompt. (Counters go
+        // 3 → 2, not to 0, so the last-counter cast trigger never fires — no
+        // follow-on interference.) The distinct-source upkeep-prompt path is
+        // covered by `multiple_distinct_upkeep_triggers_still_prompt`.
+        //
+        // Drain whatever the auto-advance path placed on the stack.
         let mut guard = 0;
         while !state.stack.is_empty() {
             guard += 1;
@@ -15793,8 +15859,8 @@ mod dedup_regression_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TargetRef,
-        TriggerDefinition,
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
+        TargetRef, TriggerDefinition,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -17133,6 +17199,144 @@ mod dedup_regression_tests {
             state.stack.len(),
             1,
             "the single trigger reaches the stack directly"
+        );
+    }
+
+    /// CR 603.3b: Two genuinely INDISTINGUISHABLE no-input triggers (same
+    /// controller, same name → identical `format!("{name}: ...")` description →
+    /// byte-identical normalized ability, no targets/modes/division) commute
+    /// under any permutation, so the engine auto-orders them with NO
+    /// `OrderTriggers` prompt (matching MTG Arena). Both still reach the stack.
+    #[test]
+    fn order_triggers_identical_no_input_triggers_auto_order() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::Upkeep;
+        // SAME name on both → identical descriptions → indistinguishable.
+        let _src_a = make_phase_trigger_source(&mut state, PlayerId(0), "Twin Source", 1);
+        let _src_b = make_phase_trigger_source(&mut state, PlayerId(0), "Twin Source", 1);
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }],
+        );
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
+            "indistinguishable no-input triggers must auto-order without a prompt; got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            state.pending_trigger_order.is_none(),
+            "no in-flight ordering state when the group auto-orders"
+        );
+        assert_eq!(
+            state.stack.len(),
+            2,
+            "both auto-ordered triggers reach the stack directly"
+        );
+    }
+
+    /// CR 603.3b + CR 603.7c: Two triggers whose normalized abilities are
+    /// byte-identical but whose firing event context differs
+    /// (`subject_match_count`) resolve differently, so they are NOT
+    /// indistinguishable and MUST still prompt for ordering. Guards the
+    /// `subject_match_count` comparison in `group_is_order_independent` from a
+    /// silent regression that would collapse them.
+    #[test]
+    fn order_triggers_distinct_event_context_still_prompt() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::Upkeep;
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // A bare no-input draw ability shared by both pending triggers.
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        );
+        // Two PendingTriggers identical in every ordering-relevant field EXCEPT
+        // `subject_match_count` (Some(1) vs Some(2)) — the CR 603.2c batched
+        // event-context divergence that makes them distinguishable.
+        let make_ctx = |source: ObjectId, count: u32| {
+            PendingTriggerContext::single(PendingTrigger {
+                source_id: source,
+                controller: PlayerId(0),
+                condition: None,
+                ability: ability.clone(),
+                timestamp: count,
+                target_constraints: Vec::new(),
+                distribute: None,
+                trigger_event: None,
+                modal: None,
+                mode_abilities: Vec::new(),
+                description: Some("Twin: draw a card.".to_string()),
+                may_trigger_origin: None,
+                subject_match_count: Some(count),
+            })
+        };
+        let ctx_a = make_ctx(ObjectId(1), 1);
+        let ctx_b = make_ctx(ObjectId(2), 2);
+
+        let disposition = begin_trigger_ordering(&mut state, vec![ctx_a, ctx_b]);
+        assert!(
+            matches!(disposition, TriggerOrderingDisposition::PromptForChoice(_)),
+            "distinct subject_match_count must still prompt (CR 603.2c event context)"
+        );
+        assert!(
+            state.pending_trigger_order.is_some(),
+            "a live ordering pass must back the prompt"
+        );
+    }
+
+    /// CR 603.3b: A group needs an ordering prompt when its triggers are
+    /// distinguishable. Two `make_phase_trigger_source` permanents with
+    /// DIFFERENT names produce distinct `format!("{name}: ...")` descriptions,
+    /// so the same-controller upkeep group still surfaces `OrderTriggers` even
+    /// though identical suspend-style triggers now auto-order. Guards the
+    /// auto_advance / upkeep prompt path covered formerly by the suspend test.
+    #[test]
+    fn multiple_distinct_upkeep_triggers_still_prompt() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::Upkeep;
+        let _src_a = make_phase_trigger_source(&mut state, PlayerId(0), "Upkeep Source A", 1);
+        let _src_b = make_phase_trigger_source(&mut state, PlayerId(0), "Upkeep Source B", 1);
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }],
+        );
+
+        let WaitingFor::OrderTriggers { player, triggers } = state.waiting_for.clone() else {
+            panic!(
+                "distinct same-controller upkeep triggers must still prompt; got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(player, PlayerId(0), "controller orders own triggers");
+        assert_eq!(
+            triggers.len(),
+            2,
+            "both distinct upkeep triggers await ordering"
+        );
+        assert!(
+            state.pending_trigger_order.is_some(),
+            "the ordering pass must be live while the prompt is up"
         );
     }
 

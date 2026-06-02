@@ -10,11 +10,12 @@ use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracke
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::apply;
 use engine::game::{
-    can_pair_commanders, estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer,
-    finalize_public_state, is_brawl_commander_eligible, is_commander_eligible,
-    is_tiny_leader_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db,
-    resolve_deck_list, start_game, start_game_with_starting_player, validate_name_deck_for_format,
-    BracketEstimate, DeckCompatibilityRequest, DeckList, PlayerDeckList,
+    can_pair_commanders, deck_copy_limit_for, estimate_bracket, evaluate_deck_compatibility,
+    filter_state_for_viewer, finalize_public_state, is_brawl_commander_eligible,
+    is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks,
+    rehydrate_game_from_card_db, resolve_deck_list, start_game, start_game_with_starting_player,
+    validate_name_deck_for_format, BracketEstimate, DeckCompatibilityRequest, DeckList,
+    PlayerDeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::identifiers::ObjectId;
@@ -281,6 +282,22 @@ pub fn is_card_commander_eligible(name: &str) -> bool {
             return false;
         };
         db.get_face_by_name(name).is_some_and(is_commander_eligible)
+    })
+}
+
+/// CR 100.2a / CR 903.5b: The named card's per-card deck-construction copy-limit
+/// override, or `null` when the default four-of / singleton limit applies.
+/// Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
+/// `{"type":"UpTo","data":N}`); the frontend must switch on `.type`. The engine
+/// is the single authority — the frontend never re-parses Oracle text.
+#[wasm_bindgen(js_name = deckCopyLimit)]
+pub fn deck_copy_limit(name: &str) -> JsValue {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return JsValue::NULL;
+        };
+        to_js(&deck_copy_limit_for(db, name))
     })
 }
 
@@ -1540,6 +1557,7 @@ mod tests {
             strive_cost: None,
             brawl_commander: false,
             is_commander: false,
+            deck_copy_limit: None,
             metadata: Default::default(),
         }
     }

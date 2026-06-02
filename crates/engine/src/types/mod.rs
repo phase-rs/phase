@@ -36,7 +36,7 @@ pub use card_type::{is_land_subtype, CardType, CoreType, Supertype};
 pub use counter::{parse_counter_type, CounterMatch, CounterType};
 pub use definitions::Definitions;
 pub use events::GameEvent;
-pub use format::{FormatConfig, GameFormat};
+pub use format::{DeckCopyLimit, FormatConfig, GameFormat};
 pub use game_state::{
     ActionResult, BattlefieldEntryRecord, CommanderDamageEntry, CostResume, GameState, LKISnapshot,
     NextSpellModifier, PayCostKind, PendingNextSpellModifier, PendingReplacement,
