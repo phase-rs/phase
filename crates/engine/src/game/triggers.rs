@@ -2197,6 +2197,51 @@ fn ability_uses_trigger_event_context(ability: &ResolvedAbility) -> bool {
         .unwrap_or(true)
 }
 
+fn zone_changes_are_same_departure_batch(a: &GameEvent, b: &GameEvent) -> bool {
+    let (
+        GameEvent::ZoneChanged {
+            object_id: a_id,
+            from: a_from,
+            to: a_to,
+            record: a_record,
+        },
+        GameEvent::ZoneChanged {
+            object_id: b_id,
+            from: b_from,
+            to: b_to,
+            record: b_record,
+        },
+    ) = (a, b)
+    else {
+        return false;
+    };
+
+    a_from == b_from
+        && a_to == b_to
+        && a_record.co_departed.contains(b_id)
+        && b_record.co_departed.contains(a_id)
+}
+
+fn trigger_events_match_for_ordering(
+    first: &PendingTrigger,
+    candidate: &PendingTrigger,
+    ability_uses_trigger_event: bool,
+) -> bool {
+    if first.trigger_event == candidate.trigger_event {
+        return true;
+    }
+    if ability_uses_trigger_event {
+        return false;
+    }
+
+    match (&first.trigger_event, &candidate.trigger_event) {
+        (Some(first_event), Some(candidate_event)) => {
+            zone_changes_are_same_departure_batch(first_event, candidate_event)
+        }
+        _ => false,
+    }
+}
+
 /// CR 603.3c/603.3d + CR 601.2c/601.2d: A trigger requires ordering-relevant
 /// player input only when it announces a mode, targets, or a division as it goes
 /// on the stack. A trigger with none of those is placed with no observable
@@ -2229,13 +2274,17 @@ fn trigger_has_no_ordering_input(t: &PendingTrigger) -> bool {
 /// once per occurrence, each carrying its own subject count; read at
 /// resolution), and the `may_trigger_origin`.
 // CR 603.2c: `trigger_event` (the firing event itself) is intentionally NOT
-// part of the equality check only when the resolved ability has no
-// event-context dependency. When N simultaneous events all match the same
-// trigger definition and the effect is fixed (e.g. three Liliana, Dreadhorde
-// General draws from one board wipe), placement order is unobservable and a
-// prompt is noise. If the ability reads `TriggeringSource`, `TriggeringPlayer`,
-// `EventContextAmount`, or another event-context ref, the concrete firing event
-// is resolution-visible and must still match before auto-ordering.
+// part of the equality check only for explicitly simultaneous ZoneChanged
+// departure batches whose resolved ability has no event-context dependency.
+// When N co-departing events all match the same trigger definition and the
+// effect is fixed (e.g. three Liliana, Dreadhorde General draws from one board
+// wipe), placement order is unobservable and a prompt is noise. Other event
+// classes stay exact even when the ability is fixed: a CounterAdded trigger
+// can create more CounterAdded events while resolving, so distinct firing
+// events are not inherently interchangeable.
+// If the ability reads `TriggeringSource`, `TriggeringPlayer`,
+// `EventContextAmount`, or another event-context ref, the concrete firing
+// event is resolution-visible and must still match before auto-ordering.
 // `subject_match_count` is kept in the equality because that is the per-batch
 // count the effect reads at resolution and *can* differ across pending triggers
 // if two distinct batched events satisfy the same definition.
@@ -2256,7 +2305,7 @@ fn group_is_order_independent(group: &[PendingTriggerContext]) -> bool {
         let t = &ctx.pending;
         trigger_has_no_ordering_input(t)
             && t.condition == first.pending.condition
-            && (!reference_uses_trigger_event || t.trigger_event == first.pending.trigger_event)
+            && trigger_events_match_for_ordering(&first.pending, t, reference_uses_trigger_event)
             && t.subject_match_count == first.pending.subject_match_count
             && t.may_trigger_origin == first.pending.may_trigger_origin
             && {
