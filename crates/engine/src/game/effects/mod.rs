@@ -4955,6 +4955,13 @@ fn resolve_unless_payer(
         TargetFilter::Player => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
+        // CR 118.12a + CR 608.2f: "Each player/each opponent ... unless they pay" —
+        // the payer is the player_scope iteration's scoped player, not a chosen
+        // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player
+        // (bound per-iteration by the fan-out at effects/mod.rs:3015-3069).
+        TargetFilter::ScopedPlayer => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        }
         _ => None,
     }
 }
@@ -5974,6 +5981,30 @@ mod tests {
 
         assert_eq!(
             resolve_unless_payer(&state, &ability, &TargetFilter::ParentTargetController),
+            Some(PlayerId(1))
+        );
+    }
+
+    // CR 118.12a + CR 608.2f: "each opponent ... unless they pay" — the payer
+    // is the per-iteration scoped player bound by the fan-out, read through
+    // `ScopedPlayer`, not a chosen target. Without this arm the resolver
+    // returns `None` and the punisher fires unconditionally.
+    #[test]
+    fn resolve_unless_payer_scoped_player_reads_ability_scoped_player() {
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: Some(TargetFilter::ScopedPlayer),
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        // Simulate the fan-out binding the scoped opponent for this iteration.
+        ability.scoped_player = Some(PlayerId(1));
+        assert_eq!(
+            resolve_unless_payer(&state, &ability, &TargetFilter::ScopedPlayer),
             Some(PlayerId(1))
         );
     }

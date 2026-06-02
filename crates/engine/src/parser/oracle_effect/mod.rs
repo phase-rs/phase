@@ -4563,8 +4563,11 @@ fn rebind_controller_to_triggering_source(mut clause: ParsedEffectClause) -> Par
 /// CR 205.1a: An object retains types explicitly stated by the effect.
 /// CR 509.1c: "All creatures able to block [target/~] [this turn] do so."
 ///
-/// Semantically equivalent to "[target/~] must be blocked this turn if able."
-/// Produces a GenericEffect with `MustBeBlocked` AddStaticMode on the referenced object.
+/// This is the "lure" requirement: *every* creature able to block the referenced
+/// object must block it, not merely one. It is therefore NOT equivalent to
+/// "[target/~] must be blocked if able" (which `MustBeBlocked` models, satisfied
+/// by a single blocker). Produces a GenericEffect with the stronger
+/// `MustBeBlockedByAll` AddStaticMode on the referenced object.
 ///
 /// Patterns:
 /// - "all creatures able to block target creature this turn do so"
@@ -4606,10 +4609,10 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
 
     Some(ParsedEffectClause {
         effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
+            static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlockedByAll)
                 .affected(target.clone())
                 .modifications(vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::MustBeBlocked,
+                    mode: StaticMode::MustBeBlockedByAll,
                 }])],
             duration: Some(Duration::UntilEndOfTurn),
             target: Some(target),
@@ -14369,7 +14372,8 @@ pub(crate) fn parse_effect_chain_ir(
         let is_decline_consequence = matches!(decline_dispatch, DeclineDispatch::Prepositional)
             || decline_consequence_active;
 
-        let (text, mut unless_pay) = extract_resolution_unless_pay_modifier(&text);
+        let (text, mut unless_pay) =
+            extract_resolution_unless_pay_modifier(&text, player_scope.as_ref());
 
         // CR 701.21a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -15766,7 +15770,10 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     Some(AbilityCost::Mana { cost })
 }
 
-fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>) {
+fn extract_resolution_unless_pay_modifier(
+    text: &str,
+    player_scope: Option<&PlayerFilter>,
+) -> (String, Option<UnlessPayModifier>) {
     let lower = text.to_lowercase();
     if tag::<_, _, OracleError<'_>>("counter ")
         .parse(lower.trim_start())
@@ -15794,13 +15801,21 @@ fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessP
             // just before " unless "; trim trailing whitespace there to
             // produce the cleaned effect.
             let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
-            return (
-                cleaned,
-                Some(UnlessPayModifier {
-                    cost,
-                    payer: TargetFilter::Player,
-                }),
-            );
+            // CR 118.12a + CR 608.2f: select the payer for "they X". A
+            // permanent's controller in the pre-"unless" text (Fade Away)
+            // takes precedence. Otherwise, when this chunk carries a
+            // `player_scope` ("each opponent/each player ... unless they X"),
+            // the payer is the per-iteration scoped player (`ScopedPlayer`,
+            // bound by the fan-out) rather than a chosen player target.
+            // Non-scoped punishers (Tergrid's Lantern) keep `Player`.
+            let payer = if nom_primitives::scan_contains(before_unless, "controller") {
+                TargetFilter::ParentTargetController
+            } else if player_scope.is_some() {
+                TargetFilter::ScopedPlayer
+            } else {
+                TargetFilter::Player
+            };
+            return (cleaned, Some(UnlessPayModifier { cost, payer }));
         }
     }
 
@@ -15814,18 +15829,26 @@ fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessP
         return (text.to_string(), None);
     };
 
-    // CR 118.12a: "unless they pay ..." surfaces `they` as `TargetFilter::Player`
-    // provisionally. When the effect text before "unless" taxes a permanent's
-    // controller ("its controller", "that land's controller" — Fade Away, Stench
-    // of Evil) rather than a player target (Flay), `they` resolves to that
-    // controller. `Player` is unique to the "they pay" arm, so this rewrite is
-    // unambiguous.
-    let payer =
-        if payer == TargetFilter::Player && nom_primitives::scan_contains(before, "controller") {
+    // CR 118.12a + CR 608.2f: "unless they pay ..." surfaces `they` as
+    // `TargetFilter::Player` provisionally. When the effect text before "unless"
+    // taxes a permanent's controller ("its controller", "that land's controller"
+    // — Fade Away, Stench of Evil) rather than a player target (Flay), `they`
+    // resolves to that controller. Otherwise, when this chunk carries a
+    // `player_scope` ("each opponent/each player ... unless they pay"), the payer
+    // is the per-iteration scoped player (`ScopedPlayer`) rather than a chosen
+    // player target. Non-scoped punishers keep `Player`. `Player` is unique to
+    // the "they pay" arm, so these rewrites are unambiguous.
+    let payer = if payer == TargetFilter::Player {
+        if nom_primitives::scan_contains(before, "controller") {
             TargetFilter::ParentTargetController
+        } else if player_scope.is_some() {
+            TargetFilter::ScopedPlayer
         } else {
-            payer
-        };
+            TargetFilter::Player
+        }
+    } else {
+        payer
+    };
 
     let cleaned = text[..before.trim_end().len()].trim().to_string();
     (cleaned, Some(UnlessPayModifier { cost, payer }))
@@ -19580,7 +19603,13 @@ mod tests {
         match &unless_pay.cost {
             AbilityCost::OneOf { costs } => {
                 assert_eq!(costs.len(), 2, "expected Sacrifice|Discard, got {costs:?}");
-                assert!(matches!(costs[0], AbilityCost::Sacrifice { .. }));
+                let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+                    panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+                };
+                let TargetFilter::Typed(tf) = target else {
+                    panic!("sacrifice target should be typed, got {target:?}");
+                };
+                assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert!(matches!(costs[1], AbilityCost::Discard { .. }));
             }
             other => panic!("expected OneOf disjunctive cost, got {other:?}"),
@@ -19602,6 +19631,47 @@ mod tests {
             &unless_pay.cost,
             AbilityCost::OneOf { costs } if costs.len() == 2
         ));
+        let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+            unreachable!("checked OneOf cost above");
+        };
+        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+            panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        // CR 118.12a: non-scoped "target player" punisher keeps `Player`
+        // (the chosen player target), NOT `ScopedPlayer`. No regression.
+        assert_eq!(unless_pay.payer, TargetFilter::Player);
+    }
+
+    /// CR 608.2f: "Each opponent ... unless they sacrifice ... or discard a
+    /// card" — the `player_scope` makes the payer the per-iteration scoped
+    /// player (`ScopedPlayer`), resolved via `ability.scoped_player`, not a
+    /// chosen player target. This is the symmetric-payer fix.
+    #[test]
+    fn effect_unless_each_opponent_sacrifice_or_discard_binds_scoped_player() {
+        let def = parse_effect_chain(
+            "Each opponent loses 3 life unless they sacrifice a nonland permanent of their choice or discard a card",
+            AbilityKind::Activated,
+        );
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+        assert!(matches!(
+            &unless_pay.cost,
+            AbilityCost::OneOf { costs } if costs.len() == 2
+        ));
+        let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+            unreachable!("checked OneOf cost above");
+        };
+        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+            panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
     }
 
     #[test]
@@ -26268,15 +26338,16 @@ mod tests {
     #[test]
     fn mass_forced_block_target_creature() {
         // "All creatures able to block target creature this turn do so" (Alluring Scent)
-        // CR 509.1c: Semantically equivalent to "target creature must be blocked"
+        // CR 509.1c: the lure requirement forces *every* able creature to block,
+        // so it lowers to MustBeBlockedByAll, not the one-blocker MustBeBlocked.
         let e = parse_effect("All creatures able to block target creature this turn do so");
         assert!(
             matches!(&e, Effect::GenericEffect { static_abilities, .. }
                 if static_abilities.iter().any(|sd|
-                    sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                    sd.mode == crate::types::statics::StaticMode::MustBeBlockedByAll
                 )
             ),
-            "Expected GenericEffect with MustBeBlocked, got {:?}",
+            "Expected GenericEffect with MustBeBlockedByAll, got {:?}",
             e
         );
     }
@@ -26288,10 +26359,10 @@ mod tests {
         assert!(
             matches!(&e, Effect::GenericEffect { static_abilities, .. }
                 if static_abilities.iter().any(|sd|
-                    sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                    sd.mode == crate::types::statics::StaticMode::MustBeBlockedByAll
                 )
             ),
-            "Expected GenericEffect with MustBeBlocked, got {:?}",
+            "Expected GenericEffect with MustBeBlockedByAll, got {:?}",
             e
         );
     }

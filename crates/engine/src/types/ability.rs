@@ -1295,6 +1295,13 @@ pub enum ManaSpendRestriction {
     SpellWithKeywordKind(KeywordKind),
     /// "Spend this mana only to cast spells with flashback from a graveyard."
     SpellWithKeywordKindFromZone { kind: KeywordKind, zone: Zone },
+    /// CR 106.6: "Spend this mana only to cast spells with mana value N or
+    /// greater" (or "or less"). Parameterized over [`Comparator`] so a single
+    /// variant covers every mana-value threshold reading rather than
+    /// proliferating per-threshold siblings ("parameterize, don't proliferate").
+    /// `value` is the printed threshold N; `comparator` applies
+    /// `spell_mana_value <cmp> value`.
+    SpellWithManaValue { comparator: Comparator, value: u32 },
 }
 
 /// Duration for temporary effects.

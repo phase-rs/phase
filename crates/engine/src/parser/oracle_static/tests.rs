@@ -69,6 +69,48 @@ fn compound_subject_keyword_static_splits_serras_emissary() {
     );
 }
 
+/// CR 509.1b: Brave the Sands — "Creatures you control have vigilance and can
+/// block an additional creature each combat." must decompose into BOTH the
+/// vigilance grant AND an `ExtraBlockers` grant affecting creatures you control.
+/// Previously the trailing extra-block clause was dropped entirely (the ability
+/// did nothing).
+#[test]
+fn extra_blockers_static_splits_from_keyword_grant() {
+    let defs = parse_static_line_multi(
+        "Creatures you control have vigilance and can block an additional creature each combat.",
+    );
+    assert!(
+        defs.len() >= 2,
+        "expected vigilance + extra-block defs, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    let extra = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::ExtraBlockers { .. }))
+        .expect("expected an ExtraBlockers static def");
+    assert_eq!(extra.mode, StaticMode::ExtraBlockers { count: Some(1) });
+    match &extra.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "extra-block grant must affect creatures, got {:?}",
+                tf.type_filters
+            );
+        }
+        other => panic!("ExtraBlockers must affect creatures you control, got {other:?}"),
+    }
+}
+
+/// CR 509.1b: A self-referential standalone extra-block grant ("~ can block an
+/// additional creature", e.g. Palace Guard) keeps the grant on the source.
+#[test]
+fn extra_blockers_static_self_reference_stays_selfref() {
+    let def = parse_static_line("~ can block an additional creature.").expect("static def");
+    assert_eq!(def.mode, StaticMode::ExtraBlockers { count: Some(1) });
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
 /// CR 118.9: Rooftop Storm grants {0} as an alternative MANA cost for Zombie
 /// creature spells the controller casts.
 #[test]

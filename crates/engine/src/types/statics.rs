@@ -841,8 +841,15 @@ pub enum StaticMode {
     // -- Tier 2: Rule-modification statics --
     CantTap,
     CantUntap,
-    /// CR 509.1c: This creature must be blocked if able.
+    /// CR 509.1c: This creature must be blocked if able — the defending player
+    /// must assign at least one legal blocker to it.
     MustBeBlocked,
+    /// CR 509.1c: "All creatures able to block this creature do so" (Lure,
+    /// Prized Unicorn, Breaker of Armies, …). Unlike [`MustBeBlocked`], this
+    /// places a block requirement on *every* creature able to block it: each
+    /// such untapped defender must be declared as a blocker of this attacker,
+    /// not merely one.
+    MustBeBlockedByAll,
     /// CR 701.15b: This creature is goaded for as long as the static applies.
     /// The source controller is the goading player for the "attack another
     /// player if able" requirement.
@@ -1241,6 +1248,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantTap => write!(f, "CantTap"),
             StaticMode::CantUntap => write!(f, "CantUntap"),
             StaticMode::MustBeBlocked => write!(f, "MustBeBlocked"),
+            StaticMode::MustBeBlockedByAll => write!(f, "MustBeBlockedByAll"),
             StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
@@ -1536,6 +1544,7 @@ impl FromStr for StaticMode {
             "CantTap" => StaticMode::CantTap,
             "CantUntap" => StaticMode::CantUntap,
             "MustBeBlocked" => StaticMode::MustBeBlocked,
+            "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll,
             "Goaded" => StaticMode::Goaded,
             "CantAttackAlone" => StaticMode::CantAttackAlone,
             "CantBlockAlone" => StaticMode::CantBlockAlone,

@@ -51,7 +51,7 @@ fn has_control_char(value: &str) -> bool {
 /// Validate a required visible label (e.g. the host display name): it must be
 /// non-empty after trimming, within `max` characters, and free of control
 /// characters. `field` names the field for the error message.
-fn validate_required_label(field: &str, value: &str, max: usize) -> Result<(), String> {
+pub fn validate_required_label(field: &str, value: &str, max: usize) -> Result<(), String> {
     if value.trim().is_empty() {
         return Err(format!("{field} must not be empty"));
     }
@@ -76,7 +76,7 @@ fn validate_optional_label(field: &str, value: &Option<String>, max: usize) -> R
 
 /// Validate an opaque token/identifier string: bounded byte length and no
 /// control characters. Empty is allowed (callers treat empty as absent).
-fn validate_token(field: &str, value: &str, max: usize) -> Result<(), String> {
+pub fn validate_token(field: &str, value: &str, max: usize) -> Result<(), String> {
     if value.len() > max {
         return Err(format!("{field} must be at most {max} bytes"));
     }
@@ -87,7 +87,11 @@ fn validate_token(field: &str, value: &str, max: usize) -> Result<(), String> {
 }
 
 /// Validate an optional opaque token/identifier string.
-fn validate_optional_token(field: &str, value: &Option<String>, max: usize) -> Result<(), String> {
+pub fn validate_optional_token(
+    field: &str,
+    value: &Option<String>,
+    max: usize,
+) -> Result<(), String> {
     match value {
         Some(v) => validate_token(field, v, max),
         None => Ok(()),
@@ -222,6 +226,9 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inbound_guard::{
+        guard_inbound, MAX_DECK_CARD_NAME_LEN, MAX_MAIN_DECK_ENTRIES, MAX_SIDEBOARD_ENTRIES,
+    };
     use crate::protocol::{DraftLobbyMetadata, LobbyClientMessage as M};
     use engine::starter_decks::DeckData;
 
@@ -243,6 +250,16 @@ mod tests {
             host_peer_id: None,
             draft_metadata: None,
             start_when_full: true,
+        }
+    }
+
+    fn join_with(display_name: &str) -> M {
+        M::JoinGameWithPassword {
+            game_code: "ABC123".into(),
+            deck: empty_deck(),
+            display_name: display_name.to_string(),
+            password: None,
+            reservation_token: None,
         }
     }
 
@@ -389,5 +406,32 @@ mod tests {
     #[test]
     fn ping_has_no_bounded_fields() {
         assert!(validate_lobby_message(&M::Ping { timestamp: 1 }).is_ok());
+    }
+
+    #[test]
+    fn guard_rejects_oversized_main_deck() {
+        let mut msg = create_with("Alice");
+        if let M::CreateGameWithSettings { deck, .. } = &mut msg {
+            deck.main_deck = vec!["Card".to_string(); MAX_MAIN_DECK_ENTRIES + 1];
+        }
+        assert!(guard_inbound(&msg).is_err());
+    }
+
+    #[test]
+    fn guard_rejects_oversized_card_name_in_deck() {
+        let mut msg = create_with("Alice");
+        if let M::CreateGameWithSettings { deck, .. } = &mut msg {
+            deck.main_deck = vec!["x".repeat(MAX_DECK_CARD_NAME_LEN + 1)];
+        }
+        assert!(guard_inbound(&msg).is_err());
+    }
+
+    #[test]
+    fn guard_rejects_oversized_join_sideboard() {
+        let mut msg = join_with("Bob");
+        if let M::JoinGameWithPassword { deck, .. } = &mut msg {
+            deck.sideboard = vec!["Card".to_string(); MAX_SIDEBOARD_ENTRIES + 1];
+        }
+        assert!(guard_inbound(&msg).is_err());
     }
 }
