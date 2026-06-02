@@ -31,6 +31,7 @@ use lobby_broker::{
 };
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
+use server_core::draft_action_payload_guard::guard_draft_action_payload;
 use server_core::draft_session::DraftSessionManager;
 use server_core::draft_wire_guard::{
     guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
@@ -4190,6 +4191,14 @@ async fn handle_client_message(
 
         ClientMessage::DraftAction { draft_code, action } => {
             if let Err(reason) = guard_draft_action(&draft_code) {
+                let msg = ServerMessage::DraftActionRejected { reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
+            if let Err(reason) = guard_draft_action_payload(&action) {
                 let msg = ServerMessage::DraftActionRejected { reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
