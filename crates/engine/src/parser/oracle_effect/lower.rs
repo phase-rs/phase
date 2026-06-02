@@ -43,13 +43,24 @@ use super::{
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     collapse_ephemeral_color_choice_mana, contains_explicit_tracked_set_pronoun,
-    contains_implicit_tracked_set_pronoun, fold_cast_copy_of_card_defs, mark_uses_tracked_set,
-    parse_effect_clause, parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
-    publishes_tracked_set_from_resolution, refine_damage_target_remainder,
+    contains_implicit_tracked_set_pronoun, fold_cast_copy_of_card_defs, has_explicit_player_target,
+    mark_uses_tracked_set, parse_effect_clause, parse_event_context_ref_with_ctx,
+    parse_for_each_object_copy_parts, publishes_tracked_set_from_resolution,
+    refine_damage_target_remainder, replace_player_anaphor_with_parent_target,
     rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
     scan_contains_phrase, stamp_delayed_returns, target_filter_controller_ref,
     try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
+
+fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
+    replace_player_anaphor_with_parent_target(def.effect.as_mut());
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rewrite_player_anaphor_targets_in_definition(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_deref_mut() {
+        rewrite_player_anaphor_targets_in_definition(else_ability);
+    }
+}
 
 pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
@@ -158,6 +169,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                                 &root.effect,
                             ) {
                                 instead.target_choice_timing = root.target_choice_timing;
+                            }
+                            if has_explicit_player_target(root.effect.as_ref()) {
+                                rewrite_player_anaphor_targets_in_definition(&mut instead);
                             }
                             instead.else_ability = root.sub_ability.take();
                             root.sub_ability = Some(Box::new(instead));

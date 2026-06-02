@@ -614,14 +614,15 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // landed us back at Priority (no further replacement choice), B1-drain the
         // deferred observer triggers parked during earlier pause segments plus the
         // ones this resume produced; otherwise leave them parked for the next drain.
+        let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+            .iter()
+            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .cloned()
+            .collect();
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
             crate::game::triggers::drain_deferred_trigger_queue(state, events);
         } else {
-            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
-                .iter()
-                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-                .cloned()
-                .collect();
             crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
         }
     }
@@ -4488,25 +4489,32 @@ pub(crate) fn evaluate_condition(
         // CR 608.2c: "If it's a [type] card" — check the revealed card's type.
         // CR 205.3m: Optional additional_filter checks extra properties like
         // "of the chosen type" (IsChosenCreatureType).
+        // CR 700.1 + CR 406.6: When no reveal occurred but the parent effect
+        // moved a card between zones (e.g. Currency Converter's
+        // "Put a card exiled with ~ into its owner's graveyard. If it's a
+        // land card, ..." — issue #1545), fall back to the just-moved card in
+        // `last_zone_changed_ids`. The reveal-driven path still wins when both
+        // trackers are populated, so existing reveal+rider cards keep their
+        // pre-fix behavior.
         AbilityCondition::RevealedHasCardType {
             card_type,
             additional_filter,
         } => {
-            let type_matches = state
+            let subject_id = state
                 .last_revealed_ids
                 .first()
-                .map(|id| super::printed_cards::object_has_core_type(state, *id, *card_type))
+                .or_else(|| state.last_zone_changed_ids.first())
+                .copied();
+            let type_matches = subject_id
+                .map(|id| super::printed_cards::object_has_core_type(state, id, *card_type))
                 .unwrap_or(false);
             let filter_matches = match additional_filter {
                 // CR 205.3m: "of the chosen type" — check the revealed card's subtype
                 // against the source permanent's chosen creature type.
                 Some(FilterProp::IsChosenCreatureType) => {
                     let source = state.objects.get(&ability.source_id);
-                    let revealed = state
-                        .last_revealed_ids
-                        .first()
-                        .and_then(|id| state.objects.get(id));
-                    match (source, revealed) {
+                    let subject = subject_id.and_then(|id| state.objects.get(&id));
+                    match (source, subject) {
                         (Some(src), Some(obj)) => {
                             src.chosen_creature_type().is_some_and(|chosen_type| {
                                 obj.card_types
@@ -11994,6 +12002,198 @@ mod tests {
             &state,
             &opponent_ability,
         ));
+    }
+
+    /// CR 608.2c + CR 700.1: Currency Converter — "Put a card exiled with this
+    /// artifact into its owner's graveyard. If it's a land card, create a
+    /// Treasure token. If it's a nonland card, create a 2/2 black Rogue
+    /// creature token." (issue #1545)
+    ///
+    /// The parser lowers "If it's a [type] card" to `RevealedHasCardType`, but
+    /// the parent effect here is a `ChangeZone` (Exile -> Graveyard), not a
+    /// reveal. With no preceding reveal, `last_revealed_ids` is empty and the
+    /// pre-fix evaluator returns `false` for both branches, so neither the
+    /// Treasure nor the Rogue token is ever created.
+    ///
+    /// CR 406.6: This shape (linked-exile consumer + conditional rider on the
+    /// moved card's type) is a class: Splinter Twin-style "if it's a creature
+    /// card", reanimate-conditional riders, and any future
+    /// "Put a card exiled with ~ into [zone]. If it's a [type] card, ..."
+    /// printing all benefit from the fallback to `last_zone_changed_ids`.
+    #[test]
+    fn revealed_has_card_type_falls_back_to_last_zone_changed_when_no_reveal() {
+        let mut state = GameState::new_two_player(42);
+        let land_card = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&land_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let nonland_card = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Goblin Guide".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&nonland_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Currency Converter style sub-ability: parent ChangeZone moved a card,
+        // sub clause reads "If it's a land card, ...". No reveal happened.
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let land_cond = AbilityCondition::RevealedHasCardType {
+            card_type: CoreType::Land,
+            additional_filter: None,
+        };
+
+        // Empty trackers — no reveal, no zone change: condition is false.
+        assert!(state.last_revealed_ids.is_empty());
+        assert!(state.last_zone_changed_ids.is_empty());
+        assert!(!evaluate_condition(&land_cond, &state, &ability));
+
+        // Parent ChangeZone moved the land card. The land branch of the
+        // "If it's a [type] card" rider must fire.
+        state.last_zone_changed_ids.push(land_card);
+        assert!(
+            evaluate_condition(&land_cond, &state, &ability),
+            "land-card branch must fire when parent ChangeZone moved a land",
+        );
+
+        // Nonland branch must NOT fire on the same moved land card. Equivalent
+        // to the parsed `Not { RevealedHasCardType { Land } }` rider that gates
+        // Currency Converter's Rogue token.
+        let nonland_cond = AbilityCondition::Not {
+            condition: Box::new(land_cond.clone()),
+        };
+        assert!(!evaluate_condition(&nonland_cond, &state, &ability));
+
+        // Swap: parent ChangeZone moved a nonland card instead.
+        state.last_zone_changed_ids.clear();
+        state.last_zone_changed_ids.push(nonland_card);
+        assert!(
+            !evaluate_condition(&land_cond, &state, &ability),
+            "land-card branch must NOT fire when parent ChangeZone moved a nonland",
+        );
+        assert!(
+            evaluate_condition(&nonland_cond, &state, &ability),
+            "nonland-card branch must fire when parent ChangeZone moved a nonland",
+        );
+
+        // CR 700.1 + CR 701.20: A real reveal still wins over the zone-change
+        // fallback so existing reveal-driven cards (Goblin Guide, dig effects)
+        // are not regressed by the fallback path.
+        state.last_zone_changed_ids.clear();
+        state.last_zone_changed_ids.push(nonland_card);
+        state.last_revealed_ids.push(land_card);
+        assert!(
+            evaluate_condition(&land_cond, &state, &ability),
+            "reveal must take precedence over the zone-change fallback",
+        );
+    }
+
+    #[test]
+    fn revealed_has_card_type_chain_uses_card_moved_by_parent_change_zone() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Currency Converter".to_string(),
+            Zone::Battlefield,
+        );
+        let land_card = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&land_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        state.exile_links.push(ExileLink {
+            source_id: source,
+            exiled_id: land_card,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let token_rider = ResolvedAbility::new(
+            Effect::Token {
+                name: "Treasure".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Artifact".to_string(), "Treasure".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::RevealedHasCardType {
+            card_type: CoreType::Land,
+            additional_filter: None,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Graveyard,
+                target: TargetFilter::ExiledBySource,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(token_rider);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.objects[&land_card].zone, Zone::Graveyard);
+        assert_eq!(
+            state
+                .objects
+                .values()
+                .filter(|obj| obj.name == "Treasure" && obj.zone == Zone::Battlefield)
+                .count(),
+            1,
+            "land-card rider must create a Treasure after the parent ChangeZone moved a land",
+        );
     }
 
     #[test]

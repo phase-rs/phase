@@ -22,6 +22,7 @@ use super::{casting, casting_costs};
 
 pub(super) enum ResolutionChoiceOutcome {
     WaitingFor(WaitingFor),
+    WaitingForWithInlineTriggers(WaitingFor),
     ActionResult(ActionResult),
 }
 
@@ -41,11 +42,24 @@ fn batch_or_drain_observer_triggers(
     events: &mut Vec<GameEvent>,
     event_slice_start: usize,
     event_slice_end: usize,
-) -> Option<WaitingFor> {
+) -> Option<ResolutionChoiceOutcome> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        // B1: this action settled — `run_post_action_pipeline` scans this
-        // action's own events; only the prior parked queue needs draining.
-        super::triggers::drain_deferred_trigger_queue(state, events)
+        // B1: this action settled. Merge this slice's observer triggers into
+        // the parked queue before draining — otherwise the last segment's
+        // triggers (e.g. the final Syphon Mind opponent discard) never enter
+        // `deferred_triggers` and are lost when ordering runs (issue #1793).
+        let trigger_events: Vec<GameEvent> = events[event_slice_start..event_slice_end]
+            .iter()
+            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .cloned()
+            .collect();
+        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        if let Some(wf) = super::triggers::drain_deferred_trigger_queue(state, events) {
+            return Some(ResolutionChoiceOutcome::WaitingFor(wf));
+        }
+        Some(ResolutionChoiceOutcome::WaitingForWithInlineTriggers(
+            state.waiting_for.clone(),
+        ))
     } else {
         // B2: paused — `run_post_action_pipeline` will not scan this action.
         // Park this move's observer triggers for a later settle.
@@ -1858,13 +1872,13 @@ pub(super) fn handle_resolution_choice(
             // action, so batch this discard's observer triggers (Waste Not,
             // Megrim, Bone Miser) across the `DiscardChoice` pause — exactly
             // as the `Sacrifice` branch does for dies-triggers.
-            if let Some(wf) = batch_or_drain_observer_triggers(
+            if let Some(outcome) = batch_or_drain_observer_triggers(
                 state,
                 events,
                 events_before_effect,
                 events_after_move,
             ) {
-                return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                return Ok(outcome);
             }
             ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
@@ -2213,13 +2227,13 @@ pub(super) fn handle_resolution_choice(
                     &mut events[events_before_effect..events_after_move],
                     &super::zones::departed_subset(state, &chosen),
                 );
-                if let Some(wf) = batch_or_drain_observer_triggers(
+                if let Some(outcome) = batch_or_drain_observer_triggers(
                     state,
                     events,
                     events_before_effect,
                     events_after_move,
                 ) {
-                    return Ok(ResolutionChoiceOutcome::WaitingFor(wf));
+                    return Ok(outcome);
                 }
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())

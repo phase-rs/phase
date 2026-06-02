@@ -2921,32 +2921,86 @@ fn dispatch_pending_trigger_context(
     }
 }
 
+/// CR 608.2e + issue #1793: True end-of-resolution boundary for draining
+/// `deferred_triggers`. Mid-resolution `Priority` from player-scope iteration,
+/// `repeat_for`, or replacement continuations must not drain (or offer CR
+/// 603.3b ordering) until those continuations finish.
+pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
+    if state.deferred_triggers.is_empty() {
+        return false;
+    }
+    if is_pending_trigger_construction_active(state) {
+        return false;
+    }
+    if state.pending_continuation.is_some() {
+        return false;
+    }
+    if state.pending_repeat_iteration.is_some() {
+        return false;
+    }
+    if state.post_replacement_continuation.is_some() {
+        return false;
+    }
+    if state.pending_change_zone_iteration.is_some() {
+        return false;
+    }
+    // CR 603.3b + issue #1793: observer triggers parked during a spell's
+    // resolution must wait until that spell leaves the stack — draining while
+    // a `Spell` entry remains would offer ordering mid player_scope iteration.
+    if state
+        .stack
+        .iter()
+        .any(|entry| matches!(entry.kind, StackEntryKind::Spell { .. }))
+    {
+        return false;
+    }
+    true
+}
+
 /// CR 113.2c + CR 603.2 + CR 603.3b: Drain the deferred-trigger queue after
 /// the active `pending_trigger` has been resolved (target chosen, mode
-/// chosen, distribution assigned) and pushed to the stack. Each queued
-/// trigger is dispatched FIFO. If one of them pauses on player input, the
-/// caller returns the resulting `WaitingFor` (already set on `state`) and the
-/// queue retains the still-unprocessed remainder. If the queue fully drains,
-/// returns the events produced (caller appends them to its own event vec).
+/// chosen, distribution assigned) and pushed to the stack. When 2+ triggers
+/// from the same controller are queued, the controller chooses their order
+/// (CR 603.3b) before dispatch. If one of them pauses on player input, the
+/// caller returns the resulting `WaitingFor` and the queue retains the
+/// still-unprocessed remainder.
 ///
-/// Returns `Some(waiting_for)` if the drain paused on a deferred trigger
-/// needing input (its target-selection / mode-choice / distribute-among
-/// `WaitingFor` to enter), or `None` if every deferred trigger reached the
-/// stack and the caller should continue with its existing `WaitingFor`
+/// Returns `Some(waiting_for)` if the drain paused on ordering, target
+/// selection, or distribute-among, or `None` if every deferred trigger reached
+/// the stack and the caller should continue with its existing `WaitingFor`
 /// (typically `Priority`).
 pub(crate) fn drain_deferred_trigger_queue(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
 ) -> Option<crate::types::game_state::WaitingFor> {
-    while !state.deferred_triggers.is_empty() {
-        let next = state.deferred_triggers.remove(0);
-        if dispatch_pending_trigger_context(state, next, events_out) {
-            // Paused on player input — the dispatcher set
-            // `state.pending_trigger` (and `state.waiting_for` for
-            // distribute-among). Defer to the engine's existing transition
-            // logic: for target/mode selection the caller invokes
-            // `begin_pending_trigger_target_selection`; for distribute-among
-            // the dispatcher already set `state.waiting_for`.
+    if !should_drain_deferred_triggers_now(state) {
+        return None;
+    }
+
+    let pending = std::mem::take(&mut state.deferred_triggers);
+    match begin_trigger_ordering(state, pending) {
+        TriggerOrderingDisposition::PromptForChoice(wf) => {
+            let wf = *wf;
+            state.waiting_for = wf.clone();
+            Some(wf)
+        }
+        TriggerOrderingDisposition::NoChoiceNeeded(pending) => {
+            dispatch_deferred_triggers_in_order(state, pending, events_out)
+        }
+    }
+}
+
+/// Dispatch an already-ordered deferred batch. On pause, park the tail back
+/// into `deferred_triggers` for a later drain at a true resolution boundary.
+fn dispatch_deferred_triggers_in_order(
+    state: &mut GameState,
+    pending: Vec<PendingTriggerContext>,
+    events_out: &mut Vec<GameEvent>,
+) -> Option<crate::types::game_state::WaitingFor> {
+    let mut iter = pending.into_iter();
+    while let Some(trigger_context) = iter.next() {
+        if dispatch_pending_trigger_context(state, trigger_context, events_out) {
+            state.deferred_triggers.extend(iter);
             if matches!(
                 state.waiting_for,
                 crate::types::game_state::WaitingFor::DistributeAmong { .. }
@@ -4349,6 +4403,27 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     // "put two cards from your hand on top of your library" does not use the word
     // "target" — the player chooses cards during resolution via EffectZoneChoice.
     if let Effect::PutAtLibraryPosition { target, .. } = effect {
+        if let Some(zone) = target.extract_in_zone() {
+            if matches!(zone, Zone::Hand | Zone::Library) {
+                return None;
+            }
+        }
+    }
+    // CR 601.2c: "You may cast a spell ... from your hand without paying its mana
+    // cost" (Baral's Expertise, Bring Back-style sub-effects) names no "target" —
+    // CR 601.2c puts target announcement BEFORE costs, and these clauses skip it
+    // entirely. The spell is chosen at resolution from the granting player's hand
+    // (or library, for Future Sight-style cast-from-library permissions), so a
+    // stack-time target slot would surface a phantom 4th pick alongside the real
+    // bounce/etc. targets.
+    //
+    // CR 115.1: Exile-link variants (`ExiledBySource`, `ParentTarget`, anaphoric
+    // "that card" / "the exiled card") stay resolved context references via the
+    // final `is_context_ref` guard rather than stack-time target slots. Those bind
+    // a single object selected earlier in the same effect chain and are not the
+    // "free pick from hand" pattern this carve-out covers. The is-private-zone
+    // test mirrors `Effect::ChangeZone` and `Effect::PutAtLibraryPosition` above.
+    if let Effect::CastFromZone { target, .. } = effect {
         if let Some(zone) = target.extract_in_zone() {
             if matches!(zone, Zone::Hand | Zone::Library) {
                 return None;
@@ -9568,6 +9643,67 @@ pub mod tests {
         );
     }
 
+    /// CR 601.2c: "You may cast a spell ... from your hand without paying its
+    /// mana cost" (Baral's Expertise, issue #1529) has no "target" word — the
+    /// spell is chosen at resolution from the player's hand, so no stack-time
+    /// target slot should be surfaced for the cast permission.
+    #[test]
+    fn extract_target_skips_cast_from_zone_from_hand() {
+        use crate::types::ability::{CardPlayMode, FilterProp, TypedFilter};
+        let effect = Effect::CastFromZone {
+            target: TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(crate::types::ability::TypeFilter::Card)
+                    .controller(ControllerRef::You)
+                    .properties(vec![
+                        FilterProp::InZone { zone: Zone::Hand },
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 4 },
+                        },
+                    ]),
+            ),
+            without_paying_mana_cost: true,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "CastFromZone from Hand has no `target` word — must not surface a target slot"
+        );
+    }
+
+    /// CR 115.1 boundary: A typed `CastFromZone` filter without an explicit
+    /// private-zone constraint (defaults to the battlefield class) keeps its
+    /// targeting behavior. This guards the carve-out above from regressing the
+    /// "from your graveyard" / library-search cast permissions that legitimately
+    /// flow through `extract_in_zone`.
+    #[test]
+    fn extract_target_keeps_cast_from_zone_from_graveyard() {
+        use crate::types::ability::{CardPlayMode, FilterProp, TypedFilter};
+        let effect = Effect::CastFromZone {
+            target: TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(crate::types::ability::TypeFilter::Card)
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }]),
+            ),
+            without_paying_mana_cost: false,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_some(),
+            "CastFromZone from a non-private zone (graveyard) must still flow through targeting"
+        );
+    }
+
     #[test]
     fn extract_target_skips_copy_token_source_filter() {
         let effect = Effect::CopyTokenOf {
@@ -13006,6 +13142,106 @@ pub mod tests {
         );
     }
 
+    fn make_draw_pending_trigger(
+        state: &mut GameState,
+        name: &str,
+        controller: PlayerId,
+    ) -> PendingTriggerContext {
+        let source_id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        PendingTriggerContext::single(PendingTrigger {
+            source_id,
+            controller,
+            condition: None,
+            // CR 603.3b: `begin_trigger_ordering` auto-orders genuinely
+            // indistinguishable no-input triggers (no prompt), so the ordering
+            // path is exercised only by distinct triggers. Key the ability
+            // description off `name` so two of these are distinguishable and
+            // still surface an OrderTriggers prompt.
+            ability: {
+                let mut ability = ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source_id,
+                    controller,
+                );
+                ability.description = Some(name.to_string());
+                ability
+            },
+            timestamp: 0,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+        })
+    }
+
+    /// Issue #1793: mid-resolution continuations must not drain (or reorder)
+    /// parked deferred triggers at intermediate Priority settles.
+    #[test]
+    fn issue_1793_pending_continuation_blocks_deferred_drain() {
+        use crate::types::game_state::PendingContinuation;
+
+        let mut state = setup();
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
+        ];
+        state.pending_continuation =
+            Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(9999),
+                PlayerId(0),
+            ))));
+        let mut events = Vec::new();
+
+        assert!(
+            !should_drain_deferred_triggers_now(&state),
+            "continuation in flight — must not drain deferred triggers yet"
+        );
+        assert!(
+            drain_deferred_trigger_queue(&mut state, &mut events).is_none(),
+            "drain must be a no-op while pending_continuation is set"
+        );
+        assert_eq!(state.deferred_triggers.len(), 2);
+    }
+
+    /// Issue #1793: at a true resolution boundary, 2+ same-controller deferred
+    /// triggers must surface CR 603.3b ordering before dispatch.
+    #[test]
+    fn issue_1793_deferred_drain_surfaces_order_triggers() {
+        let mut state = setup();
+        state.deferred_triggers = vec![
+            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
+            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
+        ];
+        let mut events = Vec::new();
+
+        let wf = drain_deferred_trigger_queue(&mut state, &mut events)
+            .expect("two same-controller deferred triggers require ordering");
+        assert!(
+            matches!(wf, WaitingFor::OrderTriggers { .. }),
+            "expected OrderTriggers, got {wf:?}"
+        );
+        assert!(state.deferred_triggers.is_empty());
+    }
+
     /// Issue #610 — Kratos, Stoic Father. A YouAttack trigger carrying a
     /// `valid_card` attacker-type filter (`Subtype "God"`) must fire iff at least
     /// one *God* attacks (CR 508.1 + CR 506.2 + CR 603.2c). Drives the real
@@ -14812,6 +15048,9 @@ pub mod tests {
                     .expect("opponent discards a card");
                     discards += 1;
                 }
+                WaitingFor::OrderTriggers { .. } => {
+                    super::drain_order_triggers_with_identity(&mut state);
+                }
                 WaitingFor::Priority { .. } if state.stack.is_empty() => break,
                 WaitingFor::Priority { .. } => {
                     crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
@@ -15011,6 +15250,49 @@ pub mod tests {
         )
         .expect("opponent sacrifices a creature");
 
+        // #1793: the deferred flush now routes through `begin_trigger_ordering`,
+        // so the two same-controller deferred triggers (Undying dies-trigger +
+        // targeted observer) surface a CR 603.3b ordering prompt before
+        // dispatch. Order the no-input Undying trigger first so it reaches the
+        // stack, leaving the targeted observer to pause on its own target
+        // selection.
+        let WaitingFor::OrderTriggers {
+            triggers: order_choices,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "the two same-controller deferred triggers must surface a CR 603.3b \
+                 ordering prompt after the deferred flush, got {:?}",
+                state.waiting_for
+            );
+        };
+        // The reflexive opponent sacrifice itself kills a creature, so the
+        // dies-observer fires again for that death: the co-triggered group is
+        // the Undying dies-trigger plus one targeted observer per creature that
+        // died (Young Wolf + the sacrificed opponent). All are P0-controlled and
+        // ordered together (CR 603.3b).
+        assert!(
+            order_choices.len() >= 2,
+            "the co-triggered group (Undying dies-trigger + targeted dies-observers) \
+             must be ordered together (issue #423), got {}",
+            order_choices.len()
+        );
+        let undying_idx = order_choices
+            .iter()
+            .position(|t| t.source_name == "Young Wolf")
+            .expect("the Undying dies-trigger must be one of the ordered triggers");
+        let undying_first: Vec<usize> = std::iter::once(undying_idx)
+            .chain((0..order_choices.len()).filter(|&i| i != undying_idx))
+            .collect();
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::OrderTriggers {
+                order: undying_first,
+            },
+        )
+        .expect("submit deferred-trigger order");
+
         // (iii) The drained targeted observer reached its own target selection.
         assert!(
             matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }),
@@ -15027,21 +15309,39 @@ pub mod tests {
             "the Undying dies-trigger must have reached the stack via the deferred flush"
         );
 
-        // Pick the observer's target, then resolve everything. Undying returns.
-        crate::game::engine::apply_as_current(
-            &mut state,
-            GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(opp_b)),
-            },
-        )
-        .expect("choose observer Tap target");
-        resolve_stack_until_paused(&mut state);
+        // Drive the flush to completion: each targeted dies-observer picks a
+        // legal Tap target (opp_b is always a legal creature target), and the
+        // stack resolves. The #423 invariant: nothing is dropped and Undying
+        // returns its creature to the battlefield.
+        let mut guard = 0;
+        while state.objects.get(&young_wolf).map(|o| o.zone) != Some(Zone::Battlefield) {
+            guard += 1;
+            assert!(
+                guard < 16,
+                "issue #423 deferred flush failed to settle (state: {:?})",
+                state.waiting_for
+            );
+            match &state.waiting_for {
+                WaitingFor::TriggerTargetSelection { .. } => {
+                    crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(opp_b)),
+                        },
+                    )
+                    .expect("choose observer Tap target");
+                }
+                _ => {
+                    resolve_stack_until_paused(&mut state);
+                }
+            }
+        }
 
         let wolf = state.objects.get(&young_wolf).expect("wolf tracked");
         assert_eq!(
             wolf.zone,
             Zone::Battlefield,
-            "Undying returned the sacrificed creature despite the co-triggered observer"
+            "Undying returned the sacrificed creature despite the co-triggered observers"
         );
     }
 
