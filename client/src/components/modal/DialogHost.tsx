@@ -181,7 +181,7 @@ export function DialogHost({ children }: { children: ReactNode }) {
   );
 }
 
-function PeekRestoreTab({
+export function PeekRestoreTab({
   direction,
   onClick,
 }: {
@@ -238,7 +238,7 @@ function PeekRestoreTab({
   );
 }
 
-function useIsNarrowViewport(breakpoint = 640): boolean {
+export function useIsNarrowViewport(breakpoint = 640): boolean {
   const [isNarrow, setIsNarrow] = useState(() =>
     typeof window === "undefined" ? false : window.innerWidth < breakpoint,
   );
