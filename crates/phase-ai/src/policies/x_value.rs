@@ -104,17 +104,15 @@ fn ability_references_x(ability: &ResolvedAbility) -> bool {
             return true;
         }
     }
-    let mut current = &ability.sub_ability;
-    while let Some(sub) = current {
-        if effect_references_x(&sub.effect) {
+    if let Some(sub) = &ability.sub_ability {
+        if ability_references_x(sub) {
             return true;
         }
-        if let Some(expr) = &sub.repeat_for {
-            if quantity_expr_contains_x(expr) {
-                return true;
-            }
+    }
+    if let Some(else_branch) = &ability.else_ability {
+        if ability_references_x(else_branch) {
+            return true;
         }
-        current = &sub.sub_ability;
     }
     false
 }
@@ -186,12 +184,38 @@ fn ability_definition_references_x(ability: &AbilityDefinition) -> bool {
 /// `engine::game::casting_costs::quantity_expr_contains_x` (kept private
 /// there) so the AI layer can run the same predicate without an engine edit.
 fn effect_references_x(effect: &Effect) -> bool {
-    for expr in collect_quantity_exprs(effect) {
-        if quantity_expr_contains_x(expr) {
-            return true;
+    match effect {
+        Effect::DealDamage { amount, .. }
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::LoseLife { amount, .. } => quantity_expr_contains_x(amount),
+        Effect::Draw { count, .. }
+        | Effect::Mill { count, .. }
+        | Effect::Discard { count, .. }
+        | Effect::AddCounter { count, .. }
+        | Effect::Scry { count, .. }
+        | Effect::Surveil { count, .. }
+        | Effect::Sacrifice { count, .. }
+        | Effect::Dig { count, .. }
+        | Effect::ExileTop { count, .. }
+        | Effect::PutAtLibraryPosition { count, .. }
+        | Effect::PutCounter { count, .. }
+        | Effect::PutCounterAll { count, .. }
+        | Effect::CopyTokenOf { count, .. }
+        | Effect::SearchLibrary { count, .. } => quantity_expr_contains_x(count),
+        Effect::Token {
+            count,
+            enter_with_counters,
+            ..
+        } => {
+            quantity_expr_contains_x(count)
+                || enter_with_counters
+                    .iter()
+                    .any(|(_, qty)| quantity_expr_contains_x(qty))
         }
+        _ => false,
     }
-    false
 }
 
 fn quantity_expr_contains_x(expr: &QuantityExpr) -> bool {
@@ -212,53 +236,6 @@ fn quantity_expr_contains_x(expr: &QuantityExpr) -> bool {
         }
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
     }
-}
-
-/// Collect every `QuantityExpr` reachable from an `Effect`. Conservative:
-/// returns refs to every `count`/`amount`/`value` field on the variants known
-/// to carry an X-driven quantity. Variants without a `QuantityExpr` are skipped
-/// (their effect doesn't scale with X, so they don't influence the decision).
-fn collect_quantity_exprs(effect: &Effect) -> Vec<&QuantityExpr> {
-    let mut out = Vec::new();
-    match effect {
-        Effect::DealDamage { amount, .. } => out.push(amount),
-        Effect::DamageAll { amount, .. } => out.push(amount),
-        Effect::DamageEachPlayer { amount, .. } => out.push(amount),
-        Effect::Draw { count, .. } => out.push(count),
-        Effect::GainLife { amount, .. } => out.push(amount),
-        Effect::LoseLife { amount, .. } => out.push(amount),
-        Effect::Mill { count, .. } => out.push(count),
-        Effect::Discard { count, .. } => out.push(count),
-        Effect::Token {
-            count,
-            enter_with_counters,
-            ..
-        } => {
-            out.push(count);
-            for (_, qty) in enter_with_counters {
-                out.push(qty);
-            }
-        }
-        Effect::AddCounter { count, .. } => out.push(count),
-        Effect::Scry { count, .. } => out.push(count),
-        Effect::Surveil { count, .. } => out.push(count),
-        Effect::Sacrifice { count, .. } => out.push(count),
-        // Dig-X (Genesis Hydra "look at the top X cards") and the related
-        // ExileTop/PutAtLibraryPosition-X family.
-        Effect::Dig { count, .. } => out.push(count),
-        Effect::ExileTop { count, .. } => out.push(count),
-        Effect::PutAtLibraryPosition { count, .. } => out.push(count),
-        // X +1/+1 counters-on-a-permanent (Reinforce X, "puts X +1/+1
-        // counters on target creature").
-        Effect::PutCounter { count, .. } => out.push(count),
-        Effect::PutCounterAll { count, .. } => out.push(count),
-        // CopyTokenOf-X covers "create X copies of target …" patterns.
-        Effect::CopyTokenOf { count, .. } => out.push(count),
-        // SearchLibrary-X (Birthing Pod-like / "search for X cards").
-        Effect::SearchLibrary { count, .. } => out.push(count),
-        _ => {}
-    }
-    out
 }
 
 #[cfg(test)]
@@ -497,6 +474,38 @@ mod tests {
         assert_eq!(
             score, 0.0,
             "Effect that doesn't reference X must not contribute (got {score})"
+        );
+    }
+
+    #[test]
+    fn ability_references_x_walks_else_branch() {
+        let mut ability = ResolvedAbility::new(
+            AbilityEffect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(7),
+            PlayerId(0),
+        );
+        ability.else_ability = Some(Box::new(ResolvedAbility::new(
+            AbilityEffect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            Vec::new(),
+            ObjectId(7),
+            PlayerId(0),
+        )));
+
+        assert!(
+            ability_references_x(&ability),
+            "XValuePolicy must see X references in else_ability branches"
         );
     }
 }
