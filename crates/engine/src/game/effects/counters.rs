@@ -589,7 +589,7 @@ pub fn resolve_add_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (counter_type, counter_num, target_filter) = match &ability.effect {
+    let (counter_type, count, counter_num_shared, target_filter) = match &ability.effect {
         Effect::PutCounterAll {
             counter_type,
             count,
@@ -598,7 +598,12 @@ pub fn resolve_add_all(
             let resolved =
                 crate::game::quantity::resolve_quantity_with_targets(state, count, ability).max(0)
                     as u32;
-            (counter_type.clone(), resolved, target.clone())
+            (
+                counter_type.clone(),
+                count.clone(),
+                resolved,
+                target.clone(),
+            )
         }
         _ => return Ok(()),
     };
@@ -673,7 +678,26 @@ pub fn resolve_add_all(
                 .collect()
         };
 
+    // CR 122.1 + CR 608.2c: A per-recipient count ("each other creature you
+    // control equal to THAT CREATURE's toughness" — Canopy Gargantuan) is
+    // re-evaluated against each object; a uniform count (the source's power —
+    // Ouroboroid) is resolved once and shared. Detected via the recipient-
+    // binding scope the parser stamps on per-recipient counts.
+    let count_uses_recipient = crate::game::quantity::quantity_expr_uses_recipient(&count);
+
     for obj_id in matching_ids {
+        let counter_num = if count_uses_recipient {
+            crate::game::quantity::resolve_quantity_with_recipient(
+                state,
+                &count,
+                ability.controller,
+                ability.source_id,
+                obj_id,
+            )
+            .max(0) as u32
+        } else {
+            counter_num_shared
+        };
         add_counter_with_replacement(
             state,
             ability.controller,
@@ -1360,6 +1384,115 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Creature);
+    }
+
+    /// Issue #1675 — Canopy Gargantuan: "put a number of +1/+1 counters on each
+    /// other creature you control equal to THAT CREATURE's toughness." Each
+    /// other creature must receive counters equal to ITS OWN toughness (the
+    /// count is re-evaluated per recipient), the source is excluded ("Another"),
+    /// and an opponent's creature receives none ("you control").
+    #[test]
+    fn put_counter_all_per_recipient_toughness() {
+        use crate::types::ability::{ObjectScope, QuantityRef};
+
+        let mut state = GameState::new_two_player(42);
+
+        // Canopy Gargantuan (the source).
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Canopy Gargantuan".to_string(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, source);
+        {
+            let o = state.objects.get_mut(&source).unwrap();
+            o.toughness = Some(7);
+            o.base_toughness = Some(7);
+        }
+
+        // Three OTHER creatures you control with distinct toughness.
+        let others: Vec<(ObjectId, i32)> = [(2u64, 3i32), (3, 5), (4, 1)]
+            .into_iter()
+            .map(|(cid, tough)| {
+                let id = create_object(
+                    &mut state,
+                    CardId(cid),
+                    PlayerId(0),
+                    format!("Creature {cid}"),
+                    Zone::Battlefield,
+                );
+                mark_creature(&mut state, id);
+                let o = state.objects.get_mut(&id).unwrap();
+                o.toughness = Some(tough);
+                o.base_toughness = Some(tough);
+                (id, tough)
+            })
+            .collect();
+
+        // An opponent's creature — must NOT receive counters ("you control").
+        let opp = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, opp);
+        {
+            let o = state.objects.get_mut(&opp).unwrap();
+            o.toughness = Some(4);
+            o.base_toughness = Some(4);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::PutCounterAll {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::Recipient,
+                    },
+                },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Another]),
+                ),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_add_all(&mut state, &ability, &mut events).unwrap();
+
+        // Each OTHER creature you control gains counters equal to ITS OWN toughness.
+        for (id, tough) in &others {
+            assert_eq!(
+                state.objects[id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                *tough as u32,
+                "creature with toughness {tough} must receive {tough} +1/+1 counters"
+            );
+        }
+        // Source ("Another") and the opponent's creature ("you control") get none.
+        assert!(
+            !state.objects[&source]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "source must be excluded by Another"
+        );
+        assert!(
+            !state.objects[&opp]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "opponent's creature must be excluded by 'you control'"
+        );
     }
 
     #[test]
