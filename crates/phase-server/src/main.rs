@@ -34,6 +34,7 @@ use server_core::draft_session::DraftSessionManager;
 use server_core::draft_wire_guard::{
     guard_create_draft_with_settings, guard_join_draft_with_password, guard_reconnect_draft,
 };
+use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::lobby::RegisterGameRequest;
 use server_core::protocol::{
     build_commit, ClientMessage, ServerMessage, ServerMode, MIN_SUPPORTED_PROTOCOL,
@@ -2044,6 +2045,13 @@ async fn handle_client_message(
         }
         ClientMessage::CreateGame { deck } => {
             info!(deck_size = deck.main_deck.len(), "CreateGame");
+            if let Err(reason) = guard_legacy_deck(&deck) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
             {
                 let mgr = state.lock().await;
                 if mgr.sessions.len() >= MAX_GAMES {
@@ -2092,6 +2100,13 @@ async fn handle_client_message(
 
         ClientMessage::JoinGame { game_code, deck } => {
             info!(game = %game_code, deck_size = deck.main_deck.len(), "JoinGame");
+            if let Err(reason) = guard_legacy_deck(&deck) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
             if reject_joining_current_game(identity, &game_code, socket)
                 .await
                 .is_err()
