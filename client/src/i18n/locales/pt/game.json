@@ -910,12 +910,17 @@
       "subtitleBattlefieldUpTo_other": "Escolha até {{count}} cartas para colocar no campo de batalha",
       "subtitleBattlefieldRange_one": "Escolha {{min}}-{{count}} carta para colocar no campo de batalha",
       "subtitleBattlefieldRange_other": "Escolha {{min}}-{{count}} cartas para colocar no campo de batalha",
+      "subtitleHandUpTo_one": "Escolha até {{count}} permanente para devolver à mão do dono",
+      "subtitleHandUpTo_other": "Escolha até {{count}} permanentes para devolver à mão dos donos",
+      "subtitleHandRange_one": "Escolha {{min}}-{{count}} permanente para devolver à mão do dono",
+      "subtitleHandRange_other": "Escolha {{min}}-{{count}} permanentes para devolver à mão dos donos",
       "labelSkip": "Pular",
       "labelDecline": "Recusar",
       "labelPutOnTop": "Colocar no topo ({{order}})",
       "labelConfirm": "Confirmar ({{selected}}/{{count}})",
       "labelTop": "Topo ({{selected}}/{{count}})",
       "labelPut": "Colocar ({{selected}}/{{count}})",
+      "labelReturn": "Devolver ({{selected}}/{{count}})",
       "orderTop": "Topo"
     },
     "drawnThisTurn": {

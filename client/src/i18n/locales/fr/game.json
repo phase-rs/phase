@@ -910,12 +910,17 @@
       "subtitleBattlefieldUpTo_other": "Choisissez jusqu'à {{count}} cartes à mettre sur le champ de bataille",
       "subtitleBattlefieldRange_one": "Choisissez {{min}}-{{count}} carte à mettre sur le champ de bataille",
       "subtitleBattlefieldRange_other": "Choisissez {{min}}-{{count}} cartes à mettre sur le champ de bataille",
+      "subtitleHandUpTo_one": "Choisissez jusqu'à {{count}} permanent à renvoyer dans la main de son propriétaire",
+      "subtitleHandUpTo_other": "Choisissez jusqu'à {{count}} permanents à renvoyer dans la main de leur propriétaire",
+      "subtitleHandRange_one": "Choisissez {{min}}-{{count}} permanent à renvoyer dans la main de son propriétaire",
+      "subtitleHandRange_other": "Choisissez {{min}}-{{count}} permanents à renvoyer dans la main de leur propriétaire",
       "labelSkip": "Ignorer",
       "labelDecline": "Refuser",
       "labelPutOnTop": "Mettre au-dessus ({{order}})",
       "labelConfirm": "Confirmer ({{selected}}/{{count}})",
       "labelTop": "Dessus ({{selected}}/{{count}})",
       "labelPut": "Placer ({{selected}}/{{count}})",
+      "labelReturn": "Renvoyer ({{selected}}/{{count}})",
       "orderTop": "Dessus"
     },
     "drawnThisTurn": {
