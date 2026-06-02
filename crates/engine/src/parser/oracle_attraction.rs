@@ -82,12 +82,14 @@ fn parse_visit_line_header(input: &str) -> nom::IResult<&str, ()> {
 }
 
 fn strip_visit_effect_text(line: &str) -> Option<&str> {
-    let lower = line.to_ascii_lowercase();
-    let (effect_start, effect_end) = nom_parse_lower(&lower, |input| {
-        let (rest, _) = tag("visit").parse(input)?;
-        let (rest, _) = multispace0.parse(rest)?;
-        let effect_start = input.len() - rest.len();
-        let before_effect = rest;
+    let stripped = line.trim();
+    let lower = stripped.to_ascii_lowercase();
+    if !lower.starts_with("visit") {
+        return None;
+    }
+    let after_visit = stripped.get("visit".len()..)?.trim_start();
+    let after_visit_lower = lower.get("visit".len()..)?.trim_start();
+    let effect_lower = nom_parse_lower(after_visit_lower, |input| {
         let (rest, effect_body) = alt((
             map(
                 preceded(
@@ -104,20 +106,18 @@ fn strip_visit_effect_text(line: &str) -> Option<&str> {
             ),
             map(nom_rest, |s: &str| s.trim()),
         ))
-        .parse(rest)?;
+        .parse(input)?;
         if effect_body.is_empty() {
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Fail,
             )));
         }
-        let effect_end = effect_start + (before_effect.len() - rest.len());
-        let raw = &lower[effect_start..effect_end];
-        let trim_start = raw.len() - raw.trim_start().len();
-        let trim_end = raw.len() - raw.trim_end().len();
-        Ok((rest, (effect_start + trim_start, effect_end - trim_end)))
+        Ok((rest, effect_body.to_string()))
     })?;
-    Some(&line[effect_start..effect_end])
+    let start = after_visit_lower.find(&effect_lower)?;
+    let end = start + effect_lower.len();
+    Some(after_visit.get(start..end)?.trim())
 }
 
 fn parse_attraction_die_face(input: &str) -> nom::IResult<&str, u8> {
@@ -206,9 +206,16 @@ mod tests {
 
     #[test]
     fn visit_dash_parses_draw() {
+        use crate::types::ability::Effect;
+
         let trigger = parse_visit_trigger("Visit — Draw a card.", "Test Attraction").unwrap();
         assert_eq!(trigger.mode, TriggerMode::VisitAttraction);
-        assert!(trigger.execute.is_some());
+        let execute = trigger.execute.as_ref().expect("execute");
+        assert!(
+            matches!(*execute.effect, Effect::Draw { .. }),
+            "expected Draw, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]
