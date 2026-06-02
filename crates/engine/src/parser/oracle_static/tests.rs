@@ -845,6 +845,31 @@ fn static_cant_block() {
     assert_eq!(def.condition, None);
 }
 
+#[test]
+fn static_cant_attack_alone() {
+    // CR 506.5 + CR 508.1a: "can't attack alone" must NOT be swallowed by the
+    // generic "can't attack" arm (which would blanket-prohibit attacking).
+    let def = parse_static_line("Bonded Construct can't attack alone.").unwrap();
+    assert_eq!(def.mode, StaticMode::CantAttackAlone);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_cant_block_alone() {
+    let def = parse_static_line("~ can't block alone.").unwrap();
+    assert_eq!(def.mode, StaticMode::CantBlockAlone);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_cant_attack_or_block_alone_emits_both() {
+    // CR 506.5: Mogg Flunkies — both restrictions from one clause.
+    let defs = parse_static_line_multi("Mogg Flunkies can't attack or block alone.");
+    assert_eq!(defs.len(), 2);
+    assert!(defs.iter().any(|d| d.mode == StaticMode::CantAttackAlone));
+    assert!(defs.iter().any(|d| d.mode == StaticMode::CantBlockAlone));
+}
+
 /// CR 508.1: "~ can't attack if defending player controls [filter]" attaches
 /// the trailing "if" clause as a `DefendingPlayerControls` condition (Orgg,
 /// Mogg Jailer). Before 5a the condition was dropped.
