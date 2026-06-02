@@ -504,16 +504,74 @@ fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
     (stripped, true)
 }
 
-/// CR 109.4 + CR 115.1 + CR 506.2: Detect a trigger condition that introduces
-/// a player target — currently the "[subject] attack(s) a player" family
-/// (CR 506.2 / CR 508.1a) and the "[subject] deals [combat] damage to a player"
-/// family (CR 120.3). When this returns true, follow-on possessive references
-/// inside the effect ("that player controls/owns") refer to that introduced
-/// player and the parser pushes a relative-player scope so they emit
-/// `ControllerRef::TargetPlayer`.
-///
-/// Built from composable nom alternatives so adding new condition shapes is a
-/// one-line change to the inner `alt()`. The attack/damage scans both accept
+/// CR 608.2c + CR 506.2: "attack a player" — the attacked player is the
+/// defending player, which resolves via `ControllerRef::DefendingPlayer` at
+/// runtime. Distinct from damage-to-player triggers (which use
+/// `ControllerRef::TargetPlayer` because the damaged player is not necessarily
+/// the defending player in combat). This function specifically detects attack
+/// patterns without matching damage-to-player patterns.
+fn condition_introduces_defending_player(cond_lower: &str) -> bool {
+    use nom::bytes::complete::tag;
+    use nom::combinator::value;
+
+    fn parse_actor(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("you ")),
+            value((), tag("an opponent ")),
+            value((), tag("a player ")),
+            value((), tag("another player ")),
+        ))
+        .parse(input)
+    }
+
+    fn parse_attack_verb(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+        alt((
+            value((), tag::<_, _, OracleError<'_>>("attack ")),
+            value((), tag("attacks ")),
+        ))
+        .parse(input)
+    }
+
+    // Walk word boundaries — the actor/verb pair may be preceded by "whenever",
+    // "when", or quantifiers like "one or more creatures you control".
+    let mut remaining = cond_lower;
+    while !remaining.is_empty() {
+        if let Ok((after_actor, ())) = parse_actor(remaining) {
+            if let Ok((after_verb, ())) = parse_attack_verb(after_actor) {
+                if tag::<_, _, OracleError<'_>>("a player")
+                    .parse(after_verb)
+                    .is_ok()
+                {
+                    return true;
+                }
+            }
+        }
+        // CR 506.2 + CR 508.1a: "[anything] attack[s] a player" — same subject
+        // permissiveness. Covers cases where the actor is wrapped in a relative
+        // clause that the explicit actor branch above cannot match, e.g. "one or
+        // more Warriors you control attack a player" (Gornog, the Red Reaper) or
+        // "a creature you control attacks a player". The verb phrase alone is
+        // unambiguous in trigger-condition text — "attack" never appears as a
+        // noun before "a player" here.
+        if let Ok((after_verb, ())) = parse_attack_verb(remaining) {
+            if tag::<_, _, OracleError<'_>>("a player")
+                .parse(after_verb)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+        // structural: not dispatch — advance to the next word boundary so the
+        // nom alternatives above are retried at every word position (mirrors
+        // `scan_timing_restrictions` in oracle_casting.rs).
+        remaining = match remaining.find(' ') {
+            Some(i) => remaining[i + 1..].trim_start(),
+            None => "",
+        };
+    }
+    false
+}
+
 /// any subject prefix (verb-phrase only), so relative-clause subjects like
 /// "one or more Warriors you control" and "a creature you control" match
 /// without needing an explicit-actor variant per subject shape.
@@ -736,6 +794,11 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // TargetPlayer resolution inside the trigger effect body.
     if condition_introduces_damage_source_controller_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
+    } else if condition_introduces_defending_player(&cond_lower) {
+        // CR 608.2c: Attack triggers use DefendingPlayer (the attacked player
+        // in combat), not TargetPlayer (which requires a player target to be
+        // bound at runtime).
+        effect_ctx.relative_player_scope = Some(ControllerRef::DefendingPlayer);
     } else if condition_introduces_target_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
     } else if condition_introduces_scoped_phase_player(&cond_lower) {
@@ -22819,11 +22882,11 @@ mod tests {
 
     /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar's first trigger introduces
     /// the attacked player in the condition; "that player controls" inside the
-    /// effect must resolve to `ControllerRef::TargetPlayer` so the runtime
-    /// auto-surfaces a Player target slot (the attacked player) rather than
-    /// defaulting to "you" and offering the trigger controller's own creatures.
+    /// effect must resolve to `ControllerRef::DefendingPlayer` so the runtime
+    /// reads the defending player from the combat state, not from a TargetPlayer
+    /// target slot. Regression test for #1667.
     #[test]
-    fn karazikar_attack_a_player_uses_target_player_controller() {
+    fn karazikar_attack_a_player_uses_defending_player_controller() {
         use crate::types::ability::Effect;
 
         let def = parse_trigger_line(
@@ -22836,8 +22899,8 @@ mod tests {
             Effect::Tap { target } => match target {
                 TargetFilter::Typed(t) => assert_eq!(
                     t.controller,
-                    Some(ControllerRef::TargetPlayer),
-                    "tap target should reference attacked player",
+                    Some(ControllerRef::DefendingPlayer),
+                    "tap target should reference the defending player via DefendingPlayer",
                 ),
                 other => panic!("expected Typed filter, got {other:?}"),
             },
@@ -22849,13 +22912,13 @@ mod tests {
     /// you control attack a player, target creature that player controls
     /// becomes a Coward" introduces the attacked player through a relative-
     /// clause subject ("Warriors you control") rather than a bare actor. The
-    /// effect's "that player controls" must still resolve to
-    /// `ControllerRef::TargetPlayer` so the UI offers the attacked player's
-    /// creatures, not the trigger controller's. Regression test for #1054 — the
-    /// subject-permissive scan in `condition_introduces_target_player` is the
-    /// fix site.
+    /// effect's "that player controls" must resolve to
+    /// `ControllerRef::DefendingPlayer` so the runtime reads the defending
+    /// player from the combat state, not from a TargetPlayer target slot.
+    /// Regression test for #1667 — the parser now emits DefendingPlayer for
+    /// attack triggers instead of TargetPlayer.
     #[test]
-    fn gornog_one_or_more_warriors_attack_uses_target_player_controller() {
+    fn gornog_one_or_more_warriors_attack_uses_defending_player_controller() {
         use crate::types::ability::Effect;
 
         let def = parse_trigger_line(
@@ -22868,12 +22931,42 @@ mod tests {
             Effect::GenericEffect { target, .. } => match target {
                 Some(TargetFilter::Typed(t)) => assert_eq!(
                     t.controller,
-                    Some(ControllerRef::TargetPlayer),
-                    "GenericEffect target should reference the attacked player",
+                    Some(ControllerRef::DefendingPlayer),
+                    "GenericEffect target should reference the defending player via DefendingPlayer",
                 ),
                 other => panic!("expected Some(Typed) target filter, got {other:?}"),
             },
             other => panic!("expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 120.3: Damage-to-player triggers (e.g., "Whenever ~ deals combat
+    /// damage to a player, destroy target creature that player controls") must
+    /// continue using `ControllerRef::TargetPlayer`, not `DefendingPlayer`,
+    /// because the damaged player is not necessarily the defending player in
+    /// combat (e.g., trample damage to a planeswalker's controller). Regression
+    /// test for #1667 — ensures the DefendingPlayer fix doesn't break
+    /// damage-to-player triggers.
+    #[test]
+    fn damage_to_player_trigger_uses_target_player() {
+        use crate::types::ability::Effect;
+
+        let def = parse_trigger_line(
+            "Whenever ~ deals combat damage to a player, destroy target creature that player controls.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        let execute = def.execute.as_deref().expect("execute ability");
+        match execute.effect.as_ref() {
+            Effect::Destroy { target, .. } => match target {
+                TargetFilter::Typed(t) => assert_eq!(
+                    t.controller,
+                    Some(ControllerRef::TargetPlayer),
+                    "Damage-to-player trigger should use TargetPlayer, not DefendingPlayer",
+                ),
+                other => panic!("expected Typed target filter, got {other:?}"),
+            },
+            other => panic!("expected Destroy effect, got {other:?}"),
         }
     }
 
