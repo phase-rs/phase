@@ -759,7 +759,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // Party (a Saga is not Equipment), wrong for Quest for the Holy Relic and
     // Stonehewer Giant (the searcher is not the moved Equipment).
     //
-    // CR 608.2k: The same flag also wires sub-chains whose own clauses
+    // CR 608.2c: The same flag also wires sub-chains whose own clauses
     // anchor on the just-moved card via the bare-"it" anaphor
     // (`TargetFilter::SelfRef`) — Emperor of Bones' "[…] put a creature
     // card exiled with this creature onto the battlefield […]. It gains
@@ -837,7 +837,7 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
 /// CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
 /// CR 301.5b: Equipment entering attached via "put onto the battlefield attached to" wiring.
 /// CR 603.7d: A delayed trigger's source/controller is the parent ability's at creation time.
-/// CR 608.2k: Bare "it" anaphor in a later clause binds to the typed referent of an earlier clause.
+/// CR 608.2c: Bare "it" anaphor in a later clause binds to the typed referent of an earlier clause.
 ///
 /// Walk the chain and set `forward_result: true` on every `Dig`/`ChangeZone`
 /// whose `destination` is `Battlefield` and whose chained sub-ability anchors
@@ -889,7 +889,7 @@ fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 608.2k: True when a sub-ability anchors on the just-moved card via
+/// CR 608.2c: True when a sub-ability anchors on the just-moved card via
 /// the bare-"it" anaphor. Two encodings are recognized:
 ///
 /// - `TargetFilter::SelfRef` — encoded when the anaphor's antecedent is

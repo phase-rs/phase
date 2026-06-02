@@ -9271,7 +9271,7 @@ fn has_typed_target(effect: &Effect) -> bool {
     )
 }
 
-/// CR 608.2k: An earlier clause whose target filter is a compound shape
+/// CR 608.2c: An earlier clause whose target filter is a compound shape
 /// (`And` / `Or` wrapping a `Typed` branch) still introduces a typed object
 /// referent for a sibling bare-"it" anaphor.
 ///
@@ -9297,7 +9297,7 @@ fn filter_introduces_typed_object(filter: &TargetFilter) -> bool {
     }
 }
 
-/// CR 608.2k: Variant of `has_typed_target` that accepts compound filter
+/// CR 608.2c: Variant of `has_typed_target` that accepts compound filter
 /// shapes (`And` / `Or` wrapping a `Typed`). Effect-kind whitelist mirrors
 /// `has_typed_target` exactly — only the filter-shape recognition is
 /// widened. Used by the chain walk so a `ChangeZone` whose target is
@@ -9359,7 +9359,6 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr]) -> bool {
             return false;
         }
         // CR 608.2c: Chain clauses resolve in written order; an earlier typed referent is visible to a later anaphor.
-        // CR 608.2k: Bare-"it" anaphor binds to the typed object introduced by an earlier clause.
         // `has_typed_target_widened` mirrors `has_typed_target`'s effect-kind
         // whitelist but also accepts a compound (`And` / `Or` over `Typed`)
         // filter as a typed-referent introducer (Emperor of Bones'
@@ -38754,7 +38753,7 @@ mod tests {
         );
     }
 
-    /// CR 608.2k: Emperor of Bones class — a ChangeZone-to-Battlefield
+    /// CR 608.2c: Emperor of Bones class — a ChangeZone-to-Battlefield
     /// followed by sibling clauses that anaphorically reference the just-
     /// moved card ("it gains haste. sacrifice it ...") must mark
     /// `forward_result: true` on the ChangeZone parent so the runtime
@@ -38805,7 +38804,7 @@ mod tests {
         let parent = find_change_zone_to_battlefield(&def)
             .expect("expected a ChangeZone|Dig to Battlefield parent in the parsed chain");
 
-        // CR 608.2k: the bare-"it" anaphor sub-chain must trigger the
+        // CR 608.2c: the bare-"it" anaphor sub-chain must trigger the
         // rewire, so the runtime rebinds the sub's source_id to the
         // moved card.
         assert!(
