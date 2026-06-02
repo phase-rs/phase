@@ -191,4 +191,30 @@ mod tests {
         let result = mgr.attempt_reconnect("DRAFT01", PlayerId(1));
         assert!(matches!(result, ReconnectResult::Ok { .. }));
     }
+
+    mod lookup_join_guard_tests {
+        use crate::lookup_join_guard::guard_lookup_join_target;
+        use lobby_broker::protocol::LobbyClientMessage;
+
+        fn lookup_msg(game_code: &str) -> LobbyClientMessage {
+            LobbyClientMessage::LookupJoinTarget {
+                game_code: game_code.to_string(),
+                password: None,
+                reserve: false,
+                display_name: None,
+                release_reservation_token: None,
+            }
+        }
+
+        #[test]
+        fn lookup_accepts_valid_game_code() {
+            assert!(guard_lookup_join_target(&lookup_msg("ABC123")).is_ok());
+        }
+
+        #[test]
+        fn lookup_rejects_oversized_game_code() {
+            let err = guard_lookup_join_target(&lookup_msg(&"x".repeat(65))).unwrap_err();
+            assert!(err.contains("game_code"));
+        }
+    }
 }

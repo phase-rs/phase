@@ -5,6 +5,7 @@ pub mod filter;
 #[cfg(test)]
 mod harness;
 pub mod lobby;
+pub mod lookup_join_guard;
 pub mod persist;
 pub mod protocol;
 pub mod reconnect;
@@ -18,6 +19,7 @@ pub use draft_wire_guard::{
 };
 pub use filter::filter_state_for_player;
 pub use lobby::LobbyManager;
+pub use lookup_join_guard::guard_lookup_join_target;
 pub use persist::{PersistedLobbyMeta, PersistedSession};
 pub use protocol::{
     AiSeatRequest, ClientMessage, DeckChoice, DeckData, LobbyGame, PlayerSlotInfo, SeatKind,
