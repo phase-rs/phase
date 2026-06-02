@@ -26641,6 +26641,91 @@ mod tests {
         );
     }
 
+    /// CR 701.19c: Standalone "target creature can't be regenerated this turn"
+    /// (Hurr Jackal, Furnace Brood) emits a GenericEffect granting
+    /// `StaticMode::CantBeRegenerated` to the chosen creature. The selection rides
+    /// on the outer `target` slot; the per-static `affected` is the runtime-bound
+    /// `ParentTarget` (per `static_affected_for_application`), and the mode is
+    /// propagated onto the granted creature via `AddStaticMode`.
+    #[test]
+    fn cant_be_regenerated_effect_standalone_targets_creature() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "target creature can't be regenerated this turn",
+            AbilityKind::Activated,
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            target,
+            duration,
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(static_abilities.len(), 1);
+        let sd = &static_abilities[0];
+        assert!(
+            matches!(&sd.mode, StaticMode::CantBeRegenerated),
+            "expected CantBeRegenerated, got {:?}",
+            sd.mode
+        );
+        assert!(
+            sd.modifications
+                .contains(&ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeRegenerated
+                }),
+            "expected AddStaticMode modification, got {:?}",
+            sd.modifications
+        );
+        assert_eq!(
+            sd.affected,
+            Some(TargetFilter::ParentTarget),
+            "affected must be the runtime-bound ParentTarget"
+        );
+        let outer = target.as_ref().expect("outer target slot must be set");
+        assert!(
+            matches!(
+                outer,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Creature))
+            ),
+            "outer target must be the creature selection filter, got {outer:?}"
+        );
+    }
+
+    /// CR 701.19c + CR 608.2c: Lim-Dûl's Cohort prints "Destroy target creature.
+    /// That creature can't be regenerated this turn." The "that creature" anaphor
+    /// binds the regeneration prohibition to the same destroyed creature
+    /// (`ParentTarget`) rather than introducing a fresh target.
+    #[test]
+    fn cant_be_regenerated_anaphor_binds_to_parent_target() {
+        use crate::types::statics::StaticMode;
+        let def = parse_effect_chain(
+            "that creature can't be regenerated this turn",
+            AbilityKind::Activated,
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*def.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", def.effect);
+        };
+        let sd = static_abilities
+            .first()
+            .expect("expected CantBeRegenerated static");
+        assert!(
+            matches!(&sd.mode, StaticMode::CantBeRegenerated),
+            "expected CantBeRegenerated, got {:?}",
+            sd.mode
+        );
+        assert_eq!(
+            sd.affected,
+            Some(TargetFilter::ParentTarget),
+            "the 'that creature' anaphor must resolve to ParentTarget"
+        );
+    }
+
     #[test]
     fn pump_compound_with_extra_blockers() {
         // Give No Ground: the trailing blocking permission is a second

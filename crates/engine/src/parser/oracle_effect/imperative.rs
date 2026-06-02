@@ -5028,6 +5028,20 @@ pub(super) fn parse_imperative_family_ast(
 ) -> Option<ImperativeFamilyAst> {
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
+    // CR 724.1: "end the turn" (Time Stop, Sundial of the Infinite, Obeka,
+    // Glorious End, Discontinuity, Day's Undoing). Whole-phrase imperative
+    // with no target; parse it as an anchored nom production rather than a
+    // substring scan so unrelated clauses cannot accidentally match it.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("end the turn"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn));
+    }
+
     // CR 500.8: Additional step/phase effects can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
     // Intercept early regardless of first_word.
@@ -10395,6 +10409,22 @@ mod tests {
             ),
             _ => panic!("expected GainKeyword(Lifelink)"),
         }
+    }
+
+    /// CR 724.1: "end the turn" parses to the no-target `Effect::EndTheTurn`
+    /// (Time Stop, Sundial of the Infinite, Obeka, Glorious End).
+    #[test]
+    fn end_the_turn_parses_to_end_the_turn_effect() {
+        let ast = parse_imperative_family_ast(
+            "end the turn",
+            "end the turn",
+            &mut ParseContext::default(),
+        )
+        .expect("'end the turn' should parse");
+        assert!(
+            matches!(ast, ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn)),
+            "expected Effect::EndTheTurn"
+        );
     }
 
     /// Regression: a genuine life-gain clause must still reach the numeric

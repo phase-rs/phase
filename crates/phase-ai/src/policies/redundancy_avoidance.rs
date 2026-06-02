@@ -348,6 +348,7 @@ fn redundancy_delta(
         | Effect::TimeTravel
         | Effect::BecomeMonarch
         | Effect::Proliferate
+        | Effect::EndTheTurn
         | Effect::Populate
         | Effect::Clash
         | Effect::Vote { .. }

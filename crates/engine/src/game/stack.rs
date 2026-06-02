@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    CastingPermission, ContinuousModification, Duration, EffectKind, KeywordAction,
+    CastingPermission, ContinuousModification, Duration, Effect, EffectKind, KeywordAction,
     ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
@@ -352,7 +352,15 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 608.3: Determine destination zone for spells.
     if is_spell {
-        let dest = if paradigm_armed {
+        let end_the_turn_resolving_object = ability
+            .as_ref()
+            .is_some_and(|ability| matches!(ability.effect, Effect::EndTheTurn));
+        let dest = if end_the_turn_resolving_object {
+            // CR 724.1b: The "end the turn" procedure exiles every object on
+            // the stack, including the resolving object that `resolve_top`
+            // already popped before executing its effect.
+            Zone::Exile
+        } else if paradigm_armed {
             // CR 702.xxx: Paradigm-armed spell exiles instead of going to
             // graveyard. The ExileLink is already created by arm_paradigm.
             Zone::Exile
@@ -1995,6 +2003,41 @@ mod tests {
                 .copied(),
             Some(4)
         );
+    }
+
+    /// CR 724.1b: "end the turn" exiles every object on the stack, including
+    /// the resolving spell itself. Discriminating against routing the source
+    /// through the normal CR 608.2n instant/sorcery graveyard path.
+    #[test]
+    fn end_the_turn_spell_exiles_resolving_object() {
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(724),
+            PlayerId(0),
+            "Time Stop".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(Effect::EndTheTurn, vec![], spell_id, PlayerId(0));
+
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(724),
+                ability: Some(ability),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        let mut events = Vec::new();
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(state.objects[&spell_id].zone, Zone::Exile);
+        assert!(state.exile.contains(&spell_id));
+        assert!(!state.players[0].graveyard.contains(&spell_id));
     }
 
     #[test]

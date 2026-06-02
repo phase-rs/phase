@@ -83,6 +83,18 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     enter_phase(state, next, events);
 }
 
+/// CR 724.1d: End the current turn by skipping straight to the cleanup step.
+/// Discards any extra phases/steps scheduled for this turn (they are skipped)
+/// and enters a fresh cleanup step — per CR 724.1d, even if the turn is ended
+/// during the cleanup step, a new cleanup step begins. Drives `Effect::EndTheTurn`
+/// (Time Stop, Sundial of the Infinite, Obeka, Glorious End, Discontinuity).
+pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 724.1d: "skip any phases or steps between this phase or step and the
+    // cleanup step" — drop scheduled extra phases for this (now-ending) turn.
+    state.extra_phases.clear();
+    enter_phase(state, Phase::Cleanup, events);
+}
+
 /// Enter a phase directly: set phase, run the CR 703.4q step-end empty
 /// unspent mana event for each player in APNAP order through the replacement
 /// pipeline, then (when the queue empties) reset priority (CR 117.3a),
