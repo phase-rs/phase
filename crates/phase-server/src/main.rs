@@ -3774,14 +3774,15 @@ async fn handle_client_message(
                 }
                 return;
             }
+            if require_host(identity, socket).await.is_err() {
+                return;
+            }
+
             if let Err(reason) = guard_seat_mutation(&mutation) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
                 }
-                return;
-            }
-            if require_host(identity, socket).await.is_err() {
                 return;
             }
 

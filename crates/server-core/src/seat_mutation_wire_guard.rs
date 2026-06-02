@@ -5,7 +5,7 @@
 //! reducer/deck-resolution work to avoid clone-heavy abuse.
 
 use lobby_broker::validate_deck_payload;
-use lobby_broker::validation::{validate_token, MAX_PLAYER_COUNT, MAX_TOKEN_LEN};
+use lobby_broker::validation::{validate_token, MAX_PLAYER_COUNT};
 
 use crate::protocol::{DeckChoice, SeatKind, SeatMutation};
 
