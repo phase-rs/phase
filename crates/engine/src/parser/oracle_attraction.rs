@@ -190,7 +190,11 @@ mod tests {
         let trigger = parse_visit_trigger("Visit — Draw a card.", "Test Attraction").unwrap();
         assert_eq!(trigger.mode, TriggerMode::VisitAttraction);
         let execute = trigger.execute.as_ref().expect("visit execute effect");
-        assert!(matches!(*execute.effect, Effect::Draw { .. }));
+        assert!(
+            matches!(*execute.effect, Effect::Draw { .. }),
+            "expected Draw, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]
