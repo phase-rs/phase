@@ -53,6 +53,33 @@ if (typeof window !== "undefined") {
 // payload; `diceRollQueue` holds the pending ones. Distinct from the board-event
 // step queue (animationStore) — that coordinates spatial per-object effects.
 let diceAdvanceTimer: ReturnType<typeof setTimeout> | null = null;
+
+// CR 103.1: the starting-player contest determines who's on the play — a moment
+// the player should acknowledge, not one that flashes by. It holds on screen
+// until the player dismisses it (backdrop tap / Escape, both via `skipDiceRoll`).
+// In-game ability rolls (planar die, "roll a dN") keep their timer so a run of
+// them advances hands-free. Keyed on the payload's own `context`, so a queue
+// that mixes kinds is handled correctly whatever the order.
+function autoAdvances(payload: DiceRollPayload): boolean {
+  return payload.context !== "startingPlayer";
+}
+
+// Arm (or deliberately withhold) the auto-advance timer for the now-active roll.
+// Single authority for the timer lifecycle: both the initial show (`flashDiceRoll`)
+// and each FIFO step (`advanceDiceQueue`) route through here so the
+// hold-for-input rule is applied in exactly one place.
+function scheduleDiceAdvance(payload: DiceRollPayload): void {
+  if (diceAdvanceTimer) {
+    clearTimeout(diceAdvanceTimer);
+    diceAdvanceTimer = null;
+  }
+  if (!autoAdvances(payload)) return;
+  // Re-read speed each step so a live Animation Speed change (incl. switching to
+  // instant) takes effect for the remaining queued rolls.
+  const speed = usePreferencesStore.getState().animationSpeedMultiplier;
+  diceAdvanceTimer = setTimeout(advanceDiceQueue, DICE_ROLL_DURATION_MS * Math.max(speed, 0));
+}
+
 function advanceDiceQueue(): void {
   const queue = useUiStore.getState().diceRollQueue;
   if (queue.length === 0) {
@@ -60,11 +87,9 @@ function advanceDiceQueue(): void {
     diceAdvanceTimer = null;
     return;
   }
-  useUiStore.setState({ diceRoll: queue[0], diceRollQueue: queue.slice(1) });
-  // Re-read speed each step so a live Animation Speed change (incl. switching to
-  // instant) takes effect for the remaining queued rolls.
-  const speed = usePreferencesStore.getState().animationSpeedMultiplier;
-  diceAdvanceTimer = setTimeout(advanceDiceQueue, DICE_ROLL_DURATION_MS * Math.max(speed, 0));
+  const next = queue[0];
+  useUiStore.setState({ diceRoll: next, diceRollQueue: queue.slice(1) });
+  scheduleDiceAdvance(next);
 }
 
 interface UiStoreState {
@@ -410,18 +435,17 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     setTimeout(() => set({ showTurnBanner: false }), duration);
   },
   flashDiceRoll: (payload) => {
-    // Instant speed (0) skips the overlay entirely. The visible window scales
-    // with the global Animation Speed ONLY — not the Banner pacing category —
-    // because the 3D die's own tumble+settle duration scales by the same
-    // `speed`, so the die always settles before the overlay advances and the
-    // result caption reveals. When a roll is already showing, queue this one so
-    // simultaneous/back-to-back rolls play serially instead of clobbering.
+    // Instant speed (0) skips the overlay entirely. When a roll is already
+    // showing, queue this one so simultaneous/back-to-back rolls play serially
+    // instead of clobbering. `scheduleDiceAdvance` owns how long the active roll
+    // stays up: ability rolls auto-advance on the speed-scaled timer (the 3D
+    // die's tumble+settle scales by the same `speed`, so it settles before the
+    // overlay advances); the starting-player contest holds for player input.
     const speed = usePreferencesStore.getState().animationSpeedMultiplier;
     if (speed <= 0) return;
     if (get().diceRoll === null) {
       set({ diceRoll: payload });
-      if (diceAdvanceTimer) clearTimeout(diceAdvanceTimer);
-      diceAdvanceTimer = setTimeout(advanceDiceQueue, DICE_ROLL_DURATION_MS * speed);
+      scheduleDiceAdvance(payload);
     } else {
       set({ diceRollQueue: [...get().diceRollQueue, payload] });
     }

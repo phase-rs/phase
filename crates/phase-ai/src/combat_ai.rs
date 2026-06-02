@@ -3,17 +3,16 @@ use std::collections::HashMap;
 use engine::game::combat::{can_block_pair, AttackTarget};
 use engine::game::commander::commander_lethal_headroom;
 use engine::game::players;
-use engine::types::ability::{Effect, QuantityExpr, QuantityRef, TargetFilter};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
-use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use crate::config::AiProfile;
+use crate::damage_reflection::has_damage_reflection_to_controller;
 use crate::eval::{evaluate_creature, threat_level};
 use crate::projection::{project_to, Projection, ProjectionHorizon};
 
@@ -1636,40 +1635,6 @@ fn evaluate_block_outcome(
     };
 
     (kills, survives)
-}
-
-/// Check if a creature has a DamageReceived trigger that deals the received damage
-/// amount back to its controller (the Jackal Pup / Boros Reckoner pattern).
-/// Returns true if blocking with this creature causes its controller to take the same
-/// damage the creature receives.
-fn has_damage_reflection_to_controller(object: &engine::game::game_object::GameObject) -> bool {
-    object.trigger_definitions.iter_unchecked().any(|trigger| {
-        if trigger.mode != TriggerMode::DamageReceived {
-            return false;
-        }
-        // Check that valid_card is SelfRef (triggers on damage to itself)
-        let self_card = trigger
-            .valid_card
-            .as_ref()
-            .is_some_and(|f| matches!(f, TargetFilter::SelfRef));
-        if !self_card {
-            return false;
-        }
-        // Check the execute ability deals EventContextAmount damage to Controller
-        let Some(execute) = &trigger.execute else {
-            return false;
-        };
-        matches!(
-            &*execute.effect,
-            Effect::DealDamage {
-                amount: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount
-                },
-                target: TargetFilter::Controller,
-                ..
-            }
-        )
-    })
 }
 
 #[cfg(test)]
