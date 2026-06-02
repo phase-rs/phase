@@ -12995,15 +12995,24 @@ pub mod tests {
             source_id,
             controller,
             condition: None,
-            ability: ResolvedAbility::new(
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::Controller,
-                },
-                vec![],
-                source_id,
-                controller,
-            ),
+            // CR 603.3b: `begin_trigger_ordering` auto-orders genuinely
+            // indistinguishable no-input triggers (no prompt), so the ordering
+            // path is exercised only by distinct triggers. Key the ability
+            // description off `name` so two of these are distinguishable and
+            // still surface an OrderTriggers prompt.
+            ability: {
+                let mut ability = ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    source_id,
+                    controller,
+                );
+                ability.description = Some(name.to_string());
+                ability
+            },
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
