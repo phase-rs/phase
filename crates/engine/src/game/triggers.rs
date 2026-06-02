@@ -2189,14 +2189,28 @@ fn trigger_has_no_ordering_input(t: &PendingTrigger) -> bool {
 /// false-negative); it can never auto-order order-sensitive triggers.
 ///
 /// Two triggers are indistinguishable when both require no ordering input and
-/// they match on: the normalized ability (CR 603.4 intervening-`if` rides in
+/// they match on the normalized ability (CR 603.4 intervening-`if` rides in
 /// `condition`; all outcome fields ride in the derived `ResolvedAbility` `==`),
-/// the trigger-level `condition`, the firing event-context (`trigger_event` and
-/// `subject_match_count` — CR 603.2c: one event with multiple occurrences fires
-/// a batched trigger once per occurrence, each carrying its own subject; these
-/// live on `PendingTrigger`, NOT the ability, and are read at resolution, so
-/// identical abilities with different event context resolve differently and
-/// must NOT be collapsed), and the `may_trigger_origin`.
+/// the trigger-level `condition`, the batched `subject_match_count`
+/// (CR 603.2c — one event with multiple occurrences fires a batched trigger
+/// once per occurrence, each carrying its own subject count; read at
+/// resolution), and the `may_trigger_origin`.
+// CR 603.2c: `trigger_event` (the firing event itself) is intentionally NOT
+// part of the equality check. When N simultaneous events all match the same
+// trigger definition (e.g. three "creature you control dies" events from a
+// single board wipe — Liliana, Dreadhorde General, issue #1505), each pending
+// trigger carries its own per-event `trigger_event`. The placement-order of
+// such siblings is unobservable provided no ordering input is needed: their
+// effects mutate independent slices of game state (each draws a card, each
+// gains life, etc.), and any resolution-time event-context read
+// (`TriggeringSource`, `EventContextAmount`) is bound to that trigger's own
+// captured event — not the previously-resolved sibling's. Requiring
+// `trigger_event` equality would force a useless `OrderTriggers` prompt
+// (3 dies = pick an ordering among 3 identical drawn cards), regressing the
+// CR 603.3b autoorder spec from PR #1849. `subject_match_count` is kept in
+// the equality because that is the per-batch count the effect reads at
+// resolution and *can* differ across pending triggers if two distinct batched
+// events satisfy the same definition.
 fn group_is_order_independent(group: &[PendingTriggerContext]) -> bool {
     let Some((first, rest)) = group.split_first() else {
         return false;
@@ -2213,7 +2227,6 @@ fn group_is_order_independent(group: &[PendingTriggerContext]) -> bool {
         let t = &ctx.pending;
         trigger_has_no_ordering_input(t)
             && t.condition == first.pending.condition
-            && t.trigger_event == first.pending.trigger_event
             && t.subject_match_count == first.pending.subject_match_count
             && t.may_trigger_origin == first.pending.may_trigger_origin
             && {
