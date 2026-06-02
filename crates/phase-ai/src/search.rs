@@ -2539,13 +2539,21 @@ mod tests {
     }
 
     /// CR 608.2c + CR 701.23: Gifts Ungiven scaling regression — with a
-    /// large library (80 cards), a count-4 search must complete in well
-    /// under 100 ms via the BEAM_K-bounded path. The pre-fix Cartesian
-    /// enumerator (~C(80, 4) ≈ 1.5M combos × per-combo scoring) stalled
-    /// the AI; the beam reduces to C(BEAM_K, 4) candidates. The DistinctNames
-    /// constraint is honored by the engine candidate filter and re-checked
-    /// inside the AI beam, so the returned selection must contain only
-    /// uniquely-named cards.
+    /// large library (80 cards), a count-4 search must complete via the
+    /// BEAM_K-bounded path rather than the pre-fix Cartesian enumerator
+    /// (~C(80, 4) ≈ 1.5M combos × per-combo scoring) that stalled the AI.
+    /// The beam reduces this to C(BEAM_K, 4) ≈ 794 scored selections.
+    ///
+    /// The ceiling is a *blowup* guard, not a tight micro-benchmark: the
+    /// healthy beam path runs in ~60–130 ms (machine- and load-dependent —
+    /// this runs in CI and alongside concurrent Tilt rebuilds), while a
+    /// reversion to Cartesian enumeration costs *tens of seconds*. A 1 s
+    /// ceiling cleanly separates the two — ~8× headroom over the loaded
+    /// healthy path, ~1000× below a Cartesian regression — so it catches the
+    /// regression it exists to catch without flaking on contention. The
+    /// DistinctNames constraint is honored by the engine candidate filter and
+    /// re-checked inside the AI beam, so the returned selection must contain
+    /// only uniquely-named cards.
     #[test]
     fn gifts_ungiven_search_choice_returns_quickly_with_distinct_names() {
         use engine::types::ability::{SearchSelectionConstraint, SharedQuality};
@@ -2594,8 +2602,10 @@ mod tests {
         let action = choose_action(&state, PlayerId(0), &config, &mut rng);
         let elapsed = started.elapsed();
         assert!(
-            elapsed.as_millis() < 100,
-            "AI search-choice took {elapsed:?}; beam path must keep it under 100ms"
+            elapsed.as_millis() < 1000,
+            "AI search-choice took {elapsed:?}; a Cartesian-enumeration regression \
+             (C(80,4) ≈ 1.5M combos) costs tens of seconds — the BEAM_K path must \
+             stay well under the 1s blowup ceiling"
         );
 
         match action {
