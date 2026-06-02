@@ -9,8 +9,7 @@ import type { SourcePrinting } from "../../hooks/useCardImage";
 import type { ScryfallCard } from "../../services/scryfall";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import type { GameFormat } from "../../adapter/types";
-import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
-import { formatMetadata } from "../../data/formatRegistry";
+import { BASIC_LAND_NAMES } from "../../constants/game";
 import { DeckCardContextMenu } from "./DeckCardContextMenu";
 import { PrintingPickerModal } from "./PrintingPickerModal";
 import { mouseHoverPreview } from "./hoverPreview";
@@ -28,6 +27,9 @@ interface DeckStackProps {
   /** Deck format — resolves the sideboard policy so the second section
    *  is labelled "Sideboard" or "Maybeboard" consistently with the list view. */
   format?: GameFormat;
+  /** CR 100.2a / CR 903.5b: engine-backed per-card copy cap resolver. Returns
+   *  the format default (4 / 1) unless the card prints an override. */
+  getEffectiveCap: (name: string) => number;
 }
 
 type DeckStackSection = "commander" | "main" | "sideboard";
@@ -435,6 +437,7 @@ export function DeckStack({
   onRemoveCommander,
   onCardHover,
   format,
+  getEffectiveCap,
 }: DeckStackProps) {
   const { t } = useTranslation("deck-builder");
   const isMaybeboard = isMaybeboardPolicy(useSideboardPolicy(format));
@@ -448,22 +451,18 @@ export function DeckStack({
     sections.commander.length > 0
     || sections.main.length > 0
     || sections.sideboard.length > 0;
-  const maxCopies =
-    format && formatMetadata(format)?.default_config.singleton ? 1 : 4;
   const canAddCard = useMemo(
     () => (item: DeckStackItem) => {
       if (item.section !== "main") return false;
-      // CR 100.2a: basic lands and cards whose Oracle text declares "a deck can
-      // have any number of cards named ~" (e.g. Relentless Rats, Rat Colony)
-      // are exempt from the per-card copy limit. Mirrors the guard inside
+      // CR 100.2a / CR 903.5b: basic lands are always addable; every other card
+      // is capped at its engine-resolved effective limit (4 / 1 default, raised
+      // by "any number" / "up to N" overrides). Mirrors the guard inside
       // useDeckBuilder.handleAddCard so the stack tile's + button doesn't
       // disagree with the hook's add path.
-      const card = cardDataCache.get(item.name);
       if (BASIC_LAND_NAMES.has(item.name)) return true;
-      if (hasUnlimitedCopies(card?.oracle_text)) return true;
-      return item.count < maxCopies;
+      return item.count < getEffectiveCap(item.name);
     },
-    [cardDataCache, maxCopies],
+    [getEffectiveCap],
   );
 
   const artOverrides = usePreferencesStore((s) => s.artOverrides);

@@ -232,6 +232,28 @@ export async function commanderPartnerCandidates(
 }
 
 /**
+ * CR 100.2a / CR 903.5b: A card's per-card deck-construction copy-limit override
+ * as a discriminated union, or `null` when the default four-of / singleton limit
+ * applies. `Unlimited` is a unit variant with no `data` field — switch on `type`,
+ * never destructure `data` unconditionally. The engine is the single authority;
+ * the frontend never re-parses Oracle text.
+ */
+export type DeckCopyLimit =
+  | { type: "Unlimited" }
+  | { type: "UpTo"; data: number };
+
+/**
+ * Query the engine for a card's deck-construction copy-limit override. Returns
+ * `null` when the format-default limit applies. The frontend must not infer
+ * this from Oracle text — the engine owns the rule.
+ */
+export async function deckCopyLimit(name: string): Promise<DeckCopyLimit | null> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.deckCopyLimit(name) as DeckCopyLimit | null;
+}
+
+/**
  * CR 100.4a: Per-format sideboard policy as a discriminated union.
  *
  * `Forbidden` and `Unlimited` are unit variants and do not carry a `data`

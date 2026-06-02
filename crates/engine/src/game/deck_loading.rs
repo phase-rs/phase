@@ -469,6 +469,7 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
         }
@@ -518,6 +519,7 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
         }

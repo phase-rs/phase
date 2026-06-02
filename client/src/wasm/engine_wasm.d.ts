@@ -44,6 +44,15 @@ export function commanderPartnerCandidates(first_commander: string, candidates: 
 export function create_initial_state(): any;
 
 /**
+ * CR 100.2a / CR 903.5b: The named card's per-card deck-construction copy-limit
+ * override, or `null` when the default four-of / singleton limit applies.
+ * Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
+ * `{"type":"UpTo","data":N}`); the frontend must switch on `.type`. The engine
+ * is the single authority — the frontend never re-parses Oracle text.
+ */
+export function deckCopyLimit(name: string): any;
+
+/**
  * Estimates a Commander deck's bracket without touching `GAME_STATE`.
  * Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
  * deck has no commander or the card database is not loaded.
@@ -323,6 +332,7 @@ export interface InitOutput {
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
+    readonly deckCopyLimit: (a: number, b: number) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
     readonly export_game_state_json: () => [number, number, number, number];

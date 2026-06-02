@@ -6830,6 +6830,10 @@ pub enum Effect {
     /// before `phase`, so "additional combat followed by an additional main phase"
     /// resolves in printed order while preserving CR 500.8 LIFO ordering.
     /// CR 500.10a: Only adds steps/phases to the affected player's own turn.
+    /// `count` resolves at resolution time so dynamic quantities such as Obeka,
+    /// Splitter of Seconds' "that many additional upkeep steps" thread the
+    /// triggering event amount through `QuantityRef::EventContextAmount`. Legacy
+    /// callers and explicit "an additional" wording deserialize to a Fixed 1.
     AdditionalPhase {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
@@ -6837,6 +6841,8 @@ pub enum Effect {
         after: Phase,
         #[serde(default)]
         followed_by: Vec<Phase>,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
     },
     /// CR 701.10d-f: Double counters on a permanent, a player's life total, or mana pool.
     /// Uses `DoubleTarget` enum per D-05 to distinguish the three variants.
