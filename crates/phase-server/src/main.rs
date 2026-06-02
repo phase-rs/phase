@@ -52,7 +52,9 @@ use server_core::protocol::{
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{ActionResult, GameSession, SessionManager};
-use server_core::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
+use server_core::spectator_wire_guard::{
+    guard_spectate_draft, guard_spectator_capacity, guard_spectator_join,
+};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
@@ -4034,6 +4036,19 @@ async fn handle_client_message(
             }
 
             debug!(game = %game_code, "spectator join request");
+
+            let current_spectators = {
+                let specs = game_spectators.lock().await;
+                specs.get(&game_code).map(|v| v.len()).unwrap_or(0)
+            };
+            if let Err(reason) = guard_spectator_capacity("game", current_spectators) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             let spectator_msg = {
                 let mgr = state.lock().await;
                 let Some(session) = mgr.sessions.get(&game_code) else {
@@ -4734,6 +4749,18 @@ async fn handle_client_message(
 
         ClientMessage::SpectateDraft { draft_code } => {
             if let Err(reason) = guard_spectate_draft(&draft_code) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
+            let current_spectators = {
+                let specs = draft_spectators.lock().await;
+                specs.get(&draft_code).map(|v| v.len()).unwrap_or(0)
+            };
+            if let Err(reason) = guard_spectator_capacity("draft", current_spectators) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
