@@ -7058,19 +7058,18 @@ fn deserialize_gain_life_player<'de, D>(d: D) -> Result<TargetFilter, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::Deserialize as _;
     let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
     match raw {
         // Legacy string format from GainLifePlayer enum
-        serde_json::Value::String(ref s) => {
-            match s.as_str() {
-                "controller" => Ok(TargetFilter::Controller),
-                "targeted_controller" => Ok(TargetFilter::ParentTargetController),
-                "target_player" => Ok(TargetFilter::Player),
-                // Forward-compat: unknown strings default to Controller to avoid hard errors
-                _ => Ok(TargetFilter::Controller),
-            }
-        }
+        serde_json::Value::String(s) => match s.as_str() {
+            "controller" => Ok(TargetFilter::Controller),
+            "targeted_controller" => Ok(TargetFilter::ParentTargetController),
+            "target_player" => Ok(TargetFilter::Player),
+            other => Err(de::Error::unknown_variant(
+                other,
+                &["controller", "targeted_controller", "target_player"],
+            )),
+        },
         // New TargetFilter object format — delegate to derived deserializer
         other => serde_json::from_value::<TargetFilter>(other).map_err(serde::de::Error::custom),
     }
@@ -12782,6 +12781,25 @@ mod tests {
     }
 
     #[test]
+    fn player_filter_legacy_controls_permanent_alias_defaults_to_presence_check() {
+        let json = r#"{
+            "type": "ControlsPermanent",
+            "relation": { "type": "Opponent" },
+            "filter": { "type": "Any" }
+        }"#;
+        let deserialized: PlayerFilter = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            deserialized,
+            PlayerFilter::ControlsCount {
+                relation: PlayerRelation::Opponent,
+                filter: TargetFilter::Any,
+                comparator: Comparator::GE,
+                count: Box::new(QuantityExpr::Fixed { value: 1 }),
+            }
+        );
+    }
+
+    #[test]
     fn ability_definition_with_sub_ability_chain_roundtrip() {
         let ability = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -12957,6 +12975,37 @@ mod tests {
                 expiry: None,
                 target: None,
             }
+        );
+    }
+
+    #[test]
+    fn gain_life_legacy_player_strings_deserialize() {
+        let cases = [
+            ("controller", TargetFilter::Controller),
+            ("targeted_controller", TargetFilter::ParentTargetController),
+            ("target_player", TargetFilter::Player),
+        ];
+
+        for (legacy_player, expected) in cases {
+            let json = format!(r#"{{"type":"GainLife","player":"{legacy_player}"}}"#);
+            let deserialized: Effect = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                deserialized,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: expected,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn gain_life_unknown_player_string_errors() {
+        let err = serde_json::from_str::<Effect>(r#"{"type":"GainLife","player":"nobody"}"#)
+            .expect_err("unknown legacy GainLife.player strings must not silently default");
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "expected unknown-variant error, got: {err}"
         );
     }
 

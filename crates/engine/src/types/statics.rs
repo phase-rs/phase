@@ -1793,7 +1793,6 @@ pub fn deserialize_static_mode_fwd<'de, D>(d: D) -> Result<StaticMode, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::Deserialize as _;
     let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
     match raw {
         serde_json::Value::String(ref s) => {
