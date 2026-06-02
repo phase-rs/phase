@@ -15411,4 +15411,48 @@ mod pipeline_snapshot_tests {
             other => panic!("sub-clause must be Destroy, got {:?}", other),
         }
     }
+
+    // ── Well of Lost Dreams: pay {X} ≤ life gained, draw X cards ─────────────
+
+    #[test]
+    fn well_of_lost_dreams_draw_count_is_variable_x() {
+        // CR 107.3i: "where X is less than or equal to <bound>" is a player-
+        // chosen constraint, not a definition of X. The draw count must resolve
+        // to Variable("X") so the PayAmountChoice → chosen_x → draw path
+        // produces X drawn cards (not 0 from a stale QuantityRef string).
+        let r = pipeline_parse(
+            "Whenever you gain life, you may pay {X}, where X is less than or equal to the amount of life you gained. If you do, draw X cards.",
+            "Well of Lost Dreams",
+            &["Artifact"],
+            &[],
+        );
+        assert_eq!(r.triggers.len(), 1, "should have one trigger");
+        let exec = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("trigger must have execute");
+        assert!(
+            matches!(*exec.effect, Effect::PayCost { .. }),
+            "first effect should be PayCost, got {:?}",
+            exec.effect,
+        );
+        let sub = exec
+            .sub_ability
+            .as_deref()
+            .expect("PayCost must have sub_ability");
+        match sub.effect.as_ref() {
+            Effect::Draw { count, .. } => {
+                assert_eq!(
+                    count.clone(),
+                    crate::types::ability::QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    "draw count must be Variable(\"X\") so chosen_x resolves it, not a stale bound string"
+                );
+            }
+            other => panic!("sub-ability must be Draw, got {:?}", other),
+        }
+    }
 }

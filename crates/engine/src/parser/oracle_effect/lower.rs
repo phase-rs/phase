@@ -4181,6 +4181,22 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
             },
         });
     }
+    // CR 107.3i + CR 117.1: "where X is less than or equal to <bound>" is a
+    // constraint on the player's chosen X (not a definition of X's exact
+    // value). Well of Lost Dreams pays {X} mana and draws X cards; the bound
+    // only limits what the player may choose — the actual drawn count is the
+    // amount paid (resolved via `chosen_x`). Preserving Variable("X") lets the
+    // existing PayAmountChoice → chosen_x → draw machinery work correctly.
+    if tag::<_, _, OracleError<'_>>("less than or equal to ")
+        .parse(expression_lower.as_str())
+        .is_ok()
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+    }
     if let Ok((rest_lower, (n, sign))) = (
         nom_primitives::parse_number,
         alt((
