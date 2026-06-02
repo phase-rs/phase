@@ -24,6 +24,7 @@ use engine::game::validate_name_deck_for_format;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
+use engine::types::GameLogEntry;
 use http::HeaderValue;
 use lobby_broker::{
     check_build_commit, conn_holds_reservation, Broker, BrokerEnv, BuildCommitCheck, ConnState,
@@ -68,6 +69,7 @@ type SharedLobbySubscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<ServerMessage>
 type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
 type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
+const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
 type SharedDraftPools = Arc<draft_pools::DraftPools>;
 /// Spectator senders keyed by draft_code. Each spectator has a visibility + sender.
 type SharedDraftSpectators = Arc<
@@ -82,8 +84,7 @@ type SharedDraftSpectators = Arc<
     >,
 >;
 /// Spectator senders keyed by game code (live games only).
-type SharedGameSpectators =
-    Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
+type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
 
 /// Build the `GameStarted` message for a single seat.
 ///
@@ -201,13 +202,12 @@ fn build_state_update_message(result: &ActionResult, player: PlayerId) -> Server
 /// Spectators are modeled as a non-seat viewer (`PlayerId(u8::MAX)`), which
 /// keeps all seat-private data redacted and guarantees no legal-action payload.
 fn build_spectator_game_started_message(session: &GameSession) -> ServerMessage {
-    let spectator_viewer = PlayerId(u8::MAX);
-    let filtered = server_core::filter_state_for_player(&session.state, spectator_viewer);
+    let filtered = server_core::filter_state_for_player(&session.state, SPECTATOR_PLAYER_ID);
     let derived = derive_views(&filtered, None);
 
     ServerMessage::GameStarted {
         state: filtered,
-        your_player: spectator_viewer,
+        your_player: SPECTATOR_PLAYER_ID,
         opponent_name: None,
         player_names: session.display_names.clone(),
         legal_actions: Vec::new(),
@@ -220,19 +220,22 @@ fn build_spectator_game_started_message(session: &GameSession) -> ServerMessage 
     }
 }
 
-fn build_spectator_state_update_message(result: &ActionResult) -> ServerMessage {
-    let spectator_viewer = PlayerId(u8::MAX);
-    let (raw_state, events, _legal_actions, log_entries, _auto_pass, _spell_costs, _by_object) = result;
-    let filtered = server_core::filter_state_for_player(raw_state, spectator_viewer);
+fn build_spectator_state_update_message(
+    raw_state: &GameState,
+    events: &[GameEvent],
+    log_entries: &[GameLogEntry],
+) -> ServerMessage {
+    let filtered = server_core::filter_state_for_player(raw_state, SPECTATOR_PLAYER_ID);
     let derived = derive_views(&filtered, None);
+    let eliminated_players = raw_state.eliminated_players.clone();
 
     ServerMessage::StateUpdate {
         state: filtered,
-        events: events.clone(),
+        events: events.to_vec(),
         legal_actions: Vec::new(),
         auto_pass_recommended: false,
-        eliminated_players: Vec::new(),
-        log_entries: log_entries.clone(),
+        eliminated_players,
+        log_entries: log_entries.to_vec(),
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
         derived,
@@ -2434,15 +2437,8 @@ async fn handle_client_message(
                         }
                     }
                     {
-                        let spectator_msg = build_spectator_state_update_message(&(
-                            raw_state.clone(),
-                            events.clone(),
-                            legal_actions.clone(),
-                            log_entries.clone(),
-                            auto_pass_rec,
-                            spell_costs.clone(),
-                            legal_actions_by_object.clone(),
-                        ));
+                        let spectator_msg =
+                            build_spectator_state_update_message(&raw_state, &events, &log_entries);
                         let mut specs = game_spectators.lock().await;
                         if let Some(spectators) = specs.get_mut(&game_code) {
                             spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
@@ -2514,7 +2510,12 @@ async fn handle_client_message(
                                 }
                             }
                         }
-                        let spectator_msg = build_spectator_state_update_message(result);
+                        let (ai_raw_state, ai_events, _, ai_log_entries, _, _, _) = result;
+                        let spectator_msg = build_spectator_state_update_message(
+                            ai_raw_state,
+                            ai_events,
+                            ai_log_entries,
+                        );
                         let mut specs = game_spectators.lock().await;
                         if let Some(spectators) = specs.get_mut(&game_code) {
                             spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
@@ -3729,8 +3730,14 @@ async fn handle_client_message(
                         )
                         .await;
                     }
-                    broadcast_game_started(state, connections, game_spectators, game_db, &game_code)
-                        .await;
+                    broadcast_game_started(
+                        state,
+                        connections,
+                        game_spectators,
+                        game_db,
+                        &game_code,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     error!(game = %game_code, error = %e, "JoinGameWithPassword failed");
@@ -4573,6 +4580,37 @@ async fn handle_client_message(
                 identity,
             )
             .await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_spectator_tests {
+    use super::*;
+
+    #[test]
+    fn spectator_state_update_keeps_public_status_without_actions() {
+        let mut state = GameState::new_two_player(42);
+        state.eliminated_players.push(PlayerId(1));
+
+        let msg = build_spectator_state_update_message(&state, &[], &[]);
+
+        match msg {
+            ServerMessage::StateUpdate {
+                legal_actions,
+                auto_pass_recommended,
+                eliminated_players,
+                spell_costs,
+                legal_actions_by_object,
+                ..
+            } => {
+                assert!(legal_actions.is_empty());
+                assert!(!auto_pass_recommended);
+                assert_eq!(eliminated_players, vec![PlayerId(1)]);
+                assert!(spell_costs.is_empty());
+                assert!(legal_actions_by_object.is_empty());
+            }
+            other => panic!("expected spectator StateUpdate, got {other:?}"),
         }
     }
 }
