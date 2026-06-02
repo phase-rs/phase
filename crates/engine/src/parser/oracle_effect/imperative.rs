@@ -1582,6 +1582,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 // `grant_permission::resolve`.
                 granted_to: None,
                 resolution_cleanup: None,
+                duration: None,
             },
             target,
             grantee: Default::default(),

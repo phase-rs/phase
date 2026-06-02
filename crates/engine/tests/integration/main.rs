@@ -30,6 +30,7 @@ mod cloud_key_chosen_type_cost;
 mod coalition_relic_integration;
 mod combat_celebrant_exert;
 mod combat_damage_order_triggers_no_hang;
+mod consuming_vapors_rebound;
 mod council_of_four_nth_per_turn;
 mod cr_annotations;
 mod crossway_troublemakers_attacking_keywords;

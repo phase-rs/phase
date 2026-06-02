@@ -1920,6 +1920,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         // the ability controller at grant time.
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -10835,6 +10836,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10868,6 +10870,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
     // CR 610.3 + CR 118.9 + CR 608.2c + CR 701.13a: "Cast [quantifier] [filter]
@@ -10888,6 +10891,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
     if scan_contains_phrase(rest, "from among them")
@@ -10902,6 +10906,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10953,6 +10958,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10978,6 +10984,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint,
+            duration: None,
         });
     }
 
@@ -10989,6 +10996,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         cast_transformed: false,
         alt_ability_cost: None,
         constraint,
+        duration: None,
     })
 }
 

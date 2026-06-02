@@ -9668,6 +9668,7 @@ pub mod tests {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint: None,
+            duration: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -9697,6 +9698,7 @@ pub mod tests {
             cast_transformed: false,
             alt_ability_cost: None,
             constraint: None,
+            duration: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
