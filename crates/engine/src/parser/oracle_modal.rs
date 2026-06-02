@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{map, opt, success, value};
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
@@ -552,13 +552,17 @@ fn parse_modal_specific_kicker_cost_condition(
 }
 
 fn parse_modal_override_count(input: &str) -> nom::IResult<&str, usize, OracleError<'_>> {
-    alt((
-        value(2, tag("choose both instead")),
-        value(2, tag("choose two instead")),
-        value(3, tag("choose three instead")),
-        value(usize::MAX, tag("choose any number instead")),
-        value(usize::MAX, tag("choose one or more instead")),
-    ))
+    // "choose <count> instead" — factor the shared prefix/suffix; only the
+    // count word varies (PATTERNS.md §8b).
+    delimited(
+        tag("choose "),
+        alt((
+            value(2, alt((tag("both"), tag("two")))),
+            value(3, tag("three")),
+            value(usize::MAX, alt((tag("any number"), tag("one or more")))),
+        )),
+        tag(" instead"),
+    )
     .parse(input)
 }
 

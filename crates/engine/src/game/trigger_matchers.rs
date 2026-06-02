@@ -594,6 +594,27 @@ fn player_matches_filter(
     }
 }
 
+/// CR 120.3 + CR 102.2: True when a damage-recipient `valid_target` names a
+/// *player* and therefore can never be satisfied by an object recipient.
+///
+/// Covers the player-scope filters the parser emits for "deals [combat] damage
+/// to a player / to an opponent / to you": `Player`, `Controller`, and the
+/// controller-only `Typed` scope (empty `type_filters` and `properties`, only a
+/// `controller` set) that `player_matches_filter` treats as "you"/"an opponent".
+/// A `Typed` filter carrying any type constraint or property is a genuine object
+/// filter (e.g. "to a creature an opponent controls") and is excluded here.
+fn is_player_scope_damage_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Player | TargetFilter::Controller => true,
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: Some(_),
+            properties,
+        }) => type_filters.is_empty() && properties.is_empty(),
+        _ => false,
+    }
+}
+
 /// Basic runtime matching of a TargetFilter against a game object.
 /// Handles the common filter patterns used in triggers.
 pub(super) fn target_filter_matches_object(
@@ -989,6 +1010,19 @@ pub(super) fn match_damage_done(
                     }
                 }
                 TargetRef::Object(oid) => {
+                    // CR 120.3 + CR 102.2: "deals [combat] damage to a player /
+                    // to an opponent" names a *player* recipient — an opponent is
+                    // by definition a player. The parser encodes "an opponent" as
+                    // a controller-only `Typed` scope (empty type_filters and
+                    // properties), the same player-scope convention
+                    // `player_matches_filter` honors. Damage dealt to an *object*
+                    // an opponent controls is not "damage to an opponent", so a
+                    // player-scope `valid_target` must reject every object
+                    // recipient — otherwise e.g. Coastal Piracy mis-fires on
+                    // combat damage to the opponent's creatures.
+                    if is_player_scope_damage_filter(vt) {
+                        return false;
+                    }
                     if !target_filter_matches_object(state, *oid, vt, source_id) {
                         return false;
                     }
@@ -7761,6 +7795,64 @@ mod tests {
             excess: 0,
         };
         assert!(match_damage_done(&event_opp, &trigger, source_id, &state));
+    }
+
+    /// CR 120.3 + CR 102.2: "deals combat damage to an opponent" names a *player*
+    /// recipient. A controller-only `Typed` opponent scope must reject combat
+    /// damage dealt to an *object* an opponent controls (their creature /
+    /// planeswalker) — otherwise Coastal Piracy ("Whenever a creature you control
+    /// deals combat damage to an opponent, you may draw a card") mis-fires on
+    /// blocked combat damage, spawning spurious same-controller triggers.
+    #[test]
+    fn damage_done_opponent_player_scope_rejects_object_recipient() {
+        let mut state = setup();
+        // Source: a creature PlayerId(0) controls (the Coastal Piracy attacker).
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            String::new(),
+            Zone::Battlefield,
+        );
+        // Opponent's creature — a valid combat-damage *object* recipient.
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::DamageDone);
+        trigger.damage_kind = DamageKindFilter::CombatOnly;
+        trigger.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+
+        // Combat damage to the opponent's creature — must NOT match.
+        let to_object = GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(opp_creature),
+            amount: 4,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(
+            !match_damage_done(&to_object, &trigger, source_id, &state),
+            "combat damage to an opponent's creature is not 'damage to an opponent'"
+        );
+
+        // Combat damage to the opponent *player* — must still match.
+        let to_player = GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 4,
+            is_combat: true,
+            excess: 0,
+        };
+        assert!(
+            match_damage_done(&to_player, &trigger, source_id, &state),
+            "combat damage to the opponent player must still fire the trigger"
+        );
     }
 
     // ── damage_amount threshold (CR 603.2 + CR 120.1) ─────────────

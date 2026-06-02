@@ -97,7 +97,7 @@ mod support {
         parse_compound_subject_rule_static, parse_property_descriptor,
         parse_rule_static_separator_nom, try_parse_compound_subtypes,
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
-        try_split_and_must_attack_block,
+        try_split_and_can_block_additional, try_split_and_must_attack_block,
     };
     pub(super) use super::grammar::*;
     pub(super) use super::keyword_grant::{
