@@ -5984,7 +5984,6 @@ mod tests {
             Effect::ChangeZone {
                 destination,
                 target,
-                up_to,
                 ..
             } => {
                 assert_eq!(*destination, Zone::Exile, "mode 3 exiles the cards");
@@ -5993,10 +5992,9 @@ mod tests {
                     Some(Zone::Graveyard),
                     "mode 3 must target cards in a graveyard, got {target:?}"
                 );
-                assert!(
-                    *up_to,
-                    "'up to X' makes the mode-3 selection optional (0..=X)"
-                );
+                // Optionality ("up to X" => 0..=X) is asserted below via the
+                // MultiTargetSpec floor of zero, the source of truth for
+                // multi-target modes; the ChangeZone `up_to` bool is not.
             }
             other => panic!("expected mode 3 ChangeZone→Exile, got {other:?}"),
         }
