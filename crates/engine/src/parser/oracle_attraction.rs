@@ -3,7 +3,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_while1};
 use nom::character::complete::multispace0;
-use nom::combinator::{eof, map, opt, rest as nom_rest, value};
+use nom::combinator::{map, rest as nom_rest, value};
 use nom::sequence::preceded;
 use nom::Parser;
 
