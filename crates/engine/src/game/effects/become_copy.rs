@@ -1329,11 +1329,15 @@ mod tests {
             source_obj.keywords.contains(&Keyword::Myriad),
             "Myriad keyword should be granted via except clause"
         );
+        let has_myriad_trigger = source_obj.trigger_definitions.iter_all().any(|trigger| {
+            matches!(trigger.mode, TriggerMode::Attacks)
+                && matches!(trigger.valid_card, Some(TargetFilter::SelfRef))
+                && trigger.execute.as_deref().is_some_and(|ability| {
+                    ability.optional && matches!(ability.effect.as_ref(), Effect::Myriad)
+                })
+        });
         assert!(
-            source_obj
-                .trigger_definitions
-                .iter_all()
-                .any(|t| matches!(t.mode, TriggerMode::Attacks)),
+            has_myriad_trigger,
             "Myriad attack trigger should be synthesized when keyword is granted"
         );
     }

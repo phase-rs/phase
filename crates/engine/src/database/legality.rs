@@ -28,7 +28,7 @@ pub enum LegalityFormat {
 }
 
 impl LegalityFormat {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Standard,
         Self::Commander,
         Self::Modern,
@@ -43,6 +43,7 @@ impl LegalityFormat {
         Self::Timeless,
         Self::PauperCommander,
         Self::DuelCommander,
+        Self::Oathbreaker,
     ];
 
     pub fn as_key(self) -> &'static str {
@@ -322,6 +323,13 @@ mod tests {
         assert_eq!(out.get("standard"), Some(&"legal".to_string()));
         assert_eq!(out.get("premodern"), Some(&"banned".to_string()));
         assert_eq!(out.get("commander"), Some(&"not_legal".to_string()));
+    }
+
+    #[test]
+    fn all_formats_round_trip_through_keys() {
+        for format in LegalityFormat::ALL {
+            assert_eq!(LegalityFormat::from_key(format.as_key()), Some(format));
+        }
     }
 }
 
