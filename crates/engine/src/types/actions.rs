@@ -188,6 +188,11 @@ pub enum GameAction {
     SelectCards {
         cards: Vec<ObjectId>,
     },
+    /// CR 705.1: Krark's Thumb keep-choice — indices into `results` the player
+    /// keeps (ignoring the rest, CR 614.1a). Length must equal `keep_count`.
+    SelectCoinFlips {
+        keep_indices: Vec<usize>,
+    },
     /// CR 400.11 + CR 406.3: Player commits one or more selections from the
     /// offered outside-game pool. Each selection is a discriminated source —
     /// a sideboard slot (wishboard) or a face-up exile object (Karn / Coax).
@@ -1141,6 +1146,7 @@ impl GameAction {
             | GameAction::MulliganDecision { .. }
             | GameAction::ReorderHand { .. }
             | GameAction::SelectCards { .. }
+            | GameAction::SelectCoinFlips { .. }
             | GameAction::ChooseOutsideGameCards { .. }
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }

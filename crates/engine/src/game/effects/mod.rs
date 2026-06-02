@@ -915,6 +915,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::ScryChoice { .. }
+            | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }

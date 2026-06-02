@@ -74,6 +74,7 @@ mod json_smoke_test;
 mod kaito_integration;
 mod kodama_anti_recursion_intervening_if;
 mod krark_clan_ironworks_castability;
+mod krark_thumb_coin_flip;
 mod lathiel_end_step_counters_repro;
 mod leyline_taps_for_mana_repro;
 mod liliana_waker_cross_scope_decline;

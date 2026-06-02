@@ -187,6 +187,15 @@ pub enum ProposedEvent {
         destination: Zone,
         applied: HashSet<ReplacementId>,
     },
+    /// CR 705.1 + CR 614.1a: A player is about to flip a single coin. Carried
+    /// through the replacement pipeline so per-flip "instead flip two and ignore
+    /// one" effects (Krark's Thumb) double the count before the RNG runs. Per the
+    /// card's 2019-01-25 ruling, each individual flip is replaced separately.
+    CoinFlip {
+        player_id: PlayerId,
+        count: u32,
+        applied: HashSet<ReplacementId>,
+    },
     LifeGain {
         player_id: PlayerId,
         amount: u32,
@@ -421,6 +430,7 @@ impl ProposedEvent {
             | ProposedEvent::Draw { applied, .. }
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
+            | ProposedEvent::CoinFlip { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
             | ProposedEvent::AddCounter { applied, .. }
@@ -446,6 +456,7 @@ impl ProposedEvent {
             | ProposedEvent::Draw { applied, .. }
             | ProposedEvent::Scry { applied, .. }
             | ProposedEvent::Mill { applied, .. }
+            | ProposedEvent::CoinFlip { applied, .. }
             | ProposedEvent::LifeGain { applied, .. }
             | ProposedEvent::LifeLoss { applied, .. }
             | ProposedEvent::AddCounter { applied, .. }
@@ -511,6 +522,7 @@ impl ProposedEvent {
             ProposedEvent::Draw { player_id, .. }
             | ProposedEvent::Scry { player_id, .. }
             | ProposedEvent::Mill { player_id, .. }
+            | ProposedEvent::CoinFlip { player_id, .. }
             | ProposedEvent::LifeGain { player_id, .. }
             | ProposedEvent::LifeLoss { player_id, .. }
             | ProposedEvent::Discard { player_id, .. }
@@ -553,6 +565,7 @@ impl ProposedEvent {
             ProposedEvent::Draw { .. }
             | ProposedEvent::Scry { .. }
             | ProposedEvent::Mill { .. }
+            | ProposedEvent::CoinFlip { .. }
             | ProposedEvent::LifeGain { .. }
             | ProposedEvent::LifeLoss { .. }
             | ProposedEvent::CreateToken { .. }
@@ -568,8 +581,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proposed_event_has_19_variants() {
-        // Verify all 19 variants compile
+    fn proposed_event_has_21_variants() {
+        // Verify all 21 variants compile
         let events: Vec<ProposedEvent> = vec![
             ProposedEvent::zone_change(ObjectId(1), Zone::Battlefield, Zone::Graveyard, None),
             ProposedEvent::Damage {
@@ -593,6 +606,11 @@ mod tests {
                 player_id: PlayerId(0),
                 count: 1,
                 destination: Zone::Graveyard,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::CoinFlip {
+                player_id: PlayerId(0),
+                count: 1,
                 applied: HashSet::new(),
             },
             ProposedEvent::LifeGain {
@@ -689,7 +707,7 @@ mod tests {
                 applied: HashSet::new(),
             },
         ];
-        assert_eq!(events.len(), 20);
+        assert_eq!(events.len(), 21);
     }
 
     #[test]

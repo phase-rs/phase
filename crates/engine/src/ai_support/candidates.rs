@@ -797,6 +797,31 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             }
         }
         WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),
+        WaitingFor::CoinFlipKeepChoice {
+            player,
+            results,
+            keep_count,
+        } => {
+            // CR 705.1 + CR 614.1a: Krark's Thumb keep choice. `keep_count` is
+            // always 1 for the only consumer today, so each candidate keeps a
+            // single index. (Generalization: enumerate C(results.len(),
+            // keep_count) combos if a multi-keep effect is ever added.)
+            if *keep_count == 1 {
+                (0..results.len())
+                    .map(|index| {
+                        candidate(
+                            GameAction::SelectCoinFlips {
+                                keep_indices: vec![index],
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
         WaitingFor::DigChoice {
             player,
             keep_count,
