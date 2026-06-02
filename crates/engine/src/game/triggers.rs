@@ -16191,6 +16191,318 @@ pub mod tests {
             frames, elapsed, fps
         );
     }
+
+    /// CR 603.2 + CR 700.4: Jackdaw Savior (issue #887) — "Whenever this creature
+    /// or another creature you control with flying dies, return another target
+    /// creature card with lesser mana value from your graveyard to the battlefield."
+    ///
+    /// The trigger must fire when a flying creature you control dies and there is
+    /// a valid lower-CMC creature in the graveyard.
+    fn move_to_graveyard_through_replacement_pipeline(
+        state: &mut GameState,
+        object_id: ObjectId,
+        events: &mut Vec<GameEvent>,
+    ) {
+        let from = state
+            .objects
+            .get(&object_id)
+            .expect("object exists before zone change")
+            .zone;
+        let proposed = crate::types::proposed_event::ProposedEvent::zone_change(
+            object_id,
+            from,
+            Zone::Graveyard,
+            None,
+        );
+        match crate::game::replacement::replace_event(state, proposed, events) {
+            crate::game::replacement::ReplacementResult::Execute(event) => {
+                crate::game::effects::change_zone::deliver_replaced_zone_change(
+                    state, event, None, None, false, events,
+                );
+            }
+            crate::game::replacement::ReplacementResult::Prevented => {}
+            crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+                panic!("test death should not require replacement choice for {player:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn jackdaw_savior_trigger_fires_when_another_flying_creature_dies() {
+        use crate::types::ability::{FilterProp, ObjectScope, QuantityRef};
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup();
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+
+        // A creature card in the graveyard (CMC 1) — valid return target.
+        let graveyard_creature = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&graveyard_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            // CMC 1: mana cost = {W}
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::White],
+                generic: 0,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+        }
+        // Place in player 0's graveyard
+        state.players[0].graveyard.push_back(graveyard_creature);
+
+        // The flying creature that will die (CMC 2: {1}{W}).
+        let flying_bird = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "Flying Bird".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&flying_bird).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::White],
+                generic: 1,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            // Flying is required by Jackdaw Savior's valid_card filter.
+            obj.keywords.push(Keyword::Flying);
+            obj.base_keywords = obj.keywords.clone();
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        // Jackdaw Savior on the battlefield (CMC 3: {2}{W}).
+        let jackdaw = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Jackdaw Savior".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&jackdaw).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::White],
+                generic: 2,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.keywords.push(Keyword::Flying);
+            obj.base_keywords = obj.keywords.clone();
+            obj.entered_battlefield_turn = Some(1);
+
+            // Trigger: "Whenever ~ or another creature you control with flying dies,
+            // return another target creature card with lesser mana value from your
+            // graveyard to the battlefield." — exact match to card-data.json.
+            //
+            // CR 700.4: "dies" = moves from battlefield to graveyard.
+            let valid_card = TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::SelfRef,
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![
+                            FilterProp::WithKeyword {
+                                value: Keyword::Flying,
+                            },
+                            FilterProp::Another,
+                        ],
+                    }),
+                ],
+            };
+            let execute_effect = Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![
+                        FilterProp::Another,
+                        FilterProp::Cmc {
+                            comparator: Comparator::LT,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectManaValue {
+                                    scope: ObjectScope::CostPaidObject,
+                                },
+                            },
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            };
+            let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(valid_card)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Graveyard)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, execute_effect));
+            obj.trigger_definitions.push(trig.clone());
+            obj.base_trigger_definitions = std::sync::Arc::new(vec![trig]);
+        }
+        // Rebuild trigger index so Jackdaw is in the Dies/LBF buckets.
+        crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+        // Simulate the flying bird dying through the replacement pipeline.
+        let mut events = Vec::new();
+        move_to_graveyard_through_replacement_pipeline(&mut state, flying_bird, &mut events);
+
+        process_triggers(&mut state, &events);
+
+        // Jackdaw Savior's trigger must fire. The trigger has a mandatory target
+        // (creature in graveyard with CMC < Bird's CMC = 2). Since CMC 1 is < 2,
+        // `graveyard_creature` is a legal target. The trigger should pause for
+        // target selection.
+        assert!(
+            !state.stack.is_empty() || state.pending_trigger.is_some(),
+            "Jackdaw Savior trigger must fire when a flying creature you control dies \
+             and a lower-CMC creature card exists in your graveyard (issue #887)"
+        );
+    }
+
+    /// CR 603.10a: Jackdaw Savior's SelfRef arm fires when Jackdaw Savior itself dies.
+    #[test]
+    fn jackdaw_savior_trigger_fires_when_jackdaw_savior_dies() {
+        use crate::types::ability::{FilterProp, ObjectScope, QuantityRef};
+        use crate::types::mana::ManaCost;
+
+        let mut state = setup();
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+
+        // A creature card in the graveyard (CMC 1) — valid return target.
+        let graveyard_creature = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Graveyard Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&graveyard_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::White],
+                generic: 0,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+        }
+        state.players[0].graveyard.push_back(graveyard_creature);
+
+        // Jackdaw Savior (CMC 3: {2}{W}) — the creature that will die.
+        let jackdaw = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Jackdaw Savior".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&jackdaw).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::White],
+                generic: 2,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.keywords.push(Keyword::Flying);
+            obj.base_keywords = obj.keywords.clone();
+            obj.entered_battlefield_turn = Some(1);
+
+            let valid_card = TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::SelfRef,
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![
+                            FilterProp::WithKeyword {
+                                value: Keyword::Flying,
+                            },
+                            FilterProp::Another,
+                        ],
+                    }),
+                ],
+            };
+            let execute_effect = Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![
+                        FilterProp::Another,
+                        FilterProp::Cmc {
+                            comparator: Comparator::LT,
+                            value: QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectManaValue {
+                                    scope: ObjectScope::CostPaidObject,
+                                },
+                            },
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard,
+                        },
+                    ],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            };
+            let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(valid_card)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Graveyard)
+                .trigger_zones(vec![Zone::Battlefield])
+                .execute(AbilityDefinition::new(AbilityKind::Spell, execute_effect));
+            obj.trigger_definitions.push(trig.clone());
+            obj.base_trigger_definitions = std::sync::Arc::new(vec![trig]);
+        }
+        crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+        // Jackdaw Savior dies through the replacement pipeline.
+        let mut events = Vec::new();
+        move_to_graveyard_through_replacement_pipeline(&mut state, jackdaw, &mut events);
+        process_triggers(&mut state, &events);
+
+        // The SelfRef arm should fire via the LKI scan (CR 603.10a).
+        // The trigger targets graveyard_creature (CMC 1 < Jackdaw's CMC 3).
+        assert!(
+            !state.stack.is_empty() || state.pending_trigger.is_some(),
+            "Jackdaw Savior trigger must fire via SelfRef when Jackdaw Savior itself dies \
+             and a lower-CMC creature card exists in the graveyard (issue #887)"
+        );
+    }
 }
 
 /// Regression tests for the foundational trigger double-fire defect

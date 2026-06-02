@@ -12246,6 +12246,77 @@ mod tests {
         }
     }
 
+    /// CR 700.4 + CR 603.10a: Jackdaw Savior (issue #887) — "Whenever this
+    /// creature or another creature you control with flying dies, return another
+    /// target creature card with lesser mana value from your graveyard to the
+    /// battlefield."
+    ///
+    /// The `valid_card` must be `Or[SelfRef, Typed{Creature, You,
+    /// [WithKeyword(Flying), Another]}]` — not `Or[SelfRef, Typed{..., [Another]}]`
+    /// (missing flying) or `Typed{..., [Flying, Another]}` (missing SelfRef arm).
+    #[test]
+    fn trigger_self_or_another_creature_with_flying_dies() {
+        let def = parse_trigger_line(
+            "Whenever this creature or another creature you control with flying dies, \
+             return another target creature card with lesser mana value from your graveyard \
+             to the battlefield.",
+            "Jackdaw Savior",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        // CR 700.4: "dies" = leaves battlefield → graveyard.
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        // The valid_card filter distinguishes Jackdaw Savior itself (SelfRef) from
+        // other flying creatures you control (Typed + WithKeyword + Another).
+        match &def.valid_card {
+            Some(TargetFilter::Or { filters }) => {
+                assert_eq!(filters.len(), 2, "Or must have exactly two arms");
+                assert_eq!(
+                    filters[0],
+                    TargetFilter::SelfRef,
+                    "first arm must be SelfRef ('this creature')"
+                );
+                match &filters[1] {
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }) => {
+                        assert!(
+                            type_filters.contains(&TypeFilter::Creature),
+                            "second arm must require Creature type"
+                        );
+                        assert_eq!(
+                            *controller,
+                            Some(ControllerRef::You),
+                            "second arm must require 'you control'"
+                        );
+                        assert!(
+                            properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::WithKeyword { value: kw }
+                                if *kw == crate::types::keywords::Keyword::Flying
+                            )),
+                            "second arm must check WithKeyword(Flying); properties={:?}",
+                            properties
+                        );
+                        assert!(
+                            properties.contains(&FilterProp::Another),
+                            "second arm must check Another (not Jackdaw itself); \
+                             properties={:?}",
+                            properties
+                        );
+                    }
+                    other => panic!("second Or arm must be Typed filter, got {other:?}"),
+                }
+            }
+            other => panic!(
+                "valid_card must be Or[SelfRef, Typed{{Creature, You, [Flying, Another]}}], \
+                 got {other:?}"
+            ),
+        }
+    }
+
     // --- Intervening-if condition tests ---
 
     /// CR 608.2h: Haliya, Guided by Light — "draw a card if you've gained 3 or
