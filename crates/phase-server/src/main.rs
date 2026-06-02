@@ -34,6 +34,7 @@ use server_core::draft_session::DraftSessionManager;
 use server_core::draft_wire_guard::{
     guard_create_draft_with_settings, guard_join_draft_with_password, guard_reconnect_draft,
 };
+use server_core::emote_guard::guard_emote;
 use server_core::lobby::RegisterGameRequest;
 use server_core::protocol::{
     build_commit, ClientMessage, ServerMessage, ServerMode, MIN_SUPPORTED_PROTOCOL,
@@ -3663,6 +3664,14 @@ async fn handle_client_message(
         }
 
         ClientMessage::Emote { emote } => {
+            if let Err(reason) = guard_emote(&emote) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             let game_code = match &identity.game_code {
                 Some(c) => c.clone(),
                 None => return,
