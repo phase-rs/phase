@@ -15558,9 +15558,17 @@ mod tests {
         let TargetFilter::Typed(ref tf) = *target else {
             panic!("expected Typed filter, got {target:?}")
         };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
         assert!(
             tf.properties.contains(&FilterProp::Another),
             "exile target must carry FilterProp::Another for 'other than this card'; got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::InZone {
+                zone: Zone::Graveyard
+            }),
+            "exile target must be scoped to your graveyard; got {:?}",
             tf.properties
         );
         assert!(
