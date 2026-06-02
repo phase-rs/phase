@@ -1453,6 +1453,7 @@ fn combat_requirement_conjunct_prepend(
     let remainder_lower = remainder_trimmed.to_ascii_lowercase();
     if !super::imperative::is_standalone_combat_requirement(&remainder_lower)
         && !super::subject::is_can_block_extra_predicate(&remainder_lower)
+        && !super::subject::is_can_attack_despite_defender_predicate(&remainder_lower)
     {
         return None;
     }

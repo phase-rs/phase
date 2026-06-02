@@ -19055,6 +19055,75 @@ mod tests {
         );
     }
 
+    /// CR 702.3b + CR 613: the Walls-that-attack compound — "<self> gets +N/-M
+    /// until end of turn and can attack this turn as though it didn't have
+    /// defender" (Wall of Wonder, Mobile Fort, Nivix Cyclops). The sequence
+    /// splitter peels the subjectless "can attack ... as though it didn't have
+    /// defender" conjunct off the P/T conjunct;
+    /// `combat_requirement_conjunct_prepend` re-attaches the lifted `~` subject so
+    /// `try_parse_can_attack_with_defender` fires. The parsed chain must carry
+    /// BOTH a P/T modification (Pump) AND a `CanAttackWithDefender` static grant —
+    /// a regression that drops either half fails here.
+    #[test]
+    fn walls_that_attack_compound_yields_pump_and_can_attack() {
+        for (text, plus, minus) in [
+            (
+                "~ gets +4/-4 until end of turn and can attack this turn as though it didn't have defender",
+                4i32,
+                -4i32,
+            ),
+            (
+                "~ gets +3/-1 until end of turn and can attack this turn as though it didn't have defender",
+                3,
+                -1,
+            ),
+            (
+                "~ gets +2/-2 until end of turn and can attack this turn as though they didn't have defender",
+                2,
+                -2,
+            ),
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Activated);
+
+            // Collect every effect in the chain (primary + chained sub_abilities).
+            let mut effects: Vec<&Effect> = Vec::new();
+            let mut node = Some(&def);
+            while let Some(d) = node {
+                effects.push(&d.effect);
+                node = d.sub_ability.as_deref();
+            }
+
+            let has_pump = effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::Pump {
+                        target: TargetFilter::SelfRef,
+                        power: PtValue::Fixed(p),
+                        toughness: PtValue::Fixed(t),
+                    } if *p == plus && *t == minus
+                )
+            });
+            assert!(
+                has_pump,
+                "{text:?}: expected a self Pump({plus}/{minus}); chain effects: {effects:?}"
+            );
+
+            let has_can_attack = effects.iter().any(|e| {
+                matches!(
+                    e,
+                    Effect::GenericEffect { static_abilities, .. }
+                        if static_abilities
+                            .iter()
+                            .any(|s| s.mode == StaticMode::CanAttackWithDefender)
+                )
+            });
+            assert!(
+                has_can_attack,
+                "{text:?}: expected a CanAttackWithDefender grant; chain effects: {effects:?}"
+            );
+        }
+    }
+
     #[test]
     fn destroy_target_was_dealt_damage_preserves_relative_clause() {
         let def = parse_effect_chain(
