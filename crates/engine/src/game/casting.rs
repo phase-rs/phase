@@ -915,6 +915,7 @@ pub(super) fn build_spell_meta(
         subtypes: obj.card_types.subtypes.clone(),
         keyword_kinds: effective_spell_keyword_kinds(state, caster, object_id),
         cast_from_zone: Some(pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone)),
+        mana_value: Some(obj.mana_cost.mana_value()),
     })
 }
 

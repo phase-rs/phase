@@ -566,8 +566,10 @@ pub fn validate_blockers_for_player(
         }
     }
 
-    // Group assignments by attacker for menace validation
+    // Group assignments by attacker for menace validation and by blocker for
+    // per-creature block-capacity checks.
     let mut blockers_per_attacker: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
+    let mut attackers_per_blocker: HashMap<ObjectId, u32> = HashMap::new();
 
     for &(blocker_id, attacker_id) in assignments {
         let blocker = state
@@ -798,15 +800,12 @@ pub fn validate_blockers_for_player(
             .entry(attacker_id)
             .or_default()
             .push(blocker_id);
+        *attackers_per_blocker.entry(blocker_id).or_default() += 1;
     }
 
     // CR 509.1a + CR 509.1b: Enforce per-blocker limit on how many attackers it can block.
     // Default is 1; ExtraBlockers { count: Some(n) } allows 1 + n; count: None = unlimited.
     {
-        let mut attackers_per_blocker: HashMap<ObjectId, u32> = HashMap::new();
-        for &(blocker_id, _) in assignments {
-            *attackers_per_blocker.entry(blocker_id).or_default() += 1;
-        }
         for (&blocker_id, &num_blocked) in &attackers_per_blocker {
             if num_blocked <= 1 {
                 continue;
@@ -895,6 +894,61 @@ pub fn validate_blockers_for_player(
             if has_available_blocker {
                 return Err(format!(
                     "{:?} must be blocked if able (CR 509.1c)",
+                    attacker_id
+                ));
+            }
+        }
+
+        // CR 509.1c: MustBeBlockedByAll — the "lure" requirement ("All creatures
+        // able to block ~ do so": Lure, Prized Unicorn, Breaker of Armies, …).
+        // Every creature this defending player controls that could legally block
+        // the lured attacker carries a "must block it" requirement, so — unlike
+        // MustBeBlocked, which is satisfied by a single blocker — there must be
+        // *no* creature with spare block capacity able to block it left off that
+        // attacker. A blocker already at its per-creature block limit is not
+        // able to add another block; a blocker with ExtraBlockers spare capacity
+        // still must also block the lured attacker.
+        for attacker_info in &combat.attackers {
+            if attacker_info.defending_player != player {
+                continue;
+            }
+            let attacker_id = attacker_info.object_id;
+            let attacker = match state.objects.get(&attacker_id) {
+                Some(obj) => obj,
+                None => continue,
+            };
+            // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
+            let has_must_be_blocked_by_all =
+                super::functioning_abilities::active_static_definitions(state, attacker)
+                    .any(|sd| sd.mode == StaticMode::MustBeBlockedByAll);
+            if !has_must_be_blocked_by_all {
+                continue;
+            }
+            // Any untapped defender with spare block capacity that could legally
+            // block the lured attacker should have been declared as its blocker.
+            let has_idle_able_blocker = state.battlefield.iter().any(|id| {
+                if blockers_per_attacker
+                    .get(&attacker_id)
+                    .is_some_and(|blockers| blockers.contains(id))
+                {
+                    return false;
+                }
+                let Some(obj) = state.objects.get(id) else {
+                    return false;
+                };
+                if obj.controller != player
+                    || !obj.card_types.core_types.contains(&CoreType::Creature)
+                    || obj.tapped
+                    || !can_block_pair(state, *id, attacker_id)
+                {
+                    return false;
+                }
+                let assigned_count = attackers_per_blocker.get(id).copied().unwrap_or(0);
+                assigned_count < extra_block_limit(state, obj)
+            });
+            if has_idle_able_blocker {
+                return Err(format!(
+                    "{:?} must be blocked by every creature able to block it (CR 509.1c)",
                     attacker_id
                 ));
             }
@@ -4274,6 +4328,131 @@ mod tests {
 
         // No untapped blockers available — constraint satisfied
         assert!(validate_blockers(&state, &[]).is_ok());
+    }
+
+    fn add_must_be_blocked_by_all(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::MustBeBlockedByAll));
+    }
+
+    #[test]
+    fn must_be_blocked_by_all_requires_every_able_blocker() {
+        // CR 509.1c: a lured attacker ("All creatures able to block ~ do so",
+        // Prized Unicorn / Lure) must be blocked by EVERY creature able to block
+        // it — not just one, which is the distinction from MustBeBlocked.
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Prized Unicorn", 2, 2);
+        add_must_be_blocked_by_all(&mut state, attacker);
+        let blocker_a = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let blocker_b = create_creature(&mut state, PlayerId(1), "Elf", 1, 1);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // No blockers: illegal (two able creatures left idle).
+        assert!(validate_blockers(&state, &[]).is_err());
+        // Only one of two able blockers: still illegal — the other is idle & able.
+        assert!(validate_blockers(&state, &[(blocker_a, attacker)]).is_err());
+        // Every able blocker assigned: legal.
+        assert!(validate_blockers(&state, &[(blocker_a, attacker), (blocker_b, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn must_be_blocked_by_all_exempts_unable_blockers() {
+        // CR 509.1c "able to": a tapped creature carries no block requirement, so
+        // blocking with only the untapped able creature is a legal declaration.
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Prized Unicorn", 2, 2);
+        add_must_be_blocked_by_all(&mut state, attacker);
+        let able = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let tapped = create_creature(&mut state, PlayerId(1), "Elf", 1, 1);
+        state.objects.get_mut(&tapped).unwrap().tapped = true;
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // The lone untapped able blocker must block; the tapped one is exempt.
+        assert!(validate_blockers(&state, &[]).is_err());
+        assert!(validate_blockers(&state, &[(able, attacker)]).is_ok());
+    }
+
+    #[test]
+    fn must_be_blocked_by_all_counts_multi_blocker_spare_capacity() {
+        // CR 509.1c: a creature that can block an additional attacker is still
+        // "able to" block the lured attacker while blocking elsewhere.
+        let mut state = setup();
+        let lured = create_creature(&mut state, PlayerId(0), "Prized Unicorn", 2, 2);
+        add_must_be_blocked_by_all(&mut state, lured);
+        let other_attacker = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let guard = create_creature(&mut state, PlayerId(1), "Palace Guard", 1, 4);
+        state
+            .objects
+            .get_mut(&guard)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::ExtraBlockers {
+                count: Some(1),
+            }));
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(lured, PlayerId(1)),
+                AttackerInfo::attacking_player(other_attacker, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+
+        assert!(validate_blockers(&state, &[(guard, other_attacker)]).is_err());
+        assert!(validate_blockers(&state, &[(guard, other_attacker), (guard, lured)]).is_ok());
+    }
+
+    #[test]
+    fn parsed_lure_effect_reaches_must_be_blocked_by_all_enforcement() {
+        use crate::game::effects::effect::resolve;
+        use crate::game::layers::evaluate_layers;
+        use crate::types::ability::{Duration, Effect, ResolvedAbility, TargetFilter};
+
+        let mut state = setup();
+        let lured = create_creature(&mut state, PlayerId(0), "Prized Unicorn", 2, 2);
+        let blocker_a = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let blocker_b = create_creature(&mut state, PlayerId(1), "Elf", 1, 1);
+
+        let mut effect = crate::parser::oracle_effect::parse_effect(
+            "All creatures able to block target creature this turn do so",
+        );
+        match &mut effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => {
+                *target = Some(TargetFilter::SpecificObject { id: lured });
+                for sd in static_abilities.iter_mut() {
+                    sd.affected = Some(TargetFilter::SpecificObject { id: lured });
+                }
+            }
+            other => panic!("expected GenericEffect from lure parser, got {other:?}"),
+        }
+        let ability = ResolvedAbility::new(effect, vec![], lured, PlayerId(0))
+            .duration(Duration::UntilEndOfTurn);
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        evaluate_layers(&mut state);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(lured, PlayerId(1))],
+            ..Default::default()
+        });
+
+        assert!(validate_blockers(&state, &[(blocker_a, lured)]).is_err());
+        assert!(validate_blockers(&state, &[(blocker_a, lured), (blocker_b, lured)]).is_ok());
     }
 
     /// CR 509.1c (GAP-7): a `MustBeBlocked` requirement granted *transiently*

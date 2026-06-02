@@ -2,7 +2,9 @@ use std::str::FromStr;
 
 use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
-use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
+use crate::parser::oracle::{
+    compute_deck_copy_limit_from_text, oracle_text_allows_commander, parse_oracle_text,
+};
 use crate::parser::oracle_keyword::{keyword_display_name, parse_keyword_from_oracle};
 use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, BracketMode};
 use crate::types::ability::{
@@ -20,6 +22,7 @@ use crate::types::ability::{
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{BloodthirstValue, BuybackCost, CyclingCost, Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
@@ -1176,6 +1179,16 @@ pub fn compute_commander(mtgjson: &super::mtgjson::AtomicCard, face: &CardFace) 
     // Source 2: type-line analysis — mirrors crate::game::deck_validation logic
     // so this function is the single authority for commander eligibility.
     mtgjson_says || type_line_commander_eligible(face)
+}
+
+/// CR 100.2a / CR 903.5b: determine a card's deck-construction copy-limit
+/// override from its Oracle text (including reminder-text bodies). `None` means
+/// the default four-of (constructed) / singleton (Commander) limit applies.
+/// Delegates to the parser so the recognizer and the validator agree.
+pub fn compute_deck_copy_limit(face: &CardFace) -> Option<DeckCopyLimit> {
+    face.oracle_text
+        .as_deref()
+        .and_then(compute_deck_copy_limit_from_text)
 }
 
 /// CR 903.3 type-line analysis (excludes MTGJSON skill data). Public for use by
@@ -5155,12 +5168,17 @@ fn build_oracle_face_inner(
         parse_warnings: parsed.parse_warnings,
         brawl_commander: false,
         is_commander: false,
+        deck_copy_limit: None,
         metadata: Default::default(),
         rarities: Default::default(),
     };
 
     face.brawl_commander = compute_brawl_commander(mtgjson, &face);
     face.is_commander = compute_commander(mtgjson, &face);
+    // CR 100.2a / CR 903.5b: per-card deck-construction copy-limit override.
+    // `face.oracle_text` retains reminder text + DCI prefix, so reminder-only
+    // limits (Vazal, the Compleat's Megalegendary) are still discovered.
+    face.deck_copy_limit = compute_deck_copy_limit(&face);
     synthesize_all(&mut face);
     face
 }
