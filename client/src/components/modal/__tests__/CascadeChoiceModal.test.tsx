@@ -76,7 +76,7 @@ describe("CascadeChoiceModal", () => {
       type: "CastOffer",
       data: {
         player: 0,
-        kind: { type: "Discover", hit_card: 52, exiled_misses: [1, 2, 3] },
+        kind: { type: "Discover", hit_card: 52, exiled_misses: [1, 2, 3], discover_value: 3 },
       },
     });
 

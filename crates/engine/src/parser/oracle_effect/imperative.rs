@@ -1581,6 +1581,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 // CR 611.2a: bound to the ability controller by
                 // `grant_permission::resolve`.
                 granted_to: None,
+                resolution_cleanup: None,
             },
             target,
             grantee: Default::default(),
@@ -6814,27 +6815,23 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let trimmed = lower.trim_end_matches('.');
 
     // First try: bare forms without a player reference.
-    let result: Result<(&str, Duration), nom::Err<OracleError<'_>>> = alt((
-        value(Duration::UntilEndOfTurn, tag("attacks this turn if able")),
-        value(Duration::UntilEndOfTurn, tag("attack this turn if able")),
-        value(
-            Duration::UntilEndOfCombat,
-            tag("attacks this combat if able"),
+    // verb axis × phase axis (PATTERNS.md §8b): factor "attack(s)" out front,
+    // then map the phase clause to its duration.
+    let result: Result<(&str, Duration), nom::Err<OracleError<'_>>> = (
+        alt((tag("attacks"), tag("attack"))),
+        preceded(
+            tag(" "),
+            alt((
+                value(Duration::UntilEndOfTurn, tag("this turn if able")),
+                value(
+                    Duration::UntilEndOfCombat,
+                    alt((tag("this combat if able"), tag("that combat if able"))),
+                ),
+            )),
         ),
-        value(
-            Duration::UntilEndOfCombat,
-            tag("attack this combat if able"),
-        ),
-        value(
-            Duration::UntilEndOfCombat,
-            tag("attacks that combat if able"),
-        ),
-        value(
-            Duration::UntilEndOfCombat,
-            tag("attack that combat if able"),
-        ),
-    ))
-    .parse(trimmed);
+    )
+        .map(|(_, duration)| duration)
+        .parse(trimmed);
 
     if let Ok((_, duration)) = result {
         return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {

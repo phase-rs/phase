@@ -40,9 +40,31 @@ pub fn handle_priority_pass(
         state.priority_pass_count = 0;
 
         if state.stack.is_empty() {
-            // CR 117.4: Empty stack — advance to next phase.
-            turns::advance_phase(state, events);
-            turns::auto_advance(state, events)
+            // CR 510.4: The combat damage step's turn-based action runs in two
+            // sub-steps when a first-strike/double-strike creature is present. If
+            // the first-strike sub-step paused on a CR 603.3b trigger-ordering
+            // prompt (combat_damage.rs), `resolve_combat_damage` returned before
+            // the MANDATORY second (regular) sub-step ran (`regular_damage_done ==
+            // false`). Those ordered triggers have now resolved and all players
+            // passed with an empty stack, but combat damage is INCOMPLETE — re-enter
+            // the combat-damage turn-based action (auto_advance re-calls
+            // resolve_combat_damage, which runs only the regular sub-step) instead
+            // of advancing to end of combat (which would silently skip the regular
+            // damage, violating CR 510.4). `regular_damage_done` is set true before
+            // the regular sub-step's own trigger processing, so the gate fires at
+            // most once and then advances normally — no infinite loop.
+            let combat_damage_incomplete = state.phase == crate::types::phase::Phase::CombatDamage
+                && state
+                    .combat
+                    .as_ref()
+                    .is_some_and(|c| !c.regular_damage_done);
+            if combat_damage_incomplete {
+                turns::auto_advance(state, events)
+            } else {
+                // CR 117.4: Empty stack — advance to next phase.
+                turns::advance_phase(state, events);
+                turns::auto_advance(state, events)
+            }
         } else {
             // CR 117.4: Non-empty stack — resolve the next object. A batch-safe
             // run of identical token triggers collapses into one step that

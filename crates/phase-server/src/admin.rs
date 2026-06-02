@@ -77,7 +77,7 @@ pub async fn admin_delete_draft(
             if !session.active_matches.is_empty() {
                 let mut sessions = app_state.sessions.lock().await;
                 for game_code in session.active_matches.values() {
-                    sessions.sessions.remove(game_code);
+                    sessions.remove_game(game_code);
                 }
             }
             // Delete from persistence

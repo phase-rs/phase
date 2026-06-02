@@ -6,6 +6,7 @@ import {
   getKeywordDetail,
   getKeywordDisplayText,
   getKeywordName,
+  getKeywordReminderText,
   isGrantedKeyword,
   sortKeywords,
 } from "../keywordProps";
@@ -133,6 +134,26 @@ describe("getKeywordDisplayText", () => {
   it("returns just name for simple keywords", () => {
     expect(getKeywordDisplayText("Flying")).toBe("Flying");
     expect(getKeywordDisplayText("FirstStrike")).toBe("First Strike");
+  });
+});
+
+describe("getKeywordReminderText", () => {
+  it("returns reminder text for simple keywords", () => {
+    expect(getKeywordReminderText("Flying")).toContain("creatures with flying or reach");
+  });
+
+  it("returns reminder text by keyword name for parameterized keywords", () => {
+    expect(getKeywordReminderText({ Ward: { type: "Mana", data: { Cost: { shards: [], generic: 2 } } } })).toContain("ward cost");
+    expect(getKeywordReminderText({ Protection: { Color: "Red" } })).toContain("stated quality");
+    expect(
+      getKeywordReminderText({
+        Crew: { power: 3, once_per_turn: { type: "Unlimited" } },
+      } as unknown as Keyword),
+    ).toContain("crew value");
+  });
+
+  it("returns null when no reminder text is defined", () => {
+    expect(getKeywordReminderText({ Unknown: "CustomAbility" })).toBeNull();
   });
 });
 

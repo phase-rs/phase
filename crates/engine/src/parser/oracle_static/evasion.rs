@@ -452,6 +452,72 @@ pub(crate) fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDe
     Some(defs)
 }
 
+/// CR 509.1b: Decompose `"<predicate> and can block an additional N creatures
+/// [each combat]"` (or `"… any number of creatures"`) into the first conjunct's
+/// static(s) plus an `ExtraBlockers` static sharing the same `affected` set.
+///
+/// Without this split the trailing extra-block grant was dropped: Brave the
+/// Sands ("Creatures you control have vigilance and can block an additional
+/// creature each combat.") parsed to only the vigilance grant, so its
+/// extra-block clause did nothing. Mirrors `try_split_and_can_attack_despite_defender`
+/// and `try_split_and_must_attack_block`: splice the conjunction out, re-parse
+/// the remainder for the first conjunct, then clone its `affected`/`condition`
+/// onto the companion `ExtraBlockers` definition.
+pub(crate) fn try_split_and_can_block_additional(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let (before, count, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        let (i, _) = tag::<_, _, VE>("and can block ").parse(i)?;
+        // CR 107.1c: "any number of creatures" → unbounded (None); otherwise a
+        // numeric count of additional creatures ("an"/"a" → 1, "two" → 2, …).
+        let (i, count): (&str, Option<u32>) = if let Ok((after, _)) = (
+            tag::<_, _, VE>("any"),
+            tag::<_, _, VE>(" number of creatures"),
+        )
+            .parse(i)
+        {
+            (after, None)
+        } else {
+            let (after_n, n) = nom_primitives::parse_number(i)?;
+            let (after_kw, _) = tag::<_, _, VE>(" additional creature").parse(after_n)?;
+            let (after_s, _) = opt(tag::<_, _, VE>("s")).parse(after_kw)?;
+            (after_s, Some(n))
+        };
+        // Optional trailing duration phrase ("each combat", "this combat", …).
+        let (i, _) = opt(alt((
+            tag::<_, _, VE>(" each combat"),
+            tag::<_, _, VE>(" this combat"),
+            tag::<_, _, VE>(" this turn"),
+        )))
+        .parse(i)?;
+        Ok((i, count))
+    })?;
+
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    let condition = defs[0].condition.clone();
+    let mut companion = StaticDefinition::new(StaticMode::ExtraBlockers { count })
+        .affected(affected)
+        .description(text.to_string());
+    if let Some(condition) = condition {
+        companion = companion.condition(condition);
+    }
+    defs.push(companion);
+    Some(defs)
+}
+
 /// CR 105.2c / CR 205.4a: Parse property-based creature descriptors that are not subtypes.
 /// Handles "colorless", "multicolored", "snow", and "snow and [Subtype]" patterns.
 /// Returns a fully constructed `TargetFilter` with the appropriate properties.

@@ -2685,11 +2685,15 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanents(filter)?,
             cant_regenerate: true,
         },
-        Action::DestroyEachPermanent(filter) => Effect::Destroy {
+        // CR 701.8a: "Destroy all X" — mass destruction uses DestroyAll, not
+        // the single-target Destroy resolver, so the full matching set is
+        // processed and the tracked set is populated correctly for downstream
+        // "for each X destroyed this way" sub-abilities.
+        Action::DestroyEachPermanent(filter) => Effect::DestroyAll {
             target: convert_permanents(filter)?,
             cant_regenerate: false,
         },
-        Action::DestroyEachPermanentNoRegen(filter) => Effect::Destroy {
+        Action::DestroyEachPermanentNoRegen(filter) => Effect::DestroyAll {
             target: convert_permanents(filter)?,
             cant_regenerate: true,
         },
