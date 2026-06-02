@@ -5,7 +5,9 @@ use nom::combinator::{all_consuming, map, opt, value, verify};
 use nom::sequence::preceded;
 use nom::Parser;
 
-use super::animation::{animation_modifications, parse_animation_spec};
+use super::animation::{
+    animation_modifications_with_replacement, has_in_addition_to_other_types, parse_animation_spec,
+};
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
@@ -1837,7 +1839,12 @@ fn build_become_clause(
 
     let (become_text, name_override) = strip_become_name_override(become_text);
     let animation = parse_animation_spec(&become_text, ctx)?;
-    let mut modifications = animation_modifications(&animation);
+    // CR 205.1a vs CR 205.1b: a "becomes a [type]" effect REPLACES the creature's
+    // subtypes (so e.g. a Human Soldier that becomes a Frog is only a Frog) unless
+    // it says "in addition to its other types", which stays additive. Mirrors the
+    // static type-change path's suffix detection.
+    let is_additive = has_in_addition_to_other_types(&become_text);
+    let mut modifications = animation_modifications_with_replacement(&animation, is_additive);
     for modification in parse_continuous_modifications(predicate) {
         if !modifications.contains(&modification) {
             modifications.push(modification);
@@ -1910,7 +1917,9 @@ fn try_parse_become_and_attack_if_able(
     let (animation_text, animation_duration) = super::strip_trailing_duration(animation_text);
     let animation_duration = animation_duration?;
     let animation = parse_animation_spec(animation_text, ctx)?;
-    let modifications = animation_modifications(&animation);
+    // CR 205.1a: non-additive "becomes a [type]" replaces subtypes.
+    let is_additive = has_in_addition_to_other_types(animation_text);
+    let modifications = animation_modifications_with_replacement(&animation, is_additive);
     if modifications.is_empty() {
         return None;
     }
@@ -1947,25 +1956,21 @@ fn try_parse_become_and_attack_if_able(
 }
 
 fn parse_attack_if_able_duration(input: &str) -> OracleResult<'_, Duration> {
-    alt((
-        value(
-            Duration::UntilEndOfTurn,
-            alt((
-                tag("attacks this turn if able"),
-                tag("attack this turn if able"),
-            )),
-        ),
-        value(
-            Duration::UntilEndOfCombat,
-            alt((
-                tag("attacks this combat if able"),
-                tag("attack this combat if able"),
-                tag("attacks that combat if able"),
-                tag("attack that combat if able"),
-            )),
-        ),
-    ))
-    .parse(input)
+    // verb axis × phase axis (PATTERNS.md §8b): factor "attack(s)" out front,
+    // then map the phase clause to its duration ("this turn" → end of turn,
+    // "this/that combat" → end of combat).
+    let (rest, _) = alt((tag("attacks"), tag("attack"))).parse(input)?;
+    preceded(
+        tag(" "),
+        alt((
+            value(Duration::UntilEndOfTurn, tag("this turn if able")),
+            value(
+                Duration::UntilEndOfCombat,
+                alt((tag("this combat if able"), tag("that combat if able"))),
+            ),
+        )),
+    )
+    .parse(rest)
 }
 
 /// CR 119.5: Parse "life total becomes N" into SetLifeTotal effect.

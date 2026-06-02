@@ -1979,7 +1979,12 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => matches!(qty, QuantityRef::TrackedSetSize),
+        QuantityExpr::Ref { qty } => {
+            matches!(
+                qty,
+                QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
+            )
+        }
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
@@ -2062,6 +2067,29 @@ fn affected_objects_from_events(
                 _ => None,
             })
             .collect(),
+        // CR 701.26a + CR 608.2c: Tap publishes the tapped set for downstream
+        // "each of those <type>" continuations (Urge to Feed class).
+        Effect::Tap { .. } | Effect::Untap { .. } => {
+            let from_events: Vec<ObjectId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::PermanentTapped { object_id, .. }
+                    | GameEvent::PermanentUntapped { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            if !from_events.is_empty() {
+                from_events
+            } else {
+                fallback_targets
+                    .iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            }
+        }
         _ => {
             let dest_zone = match effect {
                 Effect::ChangeZone { destination, .. }
@@ -4570,10 +4598,31 @@ pub(crate) fn evaluate_condition(
             .is_some_and(|obj| obj.has_keyword(keyword)),
         // CR 400.7 + CR 608.2c: "if that creature was a [type]" — check target or its LKI.
         AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
-            let target_id = ability.targets.iter().find_map(|t| match t {
-                TargetRef::Object(id) => Some(*id),
-                _ => None,
-            });
+            // CR 109.4 + CR 603.2: "that creature" / "it" is the ability's first
+            // object target, OR — for subject-based triggers that carry no chosen
+            // target (e.g. "Whenever one or more -1/-1 counters are put on a
+            // creature, draw a card if you control that creature.") — the
+            // triggering event's subject object. Mirror the `ParentTargetController`
+            // fallback (targeting.rs): when `targets` has no object, resolve the
+            // anaphor against `TriggeringSource` from the current trigger event.
+            let target_id = ability
+                .targets
+                .iter()
+                .find_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+                .or_else(|| {
+                    crate::game::targeting::resolve_event_context_target(
+                        state,
+                        &TargetFilter::TriggeringSource,
+                        ability.source_id,
+                    )
+                    .and_then(|t| match t {
+                        TargetRef::Object(id) => Some(id),
+                        TargetRef::Player(_) => None,
+                    })
+                });
             let matched = if let Some(id) = target_id {
                 if *use_lki {
                     if let Some(GameEvent::ZoneChanged { record, .. }) =
@@ -4903,6 +4952,13 @@ fn resolve_unless_payer(
         // `TargetFilter::Player` arm which scans `ability.targets` for the
         // first `TargetRef::Player`.
         TargetFilter::Player => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        }
+        // CR 118.12a + CR 608.2f: "Each player/each opponent ... unless they pay" —
+        // the payer is the player_scope iteration's scoped player, not a chosen
+        // target. resolve_effect_player_ref maps ScopedPlayer -> ability.scoped_player
+        // (bound per-iteration by the fan-out at effects/mod.rs:3015-3069).
+        TargetFilter::ScopedPlayer => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
         _ => None,
@@ -5924,6 +5980,30 @@ mod tests {
 
         assert_eq!(
             resolve_unless_payer(&state, &ability, &TargetFilter::ParentTargetController),
+            Some(PlayerId(1))
+        );
+    }
+
+    // CR 118.12a + CR 608.2f: "each opponent ... unless they pay" — the payer
+    // is the per-iteration scoped player bound by the fan-out, read through
+    // `ScopedPlayer`, not a chosen target. Without this arm the resolver
+    // returns `None` and the punisher fires unconditionally.
+    #[test]
+    fn resolve_unless_payer_scoped_player_reads_ability_scoped_player() {
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: Some(TargetFilter::ScopedPlayer),
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        // Simulate the fan-out binding the scoped opponent for this iteration.
+        ability.scoped_player = Some(PlayerId(1));
+        assert_eq!(
+            resolve_unless_payer(&state, &ability, &TargetFilter::ScopedPlayer),
             Some(PlayerId(1))
         );
     }
@@ -7519,6 +7599,102 @@ mod tests {
         assert_eq!(treasures0, 0, "Empty chain must mint zero tokens");
     }
 
+    /// CR 608.2c + CR 400.7: a mass-destroy parent must publish the destroyed
+    /// set so a token-count follow-up can count only the filtered subset.
+    #[test]
+    fn destroy_all_chain_counts_filtered_tracked_set_for_token_followup() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Ceaseless Conflict".to_string(),
+            Zone::Graveyard,
+        );
+        let controller_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Controller Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let controller_token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Controller Token".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [controller_creature, controller_token, opponent_creature] {
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+        }
+        state.objects.get_mut(&controller_token).unwrap().is_token = true;
+
+        let token_sub = ResolvedAbility::new(
+            Effect::Token {
+                name: "Spirit".to_string(),
+                power: PtValue::Fixed(3),
+                toughness: PtValue::Fixed(2),
+                types: vec!["Creature".to_string(), "Spirit".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![FilterProp::NonToken]),
+                        )),
+                    },
+                },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::DestroyAll {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(token_sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        for id in [controller_creature, controller_token, opponent_creature] {
+            assert_eq!(state.objects[&id].zone, Zone::Graveyard);
+        }
+        let spirits = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|object| object.name == "Spirit")
+            .count();
+        assert_eq!(
+            spirits, 1,
+            "only the controller's nontoken destroyed creature should be counted"
+        );
+    }
+
     #[test]
     fn put_counter_all_publishes_countered_objects_for_tracked_set_followup() {
         let mut state = GameState::new_two_player(42);
@@ -7676,6 +7852,104 @@ mod tests {
             .is_some_and(|objects| objects.is_empty()));
     }
 
+    /// CR 608.2c + CR 701.26a: a tapped-object set published by `Tap` must
+    /// bind a downstream filtered "each of those <type>" counter effect.
+    #[test]
+    fn tap_chain_publishes_filtered_tracked_set_for_counter_followup() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Urge to Feed".to_string(),
+            Zone::Graveyard,
+        );
+        let vampire = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vampire".to_string(),
+            Zone::Battlefield,
+        );
+        let other_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Swamp".to_string(),
+            Zone::Battlefield,
+        );
+
+        state
+            .objects
+            .get_mut(&vampire)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        state.objects.get_mut(&vampire).unwrap().card_types.subtypes = vec!["Vampire".to_string()];
+        state
+            .objects
+            .get_mut(&other_creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
+        state.objects.get_mut(&land).unwrap().card_types.subtypes = vec!["Swamp".to_string()];
+
+        let counter = ResolvedAbility::new(
+            Effect::PutCounterAll {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::creature().subtype("Vampire".to_string()),
+                    )),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::Typed(TypedFilter::creature().subtype("Vampire".to_string())),
+            },
+            vec![TargetRef::Object(vampire)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(counter);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(state.objects[&vampire].tapped);
+        assert_eq!(
+            state.objects[&vampire]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(1)
+        );
+        for id in [other_creature, land] {
+            assert_eq!(
+                state.objects[&id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied(),
+                None,
+                "only the tapped Vampire should receive the counter"
+            );
+        }
+    }
+
     #[test]
     fn airbend_chain_exiles_all_creatures_when_no_target_is_chosen() {
         let mut state = GameState::new_two_player(42);
@@ -7738,6 +8012,7 @@ mod tests {
                         cast_transformed: false,
                         constraint: None,
                         granted_to: None,
+                        resolution_cleanup: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -7826,6 +8101,7 @@ mod tests {
                         cast_transformed: false,
                         constraint: None,
                         granted_to: None,
+                        resolution_cleanup: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -7888,6 +8164,7 @@ mod tests {
                     cast_transformed: false,
                     constraint: None,
                     granted_to: None,
+                    resolution_cleanup: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

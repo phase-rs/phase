@@ -103,4 +103,20 @@ describe("CardPreview chosen attributes", () => {
     expect(screen.getByText("Chosen")).toBeInTheDocument();
     expect(screen.getByText("Card name: Lightning Bolt")).toBeInTheDocument();
   });
+
+  it("renders keyword reminder tooltips for battlefield permanents", () => {
+    const object = battlefieldObject({
+      keywords: ["Flying", { Ward: { type: "Mana", data: { Cost: { shards: [], generic: 2 } } } }],
+      base_keywords: ["Flying", { Ward: { type: "Mana", data: { Cost: { shards: [], generic: 2 } } } }],
+    });
+    useGameStore.setState({ gameState: gameStateWithObject(object), spellCosts: {} });
+    useUiStore.setState({ inspectedObjectId: object.id, altHeld: false });
+
+    render(<CardPreview cardName="Pithing Needle" position={{ x: 20, y: 20 }} />);
+
+    expect(screen.getByText("Flying")).toBeInTheDocument();
+    expect(screen.getByText("Ward {2}")).toHaveAttribute("aria-describedby");
+    expect(screen.getByText(/creatures with flying or reach/)).toBeInTheDocument();
+    expect(screen.getByText(/ward cost/)).toBeInTheDocument();
+  });
 });

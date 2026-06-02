@@ -1533,6 +1533,54 @@ fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
 /// The counter-type word, when present, is intentionally NOT extracted —
 /// the resolved quantity is whatever the parent `Effect::RemoveCounter`
 /// removed, and the parent already restricts by counter type.
+/// Returns true when the filter carries information that can restrict the
+/// tracked set beyond the default (all objects moved by the preceding effect).
+/// Only `Any` is trivial; even a plain type/subtype filter can matter when the
+/// parent effect moved a wider set.
+fn filter_is_nontrivial_for_tracked_set(filter: &crate::types::ability::TargetFilter) -> bool {
+    !matches!(filter, crate::types::ability::TargetFilter::Any)
+}
+
+/// CR 608.2c + CR 400.7: Try to parse a "for each <filter> [that was/were]
+/// destroyed/sacrificed this way" clause. Returns `FilteredTrackedSetSize`
+/// when the type-phrase prefix restricts the tracked set; returns `None` to
+/// fall through to plain `TrackedSetSize` otherwise.
+///
+/// Uses `terminated(take_until(suffix), tag(suffix))` to split at each
+/// recognized suffix, then delegates the prefix to `parse_type_phrase`.
+fn parse_filtered_destroyed_this_way(lower: &str) -> Option<QuantityRef> {
+    // Each suffix is tried in order; the first complete match wins.
+    // Longer/more-specific suffixes must come before shorter ones so
+    // "that was destroyed this way" is preferred over "destroyed this way".
+    let suffixes: &[&str] = &[
+        " that was destroyed this way",
+        " that were destroyed this way",
+        " destroyed this way",
+        " that was sacrificed this way",
+        " that were sacrificed this way",
+        " sacrificed this way",
+    ];
+    for &suffix in suffixes {
+        // terminated(take_until(suffix), tag(suffix)) parses the noun-phrase
+        // prefix, then consumes the suffix exactly, leaving an empty remainder.
+        let result: OracleResult<'_, &str> =
+            terminated(take_until(suffix), tag(suffix)).parse(lower);
+        if let Ok(("", filter_phrase)) = result {
+            let (filter, remainder) =
+                crate::parser::oracle_target::parse_type_phrase(filter_phrase.trim());
+            if remainder.trim().is_empty() && filter_is_nontrivial_for_tracked_set(&filter) {
+                return Some(QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(filter),
+                });
+            }
+            // A suffix matched but the filter is trivial or the phrase
+            // didn't fully consume — fall through to TrackedSetSize.
+            return None;
+        }
+    }
+    None
+}
+
 fn try_parse_counters_removed_this_way(lower: &str) -> bool {
     crate::parser::oracle_nom::primitives::scan_at_word_boundaries(lower, |input| {
         let (rest, _) = alt((
@@ -1826,6 +1874,16 @@ fn parse_for_each_clause_with_they_controller(
         // way" quantities, this is the right place to extend.
         if try_parse_counters_removed_this_way(&lower) {
             return Some(QuantityRef::PreviousEffectAmount);
+        }
+        // CR 608.2c + CR 400.7: "nontoken creature you controlled that was
+        // destroyed this way" — tracked set members matching the filter prefix.
+        // Use terminated(take_until(suffix), tag(suffix)) to split the clause
+        // at each recognized suffix and parse the prefix as a type filter.
+        // Only emit `FilteredTrackedSetSize` when the filter restricts the
+        // tracked set. Bare "destroyed this way" still falls through to the
+        // unfiltered `TrackedSetSize`.
+        if let Some(qty) = parse_filtered_destroyed_this_way(&lower) {
+            return Some(qty);
         }
         return Some(QuantityRef::TrackedSetSize);
     }
@@ -4906,6 +4964,57 @@ mod tests {
 
     /// Same composite shape with "you controlled" — verifies the controller
     /// axis is parameterized correctly across "you / they / an opponent".
+    /// CR 608.2c + CR 400.7: "nontoken creature you controlled that was
+    /// destroyed this way" must emit FilteredTrackedSetSize, not the plain
+    /// TrackedSetSize that the fallback returns for unfiltered "this way"
+    /// clauses. Covers Ceaseless Conflict (issue #1503).
+    #[test]
+    fn nontoken_creature_you_controlled_destroyed_this_way_uses_filtered_tracked_set() {
+        let qty =
+            parse_for_each_clause("nontoken creature you controlled that was destroyed this way")
+                .expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter } => {
+                // Filter must include NonToken and ControlledByYou (controller=You).
+                match *filter {
+                    TargetFilter::Typed(ref tf) => {
+                        assert!(
+                            tf.properties
+                                .contains(&crate::types::ability::FilterProp::NonToken),
+                            "filter must include NonToken"
+                        );
+                        assert!(
+                            tf.controller
+                                .as_ref()
+                                .is_some_and(|c| matches!(c, ControllerRef::You)),
+                            "filter must require controller=You"
+                        );
+                    }
+                    other => panic!("expected Typed filter, got {other:?}"),
+                }
+            }
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
+    /// Subtype-only filters must not collapse to plain `TrackedSetSize`; the
+    /// parent destroy can move a wider set than the subtype named by the count.
+    #[test]
+    fn vampire_destroyed_this_way_uses_filtered_tracked_set() {
+        let qty = parse_for_each_clause("vampire that was destroyed this way").expect("must parse");
+        match qty {
+            QuantityRef::FilteredTrackedSetSize { filter } => match *filter {
+                TargetFilter::Typed(ref tf) => assert!(
+                    tf.type_filters
+                        .contains(&TypeFilter::Subtype("Vampire".to_string())),
+                    "filter must preserve the Vampire subtype"
+                ),
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected FilteredTrackedSetSize, got {other:?}"),
+        }
+    }
+
     #[test]
     fn total_toughness_of_creatures_you_controlled_exiled_this_way() {
         let qty = parse_quantity_ref(

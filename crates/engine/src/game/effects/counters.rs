@@ -604,13 +604,10 @@ pub fn resolve_add_all(
     };
     // CR 608.2c: Bind the `TrackedSetId(0)` sentinel emitted by the parser for
     // "put a counter on each [card] this way" continuations to the active
-    // chain tracked set — the set the immediately preceding effect in this
-    // chain published. Empty sets are *not* skipped here (unlike
-    // `targeting::resolve_tracked_set_sentinel`): a chained counter effect
-    // refers to the preceding effect's set even when it ended up empty. When
-    // no chain set exists, combat-damage trigger context may provide the
-    // filtered "those creatures" source set; otherwise fall back to the legacy
-    // latest tracked set behavior.
+    // chain tracked set. Empty sets are *not* skipped here: a chained counter
+    // effect refers to the preceding effect's set even when it affected no
+    // objects. Preserve that counter-specific fallback while supporting the
+    // filtered "each of those <type>" intersection.
     let target_filter = match crate::game::effects::resolved_object_filter(ability, &target_filter)
     {
         TargetFilter::TrackedSet {
@@ -629,6 +626,29 @@ pub fn resolve_add_all(
             .unwrap_or(TargetFilter::TrackedSet {
                 id: crate::types::identifiers::TrackedSetId(0),
             }),
+        TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter,
+        } => {
+            if let Some(id) = state.chain_tracked_set_id {
+                TargetFilter::TrackedSetFiltered { id, filter }
+            } else if let Some(source_filter) =
+                crate::game::targeting::current_combat_damage_source_filter(state)
+            {
+                TargetFilter::And {
+                    filters: vec![source_filter, *filter],
+                }
+            } else if let Some((&id, _)) =
+                state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
+            {
+                TargetFilter::TrackedSetFiltered { id, filter }
+            } else {
+                TargetFilter::TrackedSetFiltered {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                    filter,
+                }
+            }
+        }
         filter => filter,
     };
 

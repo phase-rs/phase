@@ -1919,6 +1919,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
                         // CR 611.2a: `grant_permission::resolve` binds this to
                         // the ability controller at grant time.
                         granted_to: None,
+                        resolution_cleanup: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -13216,6 +13217,23 @@ pub(crate) fn fold_speed_floor_sentences(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 109.4 + CR 608.2c: True when a clause's leading/suffix condition is an
+/// anaphoric-control check on the subject — `TargetMatchesFilter` over a
+/// controlled-by-`You` typed filter (the positive antecedent of an inverse
+/// "if you don't control it, …" else-connector). Used to gate the inverse-
+/// control "otherwise" routing so it only engages with a matching positive
+/// antecedent. Accepts both `use_lki` tenses (present "control" / past
+/// "controlled").
+fn clause_has_anaphoric_control_condition(clause: &ClauseIr) -> bool {
+    matches!(
+        clause.condition.as_ref(),
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(tf),
+            ..
+        }) if tf.controller == Some(ControllerRef::You)
+    )
+}
+
 /// Produce an intermediate representation of an effect chain from Oracle text.
 ///
 /// This is the IR-production half of the parse/lower split (Phase 48).
@@ -13442,6 +13460,49 @@ pub(crate) fn parse_effect_chain_ir(
                     is_otherwise: false,
                     unless_pay: None,
                     special: Some(SpecialClause::ManaRetention(expiry)),
+                    source_text: normalized_text.to_string(),
+                    target_selection_mode: TargetSelectionMode::Chosen,
+                });
+                continue;
+            }
+        }
+
+        // CR 109.4 + CR 608.2c: Inverse anaphoric-control "otherwise" connector —
+        // "If you don't control it, [effect]" following a positively-control-gated
+        // clause ("draw a card if you control that creature."). The negated second
+        // sentence is the `else_ability` of the first over the SAME subject, not an
+        // independent sibling instruction — without this routing the runtime would
+        // either fire both branches or neither (issue #1510, Auntie Ool). Requires a
+        // prior clause to carry an anaphoric-control condition so this only engages
+        // as a genuine else over a matching positive antecedent.
+        if clauses.iter().any(clause_has_anaphoric_control_condition) {
+            if let Some(else_text) = strip_inverse_control_otherwise_connector(normalized_text) {
+                let else_def = {
+                    let ir = parse_effect_chain_ir(&else_text, kind, ctx);
+                    lower_effect_chain_ir(&ir)
+                };
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "otherwise_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    starting_with: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: true,
+                    unless_pay: None,
+                    special: Some(SpecialClause::Otherwise(Box::new(else_def))),
                     source_text: normalized_text.to_string(),
                     target_selection_mode: TargetSelectionMode::Chosen,
                 });
@@ -14308,7 +14369,8 @@ pub(crate) fn parse_effect_chain_ir(
         let is_decline_consequence = matches!(decline_dispatch, DeclineDispatch::Prepositional)
             || decline_consequence_active;
 
-        let (text, mut unless_pay) = extract_resolution_unless_pay_modifier(&text);
+        let (text, mut unless_pay) =
+            extract_resolution_unless_pay_modifier(&text, player_scope.as_ref());
 
         // CR 701.21a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -15705,7 +15767,10 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     Some(AbilityCost::Mana { cost })
 }
 
-fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>) {
+fn extract_resolution_unless_pay_modifier(
+    text: &str,
+    player_scope: Option<&PlayerFilter>,
+) -> (String, Option<UnlessPayModifier>) {
     let lower = text.to_lowercase();
     if tag::<_, _, OracleError<'_>>("counter ")
         .parse(lower.trim_start())
@@ -15733,13 +15798,21 @@ fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessP
             // just before " unless "; trim trailing whitespace there to
             // produce the cleaned effect.
             let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
-            return (
-                cleaned,
-                Some(UnlessPayModifier {
-                    cost,
-                    payer: TargetFilter::Player,
-                }),
-            );
+            // CR 118.12a + CR 608.2f: select the payer for "they X". A
+            // permanent's controller in the pre-"unless" text (Fade Away)
+            // takes precedence. Otherwise, when this chunk carries a
+            // `player_scope` ("each opponent/each player ... unless they X"),
+            // the payer is the per-iteration scoped player (`ScopedPlayer`,
+            // bound by the fan-out) rather than a chosen player target.
+            // Non-scoped punishers (Tergrid's Lantern) keep `Player`.
+            let payer = if nom_primitives::scan_contains(before_unless, "controller") {
+                TargetFilter::ParentTargetController
+            } else if player_scope.is_some() {
+                TargetFilter::ScopedPlayer
+            } else {
+                TargetFilter::Player
+            };
+            return (cleaned, Some(UnlessPayModifier { cost, payer }));
         }
     }
 
@@ -15753,18 +15826,26 @@ fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessP
         return (text.to_string(), None);
     };
 
-    // CR 118.12a: "unless they pay ..." surfaces `they` as `TargetFilter::Player`
-    // provisionally. When the effect text before "unless" taxes a permanent's
-    // controller ("its controller", "that land's controller" — Fade Away, Stench
-    // of Evil) rather than a player target (Flay), `they` resolves to that
-    // controller. `Player` is unique to the "they pay" arm, so this rewrite is
-    // unambiguous.
-    let payer =
-        if payer == TargetFilter::Player && nom_primitives::scan_contains(before, "controller") {
+    // CR 118.12a + CR 608.2f: "unless they pay ..." surfaces `they` as
+    // `TargetFilter::Player` provisionally. When the effect text before "unless"
+    // taxes a permanent's controller ("its controller", "that land's controller"
+    // — Fade Away, Stench of Evil) rather than a player target (Flay), `they`
+    // resolves to that controller. Otherwise, when this chunk carries a
+    // `player_scope` ("each opponent/each player ... unless they pay"), the payer
+    // is the per-iteration scoped player (`ScopedPlayer`) rather than a chosen
+    // player target. Non-scoped punishers keep `Player`. `Player` is unique to
+    // the "they pay" arm, so these rewrites are unambiguous.
+    let payer = if payer == TargetFilter::Player {
+        if nom_primitives::scan_contains(before, "controller") {
             TargetFilter::ParentTargetController
+        } else if player_scope.is_some() {
+            TargetFilter::ScopedPlayer
         } else {
-            payer
-        };
+            TargetFilter::Player
+        }
+    } else {
+        payer
+    };
 
     let cleaned = text[..before.trim_end().len()].trim().to_string();
     (cleaned, Some(UnlessPayModifier { cost, payer }))
@@ -19519,7 +19600,13 @@ mod tests {
         match &unless_pay.cost {
             AbilityCost::OneOf { costs } => {
                 assert_eq!(costs.len(), 2, "expected Sacrifice|Discard, got {costs:?}");
-                assert!(matches!(costs[0], AbilityCost::Sacrifice { .. }));
+                let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+                    panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+                };
+                let TargetFilter::Typed(tf) = target else {
+                    panic!("sacrifice target should be typed, got {target:?}");
+                };
+                assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert!(matches!(costs[1], AbilityCost::Discard { .. }));
             }
             other => panic!("expected OneOf disjunctive cost, got {other:?}"),
@@ -19541,6 +19628,47 @@ mod tests {
             &unless_pay.cost,
             AbilityCost::OneOf { costs } if costs.len() == 2
         ));
+        let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+            unreachable!("checked OneOf cost above");
+        };
+        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+            panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        // CR 118.12a: non-scoped "target player" punisher keeps `Player`
+        // (the chosen player target), NOT `ScopedPlayer`. No regression.
+        assert_eq!(unless_pay.payer, TargetFilter::Player);
+    }
+
+    /// CR 608.2f: "Each opponent ... unless they sacrifice ... or discard a
+    /// card" — the `player_scope` makes the payer the per-iteration scoped
+    /// player (`ScopedPlayer`), resolved via `ability.scoped_player`, not a
+    /// chosen player target. This is the symmetric-payer fix.
+    #[test]
+    fn effect_unless_each_opponent_sacrifice_or_discard_binds_scoped_player() {
+        let def = parse_effect_chain(
+            "Each opponent loses 3 life unless they sacrifice a nonland permanent of their choice or discard a card",
+            AbilityKind::Activated,
+        );
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ScopedPlayer);
+        assert!(matches!(
+            &unless_pay.cost,
+            AbilityCost::OneOf { costs } if costs.len() == 2
+        ));
+        let AbilityCost::OneOf { costs } = &unless_pay.cost else {
+            unreachable!("checked OneOf cost above");
+        };
+        let AbilityCost::Sacrifice { target, .. } = &costs[0] else {
+            panic!("first branch should be Sacrifice, got {:?}", costs[0]);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("sacrifice target should be typed, got {target:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
     }
 
     #[test]
@@ -31326,6 +31454,67 @@ mod tests {
             }
             other => panic!("expected controller-only typed filter, got {other:?}"),
         }
+
+        let present = try_nom_condition_as_ability_condition(
+            "you control that creature",
+            &mut ParseContext::default(),
+        )
+        .expect("present-tense condition should parse");
+        let AbilityCondition::TargetMatchesFilter {
+            filter: present_filter,
+            use_lki,
+        } = present
+        else {
+            panic!("expected TargetMatchesFilter condition");
+        };
+        assert!(!use_lki);
+        match present_filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected typed creature filter, got {other:?}"),
+        }
+
+        let negative_present = try_nom_condition_as_ability_condition(
+            "you don't control it",
+            &mut ParseContext::default(),
+        )
+        .expect("negative present-tense condition should parse");
+        let AbilityCondition::Not { condition } = negative_present else {
+            panic!("expected negated condition");
+        };
+        let AbilityCondition::TargetMatchesFilter { filter, use_lki } = *condition else {
+            panic!("expected inner TargetMatchesFilter condition");
+        };
+        assert!(!use_lki);
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.is_empty());
+            }
+            other => panic!("expected controller-only typed filter, got {other:?}"),
+        }
+
+        let negative_past = try_nom_condition_as_ability_condition(
+            "you didn't control it",
+            &mut ParseContext::default(),
+        )
+        .expect("negative past-tense condition should parse");
+        let AbilityCondition::Not { condition } = negative_past else {
+            panic!("expected negated condition");
+        };
+        let AbilityCondition::TargetMatchesFilter { filter, use_lki } = *condition else {
+            panic!("expected inner TargetMatchesFilter condition");
+        };
+        assert!(use_lki);
+        match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.is_empty());
+            }
+            other => panic!("expected controller-only typed filter, got {other:?}"),
+        }
     }
 
     #[test]
@@ -39808,6 +39997,11 @@ mod snapshot_tests {
                 matches!(
                     modification,
                     ContinuousModification::AddSubtype { subtype } if subtype == "Vampire"
+                )
+            }) && !static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::RemoveAllSubtypes { .. }
                 )
             })
         }));

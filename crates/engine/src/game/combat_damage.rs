@@ -114,6 +114,17 @@ pub fn resolve_combat_damage(
 
         // CR 510.4: SBAs and triggers run between first-strike and regular damage sub-steps.
         process_combat_damage_triggers(state, &damage_events, events);
+
+        // CR 510.4 + CR 603.3b: if the first-strike sub-step produced a same-
+        // controller trigger-ordering prompt, surface it now — before the regular
+        // sub-step's own trigger processing clobbers/orphans it. Returning here
+        // leaves `regular_damage_done == false`; the mandatory second (regular)
+        // combat-damage sub-step is resumed by the priority-pass completeness gate
+        // in priority.rs, which re-enters this function once the order is submitted
+        // and the resulting triggers resolve.
+        if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+            return Some(state.waiting_for.clone());
+        }
     }
 
     // --- Regular damage sub-step ---
