@@ -16641,6 +16641,96 @@ pub mod tests {
              and a lower-CMC creature card exists in the graveyard (issue #887)"
         );
     }
+
+    /// CR 603.4 + CR 508.1 (issue #1487, Fire Lord Azula + Sunscorch Regent):
+    /// "Whenever you cast a spell while ~ is attacking, copy that spell." The
+    /// `while ~ is attacking` gate restricts the trigger to combat. Drives the
+    /// real `process_triggers` path with Azula's parsed trigger and a
+    /// `SpellCast` event, asserting the copy trigger lands on the stack ONLY
+    /// while Azula is an attacker. Before the fix the gate was dropped, so the
+    /// trigger fired on every spell cast — regardless of combat state.
+    #[test]
+    fn cast_while_attacking_trigger_gated_on_combat_state() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+        fn build_azula_state(attacking: bool) -> (GameState, ObjectId) {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+
+            // Azula on the battlefield, controlled by P0, with her real trigger.
+            let azula = make_creature(&mut state, PlayerId(0), "Fire Lord Azula", 4, 4);
+            let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+                "Whenever you cast a spell while Fire Lord Azula is attacking, copy that spell. \
+                 You may choose new targets for the copy.",
+                "Fire Lord Azula",
+            );
+            assert_eq!(
+                trigger.condition,
+                Some(TriggerCondition::SourceIsAttacking),
+                "precondition: the parsed trigger must carry the SourceIsAttacking gate"
+            );
+            state
+                .objects
+                .get_mut(&azula)
+                .unwrap()
+                .trigger_definitions
+                .push(trigger);
+
+            // CR 508.1: enter combat with Azula declared as an attacker only in
+            // the attacking case.
+            if attacking {
+                state.combat = Some(CombatState {
+                    attackers: vec![AttackerInfo::new(
+                        azula,
+                        AttackTarget::Player(PlayerId(1)),
+                        PlayerId(1),
+                    )],
+                    ..CombatState::default()
+                });
+            }
+            (state, azula)
+        }
+
+        // CR 601.2a: P0 casts a spell — the SpellCast event the trigger watches.
+        let cast_event = |controller: PlayerId| GameEvent::SpellCast {
+            card_id: CardId(999),
+            object_id: ObjectId(999),
+            controller,
+        };
+
+        // Attacking: the copy trigger lands on the stack.
+        let (mut attacking_state, azula) = build_azula_state(true);
+        process_triggers(&mut attacking_state, &[cast_event(PlayerId(0))]);
+        let attacking_triggers = attacking_state
+            .stack
+            .iter()
+            .filter(|e| {
+                matches!(&e.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == azula)
+            })
+            .count();
+        assert_eq!(
+            attacking_triggers, 1,
+            "Azula's copy trigger must fire while she is attacking"
+        );
+
+        // Not attacking: the copy trigger must NOT fire.
+        let (mut idle_state, azula_idle) = build_azula_state(false);
+        process_triggers(&mut idle_state, &[cast_event(PlayerId(0))]);
+        let idle_triggers = idle_state
+            .stack
+            .iter()
+            .filter(|e| {
+                matches!(&e.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == azula_idle)
+            })
+            .count();
+        assert_eq!(
+            idle_triggers, 0,
+            "Azula's copy trigger must NOT fire when she is not attacking (CR 603.4)"
+        );
+    }
 }
 
 /// Regression tests for the foundational trigger double-fire defect
