@@ -36,6 +36,13 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // CR 701.43d: linked "when you do" trigger fires when the source creature
         // is exerted as it attacks.
         TriggerMode::Exerted => match_exerted,
+        TriggerMode::Discover => match_discover,
+        TriggerMode::Adapt => match_adapt,
+        TriggerMode::Investigated => match_investigated,
+        TriggerMode::Forage => match_forage,
+        TriggerMode::Foretell => match_foretell,
+        TriggerMode::PayLife => match_pay_life,
+        TriggerMode::DamagePreventedOnce => match_damage_prevented_once,
         TriggerMode::AttackersDeclared | TriggerMode::AttackersDeclaredOneTarget => {
             match_attackers_declared
         }
@@ -133,23 +140,18 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::LosesGame => match_loses_game,
         // CR 702.26c: Phasing triggers fire when a permanent phases in.
         TriggerMode::PhaseIn => match_phase_in,
-        TriggerMode::DamagePreventedOnce
-        | TriggerMode::AbilityCast
+        TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
         | TriggerMode::AbilityTriggered
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
         | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll
-        | TriggerMode::PayLife
         | TriggerMode::PhaseOut
         | TriggerMode::PhaseOutAll
         | TriggerMode::NewGame
         | TriggerMode::Championed
         | TriggerMode::Enlisted
-        | TriggerMode::Adapt
-        | TriggerMode::Foretell
-        | TriggerMode::Investigated
         | TriggerMode::PlanarDice
         | TriggerMode::PlaneswalkedFrom
         | TriggerMode::PlaneswalkedTo
@@ -160,8 +162,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
         | TriggerMode::Devoured
-        | TriggerMode::Discover
-        | TriggerMode::Forage
         | TriggerMode::GiveGift
         | TriggerMode::Mentored
         | TriggerMode::Mutates
@@ -217,6 +217,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::SpellCast, match_spell_cast);
     r.insert(TriggerMode::SpellCastOrCopy, match_spell_cast);
     r.insert(TriggerMode::Attacks, match_attacks);
+    r.insert(TriggerMode::Exerted, match_exerted);
     r.insert(TriggerMode::AttackersDeclared, match_attackers_declared);
     r.insert(
         TriggerMode::AttackersDeclaredOneTarget,
@@ -381,9 +382,19 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 702.26c: Phasing triggers fire when a permanent phases in.
     r.insert(TriggerMode::PhaseIn, match_phase_in);
 
+    r.insert(TriggerMode::Discover, match_discover);
+    r.insert(TriggerMode::Adapt, match_adapt);
+    r.insert(TriggerMode::Investigated, match_investigated);
+    r.insert(TriggerMode::Forage, match_forage);
+    r.insert(TriggerMode::Foretell, match_foretell);
+    r.insert(TriggerMode::PayLife, match_pay_life);
+    r.insert(
+        TriggerMode::DamagePreventedOnce,
+        match_damage_prevented_once,
+    );
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
-        TriggerMode::DamagePreventedOnce,
         TriggerMode::AbilityCast,
         TriggerMode::AbilityResolves,
         TriggerMode::AbilityTriggered,
@@ -391,22 +402,17 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::SpellAbilityCopy,
         TriggerMode::CounterPlayerAddedAll,
         TriggerMode::CounterTypeAddedAll,
-        TriggerMode::PayLife,
         TriggerMode::PhaseOut,
         TriggerMode::PhaseOutAll,
         TriggerMode::NewGame,
         // TriggerMode::TakesInitiative — moved to real matcher above
         // TriggerMode::LosesGame — moved to real matcher above
         TriggerMode::Championed,
-        TriggerMode::Exerted,
         // TriggerMode::Crewed — moved to real matcher below
         // TriggerMode::Saddled — moved to real matcher below
         // TriggerMode::Evolve — moved to real matcher below
         // TriggerMode::Evolved — moved to real matcher below
         TriggerMode::Enlisted,
-        TriggerMode::Adapt,
-        TriggerMode::Foretell,
-        TriggerMode::Investigated,
         // TriggerMode::DungeonCompleted — moved to real matcher above
         // TriggerMode::RoomEntered — moved to real matcher above
         TriggerMode::PlanarDice,
@@ -419,8 +425,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
         TriggerMode::Devoured,
-        TriggerMode::Discover,
-        TriggerMode::Forage,
         TriggerMode::GiveGift,
         TriggerMode::Mentored,
         TriggerMode::Mutates,
@@ -832,7 +836,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
         | GameEvent::DebugPermissionRevoked { .. }
-        | GameEvent::StartingPlayerContest { .. } => 0,
+        | GameEvent::StartingPlayerContest { .. }
+        | GameEvent::Foretold { .. } => 0,
     }
 }
 
@@ -2428,6 +2433,143 @@ pub(super) fn match_explored(
         }
     } else {
         false
+    }
+}
+
+/// CR 701.57a: Discover — fires when a discover effect resolves.
+pub(super) fn match_discover(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::EffectResolved {
+        kind: EffectKind::Discover,
+        source_id: discoverer_id,
+    } = event
+    else {
+        return false;
+    };
+    if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, *discoverer_id, source_id)
+    } else {
+        true
+    }
+}
+
+/// CR 702.12a: Adapt — fires when a permanent adapts.
+pub(super) fn match_adapt(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::EffectResolved {
+        kind: EffectKind::Adapt,
+        source_id: adapted_id,
+    } = event
+    else {
+        return false;
+    };
+    if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, *adapted_id, source_id)
+    } else {
+        *adapted_id == source_id
+    }
+}
+
+/// CR 701.16a: Investigated — fires when a player investigates.
+pub(super) fn match_investigated(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::PlayerPerformedAction {
+        player_id,
+        action: PlayerActionKind::Investigate,
+    } = event
+    else {
+        return false;
+    };
+    valid_player_matches(trigger, state, *player_id, source_id)
+}
+
+/// CR 702.808: Forage — fires when a player forages.
+pub(super) fn match_forage(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::PlayerPerformedAction {
+        player_id,
+        action: PlayerActionKind::Forage,
+    } = event
+    else {
+        return false;
+    };
+    valid_player_matches(trigger, state, *player_id, source_id)
+}
+
+/// CR 702.143a: Foretell — fires when a player foretells a card.
+pub(super) fn match_foretell(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::Foretold {
+        player_id,
+        object_id,
+    } = event
+    else {
+        return false;
+    };
+    if !valid_player_matches(trigger, state, *player_id, source_id) {
+        return false;
+    }
+    if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, *object_id, source_id)
+    } else {
+        true
+    }
+}
+
+/// CR 119.3: Pay life as a cost — life lost (not combat damage).
+pub(super) fn match_pay_life(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::LifeChanged { player_id, amount } = event else {
+        return false;
+    };
+    if *amount >= 0 {
+        return false;
+    }
+    valid_player_matches(trigger, state, *player_id, source_id)
+}
+
+/// CR 615.13: Damage prevented — batch informational event.
+pub(super) fn match_damage_prevented_once(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::DamagePrevented {
+        source_id: preventer,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, *preventer, source_id)
+    } else {
+        *preventer == source_id
     }
 }
 
