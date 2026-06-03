@@ -1,5 +1,7 @@
 use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
-use crate::types::counter::CounterType;
+use crate::types::counter::{
+    has_positive_counters, positive_counter_types, prune_zero_counters, CounterType,
+};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
@@ -45,7 +47,7 @@ pub fn resolve(
             state
                 .objects
                 .get(id)
-                .map(|obj| !obj.counters.is_empty())
+                .map(|obj| has_positive_counters(&obj.counters))
                 .unwrap_or(false)
         })
         .map(|id| TargetRef::Object(*id))
@@ -93,10 +95,14 @@ pub fn apply_proliferate(
     for target in selected {
         match target {
             TargetRef::Object(obj_id) => {
+                if let Some(obj) = state.objects.get_mut(obj_id) {
+                    prune_zero_counters(&mut obj.counters);
+                }
+
                 let counter_types: Vec<CounterType> = state
                     .objects
                     .get(obj_id)
-                    .map(|obj| obj.counters.keys().cloned().collect())
+                    .map(|obj| positive_counter_types(&obj.counters))
                     .unwrap_or_default();
 
                 for ct in counter_types {
@@ -418,5 +424,190 @@ mod tests {
                 delta: 1,
             }
         )));
+    }
+
+    #[test]
+    fn resolve_excludes_permanent_with_only_zero_count_entries() {
+        let mut state = GameState::new_two_player(42);
+        let stale = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stale Counter Map".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&stale)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 0);
+
+        let pumped = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Still Pumped".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&pumped)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        let ability = make_proliferate_ability();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        if let WaitingFor::ProliferateChoice { eligible, .. } = &state.waiting_for {
+            assert!(
+                !eligible
+                    .iter()
+                    .any(|t| matches!(t, TargetRef::Object(id) if *id == stale)),
+                "zero-count stale entry must not make a permanent proliferate-eligible"
+            );
+            assert!(
+                eligible
+                    .iter()
+                    .any(|t| matches!(t, TargetRef::Object(id) if *id == pumped)),
+                "permanent with a positive counter must remain eligible"
+            );
+        } else {
+            panic!("Expected ProliferateChoice");
+        }
+    }
+
+    #[test]
+    fn apply_proliferate_skips_zero_count_counter_types() {
+        let mut state = GameState::new_two_player(42);
+        let obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mixed Counters".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 0);
+        state
+            .objects
+            .get_mut(&obj)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("charge".to_string()), 2);
+
+        let mut events = Vec::new();
+        apply_proliferate(
+            &mut state,
+            PlayerId(0),
+            &[TargetRef::Object(obj)],
+            &mut events,
+        );
+
+        assert!(
+            !state.objects[&obj]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "proliferate must not add a counter type that was at zero"
+        );
+        assert_eq!(
+            state.objects[&obj].counters[&CounterType::Generic("charge".to_string())],
+            3
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::CounterAdded {
+                    counter_type: CounterType::Plus1Plus1,
+                    ..
+                }
+            )),
+            "no CounterAdded event for the zero-count type"
+        );
+    }
+
+    #[test]
+    fn apply_proliferate_after_counter_removal_does_not_restore_lost_type() {
+        let mut state = GameState::new_two_player(42);
+        let obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        super::super::counters::apply_counter_removal(
+            &mut state,
+            obj,
+            CounterType::Plus1Plus1,
+            1,
+            &mut Vec::new(),
+        );
+        assert!(
+            state.objects[&obj].counters.is_empty(),
+            "removal should prune the last +1/+1 counter"
+        );
+
+        let mut events = Vec::new();
+        apply_proliferate(
+            &mut state,
+            PlayerId(0),
+            &[TargetRef::Object(obj)],
+            &mut events,
+        );
+
+        assert!(
+            state.objects[&obj].counters.is_empty(),
+            "proliferate must not add +1/+1 back after the permanent lost its last one"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, GameEvent::CounterAdded { .. })),
+            "no counter should be added"
+        );
+    }
+
+    #[test]
+    fn resolve_skips_choice_when_only_zero_count_permanents_exist() {
+        let mut state = GameState::new_two_player(42);
+        let stale = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stale".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&stale)
+            .unwrap()
+            .counters
+            .insert(CounterType::Minus1Minus1, 0);
+
+        let ability = make_proliferate_ability();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ProliferateChoice { .. }),
+            "only stale zero-count entries should not open a proliferate choice"
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, GameEvent::EffectResolved { .. })));
     }
 }

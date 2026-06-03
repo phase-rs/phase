@@ -14,6 +14,119 @@ use super::support::*;
 /// 5. Self-spell: "This spell costs {N} less to cast for each ..." (Tolarian Terror)
 ///    — emitted with `affected = SelfRef`, `active_zones = [Hand, Stack, Command]`.
 ///
+/// CR 601.2f: Parse the spell-type prefix of a cost-modification line before
+/// `"cost"`. Handles compound subjects such as Goblin Anarchomancer's
+/// "Each spell you cast that's red or green" via `parse_that_clause_suffix`.
+fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
+    let base = type_desc.trim();
+    let base = tag::<_, _, OracleError<'_>>("each ")
+        .parse(base)
+        .map_or(base, |(rest, _)| rest);
+
+    let that_split: Result<(&str, (&str, &str)), nom::Err<OracleError<'_>>> = all_consuming(alt((
+        (
+            take_until(" that's "),
+            recognize((tag::<_, _, OracleError<'_>>(" that's "), rest)),
+        ),
+        (
+            take_until(" that is "),
+            recognize((tag::<_, _, OracleError<'_>>(" that is "), rest)),
+        ),
+        (
+            take_until(" that are "),
+            recognize((tag::<_, _, OracleError<'_>>(" that are "), rest)),
+        ),
+    )))
+    .parse(base);
+
+    let (base_part, qual_props) = if let Ok((_, (before, suffix))) = that_split {
+        let suffix = suffix.trim_start();
+        let (props, consumed) = crate::parser::oracle_target::parse_that_clause_suffix(suffix)?;
+        if !suffix[consumed..].trim().is_empty() {
+            return None;
+        }
+        (before.trim(), props)
+    } else {
+        (base, Vec::new())
+    };
+
+    let base_part = strip_cost_mod_cast_scope_suffix(base_part);
+    let base_part = strip_cost_mod_spell_noun_suffix(base_part);
+
+    let typed_filter = if base_part.is_empty() {
+        None
+    } else {
+        let (filter, remainder) = parse_type_phrase(base_part);
+        let remainder = remainder.trim();
+        match &filter {
+            TargetFilter::Typed(tf)
+                if (!tf.type_filters.is_empty() || !tf.properties.is_empty())
+                    && remainder.is_empty() =>
+            {
+                Some(filter)
+            }
+            TargetFilter::Or { filters } if !filters.is_empty() && remainder.is_empty() => {
+                Some(filter)
+            }
+            // Bare color words ("white", "red") are not consumed by parse_type_phrase
+            // because color prefixes require a trailing type word ("white creature").
+            _ if remainder.is_empty() || remainder.eq_ignore_ascii_case(base_part) => {
+                parse_named_color(base_part).map(|color| {
+                    TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
+                    )
+                })
+            }
+            _ => None,
+        }
+    };
+
+    match (typed_filter, qual_props.is_empty()) {
+        (filter, true) => filter,
+        (Some(TargetFilter::Typed(mut tf)), false) => {
+            tf.properties.extend(qual_props);
+            Some(TargetFilter::Typed(tf))
+        }
+        (Some(other), false) => Some(TargetFilter::And {
+            filters: vec![
+                other,
+                TargetFilter::Typed(TypedFilter::card().properties(qual_props)),
+            ],
+        }),
+        (None, false) => Some(TargetFilter::Typed(
+            TypedFilter::card().properties(qual_props),
+        )),
+    }
+}
+
+fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
+    let (_, stripped) = all_consuming(alt((
+        terminated(
+            take_until(" your opponents cast"),
+            (tag::<_, _, OracleError<'_>>(" your opponents cast"), eof),
+        ),
+        terminated(take_until(" opponents cast"), (tag(" opponents cast"), eof)),
+        terminated(take_until(" you cast"), (tag(" you cast"), eof)),
+        rest,
+    )))
+    .parse(input)
+    .expect("rest fallback makes cast-scope suffix stripping infallible");
+    stripped.trim()
+}
+
+fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
+    let (_, stripped) = all_consuming(alt((
+        value("", terminated(tag::<_, _, OracleError<'_>>("spells"), eof)),
+        value("", terminated(tag("spell"), eof)),
+        terminated(take_until(" spells"), (tag(" spells"), eof)),
+        terminated(take_until(" spell"), (tag(" spell"), eof)),
+        rest,
+    )))
+    .parse(input)
+    .expect("rest fallback makes spell-noun suffix stripping infallible");
+    stripped.trim()
+}
+
 /// Dynamic "for each" counts are extracted when present.
 pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefinition> {
     let is_raise = nom_primitives::scan_contains(lower, "more to cast")
@@ -164,26 +277,7 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
         {
             None
         } else {
-            // First try parse_type_phrase for standard type patterns
-            let (filter, _) = parse_type_phrase(type_desc);
-            match &filter {
-                // Single type: "creature", "noncreature", "artifact"
-                TargetFilter::Typed(tf)
-                    if !tf.type_filters.is_empty() || !tf.properties.is_empty() =>
-                {
-                    Some(filter)
-                }
-                // Combined types: "instant and sorcery", "artifact or enchantment"
-                TargetFilter::Or { filters } if !filters.is_empty() => Some(filter),
-                _ => {
-                    // Fallback: check for bare color names ("white", "blue", etc.)
-                    parse_named_color(type_desc).map(|color| {
-                        TargetFilter::Typed(
-                            TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
-                        )
-                    })
-                }
-            }
+            parse_cost_mod_spell_type_prefix(type_desc)
         };
         // CR 205.2a: Re-attach the chosen-type discriminator stripped above. A
         // creature-typed base ("Creature spells ... of the chosen type",

@@ -19,7 +19,7 @@ use crate::types::ability::{
     QuantityRef, ResolvedAbility, RoundingMode, TargetFilter, TargetRef, TypeFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
-use crate::types::counter::CounterType;
+use crate::types::counter::{positive_counter_types, CounterType};
 use crate::types::game_state::{DamageRecord, GameState};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -2537,8 +2537,9 @@ fn object_id_for_scope(
 /// CR 122.1: Distinct counter kinds present on permanents matching `filter`
 /// (controller-relative, CR 109.4). Mirrors `DistinctColorsAmongPermanents`'s
 /// resolver (zone from `filter.extract_in_zone()`, `zone_object_ids`,
-/// `matches_target_filter`), enumerating `obj.counters.keys()` the same way
-/// proliferate does. Returns a `Vec<CounterType>` SORTED by `CounterType::as_str`
+/// `matches_target_filter`), enumerating only positive-count counter kinds the
+/// same way proliferate does. Returns a `Vec<CounterType>` SORTED by
+/// `CounterType::as_str`
 /// for determinism — `CounterType` has no `Ord` (and must not gain one), so the
 /// underlying `HashSet` iteration order is nondeterministic and would cause
 /// replay desync if returned directly. Used both as the `len()` source for
@@ -2558,8 +2559,8 @@ pub(crate) fn distinct_counter_kinds_among(
             continue;
         }
         if let Some(obj) = state.objects.get(&id) {
-            for ct in obj.counters.keys() {
-                seen.insert(ct.clone());
+            for counter_type in positive_counter_types(&obj.counters) {
+                seen.insert(counter_type);
             }
         }
     }
@@ -3719,9 +3720,10 @@ mod tests {
     }
 
     /// CR 122.1 + CR 109.4: count distinct counter kinds among permanents the
-    /// resolving player controls. An opponent's counter kind must be EXCLUDED,
-    /// and the same kind on two controlled permanents counts once. Order is
-    /// deterministic (sorted by `as_str`).
+    /// resolving player controls. An opponent's counter kind and stale
+    /// zero-count map entries must be EXCLUDED, and the same kind on two
+    /// controlled permanents counts once. Order is deterministic (sorted by
+    /// `as_str`).
     #[test]
     fn resolve_distinct_counter_kinds_among_controlled_permanents() {
         let mut state = GameState::new_two_player(42);
@@ -3764,6 +3766,8 @@ mod tests {
             let obj = state.objects.get_mut(&perm_c).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.counters.insert(CounterType::Plus1Plus1, 3);
+            obj.counters
+                .insert(CounterType::Generic("charge".to_string()), 0);
         }
         // OPPONENT's permanent: Stun counter — MUST be excluded (CR 109.4).
         let opp_perm = create_object(
@@ -3786,6 +3790,7 @@ mod tests {
         });
 
         // Direct helper: distinct kinds among controlled permanents = {P1P1, Lore},
+        // excluding Perm C's stale zero-count charge entry.
         // sorted by as_str ("P1P1" < "lore" by byte order; uppercase 'P' = 0x50,
         // lowercase 'l' = 0x6C).
         let ctx = FilterContext::from_source_with_controller(perm_a, PlayerId(0));
