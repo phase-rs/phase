@@ -5793,6 +5793,232 @@ mod tests {
         }
     }
 
+    /// CR 700.2 + CR 700.2c + CR 601.2b: Kozilek's Command is a four-mode
+    /// "Choose two —" instant whose X threads through every mode. This pins the
+    /// full parsed shape so a regression in any single mode (or in the modal
+    /// metadata) is caught at the parser layer before the runtime tests in
+    /// `crates/engine/src/game/casting.rs` exercise the cast pipeline.
+    #[test]
+    fn kozileks_command_full_four_mode_parse() {
+        let r = parse(
+            "Choose two —\n\
+             • Target player creates X 0/1 colorless Eldrazi Spawn creature tokens with \"Sacrifice this token: Add {C}.\"\n\
+             • Target player scries X, then draws a card.\n\
+             • Exile target creature with mana value X or less.\n\
+             • Exile up to X target cards from graveyards.",
+            "Kozilek's Command",
+            &[],
+            &["Kindred", "Instant"],
+            &["Eldrazi"],
+        );
+
+        // CR 700.2 + CR 700.2d: four selectable modes, exactly two chosen.
+        assert_eq!(
+            r.abilities.len(),
+            4,
+            "Kozilek's Command must parse four modal modes, got {}",
+            r.abilities.len()
+        );
+        let modal = r
+            .modal
+            .expect("Kozilek's Command must carry modal metadata");
+        assert_eq!(modal.min_choices, 2);
+        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.mode_count, 4);
+        assert_eq!(
+            modal.mode_descriptions.len(),
+            4,
+            "every mode must surface a description string for the targeting UI"
+        );
+
+        // Mode 0 — "Target player creates X 0/1 colorless Eldrazi Spawn tokens
+        // with quoted Sacrifice: Add {C} ability." Owner is the targeted player
+        // (CR 601.2c), count is the announced X (CR 107.3), and the granted
+        // activated ability sacrifices the token (CR 701.21 — Sacrifice keyword
+        // action) to add {C}.
+        match &*r.abilities[0].effect {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                colors,
+                count,
+                owner,
+                static_abilities,
+                ..
+            } => {
+                assert_eq!(name, "Eldrazi Spawn");
+                assert_eq!(power, &PtValue::Fixed(0));
+                assert_eq!(toughness, &PtValue::Fixed(1));
+                assert!(colors.is_empty(), "Eldrazi Spawn is colorless");
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name }
+                        } if name == "X"
+                    ),
+                    "token count must be the announced X, got {count:?}"
+                );
+                assert_eq!(
+                    owner,
+                    &TargetFilter::Player,
+                    "mode 0 must surface an independent player target for the token owner"
+                );
+                assert!(
+                    static_abilities.iter().any(|static_definition| {
+                        static_definition.modifications.iter().any(|modification| {
+                            matches!(
+                                modification,
+                                ContinuousModification::GrantAbility { definition }
+                                    if matches!(*definition.effect, Effect::Mana { .. })
+                                        && matches!(
+                                            definition.cost,
+                                            Some(AbilityCost::Sacrifice {
+                                                target: TargetFilter::SelfRef,
+                                                count: 1
+                                            })
+                                        )
+                            )
+                        })
+                    }),
+                    "Eldrazi Spawn must grant 'Sacrifice this token: Add {{C}}'"
+                );
+            }
+            other => panic!("expected mode 0 Token, got {other:?}"),
+        }
+
+        // Mode 1 — "Target player scries X, then draws a card." The scry count
+        // is the announced X (CR 701.22a), routed to the chosen player
+        // (CR 601.2c), and a Draw follows in the sub-ability chain.
+        match &*r.abilities[1].effect {
+            Effect::Scry { count, target } => {
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name }
+                        } if name == "X"
+                    ),
+                    "scry count must be the announced X, got {count:?}"
+                );
+                assert_eq!(
+                    target,
+                    &TargetFilter::Player,
+                    "scry must route to the chosen target player"
+                );
+            }
+            other => panic!("expected mode 1 Scry, got {other:?}"),
+        }
+        fn find_draw(
+            ab: &crate::types::ability::AbilityDefinition,
+        ) -> Option<&crate::types::ability::Effect> {
+            if matches!(&*ab.effect, Effect::Draw { .. }) {
+                return Some(&ab.effect);
+            }
+            ab.sub_ability.as_deref().and_then(find_draw)
+        }
+        assert!(
+            find_draw(&r.abilities[1]).is_some(),
+            "mode 1 must chain a Draw after the scry ('then draws a card')"
+        );
+
+        // Mode 2 — "Exile target creature with mana value X or less." This is
+        // the X-dependent target legality that gates the deferred-target flow
+        // (CR 202.3 mana value + CR 601.2b X-before-targets). Exile keyword
+        // action is CR 701.13; destination is the exile zone (CR 406).
+        match &*r.abilities[2].effect {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile, "mode 2 exiles the creature");
+                assert!(
+                    origin.is_none() || *origin == Some(Zone::Battlefield),
+                    "mode 2 exiles a battlefield creature, got origin {origin:?}"
+                );
+                let TargetFilter::Typed(typed) = target else {
+                    panic!("mode 2 target must be a typed creature filter, got {target:?}");
+                };
+                assert!(
+                    typed.type_filters.contains(&TypeFilter::Creature),
+                    "mode 2 must target a creature, got {:?}",
+                    typed.type_filters
+                );
+                let cmc = typed
+                    .properties
+                    .iter()
+                    .find_map(|prop| match prop {
+                        FilterProp::Cmc { comparator, value } => Some((comparator, value)),
+                        _ => None,
+                    })
+                    .expect("mode 2 must carry a Cmc filter prop");
+                assert_eq!(
+                    *cmc.0,
+                    Comparator::LE,
+                    "'mana value X or less' must parse as a <= bound"
+                );
+                assert!(
+                    matches!(
+                        cmc.1,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name }
+                        } if name == "X"
+                    ),
+                    "mode 2 Cmc bound must be the announced X, got {:?}",
+                    cmc.1
+                );
+            }
+            other => panic!("expected mode 2 ChangeZone→Exile, got {other:?}"),
+        }
+
+        // Mode 3 — "Exile up to X target cards from graveyards." A variable
+        // ("up to X") multi-target (CR 601.2c) whose maximum is the announced X,
+        // exiling cards from the graveyard zone (CR 701.13 + CR 406). The
+        // graveyard origin lives on the target filter; the up-to bound lives on
+        // the ability's `multi_target` spec.
+        let mode3 = &r.abilities[3];
+        match &*mode3.effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile, "mode 3 exiles the cards");
+                assert_eq!(
+                    target.extract_in_zone(),
+                    Some(Zone::Graveyard),
+                    "mode 3 must target cards in a graveyard, got {target:?}"
+                );
+                // Optionality ("up to X" => 0..=X) is asserted below via the
+                // MultiTargetSpec floor of zero, the source of truth for
+                // multi-target modes; the ChangeZone `up_to` bool is not.
+            }
+            other => panic!("expected mode 3 ChangeZone→Exile, got {other:?}"),
+        }
+        let spec = mode3
+            .multi_target
+            .as_ref()
+            .expect("mode 3 'up to X target cards' must carry a MultiTargetSpec");
+        assert_eq!(
+            spec.min,
+            QuantityExpr::Fixed { value: 0 },
+            "'up to X' has a floor of zero targets"
+        );
+        assert_eq!(
+            spec.max,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            }),
+            "'up to X' maximum must be the announced X, got {:?}",
+            spec.max
+        );
+    }
+
     #[test]
     fn target_player_scrys_carries_player_filter() {
         // CR 701.22a + CR 601.2c: "Target player scrys N" surfaces an
@@ -11377,6 +11603,70 @@ mod tests {
             "spend this mana only to cast spells with mana value 5 or greater nonsense",
         );
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn mana_spend_restriction_color_count_exactly() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with exactly three colors",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithColorCount {
+                comparator: Comparator::EQ,
+                count: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_color_count_exactly_one_color() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast a spell with exactly one color",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithColorCount {
+                comparator: Comparator::EQ,
+                count: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_color_count_or_more() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with two or more colors",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithColorCount {
+                comparator: Comparator::GE,
+                count: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn mana_spend_restriction_color_count_or_fewer() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::{Comparator, ManaSpendRestriction};
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast spells with two or fewer colors",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellWithColorCount {
+                comparator: Comparator::LE,
+                count: 2,
+            })
+        );
     }
 
     #[test]

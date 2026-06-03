@@ -201,6 +201,7 @@
   },
   "diceRoll": {
     "rollingForFirst": "Rolling for first player",
+    "tieReroll": "Tie — reroll!",
     "versus": "VS",
     "skip": "Tap to skip",
     "continue": "Tap to continue",

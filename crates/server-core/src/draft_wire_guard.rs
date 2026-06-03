@@ -22,7 +22,7 @@ pub fn guard_create_draft_with_settings(
 ) -> Result<(), String> {
     validate_required_label("display_name", display_name, MAX_DISPLAY_NAME_LEN)?;
     validate_token("set_code", set_code, MAX_DRAFT_SET_CODE_LEN)?;
-    validate_optional_token("password", password, MAX_PASSWORD_LEN)?;
+    validate_optional_token("password", password.as_deref(), MAX_PASSWORD_LEN)?;
     if pod_size == 0 || pod_size > MAX_PLAYER_COUNT {
         return Err(format!("pod_size must be between 1 and {MAX_PLAYER_COUNT}"));
     }
@@ -42,7 +42,7 @@ pub fn guard_join_draft_with_password(
 ) -> Result<(), String> {
     validate_token("draft_code", draft_code, MAX_GAME_CODE_LEN)?;
     validate_required_label("display_name", display_name, MAX_DISPLAY_NAME_LEN)?;
-    validate_optional_token("password", password, MAX_PASSWORD_LEN)?;
+    validate_optional_token("password", password.as_deref(), MAX_PASSWORD_LEN)?;
     Ok(())
 }
 

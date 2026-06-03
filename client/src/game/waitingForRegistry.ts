@@ -76,6 +76,10 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "CopyTargetChoice",
     "CopyRetarget",
     "ExploreChoice",
+    // CR 303.4 + CR 115.1: return-as-Aura / non-spell Aura entry host pick.
+    // Resolved on the board (object hosts) or via player HUD glow (Curse /
+    // enchant-player Auras) — see TargetingOverlay + PlayerHud/OpponentHud.
+    "ReturnAsAuraTarget",
     "EquipTarget",
     "CrewVehicle",
     "StationTarget",

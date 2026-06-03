@@ -2366,6 +2366,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::BecomeMonarch
         | Effect::Proliferate
         | Effect::EndTheTurn
+        | Effect::EndCombatPhase
         | Effect::SolveCase
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }

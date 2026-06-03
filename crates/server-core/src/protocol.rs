@@ -298,11 +298,11 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         player_token: Option<String>,
         /// Engine events produced by `start_game` — currently the d20
-        /// first-player contest (`DieRolled`) batch. Populated ONLY on the
-        /// initial post-start broadcast; empty for late joiners and reconnects
-        /// (a reconnecting player must not re-see the contest dice). Rolls are
-        /// public (no `visibility.rs` redaction), so the full batch goes to
-        /// every seat. `serde(default)` keeps this back-compat for older clients.
+        /// first-player contest (`StartingPlayerContest`) event. Populated ONLY
+        /// on the initial post-start broadcast; empty for late joiners and
+        /// reconnects (a reconnecting player must not re-see the contest). The
+        /// contest is public (no `visibility.rs` redaction), so it goes to every
+        /// seat. `serde(default)` keeps this back-compat for older clients.
         #[serde(default)]
         events: Vec<GameEvent>,
     },

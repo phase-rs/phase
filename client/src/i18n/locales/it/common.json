@@ -201,6 +201,7 @@
   },
   "diceRoll": {
     "rollingForFirst": "Tiro per stabilire chi inizia",
+    "tieReroll": "Pareggio — si ritira!",
     "versus": "VS",
     "skip": "Tocca per saltare",
     "continue": "Tocca per continuare",

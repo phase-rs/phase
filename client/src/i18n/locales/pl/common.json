@@ -201,6 +201,7 @@
   },
   "diceRoll": {
     "rollingForFirst": "Rzut o pierwszego gracza",
+    "tieReroll": "Remis — rzut ponownie!",
     "versus": "VS",
     "skip": "Dotknij, aby pominąć",
     "continue": "Dotknij, aby kontynuować",

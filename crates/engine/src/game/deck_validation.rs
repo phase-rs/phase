@@ -586,28 +586,18 @@ fn evaluate_commander_with_format(
             commander_identity.extend(card_color_identity(face));
         }
     }
-    let mut identity_violations = BTreeSet::new();
-    for name in &request.main_deck {
-        if request
-            .commander
-            .iter()
-            .any(|c| c.eq_ignore_ascii_case(name))
-        {
-            continue;
-        }
-        if unknown_cards.contains(name.as_str()) {
-            continue;
-        }
-        if let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) {
-            let card_colors = card_color_identity(face);
-            for color in &card_colors {
-                if !commander_identity.contains(color) {
-                    identity_violations.insert(name.clone());
-                    break;
-                }
-            }
-        }
-    }
+    let identity_violations = color_identity_violations(
+        db,
+        &request.main_deck,
+        &commander_identity,
+        unknown_cards,
+        |name| {
+            request
+                .commander
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(name))
+        },
+    );
     if !identity_violations.is_empty() {
         reasons.push(summarize_cards(
             "Cards outside commander's color identity",
@@ -1282,10 +1272,15 @@ fn evaluate_oathbreaker(
         ));
     }
 
-    // Oathbreaker RC: every main-deck card must be within the Oathbreaker's color identity.
+    // Oathbreaker RC: every main-deck card must be within the Oathbreaker's
+    // color identity. CR 903.5c (color identity) is shared with the other
+    // command-zone formats via `color_identity_violations`; CR 903.5d (off-
+    // identity basic land types) is reported in its own bucket alongside it.
     let mut identity_violations = BTreeSet::new();
     let mut basic_type_violations = BTreeSet::new();
     if let Some(identity) = &oathbreaker_identity {
+        identity_violations =
+            color_identity_violations(db, &request.main_deck, identity, unknown_cards, |_| false);
         for name in request.main_deck.iter().map(String::as_str) {
             if unknown_cards.contains(name) {
                 continue;
@@ -1294,12 +1289,6 @@ fn evaluate_oathbreaker(
             let Some(face) = db.get_face_by_name(resolved) else {
                 continue;
             };
-            for color in card_color_identity(face) {
-                if !identity.contains(&color) {
-                    identity_violations.insert(name.to_string());
-                    break;
-                }
-            }
             for color in basic_land_type_colors(face) {
                 if !identity.contains(&color) {
                     basic_type_violations.insert(face.name.clone());
@@ -1869,6 +1858,36 @@ fn collect_unknown_cards(
 }
 
 /// CR 903.4: Compute color identity of a single card from mana cost + color indicator.
+/// CR 903.5c: collect every main-deck card whose color identity is not a
+/// subset of `identity`. Shared by the command-zone formats so the
+/// color-identity-subset loop lives in one place instead of being copied per
+/// format. `is_command_zone_card` skips cards that occupy the command zone
+/// (e.g. a commander also listed in the main deck); unknown cards are skipped
+/// so they are reported only once under "Unknown cards".
+fn color_identity_violations(
+    db: &CardDatabase,
+    main_deck: &[String],
+    identity: &HashSet<ManaColor>,
+    unknown_cards: &BTreeSet<String>,
+    is_command_zone_card: impl Fn(&str) -> bool,
+) -> BTreeSet<String> {
+    let mut violations = BTreeSet::new();
+    for name in main_deck {
+        if is_command_zone_card(name.as_str()) || unknown_cards.contains(name.as_str()) {
+            continue;
+        }
+        if let Some(face) = db.get_face_by_name(resolve_card_name(db, name)) {
+            if card_color_identity(face)
+                .iter()
+                .any(|color| !identity.contains(color))
+            {
+                violations.insert(name.clone());
+            }
+        }
+    }
+    violations
+}
+
 fn card_color_identity(face: &CardFace) -> HashSet<ManaColor> {
     if !face.color_identity.is_empty() {
         return face.color_identity.iter().copied().collect();

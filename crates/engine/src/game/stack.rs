@@ -263,6 +263,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // optional copy decision is pending. Cleared at the start of the next
     // `resolve_top`.
     state.resolving_stack_entry = Some(entry.clone());
+    let resolution_start_phase = state.phase;
 
     // Only run targeting validation and effect execution when an ability exists.
     // Permanent spells with no spell ability (ability is None) skip straight to
@@ -362,13 +363,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 608.3: Determine destination zone for spells.
     if is_spell {
-        let end_the_turn_resolving_object = ability
-            .as_ref()
-            .is_some_and(|ability| matches!(ability.effect, Effect::EndTheTurn));
-        let dest = if end_the_turn_resolving_object {
-            // CR 724.1b: The "end the turn" procedure exiles every object on
-            // the stack, including the resolving object that `resolve_top`
-            // already popped before executing its effect.
+        let end_procedure_exiles_resolving_object = ability.as_ref().is_some_and(|ability| {
+            matches!(ability.effect, Effect::EndTheTurn)
+                || (matches!(ability.effect, Effect::EndCombatPhase)
+                    && resolution_start_phase.is_combat())
+        });
+        let dest = if end_procedure_exiles_resolving_object {
+            // CR 724.1b / CR 724.2b: The "end the turn" and "end the combat
+            // phase" procedures exile every object on the stack, including the
+            // resolving object that `resolve_top` already popped before
+            // executing its effect.
             Zone::Exile
         } else if paradigm_armed {
             // CR 702.xxx: Paradigm-armed spell exiles instead of going to

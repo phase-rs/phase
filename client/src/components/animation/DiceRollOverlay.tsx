@@ -190,10 +190,14 @@ function DiceRollContent({ payload, animate }: { payload: DiceRollPayload; anima
 }
 
 /**
- * Starting-player contest (CR 103.1): one die per seat, a VS framing for the
- * two-player case, then a winner reveal once every die has settled — the
- * winner's panel lifts and glows gold, the others dim, and the caption resolves.
- * `winner` is the engine's authoritative pick, never recomputed here.
+ * Starting-player contest (CR 103.1): the d20 roll-off, rendered one round at a
+ * time. Round 0 rolls every seat; on a tie the tied-max group rerolls in the
+ * next round (the others drop out), until one seat is the unique high roller —
+ * the engine's authoritative `winner`. Rendering round-by-round (rather than
+ * collapsing to last-roll-per-player) keeps the winner the visible high roller
+ * of the round shown; the prior collapse could surface an eliminated seat's
+ * higher earlier die as if it beat the winner's lower reroll. `rounds` and
+ * `winner` come straight from the engine event — never recomputed here.
  */
 function ContestDice({
   payload,
@@ -207,13 +211,34 @@ function ContestDice({
   playerLabel: (playerId: number) => string;
 }) {
   const { t } = useTranslation();
+  // `rounds` is always present for the contest; fall back to a single round from
+  // `rolls` for safety (e.g. an older event mid-deploy).
+  const rounds = payload.rounds ?? [payload.rolls];
+  // Reduced motion / no-WebGL: there's no per-round throw to watch, so jump to
+  // the decisive final round (its high roller is the winner) instead of flashing
+  // through rounds on timers.
+  const [roundIndex, setRoundIndex] = useState(animate ? 0 : rounds.length - 1);
   const [settledCount, setSettledCount] = useState(0);
   const onDieSettle = useCallback(() => setSettledCount((c) => c + 1), []);
-  // Without animation the result is shown immediately, so treat it as settled.
-  const allSettled = !animate || settledCount >= payload.rolls.length;
+
+  const currentRolls = rounds[roundIndex] ?? [];
+  const isFinalRound = roundIndex >= rounds.length - 1;
+  const roundSettled = !animate || settledCount >= currentRolls.length;
+
+  // Walk the reroll rounds: once a non-final round's dice settle, hold a beat so
+  // the tie reads, then advance — the tied group rerolls (remounted by key).
+  useEffect(() => {
+    if (!animate || isFinalRound || !roundSettled) return;
+    const id = setTimeout(() => {
+      setRoundIndex((r) => r + 1);
+      setSettledCount(0);
+    }, 1100 / speedMultiplier);
+    return () => clearTimeout(id);
+  }, [animate, isFinalRound, roundSettled, speedMultiplier]);
 
   const winner = payload.winner;
   const winnerIsYou = winner === getPlayerId();
+  const revealed = isFinalRound && roundSettled && winner != null;
   const caption =
     winner != null
       ? winnerIsYou
@@ -224,77 +249,69 @@ function ContestDice({
   return (
     <div className="relative flex flex-col items-center gap-8 select-none">
       <motion.span
+        key={roundIndex}
         className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-400"
         initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4 }}
       >
-        {t("diceRoll.rollingForFirst")}
+        {roundIndex === 0 ? t("diceRoll.rollingForFirst") : t("diceRoll.tieReroll")}
       </motion.span>
 
       <div className="flex items-center justify-center gap-8">
-        {payload.rolls.map((roll, i) => {
+        {currentRolls.map((roll) => {
           const isWinner = roll.playerId === winner;
-          const revealed = allSettled && winner != null;
           return (
-            <div key={roll.playerId} className="contents">
-              {/* `VS` separator between two contestants. */}
-              {i > 0 && (
-                <motion.span
-                  className="text-xl font-black italic tracking-tight text-slate-500"
-                  initial={{ opacity: 0, scale: 0.6 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  transition={{ delay: 0.2, duration: 0.3 }}
-                >
-                  {t("diceRoll.versus")}
-                </motion.span>
-              )}
-              <motion.div
-                className="flex flex-col items-center gap-3"
-                animate={{
-                  scale: revealed ? (isWinner ? 1.06 : 0.94) : 1,
-                  opacity: revealed && !isWinner ? 0.45 : 1,
-                }}
-                transition={{ type: "spring", stiffness: 260, damping: 22 }}
+            // Keyed by round+seat so advancing a round remounts the die → it
+            // physically rerolls (new 3D throw) for the tied group.
+            <motion.div
+              key={`${roundIndex}-${roll.playerId}`}
+              className="flex flex-col items-center gap-3"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{
+                opacity: revealed && !isWinner ? 0.45 : 1,
+                y: 0,
+                scale: revealed ? (isWinner ? 1.06 : 0.94) : 1,
+              }}
+              transition={{ type: "spring", stiffness: 260, damping: 22 }}
+            >
+              <span
+                className="text-base font-bold uppercase tracking-wide transition-colors"
+                style={{ color: revealed && isWinner ? `rgb(${GOLD})` : "#cbd5e1" }}
               >
-                <span
-                  className="text-base font-bold uppercase tracking-wide transition-colors"
-                  style={{ color: revealed && isWinner ? `rgb(${GOLD})` : "#cbd5e1" }}
-                >
-                  {playerLabel(roll.playerId)}
-                </span>
-                <DieFace
-                  animate={animate}
-                  accent={isWinner ? GOLD : NEUTRAL}
-                  emphasize={revealed && isWinner}
-                  value={roll.value}
-                  onSettle={onDieSettle}
-                >
-                  {(handleSettle) =>
-                    animate ? (
-                      <Suspense fallback={<DiePlaceholder label={String(roll.value)} />}>
-                        <Dice3D
-                          sides={payload.sides}
-                          result={roll.value}
-                          speedMultiplier={speedMultiplier}
-                          size={DIE_SIZE}
-                          onSettle={handleSettle}
-                        />
-                      </Suspense>
-                    ) : (
-                      <DiePlaceholder label={String(roll.value)} />
-                    )
-                  }
-                </DieFace>
-              </motion.div>
-            </div>
+                {playerLabel(roll.playerId)}
+              </span>
+              <DieFace
+                animate={animate}
+                accent={revealed && isWinner ? GOLD : NEUTRAL}
+                emphasize={revealed && isWinner}
+                value={roll.value}
+                onSettle={onDieSettle}
+              >
+                {(handleSettle) =>
+                  animate ? (
+                    <Suspense fallback={<DiePlaceholder label={String(roll.value)} />}>
+                      <Dice3D
+                        sides={payload.sides}
+                        result={roll.value}
+                        speedMultiplier={speedMultiplier}
+                        size={DIE_SIZE}
+                        onSettle={handleSettle}
+                      />
+                    </Suspense>
+                  ) : (
+                    <DiePlaceholder label={String(roll.value)} />
+                  )
+                }
+              </DieFace>
+            </motion.div>
           );
         })}
       </div>
 
       <div className="flex h-10 items-center">
         <AnimatePresence>
-          {allSettled && caption && (
+          {revealed && caption && (
             <motion.span
               className="text-4xl font-extrabold uppercase tracking-wider"
               style={{

@@ -201,6 +201,7 @@
   },
   "diceRoll": {
     "rollingForFirst": "Tirage pour savoir qui commence",
+    "tieReroll": "Égalité — on relance !",
     "versus": "VS",
     "skip": "Toucher pour passer",
     "continue": "Toucher pour continuer",

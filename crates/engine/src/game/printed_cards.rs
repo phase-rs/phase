@@ -707,6 +707,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::BecomeMonarch
         | Effect::Proliferate
         | Effect::EndTheTurn
+        | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
         | Effect::SwitchPT { .. }

@@ -1,8 +1,6 @@
-use crate::game::effects::change_zone::{self, ZoneMoveResult};
 use crate::types::ability::{EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntryKind};
-use crate::types::zones::Zone;
+use crate::types::game_state::GameState;
 
 /// CR 724.1: End the turn. Time Stop, Sundial of the Infinite, Obeka, Glorious
 /// End, Discontinuity, Day's Undoing.
@@ -19,50 +17,10 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 724.1a: Triggered abilities that triggered before this process began
-    // but haven't been put on the stack yet cease to exist. Abilities that
-    // trigger DURING this process (CR 724.1f) are created after this point and
-    // ride to the stack through the normal cleanup-step flow.
-    state.pending_trigger = None;
-    state.pending_trigger_entry = None;
-    state.pending_trigger_order = None;
-    state.pending_trigger_event_batch.clear();
-    state.deferred_triggers.clear();
+    super::end_phase::clear_preexisting_unstacked_triggers(state);
 
-    // CR 724.1b: Exile every object on the stack. `resolve_top` already popped
-    // the end-the-turn source's own entry before invoking this resolver; its
-    // post-resolution routing also uses CR 724.1b and sends that resolving
-    // object to exile. Here we exile every OTHER object still on the stack.
-    // Spell entries are card-backed and move to exile through the shared
-    // zone-change pipeline; ability entries (activated / triggered / keyword)
-    // aren't represented by cards, so dropping the stack entry is sufficient
-    // (they cease to exist at the next state-based-action check, CR 724.1b).
-    while let Some(entry) = state.stack.pop_back() {
-        state.stack_paid_facts.remove(&entry.id);
-        if matches!(entry.kind, StackEntryKind::Spell { .. }) {
-            match change_zone::execute_zone_move(
-                state,
-                entry.id,
-                Zone::Stack,
-                Zone::Exile,
-                ability.source_id,
-                None,
-                false,
-                false,
-                None,
-                &[],
-                false,
-                events,
-            ) {
-                ZoneMoveResult::Done => {}
-                ZoneMoveResult::NeedsChoice(player) => {
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
-                    return Ok(());
-                }
-                ZoneMoveResult::NeedsAuraAttachmentChoice => return Ok(()),
-            }
-        }
+    if !super::end_phase::exile_nonresolving_stack_objects(state, ability.source_id, events) {
+        return Ok(());
     }
 
     // CR 724.1c: Check state-based actions. No player gets priority and no
@@ -92,10 +50,11 @@ mod tests {
     use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use crate::game::zones::create_object;
     use crate::types::ability::Effect;
-    use crate::types::game_state::{CastingVariant, StackEntry};
+    use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
     #[test]
     fn end_the_turn_exiles_stack_clears_combat_and_enters_cleanup() {

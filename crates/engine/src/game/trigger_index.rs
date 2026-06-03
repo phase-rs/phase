@@ -564,6 +564,8 @@ fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         }
         GameEvent::MonarchChanged { .. } => push(TriggerEventKey::MonarchOrInitiative),
         GameEvent::CityBlessingGained { .. } => {}
+        // CR 103.1: setup determination, not a CR 706 die-roll trigger source.
+        GameEvent::StartingPlayerContest { .. } => {}
         GameEvent::DieRolled { .. } | GameEvent::CoinFlipped { .. } => {
             push(TriggerEventKey::DieOrCoin);
         }
@@ -671,6 +673,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::BecomeMonarch
         | EffectKind::Proliferate
         | EffectKind::EndTheTurn
+        | EffectKind::EndCombatPhase
         | EffectKind::Populate
         | EffectKind::Clash
         | EffectKind::Vote

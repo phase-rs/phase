@@ -1302,6 +1302,10 @@ pub enum ManaSpendRestriction {
     /// `value` is the printed threshold N; `comparator` applies
     /// `spell_mana_value <cmp> value`.
     SpellWithManaValue { comparator: Comparator, value: u32 },
+    /// CR 105.2 + CR 106.6: "Spend this mana only to cast spells with exactly N
+    /// colors" (also "N or more / N or fewer"; colorless = 0). Parameterized over
+    /// [`Comparator`] — one variant per color-count reading. `count` is N.
+    SpellWithColorCount { comparator: Comparator, count: u32 },
     /// CR 106.6 + CR 400.7: "Spend this mana only to cast spells from your
     /// graveyard" / "from exile". Gates spending on the spell's cast-from zone
     /// alone — a distinct axis from [`ManaSpendRestriction::SpellWithKeywordKindFromZone`],
@@ -3670,6 +3674,31 @@ impl QuantityExpr {
         }
     }
 
+    /// Returns true if this expression resolves through a
+    /// `QuantityRef::Variable { name: "X" }` anywhere in its tree — i.e. its
+    /// value depends on the spell or ability's chosen X. Single authority for
+    /// "does this quantity use X": the engine cost machinery (X-affordability,
+    /// pay-life-X) and the AI X-value policy all rely on it. The match is
+    /// exhaustive so a new `QuantityExpr` variant forces every consumer to
+    /// reconsider X-dependence rather than silently defaulting to false.
+    pub fn contains_x(&self) -> bool {
+        match self {
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name },
+            } => name == "X",
+            QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::UpTo { max: inner }
+            | QuantityExpr::Power {
+                exponent: inner, ..
+            } => inner.contains_x(),
+            QuantityExpr::Sum { exprs } => exprs.iter().any(QuantityExpr::contains_x),
+            QuantityExpr::Difference { left, right } => left.contains_x() || right.contains_x(),
+            QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
+        }
+    }
+
     /// Construct an `UpTo { max }` expression, debug-asserting the
     /// non-nesting invariant. Always use this rather than the raw struct
     /// literal.
@@ -5706,6 +5735,11 @@ pub enum Effect {
     /// to the cleanup step. Time Stop, Sundial of the Infinite, Obeka,
     /// Glorious End, Discontinuity, Day's Undoing.
     EndTheTurn,
+    /// CR 724.2: End the combat phase. Exile every object on the stack, check
+    /// state-based actions, remove everything from combat, expire "until end of
+    /// combat" effects, and skip straight to the postcombat main phase. Does
+    /// nothing outside a combat phase (CR 724.2g). Mandate of Peace.
+    EndCombatPhase,
     /// CR 701.38: Vote — each player chooses one of the listed options, starting
     /// with a specified player and proceeding in turn order. After all votes are
     /// collected, the resolver runs `per_choice_effect[i]` once for each vote
@@ -7839,6 +7873,7 @@ impl Effect {
             | Effect::Populate
             | Effect::Clash
             | Effect::EndTheTurn
+            | Effect::EndCombatPhase
             | Effect::Vote { .. }
             | Effect::Cleanup { .. }
             | Effect::RevealTop { .. }
@@ -7984,6 +8019,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::BecomeMonarch => "BecomeMonarch",
         Effect::Proliferate => "Proliferate",
         Effect::EndTheTurn => "EndTheTurn",
+        Effect::EndCombatPhase => "EndCombatPhase",
         Effect::Populate => "Populate",
         Effect::Clash => "Clash",
         Effect::Vote { .. } => "Vote",
@@ -8170,6 +8206,8 @@ pub enum EffectKind {
     Populate,
     Clash,
     EndTheTurn,
+    /// CR 724.2: End the combat phase — skip to the postcombat main phase.
+    EndCombatPhase,
     /// CR 701.38: Vote — interactive APNAP-ordered choice with per-choice tally effects.
     Vote,
     /// CR 700.3: SeparateIntoPiles — partition objects into two piles, another player chooses one, sub-effect applies.
@@ -8354,6 +8392,7 @@ impl From<&Effect> for EffectKind {
             Effect::BecomeMonarch => EffectKind::BecomeMonarch,
             Effect::Proliferate => EffectKind::Proliferate,
             Effect::EndTheTurn => EffectKind::EndTheTurn,
+            Effect::EndCombatPhase => EffectKind::EndCombatPhase,
             Effect::Populate => EffectKind::Populate,
             Effect::Clash => EffectKind::Clash,
             Effect::Vote { .. } => EffectKind::Vote,
