@@ -4482,6 +4482,10 @@ pub enum CastTimingPermission {
     /// The spell was cast using an effect that allowed it to be cast as though
     /// it had flash.
     AsThoughHadFlash,
+    /// CR 702.48a: The spell was cast at instant speed by paying an Offering
+    /// additional cost. When this permission is set, the Offering sacrifice is
+    /// required (the player used the offering to unlock instant-speed timing).
+    Offering,
 }
 
 impl From<NinjutsuVariant> for CastVariantPaid {

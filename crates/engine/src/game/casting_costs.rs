@@ -963,6 +963,18 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
+    // CR 702.48b/c: If this sacrifice is paying an Offering additional cost,
+    // capture the chosen permanent's ObjectId BEFORE it leaves the battlefield
+    // so `apply_offering_cost_reduction` can read its mana cost when recomputing
+    // the spell's total cost.
+    let is_offering_sacrifice = pending.ability.context.additional_cost_paid
+        && effective_offering_quality(state, player, pending.object_id).is_some();
+    if is_offering_sacrifice {
+        if let Some(&first) = chosen.first() {
+            pending.offering_sacrifice = Some(first);
+        }
+    }
+
     // CR 117.1 + CR 400.7j + CR 608.2k: Capture the sacrificed object's public
     // characteristics BEFORE it leaves the battlefield, stamping it onto the
     // resolving ability for later cost-paid-object references.
@@ -975,6 +987,19 @@ pub(crate) fn handle_sacrifice_for_cost(
                     lki: obj.snapshot_for_mana_spent(),
                 });
         }
+    }
+
+    // CR 702.48c: When paying the Offering additional cost, reduce the spell's
+    // total mana cost by the sacrificed permanent's mana cost BEFORE the
+    // permanent leaves the battlefield so its mana cost is still readable.
+    // We publish `pending` to `state.pending_cast` for the duration of the
+    // reduction call (mirrors the Bargain recompute pattern in
+    // `handle_decide_additional_cost`) then restore the previous value.
+    if is_offering_sacrifice {
+        let prior = state.pending_cast.take();
+        state.pending_cast = Some(Box::new(pending.clone()));
+        apply_offering_cost_reduction(state, &mut pending.cost);
+        state.pending_cast = prior;
     }
 
     // Sacrifice each chosen permanent
@@ -1890,7 +1915,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         }
     } else {
         (
-            obj_additional.or_else(|| effective_casualty_additional_cost(state, player, object_id)),
+            obj_additional
+                .or_else(|| effective_casualty_additional_cost(state, player, object_id))
+                // CR 702.48a: Offering — optional sacrifice before target selection
+                // (becomes Required when cast via Offering instant-speed timing; that
+                // case is handled in the casting dispatch which routes to
+                // `begin_required_cost_before_targets` before this function is reached).
+                .or_else(|| effective_offering_additional_cost(state, player, object_id)),
             None,
         )
     };
@@ -2893,6 +2924,140 @@ pub(super) fn effective_casualty_additional_cost(
         },
         repeatable: false,
     })
+}
+
+/// CR 702.48a: Return the quality (creature subtype) string from a spell's
+/// Offering keyword, if it has one. Uses `effective_spell_keywords` so
+/// layer-granted copies are included.
+pub(super) fn effective_offering_quality(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<String> {
+    super::casting::effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .find_map(|kw| {
+            if let Keyword::Offering(quality) = kw {
+                Some(quality)
+            } else {
+                None
+            }
+        })
+}
+
+/// CR 702.48a: Build a `TargetFilter` that matches any permanent on the
+/// battlefield whose type line includes `quality` (e.g. "Spirit").
+/// The filter matches any permanent type that has `quality` as a subtype.
+fn offering_quality_filter(quality: &str) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::permanent().subtype(quality.to_string()))
+}
+
+/// CR 702.48a: Returns `true` when the controller has at least one permanent
+/// on the battlefield that could be sacrificed for the Offering cost.
+pub(super) fn can_pay_offering_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    let Some(quality) = effective_offering_quality(state, player, object_id) else {
+        return false;
+    };
+    let filter = offering_quality_filter(&quality);
+    let ctx = super::filter::FilterContext::from_source(state, object_id);
+    state.battlefield.iter().any(|&id| {
+        let Some(obj) = state.objects.get(&id) else {
+            return false;
+        };
+        obj.controller == player
+            && super::filter::matches_target_filter(state, id, &filter, &ctx)
+            && !super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
+    })
+}
+
+/// CR 702.48a: Build the `AdditionalCost::Optional` representing the Offering
+/// sacrifice choice. The `repeatable` flag is `false` — Offering is paid at
+/// most once per cast.
+pub(super) fn effective_offering_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<AdditionalCost> {
+    let quality = effective_offering_quality(state, player, object_id)?;
+    Some(AdditionalCost::Optional {
+        cost: AbilityCost::Sacrifice {
+            target: offering_quality_filter(&quality),
+            count: 1,
+        },
+        repeatable: false,
+    })
+}
+
+/// CR 702.48c: Reduce `spell_cost` by the sacrificed permanent's mana cost.
+///
+/// Rules:
+/// - Generic mana in the sacrificed cost reduces generic mana in the spell cost.
+/// - Each colored/colorless shard in the sacrificed cost first tries to cancel
+///   a matching shard in the spell cost; excess reduces generic instead.
+///
+/// Reads `state.pending_cast.offering_sacrifice` to find the permanent; if the
+/// field is unset or the permanent no longer exists the function is a no-op.
+pub(super) fn apply_offering_cost_reduction(state: &GameState, spell_cost: &mut ManaCost) {
+    let Some(sacrifice_id) = state
+        .pending_cast
+        .as_ref()
+        .and_then(|pc| pc.offering_sacrifice)
+    else {
+        return;
+    };
+    let Some(sacrificed_obj) = state.objects.get(&sacrifice_id) else {
+        return;
+    };
+    let sacrificed_mana_cost = sacrificed_obj.mana_cost.clone();
+
+    let ManaCost::Cost {
+        shards: ref sac_shards,
+        generic: sac_generic,
+    } = sacrificed_mana_cost
+    else {
+        return;
+    };
+
+    let ManaCost::Cost {
+        shards: ref mut spell_shards,
+        generic: ref mut spell_generic,
+    } = spell_cost
+    else {
+        return;
+    };
+
+    // CR 702.48c: Each colored/colorless shard reduces a matching spell shard;
+    // unmatched excess reduces generic instead.
+    for &sac_shard in sac_shards {
+        // A spell shard matches if it contributes to the same color (handling
+        // hybrid/phyrexian) or is the same symbol.
+        let pos = spell_shards.iter().position(|&s| {
+            use crate::types::mana::ManaColor;
+            let color_match = [
+                ManaColor::White,
+                ManaColor::Blue,
+                ManaColor::Black,
+                ManaColor::Red,
+                ManaColor::Green,
+            ]
+            .iter()
+            .any(|&c| sac_shard.contributes_to(c) && s.contributes_to(c));
+            color_match || s == sac_shard
+        });
+        if let Some(idx) = pos {
+            spell_shards.remove(idx);
+        } else {
+            // Excess colored/colorless reduces generic (floor 0).
+            *spell_generic = spell_generic.saturating_sub(1);
+        }
+    }
+
+    // CR 702.48c: Generic in sacrificed cost reduces generic in spell cost.
+    *spell_generic = spell_generic.saturating_sub(sac_generic);
 }
 
 pub(super) fn retrace_discard_land_cost() -> AbilityCost {
@@ -5227,6 +5392,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            offering_sacrifice: None,
         }
     }
 
@@ -8669,6 +8835,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            offering_sacrifice: None,
         };
 
         let result = pay_additional_cost(
@@ -8789,6 +8956,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            offering_sacrifice: None,
         };
 
         let mut events = Vec::new();
@@ -8878,6 +9046,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            offering_sacrifice: None,
         };
 
         // Exactly one card is required. Selecting two must fail.
@@ -8956,6 +9125,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            offering_sacrifice: None,
         };
 
         // `red` is not in the legal-cards list, so the cost handler must reject
@@ -9067,6 +9237,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            offering_sacrifice: None,
         };
 
         let result = pay_additional_cost(
@@ -10384,5 +10555,535 @@ many tokens that are copies of it.)";
         let snapshot = stack_cost_paid_object(runner.state(), spell_id)
             .expect("the cost_paid_object snapshot is unconditional, even for Blight 0");
         assert_eq!(snapshot.object_id, target);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // CR 702.48: Offering
+    // ────────────────────────────────────────────────────────────────────────
+
+    /// CR 702.48a: A Spirit-offering spell at sorcery speed presents an
+    /// optional sacrifice prompt for a Spirit permanent the controller controls.
+    #[test]
+    fn spirit_offering_presents_optional_sacrifice_for_spirit() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let spirit = create_object(
+            &mut state,
+            CardId(10),
+            caster,
+            "Thief of Hope Spirit Sac".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spirit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Spirit".to_string());
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(11),
+            caster,
+            "Kitsune Blademaster".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Offering("Spirit".to_string()));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            };
+        }
+
+        let mut events = Vec::new();
+        // Use NoCost so the test focuses on Offering detection, not mana payment.
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(11),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &ManaCost::NoCost,
+            None,
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            CastPaymentMode::Auto,
+            &mut events,
+        )
+        .expect("Spirit offering spell must be castable");
+
+        match waiting {
+            WaitingFor::OptionalCostChoice { ref cost, .. } => {
+                assert!(
+                    matches!(
+                        cost,
+                        AdditionalCost::Optional {
+                            cost: AbilityCost::Sacrifice { count: 1, .. },
+                            repeatable: false,
+                        }
+                    ),
+                    "expected optional Spirit sacrifice, got {cost:?}"
+                );
+            }
+            other => panic!("expected OptionalCostChoice for Offering, got {other:?}"),
+        }
+    }
+
+    /// CR 702.48c: `apply_offering_cost_reduction` reduces by the sacrificed
+    /// permanent's mana cost. {1}{G} sacrifice reduces {3}{W} spell to {1}{W}.
+    ///   shard {G} → no match in {W} → excess reduces generic: 3→2
+    ///   sac generic 1 → generic: 2→1. Result: {W}{1}.
+    #[test]
+    fn offering_cost_reduction_applies_per_cr_702_48c() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        // Spirit with {1}{G} mana cost.
+        let spirit = create_object(
+            &mut state,
+            CardId(20),
+            caster,
+            "Floating Spirit Sac".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&spirit).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        };
+
+        // Spell with Spirit offering.
+        let spell = create_object(
+            &mut state,
+            CardId(21),
+            caster,
+            "Spirit Offering Spell".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .keywords
+            .push(Keyword::Offering("Spirit".to_string()));
+
+        // Simulate offering_sacrifice being set as it would be after sacrifice selection.
+        let pending = PendingCast::new(
+            spell,
+            CardId(21),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            ManaCost::NoCost,
+        );
+        state.pending_cast = Some(Box::new(PendingCast {
+            offering_sacrifice: Some(spirit),
+            ..pending
+        }));
+
+        let mut spell_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 3,
+        };
+        apply_offering_cost_reduction(&state, &mut spell_cost);
+
+        assert_eq!(
+            spell_cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 1,
+            },
+            "{{3}}{{W}} reduced by {{1}}{{G}} must equal {{W}}{{1}}"
+        );
+    }
+
+    /// CR 702.48b: Accepting the Offering prompts to sacrifice a qualifying
+    /// permanent before target selection.
+    #[test]
+    fn accepting_spirit_offering_prompts_sacrifice_selection() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let spirit = create_object(
+            &mut state,
+            CardId(22),
+            caster,
+            "Selectable Spirit".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spirit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Spirit".to_string());
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(23),
+            caster,
+            "Spirit Offering Spell 2".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Offering("Spirit".to_string()));
+            obj.mana_cost = ManaCost::NoCost;
+        }
+
+        let mut events = Vec::new();
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(23),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &ManaCost::NoCost,
+            None,
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            CastPaymentMode::Auto,
+            &mut events,
+        )
+        .expect("Spirit offering spell must be castable");
+
+        let WaitingFor::OptionalCostChoice {
+            cost: ref offering_cost,
+            pending_cast: ref pending_box,
+            ..
+        } = waiting
+        else {
+            panic!("expected OptionalCostChoice for Offering, got {waiting:?}");
+        };
+        let pending_cast = *pending_box.clone();
+
+        // Accept the Offering.
+        let waiting = handle_decide_additional_cost(
+            &mut state,
+            caster,
+            pending_cast,
+            offering_cost,
+            true,
+            &mut events,
+        )
+        .expect("accepting offering must succeed");
+
+        // Engine should now prompt for which Spirit to sacrifice.
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            ref choices,
+            ..
+        } = waiting
+        else {
+            panic!("expected PayCost(Sacrifice) for Offering, got {waiting:?}");
+        };
+        assert!(
+            choices.contains(&spirit),
+            "spirit must be in eligible sacrifice list"
+        );
+    }
+
+    /// CR 702.48b: Selecting a Spirit for sacrifice removes it from the battlefield.
+    /// The cost reduction itself is verified by `offering_cost_reduction_applies_per_cr_702_48c`.
+    #[test]
+    fn accepting_spirit_offering_sacrifices_permanent_and_reduces_cost() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let spirit = create_object(
+            &mut state,
+            CardId(24),
+            caster,
+            "Sacrificed Spirit".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spirit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Spirit".to_string());
+            obj.mana_cost = ManaCost::NoCost;
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(25),
+            caster,
+            "Spirit Offering Spell 3".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Offering("Spirit".to_string()));
+            obj.mana_cost = ManaCost::NoCost;
+        }
+
+        let mut events = Vec::new();
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(25),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &ManaCost::NoCost,
+            None,
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            CastPaymentMode::Auto,
+            &mut events,
+        )
+        .expect("Spirit offering spell must be castable");
+
+        let WaitingFor::OptionalCostChoice {
+            cost: ref offering_cost,
+            pending_cast: ref pending_box,
+            ..
+        } = waiting
+        else {
+            panic!("expected OptionalCostChoice for Offering, got {waiting:?}");
+        };
+        let pending_cast = *pending_box.clone();
+
+        let waiting = handle_decide_additional_cost(
+            &mut state,
+            caster,
+            pending_cast,
+            offering_cost,
+            true,
+            &mut events,
+        )
+        .expect("accepting offering must succeed");
+
+        // Confirm the sacrifice selection prompt includes the spirit.
+        let WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            ref choices,
+            ref resume,
+            ..
+        } = waiting
+        else {
+            panic!("expected PayCost(Sacrifice) for Offering, got {waiting:?}");
+        };
+        assert!(choices.contains(&spirit), "spirit must be in eligible list");
+
+        // Execute sacrifice selection and verify the spirit leaves the battlefield.
+        let CostResume::Spell {
+            spell: ref pending_box2,
+        } = resume
+        else {
+            panic!("expected CostResume::Spell");
+        };
+        let pending2 = *pending_box2.clone();
+
+        // Move spell to stack (normally done by announce_spell_on_stack in the
+        // real casting pipeline — needed by finalize_cast_to_stack).
+        crate::game::stack::push_to_stack(
+            &mut state,
+            crate::types::game_state::StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: caster,
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(25),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            },
+            &mut events,
+        );
+
+        handle_sacrifice_for_cost(
+            &mut state,
+            caster,
+            pending2,
+            (1, 1),
+            choices,
+            &[spirit],
+            &mut events,
+        )
+        .expect("sacrifice selection must succeed");
+
+        assert!(
+            !state.battlefield.contains(&spirit),
+            "sacrificed spirit must leave battlefield"
+        );
+    }
+
+    /// CR 702.48a: Declining the Offering leaves the spell's cost unchanged.
+    #[test]
+    fn declining_spirit_offering_preserves_full_cost() {
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        let spirit = create_object(
+            &mut state,
+            CardId(30),
+            caster,
+            "Declining Spirit".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spirit).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Spirit".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            };
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(31),
+            caster,
+            "Kitsune Blademaster 3".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Offering("Spirit".to_string()));
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            };
+        }
+
+        let printed_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 3,
+        };
+        // Fund enough mana to pass the affordability pre-check.
+        for _ in 0..4 {
+            state.players[0].mana_pool.add(ManaUnit::new(
+                ManaType::White,
+                ObjectId(930),
+                false,
+                Vec::new(),
+            ));
+        }
+        let mut events = Vec::new();
+
+        let waiting = check_additional_cost_or_pay_with_distribute(
+            &mut state,
+            caster,
+            spell,
+            CardId(31),
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                spell,
+                caster,
+            ),
+            &printed_cost,
+            Some(printed_cost.clone()),
+            CastingVariant::Normal,
+            None,
+            None,
+            Zone::Hand,
+            CastPaymentMode::Manual, // manual so mana payment pauses, not auto-completes
+            &mut events,
+        )
+        .expect("Spirit offering spell must be castable");
+
+        let WaitingFor::OptionalCostChoice {
+            cost: ref offering_cost,
+            pending_cast: ref pending_box,
+            ..
+        } = waiting
+        else {
+            panic!("expected OptionalCostChoice, got {waiting:?}");
+        };
+        let pending_cast = *pending_box.clone();
+
+        // Pre-announce spell to the stack (normally done by announce_spell_on_stack).
+        crate::game::stack::push_to_stack(
+            &mut state,
+            crate::types::game_state::StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: caster,
+                kind: crate::types::game_state::StackEntryKind::Spell {
+                    card_id: CardId(31),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            },
+            &mut events,
+        );
+
+        // Decline the Offering.
+        let waiting = handle_decide_additional_cost(
+            &mut state,
+            caster,
+            pending_cast,
+            offering_cost,
+            false,
+            &mut events,
+        )
+        .expect("declining offering must succeed");
+
+        // Spirit survives.
+        assert!(
+            state.battlefield.contains(&spirit),
+            "spirit must survive when offering is declined"
+        );
+
+        // After declining, engine proceeds to mana payment with unchanged cost.
+        let WaitingFor::ManaPayment { .. } = waiting else {
+            panic!("expected ManaPayment after declining offering, got {waiting:?}");
+        };
+        let pending = state.pending_cast.as_ref().expect("pending cast must exist");
+        assert_eq!(
+            pending.cost,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3,
+            },
+            "declined offering must leave cost at full {{3}}{{W}}"
+        );
     }
 }

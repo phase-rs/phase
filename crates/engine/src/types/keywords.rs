@@ -846,15 +846,14 @@ pub enum Keyword {
     /// drops its `Vec<Level>` payload).
     Specialize(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (cost-reduction + cast-as-instant hooks not wired).
-    /// CR 702.48a: "[Quality] offering" — additional-cost-on-cast that
-    /// sacrifices a permanent matching `Quality`. "If you chose to pay
-    /// the additional cost, this spell's total cost is reduced by the
-    /// sacrificed permanent's mana cost, and you may cast this spell any
-    /// time you could cast an instant." Carries the canonical subtype
-    /// string (e.g. "Spirit", "Dragon"); cost-reduction and cast-as-
-    /// instant runtime hooks are not yet wired.
+    /// CR 702.48a: "[Quality] offering" — as an additional cost to cast this
+    /// spell, you may sacrifice a [Quality] permanent. If you do, this spell's
+    /// total cost is reduced by the sacrificed permanent's mana cost (CR 702.48c),
+    /// and you may cast this spell any time you could cast an instant. Carries
+    /// the canonical subtype string (e.g. "Spirit", "Dragon"). Runtime behavior
+    /// is fully wired: timing unlock, sacrifice selection, and cost reduction via
+    /// `effective_offering_additional_cost` / `apply_offering_cost_reduction` in
+    /// `casting_costs.rs`.
     Offering(String),
 
     /// Fallback for unrecognized keywords.

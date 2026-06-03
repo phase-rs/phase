@@ -621,6 +621,7 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
+            offering_sacrifice: None,
         })
     }
 

@@ -2723,20 +2723,38 @@ fn prepare_spell_cast_with_variant_override_inner(
             casting_variant,
         ) {
             // CR 702.8a: Flash permits instant-speed casting.
-            let Some(flash_cost) = flash_cost else {
+            if let Some(flash_cost) = flash_cost {
+                restrictions::check_spell_timing(
+                    state,
+                    player,
+                    obj,
+                    ability_def.as_ref(),
+                    true,
+                    casting_variant,
+                )?;
+                mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
+                if cast_outside_sorcery_timing {
+                    cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
+                }
+            } else if casting_costs::can_pay_offering_additional_cost(state, player, object_id) {
+                // CR 702.48a: "[Quality] offering" — if the controller has a legal
+                // sacrifice target, the spell may be cast at instant speed.
+                // `CastTimingPermission::Offering` signals that the upcoming sacrifice
+                // prompt is required (not optional) because the player used Offering
+                // to unlock instant-speed timing.
+                restrictions::check_spell_timing(
+                    state,
+                    player,
+                    obj,
+                    ability_def.as_ref(),
+                    true,
+                    casting_variant,
+                )?;
+                if cast_outside_sorcery_timing {
+                    cast_timing_permission = Some(CastTimingPermission::Offering);
+                }
+            } else {
                 return Err(base_timing_error);
-            };
-            restrictions::check_spell_timing(
-                state,
-                player,
-                obj,
-                ability_def.as_ref(),
-                true,
-                casting_variant,
-            )?;
-            mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
-            if cast_outside_sorcery_timing {
-                cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
             }
         } else if cast_outside_sorcery_timing && has_granted_flash {
             cast_timing_permission = Some(CastTimingPermission::AsThoughHadFlash);
@@ -6288,6 +6306,65 @@ fn continue_with_prepared(
             );
         }
 
+        // CR 702.48a/b: Offering sacrifice must be declared before targets are chosen.
+        // When cast_timing_permission == Offering, the player used Offering to unlock
+        // instant-speed timing and is required to pay the sacrifice. Otherwise it is
+        // optional (sorcery-speed cast with optional Offering).
+        if let Some(offering_cost) =
+            casting_costs::effective_offering_additional_cost(state, player, prepared.object_id)
+        {
+            let required = prepared.cast_timing_permission == Some(CastTimingPermission::Offering);
+            if required {
+                // CR 702.48b: Required when cast used instant-speed timing via Offering.
+                let AbilityCost::Sacrifice { target, count } = (match &offering_cost {
+                    AdditionalCost::Optional { cost, .. } => cost,
+                    _ => unreachable!("offering_cost is always Optional"),
+                })
+                .clone() else {
+                    unreachable!("offering cost is always a Sacrifice")
+                };
+                return casting_costs::begin_required_cost_before_targets(
+                    state,
+                    player,
+                    prepared.object_id,
+                    prepared.card_id,
+                    resolved,
+                    prepared.mana_cost,
+                    Some(prepared.base_mana_cost.clone()),
+                    AbilityCost::Sacrifice { target, count },
+                    prepared.casting_variant,
+                    prepared.cast_timing_permission,
+                    prepared
+                        .ability_def
+                        .as_ref()
+                        .and_then(|a| a.distribute.clone()),
+                    prepared.origin_zone,
+                    prepared.payment_mode,
+                    events,
+                );
+            } else {
+                return casting_costs::begin_optional_cost_before_targets(
+                    state,
+                    player,
+                    prepared.object_id,
+                    prepared.card_id,
+                    resolved,
+                    prepared.mana_cost,
+                    Some(prepared.base_mana_cost.clone()),
+                    offering_cost,
+                    prepared.casting_variant,
+                    prepared.cast_timing_permission,
+                    prepared
+                        .ability_def
+                        .as_ref()
+                        .and_then(|a| a.distribute.clone()),
+                    prepared.origin_zone,
+                    prepared.payment_mode,
+                    events,
+                );
+            }
+        }
+
         if let Some(targets) =
             auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         {
@@ -6733,6 +6810,14 @@ fn can_cast_prepared_now(
             player,
             prepared.object_id,
         )
+    {
+        return false;
+    }
+
+    // CR 702.48a: When the Offering timing unlock was used, a legal sacrifice
+    // target must still exist (state may have changed since prepare time).
+    if prepared.cast_timing_permission == Some(CastTimingPermission::Offering)
+        && !casting_costs::can_pay_offering_additional_cost(state, player, prepared.object_id)
     {
         return false;
     }
