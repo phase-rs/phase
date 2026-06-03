@@ -705,6 +705,7 @@ mod tests {
     use draft_core::types::{
         DeckAddableCards, DraftKind, DraftSource, PodPolicy, SpectatorVisibility, TournamentFormat,
     };
+    use engine::database::CardDatabase;
 
     fn test_config() -> DraftConfig {
         DraftConfig {
@@ -841,6 +842,38 @@ mod tests {
 
         assert_eq!(mgr.draft_for_game_code("GAME01"), Some(code));
         assert_eq!(mgr.draft_for_game_code("NONEXIST"), None);
+    }
+
+    #[test]
+    fn spawn_match_games_skips_pairing_without_submitted_decks() {
+        let mut draft_mgr = DraftSessionManager::new();
+        let (code, _host_token, _) = draft_mgr.create_draft(test_config(), "Alice".to_string());
+        draft_mgr
+            .join_draft(&code, "Bob".to_string(), None)
+            .unwrap();
+
+        draft_mgr
+            .sessions
+            .get_mut(&code)
+            .unwrap()
+            .session
+            .pairings
+            .push(DraftPairing {
+                round: 1,
+                table: 0,
+                players: [PlayerId(0), PlayerId(1)],
+                match_id: "r1-t0".to_string(),
+                status: PairingStatus::Pending,
+                winner: None,
+            });
+
+        let mut game_mgr = SessionManager::new();
+        let spawns = draft_mgr
+            .spawn_match_games_for_round(&code, &mut game_mgr, &CardDatabase::default(), 1)
+            .expect("missing deck submissions should skip only the incomplete pairing");
+
+        assert!(spawns.is_empty());
+        assert!(game_mgr.sessions.is_empty());
     }
 
     #[test]

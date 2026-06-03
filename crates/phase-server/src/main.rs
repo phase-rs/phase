@@ -631,8 +631,8 @@ fn guard_full_create_game_settings_inbound(
 /// variants, which is the wrong default for a security-relevant gate.
 ///
 /// Rejected variants:
-/// - `GeneratePairings`: server-hosted draft match play is not yet implemented;
-///   pairings will be computed server-internal once that path lands.
+/// - `GeneratePairings`: draft match pairings are server-internal; accepting this
+///   from clients would let a player force pairing generation out of sequence.
 /// - `SetSeatConnected`: engine state plumbing. The server-internal runtime in
 ///   `server-core/src/draft_session.rs` broadcasts connection state via
 ///   `draft_core::session::apply` directly. Accepting it from a client would
@@ -644,7 +644,7 @@ fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction)
     use draft_core::types::DraftAction;
     match action {
         DraftAction::GeneratePairings { .. } => {
-            Some("Server-hosted draft match play is not available yet".to_string())
+            Some("GeneratePairings is server-internal; not allowed from client".to_string())
         }
         DraftAction::SetSeatConnected { .. } => {
             Some("SetSeatConnected is server-internal; not allowed from client".to_string())

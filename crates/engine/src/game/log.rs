@@ -111,7 +111,6 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
         | GameEvent::CreatureExerted { .. }
-        | GameEvent::Foretold { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. } => LogCategory::Combat,
 
         GameEvent::DamageDealt { is_combat, .. } => {
@@ -130,7 +129,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::CardsDrawn { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
-        | GameEvent::CardsRevealed { .. } => LogCategory::Zone,
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::Foretold { .. } => LogCategory::Zone,
 
         GameEvent::LifeChanged { .. } => LogCategory::Life,
 
