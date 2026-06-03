@@ -2397,14 +2397,16 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // sub-cost through `pay_additional_cost` so it is paid alongside the
     // (potentially zero) mana sub-cost.
     if casting_variant == CastingVariant::Evoke {
-        let evoke_split = state.objects.get(&object_id).and_then(|obj| {
-            obj.keywords.iter().find_map(|k| match k {
+        // CR 601.2h: non-mana evoke residual from effective keywords (granted
+        // evoke).
+        let evoke_split = super::casting::effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
                 crate::types::keywords::Keyword::Evoke(ec) => {
                     Some(super::casting::split_evoke_cost_components(ec))
                 }
                 _ => None,
-            })
-        });
+            });
         if let Some((_mana, Some(non_mana_cost))) = evoke_split {
             let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
             pending.base_cost = base_cost.clone();
