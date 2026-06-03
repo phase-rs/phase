@@ -12824,6 +12824,305 @@ mod tests {
         }
     }
 
+    /// CR 104.3e + CR 119 + CR 603.4 + CR 603.7c + CR 603.12: Ezio Auditore
+    /// da Firenze — "Whenever ~ deals combat damage to a player, you may pay
+    /// {W}{U}{B}{R}{G} if that player has 10 or less life. When you do, that
+    /// player loses the game."
+    ///
+    /// Three-defect regression for issue #1962:
+    ///
+    /// 1. The intervening-if "if that player has 10 or less life" (CR 603.4)
+    ///    used to be dropped — the trigger fired unconditionally. The new
+    ///    `parse_life_predicate` combinator in `oracle_nom::condition` must
+    ///    lift this into `TriggerCondition::QuantityComparison` on
+    ///    `LifeTotal[ScopedPlayer]`.
+    /// 2. "That player loses the game" used to lower to a bare
+    ///    `Effect::LoseTheGame` with no target — the resolver routed
+    ///    elimination to the ability controller (Ezio's controller), so the
+    ///    Ezio player eliminated *themselves*. The new
+    ///    `Effect::LoseTheGame.target` field must be
+    ///    `Some(TargetFilter::TriggeringPlayer)` (CR 603.7c — "that player"
+    ///    anaphora binds to the player named by the damage event).
+    /// 3. The reflexive "When you do" gate (CR 603.12) on the directed-loss
+    ///    sub-ability must be preserved so the loss only fires after the
+    ///    mana payment occurs.
+    #[test]
+    fn parse_ezio_damage_trigger_full_structure() {
+        use crate::types::ability::{
+            AbilityCondition, Effect, PaymentCost, PlayerScope, QuantityExpr, QuantityRef,
+        };
+        use crate::types::mana::{ManaCost, ManaCostShard};
+
+        let def = parse_trigger_line(
+            "Whenever ~ deals combat damage to a player, if that player has 10 or less life, you may pay {W}{U}{B}{R}{G}. When you do, that player loses the game.",
+            "Ezio Auditore da Firenze",
+        );
+
+        // (a) Mode + damage kind + valid_target — CR 120.3 + CR 603.7c.
+        assert!(
+            matches!(def.mode, TriggerMode::DamageDone),
+            "mode must be DamageDone, got {:?}",
+            def.mode,
+        );
+        assert!(
+            matches!(def.damage_kind, DamageKindFilter::CombatOnly),
+            "damage_kind must be CombatOnly, got {:?}",
+            def.damage_kind,
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Player),
+            "valid_target must be Player (the recipient of combat damage)",
+        );
+
+        // (b) Intervening-if condition — CR 603.4 + CR 119: LifeTotal[ScopedPlayer] LE 10.
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 10 },
+            }),
+            "intervening-if must lift to QuantityComparison(LifeTotal[ScopedPlayer] LE 10), got {:?}",
+            def.condition,
+        );
+
+        // Outer execute is the "you may pay {WUBRG}" cost.
+        let execute = def.execute.as_ref().expect("execute must be Some");
+
+        // (c) Optional flag — the "you may" prefix on the cost (CR 609.3).
+        assert!(
+            execute.optional,
+            "execute.optional must be true (the 'you may pay' wording)",
+        );
+
+        // (d) Cost effect — PayCost { Mana { WUBRG }, payer: Controller }.
+        match &*execute.effect {
+            Effect::PayCost { cost, payer } => {
+                match cost {
+                    PaymentCost::Mana {
+                        cost: ManaCost::Cost { shards, generic },
+                    } => {
+                        assert_eq!(*generic, 0, "WUBRG cost has no generic component");
+                        let expected = [
+                            ManaCostShard::White,
+                            ManaCostShard::Blue,
+                            ManaCostShard::Black,
+                            ManaCostShard::Red,
+                            ManaCostShard::Green,
+                        ];
+                        for shard in expected {
+                            assert!(
+                                shards.contains(&shard),
+                                "cost shards must include {shard:?}, got {shards:?}",
+                            );
+                        }
+                        assert_eq!(
+                            shards.len(),
+                            5,
+                            "cost must be exactly WUBRG (5 shards), got {shards:?}",
+                        );
+                    }
+                    other => panic!("PayCost.cost must be Mana(WUBRG), got {other:?}"),
+                }
+                assert_eq!(
+                    *payer,
+                    TargetFilter::Controller,
+                    "PayCost.payer must be Controller (the trigger controller pays)",
+                );
+            }
+            other => panic!("execute.effect must be PayCost, got {other:?}"),
+        }
+
+        // (e) Reflexive sub_ability: "When you do, that player loses the game."
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("sub_ability must be Some — the 'When you do' clause");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::WhenYouDo),
+            "sub_ability.condition must be WhenYouDo (CR 603.12), got {:?}",
+            sub.condition,
+        );
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::LoseTheGame { target: Some(f) } if *f == TargetFilter::TriggeringPlayer
+            ),
+            "sub_ability.effect must be LoseTheGame {{ target: Some(TriggeringPlayer) }}, got {:?}",
+            sub.effect,
+        );
+    }
+
+    /// CR 104.3e + CR 119 + CR 603.4 + CR 603.7c + CR 603.12: Ezio Auditore
+    /// da Firenze — VERBATIM printed Oracle text (post-effect `if` form):
+    /// "Whenever ~ deals combat damage to a player, you may pay
+    /// {W}{U}{B}{R}{G} if that player has 10 or less life. When you do,
+    /// that player loses the game."
+    ///
+    /// The companion test `parse_ezio_damage_trigger_full_structure` uses
+    /// the *normalized* leading-`if` form ("...if that player has 10 or
+    /// less life, you may pay...") which hoists the predicate to
+    /// `def.condition` (CR 603.4 intervening-if, detection-time gate). The
+    /// verbatim card text uses the *post-effect* `if` form, which re-homes
+    /// the predicate onto `execute.condition` (CR 608.2c, resolution-time
+    /// gate via `strip_suffix_conditional` →
+    /// `try_nom_condition_as_ability_condition`) instead.
+    ///
+    /// Issue #1962 hardening (TEST-ONLY): the real printed card text was
+    /// previously untested — a regression in the post-effect re-homer would
+    /// silently strand the life predicate (allowing the loss to fire at
+    /// any life total), but the normalized-form regression test would
+    /// continue to pass. This test locks the load-bearing invariant that
+    /// the life-total gate exists *somewhere* on the lowered ability tree,
+    /// regardless of which path the parser uses to lift it.
+    #[test]
+    fn parse_ezio_damage_trigger_verbatim_oracle_text() {
+        use crate::types::ability::{
+            AbilityCondition, Effect, PaymentCost, PlayerScope, QuantityExpr, QuantityRef,
+        };
+        use crate::types::mana::{ManaCost, ManaCostShard};
+
+        let def = parse_trigger_line(
+            "Whenever ~ deals combat damage to a player, you may pay {W}{U}{B}{R}{G} if that player has 10 or less life. When you do, that player loses the game.",
+            "Ezio Auditore da Firenze",
+        );
+
+        // (a) Mode + damage kind + valid_target — CR 120.3 + CR 603.7c.
+        // These are unchanged from the normalized form: the trigger shape
+        // itself doesn't depend on which side of the comma the `if` clause
+        // lives on.
+        assert!(
+            matches!(def.mode, TriggerMode::DamageDone),
+            "mode must be DamageDone, got {:?}",
+            def.mode,
+        );
+        assert!(
+            matches!(def.damage_kind, DamageKindFilter::CombatOnly),
+            "damage_kind must be CombatOnly, got {:?}",
+            def.damage_kind,
+        );
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Player),
+            "valid_target must be Player (the recipient of combat damage)",
+        );
+
+        let execute = def.execute.as_ref().expect("execute must be Some");
+
+        // (b) Optional flag — the "you may pay" wording (CR 609.3).
+        assert!(
+            execute.optional,
+            "execute.optional must be true (the 'you may pay' wording)",
+        );
+
+        // (c) Cost effect — PayCost { Mana { WUBRG }, payer: Controller }.
+        // The cost shape must be identical to the normalized form.
+        match &*execute.effect {
+            Effect::PayCost { cost, payer } => {
+                match cost {
+                    PaymentCost::Mana {
+                        cost: ManaCost::Cost { shards, generic },
+                    } => {
+                        assert_eq!(*generic, 0, "WUBRG cost has no generic component");
+                        let expected = [
+                            ManaCostShard::White,
+                            ManaCostShard::Blue,
+                            ManaCostShard::Black,
+                            ManaCostShard::Red,
+                            ManaCostShard::Green,
+                        ];
+                        for shard in expected {
+                            assert!(
+                                shards.contains(&shard),
+                                "cost shards must include {shard:?}, got {shards:?}",
+                            );
+                        }
+                        assert_eq!(
+                            shards.len(),
+                            5,
+                            "cost must be exactly WUBRG (5 shards), got {shards:?}",
+                        );
+                    }
+                    other => panic!("PayCost.cost must be Mana(WUBRG), got {other:?}"),
+                }
+                assert_eq!(
+                    *payer,
+                    TargetFilter::Controller,
+                    "PayCost.payer must be Controller (the trigger controller pays)",
+                );
+            }
+            other => panic!("execute.effect must be PayCost, got {other:?}"),
+        }
+
+        // (d) THE KEY INVARIANT: the life-total predicate must exist
+        // *somewhere* on the lowered ability tree. The post-effect `if`
+        // form lifts it to `execute.condition` (CR 608.2c), not
+        // `def.condition` (CR 603.4) — but a regression in either path
+        // would drop the gate entirely. Accept whichever path the parser
+        // actually uses, but assert at least one is populated with the
+        // correct shape.
+        let expected_predicate = (
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::ScopedPlayer,
+                },
+            },
+            Comparator::LE,
+            QuantityExpr::Fixed { value: 10 },
+        );
+        let trigger_condition_matches = matches!(
+            &def.condition,
+            Some(TriggerCondition::QuantityComparison { lhs, comparator, rhs })
+                if *lhs == expected_predicate.0
+                    && *comparator == expected_predicate.1
+                    && *rhs == expected_predicate.2
+        );
+        let execute_condition_matches = matches!(
+            &execute.condition,
+            Some(AbilityCondition::QuantityCheck { lhs, comparator, rhs })
+                if *lhs == expected_predicate.0
+                    && *comparator == expected_predicate.1
+                    && *rhs == expected_predicate.2
+        );
+        assert!(
+            trigger_condition_matches || execute_condition_matches,
+            "life-total gate (LifeTotal[ScopedPlayer] LE 10) must be present on either \
+             def.condition (CR 603.4 intervening-if) or execute.condition (CR 608.2c \
+             post-effect re-homer); got def.condition={:?}, execute.condition={:?}",
+            def.condition,
+            execute.condition,
+        );
+
+        // (e) Reflexive sub_ability: "When you do, that player loses the
+        // game." This is independent of which side of the comma the `if`
+        // appears on — the WhenYouDo gate + directed LoseTheGame target
+        // must always be wired through.
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("sub_ability must be Some — the 'When you do' clause");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::WhenYouDo),
+            "sub_ability.condition must be WhenYouDo (CR 603.12), got {:?}",
+            sub.condition,
+        );
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::LoseTheGame { target: Some(f) } if *f == TargetFilter::TriggeringPlayer
+            ),
+            "sub_ability.effect must be LoseTheGame {{ target: Some(TriggeringPlayer) }}, got {:?}",
+            sub.effect,
+        );
+    }
+
     /// CR 603.7c + CR 120.3 + CR 119.3: Unstoppable Slasher — "Whenever this
     /// creature deals combat damage to a player, they lose half their life,
     /// rounded up." is an event-bound (non-targeted) trigger per CR 603.6f.
@@ -13057,7 +13356,11 @@ mod tests {
         // Angel never eliminates itself — directly fixing the "my own Angel
         // killed me" report.
         let execute = def.execute.as_ref().expect("execute must be Some");
-        assert_eq!(*execute.effect, Effect::LoseTheGame);
+        assert!(
+            matches!(*execute.effect, Effect::LoseTheGame { target: None }),
+            "execute effect must be LoseTheGame with no explicit target, got {:?}",
+            execute.effect,
+        );
         assert_eq!(
             execute.player_scope,
             Some(PlayerFilter::OpponentAttackedBySourceThisTurn),

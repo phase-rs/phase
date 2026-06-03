@@ -6533,8 +6533,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Clash => Effect::Clash,
         ImperativeFamilyAst::GainKeyword(effect) => effect,
         ImperativeFamilyAst::LoseKeyword(effect) => effect,
-        ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame,
-        ImperativeFamilyAst::WinTheGame => Effect::WinTheGame,
+        ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame { target: None },
+        ImperativeFamilyAst::WinTheGame => Effect::WinTheGame { target: None },
         ImperativeFamilyAst::RollDie { sides, modifier } => Effect::RollDie {
             sides,
             results: vec![],

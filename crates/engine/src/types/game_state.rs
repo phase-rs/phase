@@ -3768,6 +3768,14 @@ pub enum CastingVariant {
     /// stack display plus layer evaluation use the secondary mana cost and P/T
     /// while it is a creature.
     Prototype,
+    /// CR 702.173a: Cast from hand via Freerunning's alternative cost. Legal
+    /// only when a player was dealt combat damage this turn by an Assassin
+    /// creature or a commander under the caster's control. The printed mana
+    /// cost is replaced by the `Keyword::Freerunning(cost)` payload at cast
+    /// preparation (mirrors `Overload` / `Foretell`). Resolution routing
+    /// matches a normal cast — no on-resolve special behavior — so this is a
+    /// casting-context tag, not a resolution-affecting variant.
+    Freerunning,
 }
 
 impl CastingVariant {
@@ -4706,6 +4714,15 @@ pub struct GameState {
     /// of deep-copying them on the AI-search hot path.
     #[serde(default)]
     pub damage_dealt_this_turn: im::Vector<DamageRecord>,
+    /// CR 702.173a + CR 608.2i: Set of players P such that, at some point this
+    /// turn, a creature controlled by P that was an Assassin OR a commander
+    /// (snapshot at damage-dealing time per CR 608.2i — "looks back in time")
+    /// dealt combat damage to ANY player. Populated by the trigger pipeline's
+    /// `DamageDealt` observer in `game::triggers` and cleared at cleanup
+    /// (`game::cleanup`) per CR 514. Read by `casting_variant_candidates`
+    /// to gate the Freerunning cast permission on the spell's controller.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub assassin_or_commander_dealt_combat_damage_this_turn: HashSet<PlayerId>,
     /// CR 700.14: Cumulative mana spent on spells this turn per player (for Expend triggers).
     #[serde(default)]
     pub mana_spent_on_spells_this_turn: HashMap<PlayerId, u32>,
@@ -5401,6 +5418,7 @@ impl GameState {
             zone_changes_this_turn: Vec::new(),
             battlefield_entries_this_turn: Vec::new(),
             damage_dealt_this_turn: im::Vector::new(),
+            assassin_or_commander_dealt_combat_damage_this_turn: HashSet::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             pending_spell_cost_reductions: Vec::new(),
             pending_next_spell_modifiers: Vec::new(),
@@ -5700,6 +5718,8 @@ impl PartialEq for GameState {
             && self.zone_changes_this_turn == other.zone_changes_this_turn
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
+            && self.assassin_or_commander_dealt_combat_damage_this_turn
+                == other.assassin_or_commander_dealt_combat_damage_this_turn
             && self.pending_spell_cost_reductions == other.pending_spell_cost_reductions
             && self.pending_next_spell_modifiers == other.pending_next_spell_modifiers
             && self.pending_etb_counters == other.pending_etb_counters

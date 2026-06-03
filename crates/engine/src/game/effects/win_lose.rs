@@ -1,37 +1,61 @@
-use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 use crate::game::elimination::eliminate_player;
 use crate::game::players;
 use crate::game::static_abilities::player_has_cant_win;
+use crate::game::targeting::extract_player_from_event;
 
-/// CR 104.3a: Resolve "lose the game" — the affected player loses.
+/// CR 104.3e: Resolve "lose the game" — the affected player loses.
 ///
-/// Target resolution:
-/// - If the ability has player targets, those players lose.
-/// - Otherwise, the ability's controller loses (self-inflicted, e.g. "you lose the game").
+/// Player resolution (in priority order):
+/// 1. If `Effect::LoseTheGame.target` names a context-ref subject
+///    (`TriggeringPlayer`, `Controller`, `SelfRef`), resolve it directly —
+///    these never produce stack-time target slots (they bind to the
+///    current trigger event or to the ability's controller).
+/// 2. Otherwise, if the ability has player targets in `ability.targets`,
+///    those players lose.
+/// 3. Otherwise, the ability's controller loses (the default
+///    "you lose the game" reading).
+///
+/// The context-ref path is required for Ezio Auditore da Firenze's
+/// "that player loses the game" reflexive sub-ability: the parser lowers
+/// "that player" to `TargetFilter::TriggeringPlayer`, which is a context
+/// ref (CR 603.7c) — `extract_target_filter_from_effect` filters context
+/// refs out of stack-time target slots, so `ability.targets` is empty even
+/// though the effect names a specific subject.
 pub fn resolve_lose(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let players_to_eliminate: Vec<_> = if ability.targets.is_empty() {
-        // No target: controller loses (e.g., "you lose the game")
-        vec![ability.controller]
-    } else {
-        ability
-            .targets
-            .iter()
-            .filter_map(|t| match t {
-                TargetRef::Player(pid) => Some(*pid),
-                _ => None,
-            })
-            .collect()
+    let target_filter = match &ability.effect {
+        Effect::LoseTheGame { target } => target.as_ref(),
+        _ => return Err(EffectError::MissingParam("expected LoseTheGame".into())),
     };
 
+    let players_to_eliminate: Vec<_> =
+        if let Some(pid) = resolve_context_ref_player(state, ability, target_filter) {
+            vec![pid]
+        } else if ability.targets.is_empty() {
+            // No target: controller loses (e.g., "you lose the game")
+            vec![ability.controller]
+        } else {
+            ability
+                .targets
+                .iter()
+                .filter_map(|t| match t {
+                    TargetRef::Player(pid) => Some(*pid),
+                    _ => None,
+                })
+                .collect()
+        };
+
     for pid in players_to_eliminate {
-        // CR 104.3a: A player who loses the game leaves the game.
+        // CR 104.3e: A player who loses the game leaves the game.
         eliminate_player(state, pid, events);
     }
 
@@ -42,22 +66,69 @@ pub fn resolve_lose(
     Ok(())
 }
 
-/// CR 104.2b + CR 104.3e: Resolve "win the game" — all opponents of the controller lose.
+/// CR 603.7c + CR 109.4: Resolve a `target` filter that is a context-ref
+/// player subject to a concrete `PlayerId` at effect-resolution time.
+/// Returns `None` if the filter is absent, not a context ref, or cannot
+/// resolve from the current trigger event.
 ///
-/// A player wins by eliminating all opponents. Per CR 104.2b, an effect may
-/// state that a player wins the game. Per CR 104.3e, all other players lose.
+/// Shared by `resolve_lose` and `resolve_win` so the directed-subject
+/// semantics ("that player loses", "that player wins") are uniform.
+fn resolve_context_ref_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: Option<&TargetFilter>,
+) -> Option<crate::types::player::PlayerId> {
+    match target? {
+        TargetFilter::Controller | TargetFilter::SelfRef => Some(ability.controller),
+        TargetFilter::TriggeringPlayer => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(|event| extract_player_from_event(event, state)),
+        _ => None,
+    }
+}
+
+/// CR 104.2b + CR 104.3e: Resolve "win the game" — the winner's opponents lose.
+///
+/// Winner resolution (in priority order):
+/// 1. If `Effect::WinTheGame.target` names a context-ref subject, that
+///    player wins (CR 104.2b). Mirrors the `LoseTheGame` directed-subject
+///    path used by "that player wins the game" wordings.
+/// 2. Otherwise, if `ability.targets` contains a player target, that
+///    player wins.
+/// 3. Otherwise, the ability's controller wins (the standard "you win the
+///    game" reading).
+///
+/// After resolving the winner, all opponents of the winner are eliminated
+/// (CR 104.3e), unless the winner is under `CantWinTheGame` (CR 104.2b).
 pub fn resolve_win(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 104.2b: CantWinTheGame blocks effect-based wins. If the controller is
+    let target_filter = match &ability.effect {
+        Effect::WinTheGame { target } => target.as_ref(),
+        _ => return Err(EffectError::MissingParam("expected WinTheGame".into())),
+    };
+
+    let winner = resolve_context_ref_player(state, ability, target_filter).unwrap_or_else(|| {
+        ability
+            .targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                _ => None,
+            })
+            .unwrap_or(ability.controller)
+    });
+
+    // CR 104.2b: CantWinTheGame blocks effect-based wins. If the winner is
     // under a CantWinTheGame static, the win effect resolves but has no
     // effect — no opponents are eliminated. CR 104.2a's last-player-standing
     // case is enforced separately in elimination::check_game_over and
     // correctly overrides CantWinTheGame (per the CR text, 104.2a "overrides
     // all effects that would preclude that player from winning the game").
-    if player_has_cant_win(state, ability.controller) {
+    if player_has_cant_win(state, winner) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::WinTheGame,
             source_id: ability.source_id,
@@ -66,7 +137,7 @@ pub fn resolve_win(
     }
 
     // CR 104.2b + CR 104.3e: A player wins the game — all opponents lose.
-    let opponents: Vec<_> = players::opponents(state, ability.controller)
+    let opponents: Vec<_> = players::opponents(state, winner)
         .into_iter()
         .filter(|&pid| players::is_alive(state, pid))
         .collect();
@@ -121,7 +192,12 @@ mod tests {
     #[test]
     fn lose_the_game_eliminates_controller_when_untargeted() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility::new(Effect::LoseTheGame, vec![], ObjectId(1), PlayerId(0));
+        let ability = ResolvedAbility::new(
+            Effect::LoseTheGame { target: None },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve_lose(&mut state, &ability, &mut events).unwrap();
@@ -139,7 +215,7 @@ mod tests {
     fn lose_the_game_eliminates_targeted_player() {
         let mut state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
-            Effect::LoseTheGame,
+            Effect::LoseTheGame { target: None },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(1),
             PlayerId(0),
@@ -157,10 +233,80 @@ mod tests {
         ));
     }
 
+    /// CR 104.3e + CR 603.7c + CR 109.4: Ezio Auditore da Firenze regression
+    /// (issue #1962, TEST-ONLY hardening) — `Effect::LoseTheGame` with
+    /// `target: Some(TargetFilter::TriggeringPlayer)` must eliminate the
+    /// damaged player (extracted from `state.current_trigger_event`), NOT
+    /// the ability's controller. This locks the load-bearing
+    /// "right player loses" invariant exercised by `resolve_lose`'s
+    /// context-ref branch — the bug the issue reported was Ezio's
+    /// controller eliminating *themselves* because the directed-subject
+    /// target was dropped at the parser layer and `resolve_lose` fell
+    /// through to the `ability.controller` default. With the fix, the
+    /// parser supplies `TriggeringPlayer`, and the resolver reads
+    /// `current_trigger_event`'s damage target to land elimination on
+    /// the correct player.
+    #[test]
+    fn lose_the_game_with_triggering_player_target_eliminates_damaged_player_not_controller() {
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::ObjectId;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Seed the trigger event as `process_triggers` would: a combat
+        // damage event targeting P1 (the damaged player), with source
+        // controlled by P0 (the ability controller).
+        state.current_trigger_event = Some(GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 4,
+            is_combat: true,
+            excess: 0,
+        });
+
+        // Ability controlled by P0, targeting TriggeringPlayer (P1 — the
+        // damaged player). `ability.targets` is empty because context-ref
+        // filters never produce stack-time target slots (see resolve_lose
+        // docs and `extract_target_filter_from_effect`).
+        let ability = ResolvedAbility::new(
+            Effect::LoseTheGame {
+                target: Some(TargetFilter::TriggeringPlayer),
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_lose(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            state.players[1].is_eliminated,
+            "P1 (damaged player extracted from current_trigger_event) must be eliminated"
+        );
+        assert!(
+            !state.players[0].is_eliminated,
+            "P0 (ability controller) must NOT be eliminated — \
+             TriggeringPlayer target must not fall through to the controller default \
+             (issue #1962: Ezio's controller used to lose the game themselves)"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(PlayerId(0))
+            }
+        ));
+    }
+
     #[test]
     fn win_the_game_eliminates_all_opponents() {
         let mut state = GameState::new_two_player(42);
-        let ability = ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(1), PlayerId(0));
+        let ability = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve_win(&mut state, &ability, &mut events).unwrap();
@@ -183,7 +329,12 @@ mod tests {
         // Platinum Angel owned by PlayerId(0) with CantWinTheGame affecting You.
         add_cant_win_permanent(&mut state, PlayerId(0), ControllerRef::You);
 
-        let ability = ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(1), PlayerId(0));
+        let ability = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve_win(&mut state, &ability, &mut events).unwrap();
@@ -208,7 +359,12 @@ mod tests {
         // Permanent owned by PlayerId(1), affects its controller (PlayerId(1)).
         add_cant_win_permanent(&mut state, PlayerId(1), ControllerRef::You);
 
-        let ability = ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(1), PlayerId(0));
+        let ability = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
         let mut events = Vec::new();
 
         resolve_win(&mut state, &ability, &mut events).unwrap();
@@ -252,7 +408,12 @@ mod tests {
             );
 
         // PlayerId(1) tries to win — blocked by the opponent-scoped CantWin.
-        let ability = ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(1), PlayerId(1));
+        let ability = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(1),
+            PlayerId(1),
+        );
         let mut events = Vec::new();
 
         resolve_win(&mut state, &ability, &mut events).unwrap();

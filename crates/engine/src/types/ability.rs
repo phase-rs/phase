@@ -6566,12 +6566,27 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recipient_object_filter: Option<TargetFilter>,
     },
-    /// CR 104.3a: A player who meets this effect's condition loses the game.
-    /// The affected player is determined by resolution context (controller's opponent
-    /// if untargeted, or explicit target if targeted).
-    LoseTheGame,
-    /// CR 104.3a: The controller wins the game — all opponents lose.
-    WinTheGame,
+    /// CR 104.3e: An effect may state that a player loses the game.
+    ///
+    /// `target` names the player who loses the game when the effect resolves:
+    /// `Some(filter)` for directed loss (e.g. "that player loses the game" on
+    /// Ezio Auditore da Firenze's reflexive sub-ability, where the filter
+    /// resolves to the damaged player via `TargetFilter::TriggeringPlayer`);
+    /// `None` for the untargeted controller-scoped form (the resolver falls
+    /// back to `ability.controller`).
+    LoseTheGame {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<TargetFilter>,
+    },
+    /// CR 104.2b: An effect may state that a player wins the game.
+    ///
+    /// `target` mirrors `LoseTheGame::target`: `Some(filter)` for directed
+    /// wins; `None` defaults to the ability's controller (the standard "you
+    /// win the game" reading).
+    WinTheGame {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<TargetFilter>,
+    },
     /// CR 706: Roll a die with the given number of sides.
     /// If `results` is non-empty, execute the matching branch.
     /// CR 706.2: `modifier` adjusts the natural roll before result-branch lookup.
@@ -7879,9 +7894,19 @@ impl Effect {
             },
 
             // GenericEffect and LoseLife have Option<TargetFilter>
-            Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {
-                target.as_ref()
-            }
+            //
+            // CR 104.3e + CR 115.1 + CR 603.7c: `LoseTheGame.target` and
+            // `WinTheGame.target` are Some(filter) when the Oracle text names
+            // a specific subject ("that player loses the game" — Ezio
+            // Auditore da Firenze; the filter resolves to
+            // `TargetFilter::TriggeringPlayer` so the trigger machinery binds
+            // the damaged player into `ability.targets`). When None the
+            // resolver falls back to `ability.controller` (the "you lose the
+            // game" / "you win the game" default).
+            Effect::GenericEffect { target, .. }
+            | Effect::LoseLife { target, .. }
+            | Effect::LoseTheGame { target, .. }
+            | Effect::WinTheGame { target, .. } => target.as_ref(),
 
             // CR 115.1 + CR 115.7: Mana abilities normally don't target, but a
             // few spell-only mana effects (Jeska's Will mode 1: "Add {R} for
@@ -7953,8 +7978,6 @@ impl Effect {
             | Effect::ExchangeControl { .. }
             | Effect::Manifest { .. }
             | Effect::ManifestDread
-            | Effect::LoseTheGame
-            | Effect::WinTheGame
             | Effect::RollDie { .. }
             | Effect::FlipCoin { .. }
             | Effect::FlipCoins { .. }
@@ -8123,8 +8146,8 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::CastFromZone { .. } => "CastFromZone",
         Effect::PreventDamage { .. } => "PreventDamage",
         Effect::CreateDamageReplacement { .. } => "CreateDamageReplacement",
-        Effect::LoseTheGame => "LoseTheGame",
-        Effect::WinTheGame => "WinTheGame",
+        Effect::LoseTheGame { .. } => "LoseTheGame",
+        Effect::WinTheGame { .. } => "WinTheGame",
         Effect::RollDie { .. } => "RollDie",
         Effect::FlipCoin { .. } => "FlipCoin",
         Effect::FlipCoins { .. } => "FlipCoins",
@@ -8500,8 +8523,8 @@ impl From<&Effect> for EffectKind {
             Effect::CastFromZone { .. } => EffectKind::CastFromZone,
             Effect::PreventDamage { .. } => EffectKind::PreventDamage,
             Effect::CreateDamageReplacement { .. } => EffectKind::CreateDamageReplacement,
-            Effect::LoseTheGame => EffectKind::LoseTheGame,
-            Effect::WinTheGame => EffectKind::WinTheGame,
+            Effect::LoseTheGame { .. } => EffectKind::LoseTheGame,
+            Effect::WinTheGame { .. } => EffectKind::WinTheGame,
             Effect::RollDie { .. } => EffectKind::RollDie,
             Effect::FlipCoin { .. } => EffectKind::FlipCoin,
             Effect::FlipCoins { .. } => EffectKind::FlipCoins,

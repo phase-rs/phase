@@ -1760,8 +1760,8 @@ pub fn resolve_effect(
         Effect::CreateDamageReplacement { .. } => {
             create_damage_replacement::resolve(state, ability, events)
         }
-        Effect::LoseTheGame => win_lose::resolve_lose(state, ability, events),
-        Effect::WinTheGame => win_lose::resolve_win(state, ability, events),
+        Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
+        Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => roll_die::resolve(state, ability, events),
         Effect::FlipCoin { .. } => flip_coin::resolve(state, ability, events),
         Effect::FlipCoins { .. } => flip_coin::resolve_flip_coins(state, ability, events),
@@ -13491,8 +13491,12 @@ mod tests {
 
         // WIN scenario: library = 1, devotion = 2 → 2 >= 1 → true.
         let state_win = build_state(1);
-        let ability_win =
-            ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(9001), PlayerId(0));
+        let ability_win = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(9001),
+            PlayerId(0),
+        );
         assert!(
             evaluate_condition(&condition, &state_win, &ability_win),
             "WIN scenario: devotion=2, library=1 should satisfy GE",
@@ -13500,8 +13504,12 @@ mod tests {
 
         // NO-WIN scenario: library = 50, devotion = 2 → 2 >= 50 → false.
         let state_no_win = build_state(50);
-        let ability_no_win =
-            ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(9002), PlayerId(0));
+        let ability_no_win = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(9002),
+            PlayerId(0),
+        );
         assert!(
             !evaluate_condition(&condition, &state_no_win, &ability_no_win),
             "NO-WIN scenario: devotion=2, library=50 must NOT satisfy GE",

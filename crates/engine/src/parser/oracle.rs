@@ -6513,14 +6513,20 @@ mod tests {
         // Walk to the innermost SequentialSibling chain — the WinTheGame node.
         let mut node = exec;
         while let Some(sub) = node.sub_ability.as_ref() {
-            if matches!(*sub.effect, crate::types::ability::Effect::WinTheGame) {
+            if matches!(
+                *sub.effect,
+                crate::types::ability::Effect::WinTheGame { .. }
+            ) {
                 node = sub;
                 break;
             }
             node = sub;
         }
         assert!(
-            matches!(*node.effect, crate::types::ability::Effect::WinTheGame),
+            matches!(
+                *node.effect,
+                crate::types::ability::Effect::WinTheGame { .. }
+            ),
             "expected to find WinTheGame in the SequentialSibling chain, got {:?}",
             node.effect
         );

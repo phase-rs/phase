@@ -10193,6 +10193,23 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         Effect::ExtraTurn { target } if *target == TargetFilter::Controller => {
             *target = subject_filter;
         }
+        // CR 104.3e + CR 603.7c: "that player loses the game" / "target player
+        // loses the game" — bind the named player into the effect's
+        // optional target field. The subject parser ("subject.rs") maps "that
+        // player" → `TargetFilter::TriggeringPlayer` (a context ref resolved
+        // at effect-resolution time against `state.current_trigger_event`)
+        // and "target player" → `TargetFilter::Player` (declared at cast/
+        // stack-push time). Guard on `is_none()` so an already-parsed target
+        // (no current call site, kept defensively) is preserved. Canonical
+        // cards: Ezio Auditore da Firenze's reflexive "that player loses the
+        // game" sub-ability (CR 104.3e); the WinTheGame arm is the symmetric
+        // CR 104.2b counterpart for any future "that player wins the game"
+        // wording.
+        Effect::LoseTheGame { ref mut target } | Effect::WinTheGame { ref mut target }
+            if target.is_none() =>
+        {
+            *target = Some(subject_filter);
+        }
         // CR 122.1: "target player gets a poison counter" — inject subject target
         Effect::GivePlayerCounter { target, .. } if *target == TargetFilter::Controller => {
             *target = subject_filter;
@@ -17355,7 +17372,7 @@ mod tests {
         );
 
         assert!(
-            matches!(*def.effect, Effect::WinTheGame),
+            matches!(*def.effect, Effect::WinTheGame { .. }),
             "top-level effect must be WinTheGame, got: {:?}",
             def.effect
         );

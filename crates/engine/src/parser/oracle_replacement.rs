@@ -10656,7 +10656,7 @@ mod snapshot_tests {
         assert!(
             matches!(
                 def.execute.as_deref().map(|a| &*a.effect),
-                Some(crate::types::ability::Effect::WinTheGame)
+                Some(crate::types::ability::Effect::WinTheGame { .. })
             ),
             "execute must be WinTheGame, got {:?}",
             def.execute

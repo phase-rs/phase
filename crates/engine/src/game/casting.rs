@@ -2223,6 +2223,25 @@ fn casting_variant_candidates(
         }
     }
 
+    // CR 702.173a: Freerunning is a static spell ability — the alt-cost
+    // permission lives on the spell card (printed or granted via
+    // `CastWithKeyword`) and only applies while the spell is in a castable
+    // zone. Today the only printed home for Freerunning is hand-castable
+    // spells (CR 601.2a default zone), so only the Zone::Hand branch surfaces
+    // it. The eligibility predicate ("a player was dealt combat damage this
+    // turn by an Assassin creature or commander you control") is read from
+    // the per-turn ledger maintained in `triggers::collect_pending_triggers`.
+    if obj.zone == Zone::Hand
+        && effective_spell_keywords(state, player, object_id)
+            .iter()
+            .any(|k| matches!(k, Keyword::Freerunning(_)))
+        && state
+            .assassin_or_commander_dealt_combat_damage_this_turn
+            .contains(&player)
+    {
+        candidates.push(CastingVariant::Freerunning);
+    }
+
     candidates
 }
 
@@ -2789,6 +2808,23 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.173a: Freerunning alternative cost — pulled from
+    // `Keyword::Freerunning(cost)` on the hand object (or from
+    // `effective_spell_keywords` when the keyword was granted via a
+    // `CastWithKeyword` static, mirroring how `effective_spell_keywords` is
+    // consulted at candidate enumeration). Only honored when the caller
+    // explicitly opted into the Freerunning variant via the
+    // `CastingVariantChoice` prompt.
+    let freerunning_cost = if casting_variant == CastingVariant::Freerunning {
+        effective_spell_keywords(state, player, object_id)
+            .iter()
+            .find_map(|k| match k {
+                crate::types::keywords::Keyword::Freerunning(cost) => Some(cost.clone()),
+                _ => None,
+            })
+    } else {
+        None
+    };
     // CR 702.34a: When the flashback cost is purely non-mana (e.g. Battle Screech's
     // "tap three white creatures"), the spell pays no mana through the normal flow.
     // For compound flashback costs ("{1}{U}, Pay 3 life") we still want the mana
@@ -2863,6 +2899,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(effective_web_slinging_cost_for_path)
             .or(alt_cost_from_exile)
             .or(effective_warp_cost_for_path)
+            .or(freerunning_cost)
             .unwrap_or_else(|| obj.mana_cost.clone())
     };
     let has_granted_flash =
@@ -11189,6 +11226,281 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ----- CR 702.173a: Freerunning alternative-cost casts ------------------
+
+    fn freerunning_test_cost() -> ManaCost {
+        // {2}{B} — chosen so the candidates test can also assert that the
+        // printed mana cost is NOT paid (paying the printed cost would
+        // require different mana from this freerunning shape).
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 2,
+        }
+    }
+
+    /// Build an instant in P0's hand that prints Freerunning {2}{B} and a
+    /// printed mana cost of {6}{B}{B} (the canonical large freerunning
+    /// spread). Returns the spell's object id.
+    fn add_freerunning_instant(state: &mut GameState) -> ObjectId {
+        let object_id = create_object(
+            state,
+            CardId(2173),
+            PlayerId(0),
+            "Freerunning Test Instant".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            generic: 6,
+        };
+        obj.keywords
+            .push(Keyword::Freerunning(freerunning_test_cost()));
+        object_id
+    }
+
+    /// CR 702.173a: With no Assassin/commander combat damage recorded this
+    /// turn, the Freerunning candidate must NOT be surfaced — the spell can
+    /// only be cast normally.
+    #[test]
+    fn freerunning_unavailable_without_assassin_combat_damage() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_freerunning_instant(&mut state);
+
+        // Sanity: ledger is empty by default.
+        assert!(
+            state
+                .assassin_or_commander_dealt_combat_damage_this_turn
+                .is_empty(),
+            "ledger must start empty",
+        );
+
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            !candidates.contains(&CastingVariant::Freerunning),
+            "Freerunning must not be a candidate without the eligibility ledger entry; \
+             got {candidates:?}",
+        );
+    }
+
+    /// CR 702.173a: When the controller's Assassin/commander has dealt
+    /// combat damage this turn, Freerunning is surfaced as a candidate; the
+    /// alternative cost replaces the printed mana cost at cast preparation.
+    #[test]
+    fn freerunning_available_after_assassin_combat_damage_to_player() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_freerunning_instant(&mut state);
+
+        // Seed the ledger as the DamageDealt observer would.
+        state
+            .assassin_or_commander_dealt_combat_damage_this_turn
+            .insert(PlayerId(0));
+
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            candidates.contains(&CastingVariant::Freerunning),
+            "Freerunning must be a candidate when the ledger contains the caster; \
+             got {candidates:?}",
+        );
+
+        // Preparation under the Freerunning override pays the freerunning
+        // cost, not the printed mana cost (CR 702.173a + CR 601.2b).
+        let prepared = prepare_spell_cast_with_variant_override(
+            &state,
+            PlayerId(0),
+            object_id,
+            Some(CastingVariant::Freerunning),
+        )
+        .expect("freerunning override must prepare a spell cast");
+        assert_eq!(prepared.casting_variant, CastingVariant::Freerunning);
+        assert_eq!(
+            prepared.mana_cost,
+            freerunning_test_cost(),
+            "prepared mana cost must be the Freerunning alt cost, not the printed mana cost",
+        );
+        assert_ne!(
+            prepared.mana_cost, state.objects[&object_id].mana_cost,
+            "printed mana cost ({:?}) must NOT be paid when Freerunning override is selected",
+            state.objects[&object_id].mana_cost,
+        );
+    }
+
+    /// CR 702.173a + CR 514: The Freerunning eligibility ledger is
+    /// turn-scoped. After a fresh turn (`prepare_turn_state` cleanup), the
+    /// ledger is empty and Freerunning is no longer a candidate even though
+    /// the printed Freerunning keyword remains.
+    #[test]
+    fn freerunning_ledger_resets_at_turn_cleanup() {
+        let mut state = setup_game_at_main_phase();
+        let object_id = add_freerunning_instant(&mut state);
+        state
+            .assassin_or_commander_dealt_combat_damage_this_turn
+            .insert(PlayerId(0));
+
+        // Pre-cleanup sanity.
+        assert!(
+            casting_variant_candidates(&state, PlayerId(0), object_id)
+                .contains(&CastingVariant::Freerunning),
+            "Freerunning must be a candidate before cleanup",
+        );
+
+        crate::game::turns::start_next_turn(&mut state, &mut Vec::new());
+
+        assert!(
+            !state
+                .assassin_or_commander_dealt_combat_damage_this_turn
+                .contains(&PlayerId(0)),
+            "ledger must be cleared by start_next_turn",
+        );
+        let candidates = casting_variant_candidates(&state, PlayerId(0), object_id);
+        assert!(
+            !candidates.contains(&CastingVariant::Freerunning),
+            "Freerunning must NOT be a candidate after turn cleanup; got {candidates:?}",
+        );
+    }
+
+    /// CR 702.173a + CR 604.1 + CR 611.2c: Freerunning **granted** by a
+    /// `CastWithKeyword` static (Ezio Auditore da Firenze: "Assassin
+    /// spells you cast have freerunning {B}{B}.") must be visible to
+    /// `casting_variant_candidates` via `effective_spell_keywords`. The
+    /// spell itself does NOT print Freerunning — the keyword is layered
+    /// in by the static, so `casting_variant_candidates`'s eligibility
+    /// query must consult the effective keyword set, not the raw
+    /// `obj.keywords` field.
+    ///
+    /// Issue #1962 hardening (TEST-ONLY): the existing Freerunning tests
+    /// (`freerunning_available_after_assassin_combat_damage_to_player`
+    /// et al.) only exercise the printed-keyword path. A regression in
+    /// `casting_variant_candidates` that read `obj.keywords` instead of
+    /// `effective_spell_keywords(...)` would silently drop the
+    /// granted-Freerunning surface for every Ezio-style "Assassin spells
+    /// have freerunning" static. This test pins down the granted path
+    /// directly.
+    #[test]
+    fn granted_freerunning_static_surfaces_freerunning_variant() {
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup_game_at_main_phase();
+
+        // Ezio Auditore da Firenze (the static source): on the
+        // battlefield, with the `CastWithKeyword { Freerunning {B}{B} }`
+        // static targeting "Assassin spells you cast" (instant + sorcery
+        // with Assassin subtype, controller-you).
+        let ezio = create_object(
+            &mut state,
+            CardId(1962),
+            PlayerId(0),
+            "Ezio Auditore da Firenze".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&ezio).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.card_types.subtypes.push("Assassin".to_string());
+            obj.base_card_types = obj.card_types.clone();
+
+            // "Assassin spells you cast have freerunning {B}{B}." —
+            // affected = (Instant ∨ Sorcery) ∧ Assassin ∧ controller-you.
+            let granted_kw = Keyword::Freerunning(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 0,
+            });
+            let affected = TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![
+                            TypeFilter::Instant,
+                            TypeFilter::Subtype("Assassin".to_string()),
+                        ],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }),
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![
+                            TypeFilter::Sorcery,
+                            TypeFilter::Subtype("Assassin".to_string()),
+                        ],
+                        controller: Some(ControllerRef::You),
+                        properties: vec![],
+                    }),
+                ],
+            };
+            let def = StaticDefinition {
+                mode: StaticMode::CastWithKeyword {
+                    keyword: granted_kw,
+                },
+                affected: Some(affected),
+                modifications: vec![],
+                condition: None,
+                per_player_condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: Some("Assassin spells you cast have freerunning {B}{B}.".to_string()),
+            };
+            obj.static_definitions = vec![def].into();
+        }
+
+        // The spell: an Assassin-subtyped instant in P0's hand. It does
+        // NOT print Freerunning — Ezio's static is the only path to the
+        // keyword. (Crucially, `obj.keywords` is empty here.)
+        let spell_id = create_object(
+            &mut state,
+            CardId(1963),
+            PlayerId(0),
+            "Hidden Strings".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.card_types.subtypes.push("Assassin".to_string());
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 1,
+            };
+            // Sanity: no printed Freerunning.
+            assert!(
+                !obj.keywords
+                    .iter()
+                    .any(|k| matches!(k, Keyword::Freerunning(_))),
+                "test fixture sanity: spell must not print Freerunning"
+            );
+        }
+
+        // Seed the eligibility ledger as `collect_pending_triggers` would
+        // when P0's Assassin/commander dealt combat damage this turn.
+        state
+            .assassin_or_commander_dealt_combat_damage_this_turn
+            .insert(PlayerId(0));
+
+        // The granted Freerunning must be visible through
+        // `effective_spell_keywords` (the building block that
+        // `casting_variant_candidates` consults).
+        let granted = super::effective_spell_keywords(&state, PlayerId(0), spell_id);
+        assert!(
+            granted.iter().any(|k| matches!(k, Keyword::Freerunning(_))),
+            "Ezio's static must layer in Freerunning for Assassin spells; \
+             effective_spell_keywords got {granted:?}"
+        );
+
+        // The load-bearing invariant: with the ledger seeded and the
+        // granted Freerunning effective, the casting pipeline must
+        // surface `CastingVariant::Freerunning` as a candidate even
+        // though the spell does not print the keyword.
+        let candidates = casting_variant_candidates(&state, PlayerId(0), spell_id);
+        assert!(
+            candidates.contains(&CastingVariant::Freerunning),
+            "casting_variant_candidates must surface Freerunning via the \
+             granted-keyword path (effective_spell_keywords), not just the \
+             printed-keyword path (obj.keywords); got {candidates:?}"
+        );
     }
 
     #[test]
