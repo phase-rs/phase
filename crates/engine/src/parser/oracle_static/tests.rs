@@ -7148,6 +7148,30 @@ fn lands_you_control_are_plains_celestial_dawn() {
 }
 
 #[test]
+fn all_mountains_are_plains_conversion() {
+    // CR 305.7: Conversion / Glaciers — "All Mountains are Plains" sets every
+    // Mountain (any controller) to Plains via SetBasicLandType. Covers the
+    // "All <basic land type> are <type>" subject class.
+    let def = parse_static_line("All Mountains are Plains.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(matches!(
+        def.modifications.as_slice(),
+        [ContinuousModification::SetBasicLandType { land_type }]
+        if *land_type == BasicLandType::Plains
+    ));
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Land));
+            assert!(tf
+                .type_filters
+                .contains(&TypeFilter::Subtype("Mountain".to_string())));
+            assert_eq!(tf.controller, None, "battlefield-wide, any controller");
+        }
+        _ => panic!("Expected Typed land filter with Mountain subtype"),
+    }
+}
+
+#[test]
 fn each_land_is_a_swamp_in_addition_urborg() {
     let def =
         parse_static_line("Each land is a Swamp in addition to its other land types.").unwrap();
