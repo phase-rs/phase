@@ -4147,6 +4147,9 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         // CR 702.26c: "phases in" / "phase in" — phasing trigger verb.
         parse_event_phrase("phases in"),
         parse_event_phrase("phase in"),
+        // CR 702.26b: "phases out" / "phase out" — phasing-out trigger verb.
+        parse_event_phrase("phases out"),
+        parse_event_phrase("phase out"),
     ));
     let player_actions = alt((
         passive_player_actions,
@@ -5803,6 +5806,8 @@ fn try_parse_event(
         Saddles,
         /// CR 702.26c: Permanent phases in from phased-out state.
         PhasesIn,
+        /// CR 702.26b: Permanent phases out.
+        PhasesOut,
         /// CR 701.3d: Equipment/Aura becomes unattached from a permanent.
         BecomesUnattached(Option<TargetFilter>),
         // CR 701.3a: Equipment/Aura becomes attached to a permanent.
@@ -5934,6 +5939,9 @@ fn try_parse_event(
             // CR 702.26c: "phases in" / "phase in" — phasing trigger.
             value(SimpleEvent::PhasesIn, tag("phases in")),
             value(SimpleEvent::PhasesIn, tag("phase in")),
+            // CR 702.26b: "phases out" / "phase out" — phasing-out trigger.
+            value(SimpleEvent::PhasesOut, tag("phases out")),
+            value(SimpleEvent::PhasesOut, tag("phase out")),
             // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
             parse_becomes_unattached,
             // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
@@ -6079,6 +6087,11 @@ fn try_parse_event(
             SimpleEvent::PhasesIn => {
                 // CR 702.26c: Permanent phases in from phased-out state.
                 def.mode = TriggerMode::PhaseIn;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::PhasesOut => {
+                // CR 702.26b: Permanent phases out.
+                def.mode = TriggerMode::PhaseOut;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::BecomesUnattached(host_filter) => {
@@ -10646,6 +10659,18 @@ mod tests {
         );
 
         assert_eq!(def.mode, TriggerMode::PhaseIn);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn parses_phases_out_trigger_as_phase_out_mode() {
+        // CR 702.26b: "Whenever ~ phases out, discard a card." (Teferi's Imp)
+        let def = parse_trigger_line(
+            "Whenever this creature phases out, discard a card.",
+            "Teferi's Imp",
+        );
+
+        assert_eq!(def.mode, TriggerMode::PhaseOut);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 

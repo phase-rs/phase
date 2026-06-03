@@ -327,9 +327,19 @@ fn collect_matching_triggers(
             Vec::new()
         };
 
+    let source_phase_out_event = matches!(
+        event,
+        GameEvent::PermanentPhasedOut { object_id, .. } if *object_id == obj_id
+    );
+
     // CR 702.26b + CR 114.4: `active_trigger_definitions` owns the phased-out /
     // command-zone gate. CR 603.4 intervening-if is still the two-point check
     // inside this function (condition block below) and at resolution.
+    //
+    // CR 702.26b: a permanent's own "phases out" trigger is checked for the
+    // phase-out event that made it phased out. `phase_out_object` emits the event
+    // after the status flip, so this one event must read only PhaseOut definitions
+    // directly from the source while leaving all other phased-out abilities inert.
     //
     // Synthesized off-zone granted-keyword triggers are appended after the
     // printed set with indices offset past `obj.trigger_definitions.len()` so
@@ -339,9 +349,21 @@ fn collect_matching_triggers(
         usize,
         &TriggerDefinition,
         Option<crate::types::keywords::KeywordKind>,
-    )> = super::functioning_abilities::active_trigger_definitions(state, source_obj)
-        .map(|(idx, def)| (idx, def, None))
-        .collect();
+    )> = if source_phase_out_event {
+        source_obj
+            .trigger_definitions
+            .iter_all()
+            .enumerate()
+            .filter(|(_, def)| {
+                matches!(&def.mode, TriggerMode::PhaseOut | TriggerMode::PhaseOutAll)
+            })
+            .map(|(idx, def)| (idx, def, None))
+            .collect()
+    } else {
+        super::functioning_abilities::active_trigger_definitions(state, source_obj)
+            .map(|(idx, def)| (idx, def, None))
+            .collect()
+    };
     let all_triggers = printed_triggers.into_iter().chain(
         granted_off_zone_triggers
             .iter()
@@ -9998,6 +10020,56 @@ pub mod tests {
             crate::game::game_object::PhaseOutCause::Directly,
             &mut events,
         );
+    }
+
+    #[test]
+    fn phase_out_self_trigger_is_collected_after_status_flip() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let source = make_creature(&mut state, PlayerId(0), "Teferi's Imp Stand-In", 1, 1);
+        let trigger = TriggerDefinition::new(TriggerMode::PhaseOut)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.trigger_definitions.push(trigger.clone());
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+
+        crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+        let mut events = Vec::new();
+        crate::game::phasing::phase_out_object(
+            &mut state,
+            source,
+            crate::game::game_object::PhaseOutCause::Directly,
+            &mut events,
+        );
+        assert!(
+            state.objects.get(&source).unwrap().is_phased_out(),
+            "producer must flip phase status before emitting PermanentPhasedOut"
+        );
+
+        let pending = collect_pending_triggers(&mut state, &events);
+        let source_triggers: Vec<_> = pending
+            .iter()
+            .filter(|context| context.pending.source_id == source)
+            .collect();
+        assert_eq!(
+            source_triggers.len(),
+            1,
+            "the source's own PhaseOut trigger must survive the post-flip candidate and \
+             definition gates"
+        );
+        assert!(matches!(
+            &source_triggers[0].pending.trigger_event,
+            Some(GameEvent::PermanentPhasedOut { object_id, .. }) if *object_id == source
+        ));
     }
 
     #[test]
