@@ -121,15 +121,19 @@ pub fn resolve(
     // If the replacement filtered out the continuation (continuation was not drained)
     // but we had a sub_ability, resolve it directly using resolve_effect to bypass
     // the guard in resolve_chain_body that would skip sub_ability resolution.
-    // Only do this if there are active replacement effects (indicates replacement pipeline ran).
+    // Only do this if a replacement effect actually applied to the draw event.
+    // CR 614.1a + CR 614.6: Verify if the event was modified by any replacement.
     if had_sub_ability && !continuation_drained {
-        // Check if there are any replacement effects that could have modified the draw
-        let has_replacement_effects = state.objects.values().any(|obj| {
-            !obj.replacement_definitions.is_empty()
-                && obj.zone == Zone::Battlefield
-                && obj.controller == drawing_player
-        });
-        if has_replacement_effects {
+        let proposed = ProposedEvent::Draw {
+            player_id: drawing_player,
+            count: num_cards,
+            applied: HashSet::new(),
+        };
+        let replacement_applied = match &result {
+            ReplacementResult::Execute(event) => event != &proposed,
+            _ => true,
+        };
+        if replacement_applied {
             if let Some(stashed_sub) = state.original_sub_ability_before_replacement.take() {
                 // Resolve the sub_ability directly using resolve_effect
                 let _ = crate::game::effects::resolve_effect(state, &stashed_sub, events);
