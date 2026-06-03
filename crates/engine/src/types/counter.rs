@@ -280,23 +280,31 @@ fn format_counter_delta(value: i32, paired_value: i32) -> String {
     }
 }
 
-/// CR 122.1: A counter with count zero is treated as absent. Stale map keys must
-/// not satisfy "has a counter" checks (e.g. proliferate CR 701.34a).
+/// CR 122.1: A counter is a marker on an object or player; an internal map
+/// entry with count zero is not a marker and must not satisfy "has a counter"
+/// checks (e.g. proliferate CR 701.34a).
 pub fn has_positive_counters(counters: &HashMap<CounterType, u32>) -> bool {
     counters.values().any(|&count| count > 0)
 }
 
-/// Counter types currently present on an object or LKI snapshot (count > 0 only).
-pub fn positive_counter_types(counters: &HashMap<CounterType, u32>) -> Vec<CounterType> {
+/// Counter entries currently present on an object or LKI snapshot (count > 0 only).
+pub fn positive_counter_entries(
+    counters: &HashMap<CounterType, u32>,
+) -> impl Iterator<Item = (&CounterType, u32)> {
     counters
         .iter()
-        .filter(|(_, &count)| count > 0)
-        .map(|(ct, _)| ct.clone())
+        .filter_map(|(counter_type, &count)| (count > 0).then_some((counter_type, count)))
+}
+
+/// Counter types currently present on an object or LKI snapshot (count > 0 only).
+pub fn positive_counter_types(counters: &HashMap<CounterType, u32>) -> Vec<CounterType> {
+    positive_counter_entries(counters)
+        .map(|(counter_type, _)| counter_type.clone())
         .collect()
 }
 
-/// CR 122.1: Drop zero-count entries after removal so counter presence stays
-/// aligned with rules text and downstream eligibility checks.
+/// CR 122.1: Drop zero-count entries so counter presence stays aligned with
+/// actual markers and downstream eligibility checks.
 pub fn prune_zero_counters(counters: &mut HashMap<CounterType, u32>) {
     counters.retain(|_, count| *count > 0);
 }
@@ -304,8 +312,8 @@ pub fn prune_zero_counters(counters: &mut HashMap<CounterType, u32>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        has_positive_counters, parse_counter_type, positive_counter_types, prune_zero_counters,
-        try_parse_counter_type, CounterType,
+        has_positive_counters, parse_counter_type, positive_counter_entries,
+        positive_counter_types, prune_zero_counters, try_parse_counter_type, CounterType,
     };
     use std::collections::HashMap;
 
@@ -408,6 +416,19 @@ mod tests {
         assert_eq!(
             positive_counter_types(&counters),
             vec![CounterType::Generic("charge".to_string())]
+        );
+    }
+
+    #[test]
+    fn positive_counter_entries_skips_zero_entries() {
+        let mut counters = HashMap::new();
+        counters.insert(CounterType::Plus1Plus1, 0);
+        counters.insert(CounterType::Generic("charge".to_string()), 2);
+        assert_eq!(
+            positive_counter_entries(&counters)
+                .map(|(counter_type, count)| (counter_type.clone(), count))
+                .collect::<Vec<_>>(),
+            vec![(CounterType::Generic("charge".to_string()), 2)]
         );
     }
 

@@ -158,6 +158,11 @@ pub(crate) fn apply_counter_addition(
     // sync with the counter map — the field IS the counter count.
     sync_derived_from_counters(obj, &counter_type);
 
+    // CR 122.1: Drop stale zero-count keys left over from prior removals before
+    // recording the object snapshot so counter history never exposes absent
+    // markers as present entries.
+    crate::types::counter::prune_zero_counters(&mut obj.counters);
+
     if counter_type_affects_layers(&counter_type) {
         state.layers_dirty.mark_full();
     }
@@ -190,10 +195,6 @@ pub(crate) fn apply_counter_addition(
         counter_type,
         count,
     });
-
-    // CR 122.1: Drop stale zero-count keys left over from prior removals so
-    // "has a counter" checks stay aligned with rules text.
-    crate::types::counter::prune_zero_counters(&mut obj.counters);
 }
 
 /// CR 122.1: Apply an already-accepted counter removal, clamping to the number
@@ -2662,7 +2663,10 @@ mod tests {
         remove_counter_with_replacement(&mut state, pw_id, CounterType::Loyalty, 5, &mut events);
 
         let obj = &state.objects[&pw_id];
-        assert_eq!(obj.counters.get(&CounterType::Loyalty).copied(), Some(0));
+        assert!(
+            !obj.counters.contains_key(&CounterType::Loyalty),
+            "zero-count loyalty entry should be pruned after removal"
+        );
         assert_eq!(obj.loyalty, Some(0));
     }
 
