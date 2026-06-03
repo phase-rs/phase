@@ -1067,7 +1067,7 @@ export function GameProvider({
           // absent on resume (e.g. navigating directly to a saved game URL).
           const resumedPlayerCount = savedState.players?.length ?? playerCount;
           controller = createGameLoopController({
-            mode,
+            mode: mode === "local" ? "local" : "ai",
             difficulty,
             aiSeats: resolveAiSeatBindings(gameId, resumedPlayerCount, difficulty),
             playerCount: resumedPlayerCount,
@@ -1113,7 +1113,7 @@ export function GameProvider({
               onCardDataMissingRef.current?.();
             }
             controller = createGameLoopController({
-              mode,
+              mode: mode === "local" ? "local" : "ai",
               difficulty,
               aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
               playerCount,
@@ -1152,7 +1152,7 @@ export function GameProvider({
           await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
           if (cancelled) return;
           controller = createGameLoopController({
-            mode,
+            mode: mode === "local" ? "local" : "ai",
             difficulty,
             aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
             playerCount,
@@ -1178,7 +1178,7 @@ export function GameProvider({
             await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
             if (cancelled) return;
             controller = createGameLoopController({
-              mode,
+              mode: mode === "local" ? "local" : "ai",
               difficulty,
               aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
               playerCount,
@@ -1230,7 +1230,7 @@ export function GameProvider({
           onCardDataMissingRef.current?.();
         }
         controller = createGameLoopController({
-          mode: isPlaytest ? "ai" : mode,
+          mode: mode === "local" ? "local" : "ai",
           difficulty,
           aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
           playerCount,

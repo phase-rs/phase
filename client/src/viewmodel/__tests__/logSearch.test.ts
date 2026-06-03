@@ -11,7 +11,7 @@ function entry(
   return {
     seq: turn,
     turn,
-    phase: "Main1",
+    phase: "PreCombatMain",
     category,
     segments: [{ type: "Text", value: text }],
   };

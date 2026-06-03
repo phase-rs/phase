@@ -98,14 +98,14 @@ export function PlaytestPanel({ deck, format, mainCount }: PlaytestPanelProps) {
 }
 
 function PlaytestCardRow({ name }: { name: string }) {
-  const { imageUrl, loading } = useCardImage(name);
+  const { src, isLoading } = useCardImage(name);
   return (
     <li className="flex items-center gap-2 rounded-lg bg-white/5 px-2 py-1.5 text-sm text-slate-200">
-      {imageUrl ? (
-        <img src={imageUrl} alt="" className="h-10 w-7 rounded object-cover" />
+      {src ? (
+        <img src={src} alt="" className="h-10 w-7 rounded object-cover" />
       ) : (
         <div className="flex h-10 w-7 items-center justify-center rounded bg-slate-800 text-[9px] text-slate-500">
-          {loading ? "…" : "?"}
+          {isLoading ? "…" : "?"}
         </div>
       )}
       <span className="truncate">{name}</span>
