@@ -111,7 +111,6 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
         | GameEvent::CreatureExerted { .. }
-        | GameEvent::Foretold { .. }
         | GameEvent::CombatDamageDealtToPlayer { .. } => LogCategory::Combat,
 
         GameEvent::DamageDealt { is_combat, .. } => {
