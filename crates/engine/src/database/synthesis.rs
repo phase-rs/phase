@@ -213,6 +213,11 @@ impl KeywordTriggerInstaller {
             Keyword::Persist => vec![build_dies_return_with_counter_trigger(
                 "M1M1", "-1/-1", "702.79a",
             )],
+            // CR 702.135a: Afterlife N — dies trigger creating N 1/1 white and
+            // black Spirit creature tokens with flying. Per CR 702.135b each
+            // instance triggers separately, so one trigger is emitted per
+            // `Keyword::Afterlife(_)` on the face.
+            Keyword::Afterlife(n) => vec![build_afterlife_trigger(*n)],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
             Keyword::Renown(n) => vec![build_renown_trigger(*n)],
             Keyword::Mentor => vec![build_mentor_trigger()],
@@ -231,6 +236,7 @@ impl KeywordTriggerInstaller {
             Keyword::Exalted => vec![build_exalted_trigger()],
             Keyword::Extort => vec![build_extort_trigger()],
             Keyword::Myriad => vec![build_myriad_trigger()],
+            Keyword::DoubleTeam => vec![build_double_team_trigger()],
             Keyword::Soulbond => build_soulbond_triggers(),
             // CR 702.62a + CR 604.1: granted Suspend carries the same two
             // triggered abilities printed Suspend synthesizes. The
@@ -256,6 +262,7 @@ impl KeywordTriggerInstaller {
             Keyword::Persist => {
                 is_dies_return_with_counter_trigger(trigger, &CounterType::Minus1Minus1)
             }
+            Keyword::Afterlife(n) => is_afterlife_trigger_for_count(trigger, *n),
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
             Keyword::Renown(_) => is_renown_trigger(trigger),
             Keyword::Mentor => is_mentor_trigger(trigger),
@@ -268,6 +275,7 @@ impl KeywordTriggerInstaller {
             Keyword::Exalted => is_exalted_trigger(trigger),
             Keyword::Extort => is_extort_trigger(trigger),
             Keyword::Myriad => is_myriad_attack_trigger(trigger),
+            Keyword::DoubleTeam => is_double_team_attack_trigger(trigger),
             Keyword::Soulbond => is_soulbond_trigger(trigger),
             // CR 702.62a + CR 604.1: symmetric removal — `RemoveKeyword` strips
             // both suspend triggers when the granted keyword is removed.
@@ -411,6 +419,68 @@ pub fn synthesize_reconfigure(face: &mut CardFace) {
                     required_type: CoreType::Creature,
                 }),
             }])
+            .sorcery_speed(),
+        );
+    }
+    face.abilities.extend(abilities);
+}
+
+/// CR 702.167a/b: Craft is an activated ability "[Cost], Exile this permanent,
+/// Exile [materials] from among permanents you control and/or cards in your
+/// graveyard: Return this card to the battlefield transformed under its owner's
+/// control. Activate only as a sorcery." (CR 712.14a: "transformed" enters the
+/// back face up.) Synthesized as a sorcery-speed activated ability whose cost is
+/// a `Composite` of the mana cost, the self-exile (`Exile { filter: SelfRef }`),
+/// and the materials exile (`ExileMaterials`); the effect returns the source
+/// from exile to the battlefield transformed. Without this synthesis a card with
+/// `Keyword::Craft` offered no ability at all (issue #1516).
+pub fn synthesize_craft(face: &mut CardFace) {
+    let mut abilities: Vec<AbilityDefinition> = Vec::new();
+    for kw in &face.keywords {
+        let Keyword::Craft {
+            cost,
+            materials,
+            count,
+        } = kw
+        else {
+            continue;
+        };
+        abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    // CR 712.14a: "transformed" — the card enters showing its back face.
+                    enter_transformed: true,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: cost.clone() },
+                    // CR 702.167a: "Exile this permanent" — the source self-exiles
+                    // from the battlefield as part of the cost.
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: Some(Zone::Battlefield),
+                        filter: Some(TargetFilter::SelfRef),
+                    },
+                    // CR 702.167a/b: "Exile [materials] from among permanents you
+                    // control and/or cards in your graveyard."
+                    AbilityCost::ExileMaterials {
+                        materials: materials.clone(),
+                        count: *count,
+                    },
+                ],
+            })
+            // CR 702.167a: "Activate only as a sorcery."
             .sorcery_speed(),
         );
     }
@@ -2380,6 +2450,134 @@ pub fn synthesize_persist(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Persist));
 }
 
+/// CR 702.135a: Afterlife N — "When this permanent is put into a graveyard from
+/// the battlefield, create N 1/1 white and black Spirit creature tokens with
+/// flying."
+///
+/// Synthesized as a self-referential dies trigger (`ChangesZone`
+/// Battlefield→Graveyard with `valid_card: SelfRef`, the same shape Undying and
+/// Persist use) whose effect creates the Spirit tokens. The trigger keys on
+/// "this permanent" (CR 702.135a), not "this creature", so it also fires for a
+/// non-creature permanent that has afterlife.
+///
+/// CR 702.135b: multiple instances of afterlife trigger separately, so (via
+/// `install_matching`) one trigger is emitted per `Keyword::Afterlife(_)` on the
+/// face.
+pub fn synthesize_afterlife(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Afterlife(_)));
+}
+
+/// Builds the CR 702.135a Afterlife dies trigger for `count` Spirit tokens.
+fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
+    let plural = if count == 1 { "" } else { "s" };
+    // CR 702.135a + CR 111.3 / CR 111.4: 1/1 white and black Spirit creature
+    // token with flying. Colors carry both White and Black (CR 105.2b
+    // multicolored).
+    let token_effect = Effect::Token {
+        name: "Spirit".to_string(),
+        power: PtValue::Fixed(1),
+        toughness: PtValue::Fixed(1),
+        types: vec!["Creature".to_string(), "Spirit".to_string()],
+        colors: vec![ManaColor::White, ManaColor::Black],
+        keywords: vec![Keyword::Flying],
+        tapped: false,
+        count: QuantityExpr::Fixed {
+            value: count as i32,
+        },
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: false,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    };
+
+    let execute = AbilityDefinition::new(AbilityKind::Spell, token_effect).description(format!(
+        "Create {count} 1/1 white and black Spirit creature token{plural} with flying"
+    ));
+
+    // CR 702.135a: "put into a graveyard from the battlefield" — the same
+    // Battlefield→Graveyard self-referential dies trigger shape as Undying /
+    // Persist (`build_dies_return_with_counter_trigger`).
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .origin(Zone::Battlefield)
+        .destination(Zone::Graveyard)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(format!(
+            "CR 702.135a: When ~ is put into a graveyard from the battlefield, create {count} 1/1 white and black Spirit creature token{plural} with flying."
+        ))
+}
+
+/// Idempotency-shape predicate for `synthesize`-installed Afterlife triggers.
+/// Mirrors `is_dies_return_with_counter_trigger` but discriminates on the
+/// full CR 702.135a Spirit-token effect (so it never collides with another
+/// self-ref dies trigger that happens to create a Spirit token).
+#[cfg(test)]
+fn is_afterlife_trigger(t: &TriggerDefinition) -> bool {
+    afterlife_trigger_count(t).is_some()
+}
+
+fn is_afterlife_trigger_for_count(t: &TriggerDefinition, count: u32) -> bool {
+    let Ok(count) = i32::try_from(count) else {
+        return false;
+    };
+    afterlife_trigger_count(t) == Some(count)
+}
+
+fn afterlife_trigger_count(t: &TriggerDefinition) -> Option<i32> {
+    if !matches!(t.mode, TriggerMode::ChangesZone)
+        || t.origin != Some(Zone::Battlefield)
+        || t.destination != Some(Zone::Graveyard)
+        || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return None;
+    }
+    let execute = t.execute.as_deref()?;
+    let Effect::Token {
+        name,
+        power,
+        toughness,
+        types,
+        colors,
+        keywords,
+        tapped,
+        count,
+        owner,
+        attach_to,
+        enters_attacking,
+        supertypes,
+        static_abilities,
+        enter_with_counters,
+        ..
+    } = &*execute.effect
+    else {
+        return None;
+    };
+
+    if name != "Spirit"
+        || !matches!(power, PtValue::Fixed(1))
+        || !matches!(toughness, PtValue::Fixed(1))
+        || !types.iter().map(String::as_str).eq(["Creature", "Spirit"])
+        || colors.as_slice() != [ManaColor::White, ManaColor::Black]
+        || keywords.as_slice() != [Keyword::Flying]
+        || *tapped
+        || owner != &TargetFilter::Controller
+        || attach_to.is_some()
+        || *enters_attacking
+        || !supertypes.is_empty()
+        || !static_abilities.is_empty()
+        || !enter_with_counters.is_empty()
+    {
+        return None;
+    }
+
+    let QuantityExpr::Fixed { value } = count else {
+        return None;
+    };
+    Some(*value)
+}
+
 /// CR 702.112a: Renown N — combat-damage-to-player trigger with an
 /// intervening-if renowned designation check.
 ///
@@ -2461,6 +2659,12 @@ pub fn synthesize_evolve(face: &mut CardFace) {
 /// synthesized per `Keyword::Myriad` instance.
 pub fn synthesize_myriad(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Myriad));
+}
+
+/// Double team is an Arena/Alchemy keyword that triggers on attack and creates
+/// one tapped attacking token copy of the attacking creature.
+pub fn synthesize_double_team(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::DoubleTeam));
 }
 
 /// CR 702.95a + CR 115.10a: Soulbond represents two optional triggered
@@ -2670,6 +2874,55 @@ fn build_myriad_trigger() -> TriggerDefinition {
         .execute(execute)
         .description(
             "CR 702.116a: Myriad — whenever this creature attacks, you may create tapped attacking copy tokens for each opponent other than defending player, then exile them at end of combat.".to_string(),
+        )
+}
+
+fn is_double_team_attack_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Attacks)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && t.execute
+            .as_deref()
+            .is_some_and(|ability| match &*ability.effect {
+                Effect::CopyTokenOf {
+                    target,
+                    owner,
+                    enters_attacking,
+                    tapped,
+                    count,
+                    ..
+                } => {
+                    !ability.optional
+                        && matches!(target, TargetFilter::SelfRef)
+                        && matches!(owner, TargetFilter::Controller)
+                        && *enters_attacking
+                        && *tapped
+                        && matches!(count, QuantityExpr::Fixed { value: 1 })
+                }
+                _ => false,
+            })
+}
+
+fn build_double_team_trigger() -> TriggerDefinition {
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopyTokenOf {
+            target: TargetFilter::SelfRef,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: true,
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+        },
+    )
+    .description("Create a tapped attacking token copy of this creature".to_string());
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(
+            "Double team — whenever this creature attacks, create a tapped and attacking token that's a copy of it.".to_string(),
         )
 }
 
@@ -4641,6 +4894,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_equip(face);
     // CR 702.151a: Reconfigure — attach/unattach activated abilities.
     synthesize_reconfigure(face);
+    // CR 702.167a/b: Craft — sorcery-speed activated ability that exiles the
+    // source plus materials and returns the card transformed.
+    synthesize_craft(face);
     // CR 702.122a: Crew has no synthesized ability — activation is handled by
     // GameAction::CrewVehicle directly, not through ActivateAbility dispatch.
     // The Keyword::Crew(N) on the card provides display information.
@@ -4702,6 +4958,10 @@ pub fn synthesize_all(face: &mut CardFace) {
     // -1/-1 counter, gated on having had no -1/-1 counter at death (LKI).
     // Sibling of Undying via shared `synthesize_dies_return_with_counter`.
     synthesize_persist(face);
+    // CR 702.135a: Afterlife N — dies trigger creating N 1/1 white and black
+    // Spirit creature tokens with flying. Self-referential dies trigger shape
+    // shared with Undying/Persist.
+    synthesize_afterlife(face);
     // CR 702.112a: Renown N — combat damage to player trigger with
     // designation-setting resolution. CR 702.112c: each instance triggers
     // separately; the resolution-time designation guard suppresses later ones.
@@ -4731,6 +4991,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // player, exiled at end of combat. CR 702.116b: each instance triggers
     // separately.
     synthesize_myriad(face);
+    // Double team is an Arena/Alchemy attack trigger creating one tapped
+    // attacking copy. Each instance triggers separately.
+    synthesize_double_team(face);
     // CR 702.95a: Soulbond — two optional ETB triggers that create pair
     // relationships under the resolution checks in CR 702.95c-d.
     synthesize_soulbond(face);
@@ -5273,12 +5536,25 @@ fn build_oracle_face_inner(
         &subtypes,
     );
 
+    let extracted_keywords = parsed.extracted_keywords;
+    let extracted_has_craft = extracted_keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Craft { .. }));
+    let oracle_has_craft_materials = raw_oracle_text
+        .lines()
+        .map(str::trim_start)
+        .map(str::to_ascii_lowercase)
+        .any(|line| line.strip_prefix("craft with ").is_some());
+    if oracle_has_craft_materials && !extracted_has_craft {
+        keywords.retain(|keyword| !matches!(keyword, Keyword::Craft { .. }));
+    }
+
     // Merge keywords extracted from Oracle text with MTGJSON keywords via the
     // shared `merge_extracted_keywords` authority (also used by the scenario test
     // harness so the two pipelines cannot diverge). It reconciles parameterized
     // keywords (e.g., Morph) and CR 113.2c multi-instance keywords (Cascade/Storm/
     // Myriad/Exalted) — see the helper's doc comment for the per-class rules.
-    merge_extracted_keywords(&mut keywords, parsed.extracted_keywords);
+    merge_extracted_keywords(&mut keywords, extracted_keywords);
 
     // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
@@ -6879,6 +7155,203 @@ mod undying_persist_synthesis_tests {
         assert_eq!(p1p1, 1, "exactly one Undying trigger");
         assert_eq!(m1m1, 1, "exactly one Persist trigger");
     }
+
+    /// CR 702.135a: Afterlife N synthesizes a self-ref dies trigger whose
+    /// effect creates N 1/1 white-and-black flying Spirit tokens.
+    #[test]
+    fn synthesize_afterlife_adds_dies_trigger_with_spirit_tokens() {
+        let mut face = face_with_keyword(Keyword::Afterlife(2));
+        synthesize_afterlife(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_afterlife_trigger(t))
+            .expect("afterlife should synthesize a dies trigger");
+
+        // Trigger shape: dies (battlefield → graveyard) with self-ref filter.
+        assert!(matches!(trigger.mode, TriggerMode::ChangesZone));
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        // CR 702.135a is unconditional — no intervening-if gate.
+        assert!(trigger.condition.is_none());
+
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        let Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            colors,
+            keywords,
+            count,
+            owner,
+            tapped,
+            enters_attacking,
+            ..
+        } = &*execute.effect
+        else {
+            panic!("afterlife execute should be Effect::Token");
+        };
+        assert_eq!(name, "Spirit");
+        assert!(matches!(power, PtValue::Fixed(1)));
+        assert!(matches!(toughness, PtValue::Fixed(1)));
+        assert!(types.contains(&"Creature".to_string()));
+        assert!(types.contains(&"Spirit".to_string()));
+        assert_eq!(colors, &vec![ManaColor::White, ManaColor::Black]);
+        assert_eq!(keywords, &vec![Keyword::Flying]);
+        assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+        assert!(matches!(owner, TargetFilter::Controller));
+        assert!(!tapped);
+        assert!(!enters_attacking);
+    }
+
+    /// Afterlife 1 vs Afterlife 3 — the token `count` tracks N.
+    #[test]
+    fn synthesize_afterlife_count_tracks_n() {
+        for n in [1u32, 3] {
+            let mut face = face_with_keyword(Keyword::Afterlife(n));
+            synthesize_afterlife(&mut face);
+            let execute = face
+                .triggers
+                .iter()
+                .find(|t| is_afterlife_trigger(t))
+                .and_then(|t| t.execute.as_deref())
+                .expect("afterlife trigger with execute");
+            let Effect::Token { count, .. } = &*execute.effect else {
+                panic!("expected Effect::Token");
+            };
+            assert!(
+                matches!(count, QuantityExpr::Fixed { value } if *value == n as i32),
+                "afterlife {n} should create {n} tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn synthesize_afterlife_is_idempotent() {
+        let mut face = face_with_keyword(Keyword::Afterlife(2));
+        synthesize_afterlife(&mut face);
+        synthesize_afterlife(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_afterlife_trigger(t))
+            .count();
+        assert_eq!(count, 1, "afterlife trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_afterlife_noop_without_keyword() {
+        let mut face = face_with_keyword(Keyword::Flying);
+        synthesize_afterlife(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+
+    /// CR 702.135b: multiple instances of afterlife each trigger separately.
+    #[test]
+    fn synthesize_afterlife_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Afterlife(1));
+        face.keywords.push(Keyword::Afterlife(1));
+        synthesize_afterlife(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_afterlife_trigger(t))
+            .count();
+        assert_eq!(count, 2);
+    }
+
+    /// CR 702.135b with differing N values: each Afterlife instance carries its
+    /// own token count, so a face with Afterlife 1 and Afterlife 2 gets one
+    /// trigger for each quantity instead of collapsing by keyword kind.
+    #[test]
+    fn synthesize_afterlife_keeps_distinct_counts() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Afterlife(1));
+        face.keywords.push(Keyword::Afterlife(2));
+        synthesize_afterlife(&mut face);
+
+        let mut counts: Vec<i32> = face
+            .triggers
+            .iter()
+            .filter_map(afterlife_trigger_count)
+            .collect();
+        counts.sort_unstable();
+        assert_eq!(counts, vec![1, 2]);
+    }
+
+    /// The Afterlife matcher (Spirit-token effect) must not collide with the
+    /// Undying/Persist return triggers, which share the Battlefield→Graveyard
+    /// self-ref shape but carry an `Effect::ChangeZone`.
+    #[test]
+    fn afterlife_trigger_distinct_from_undying() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Afterlife(2));
+        face.keywords.push(Keyword::Undying);
+        synthesize_afterlife(&mut face);
+        synthesize_undying(&mut face);
+
+        let afterlife = face
+            .triggers
+            .iter()
+            .filter(|t| is_afterlife_trigger(t))
+            .count();
+        let undying = face
+            .triggers
+            .iter()
+            .filter(|t| is_dies_return_with_counter_trigger(t, &CounterType::Plus1Plus1))
+            .count();
+        assert_eq!(afterlife, 1, "exactly one Afterlife trigger");
+        assert_eq!(undying, 1, "exactly one Undying trigger");
+        // Neither predicate matches the other's trigger.
+        assert!(
+            !face.triggers.iter().any(|t| is_afterlife_trigger(t)
+                && is_dies_return_with_counter_trigger(t, &CounterType::Plus1Plus1)),
+            "no trigger is matched by both predicates"
+        );
+    }
+
+    /// CR 604.1 runtime-grant path: `triggers_for` produces the trigger and
+    /// `trigger_matches_keyword_kind` recognizes it (used by layers.rs when
+    /// afterlife is granted on the battlefield, and for symmetric removal).
+    #[test]
+    fn afterlife_triggers_for_and_matcher_roundtrip() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Afterlife(2));
+        assert_eq!(triggers.len(), 1, "afterlife yields exactly one trigger");
+        assert!(
+            KeywordTriggerInstaller::trigger_matches_keyword_kind(
+                &triggers[0],
+                &Keyword::Afterlife(2)
+            ),
+            "matcher must recognize the synthesized afterlife trigger"
+        );
+        // It must NOT be recognized as some other keyword's trigger.
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Undying
+        ));
+    }
+
+    /// Runtime-grant removal uses `trigger_matches_keyword_kind`, so the matcher
+    /// must discriminate `Afterlife(N)` by N rather than stripping every
+    /// Afterlife-style Spirit trigger for the same discriminant.
+    #[test]
+    fn afterlife_matcher_distinguishes_count() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Afterlife(2));
+        assert_eq!(triggers.len(), 1, "afterlife yields exactly one trigger");
+
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Afterlife(2)
+        ));
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Afterlife(1)
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -7063,6 +7536,54 @@ mod undying_persist_runtime_tests {
             Zone::Graveyard,
             "persist must NOT return a creature that died with a -1/-1 counter"
         );
+    }
+
+    /// CR 702.135a runtime path: when a permanent with Afterlife N dies, the
+    /// synthesized dies trigger resolves through `Effect::Token` and creates N
+    /// 1/1 white-and-black flying Spirit creature tokens under the controller.
+    #[test]
+    fn afterlife_creates_spirit_tokens_when_permanent_dies() {
+        let face = creature_face_with_keyword("Tithe Taker", Keyword::Afterlife(2));
+        let (mut state, obj_id) = setup_with_creature(&face, PlayerId(0));
+
+        let _ = kill_and_resolve(&mut state, obj_id);
+
+        let source = state.objects.get(&obj_id).expect("object still tracked");
+        assert_eq!(
+            source.zone,
+            Zone::Graveyard,
+            "afterlife does not return the source permanent"
+        );
+
+        let spirits: Vec<_> = state
+            .objects
+            .values()
+            .filter(|obj| obj.is_token && obj.name == "Spirit" && obj.zone == Zone::Battlefield)
+            .collect();
+        assert_eq!(
+            spirits.len(),
+            2,
+            "Afterlife 2 must create exactly 2 Spirits"
+        );
+        for spirit in spirits {
+            assert_eq!(spirit.owner, PlayerId(0));
+            assert_eq!(spirit.controller, PlayerId(0));
+            assert_eq!(spirit.power, Some(1));
+            assert_eq!(spirit.toughness, Some(1));
+            assert!(
+                spirit.card_types.core_types.contains(&CoreType::Creature),
+                "Spirit token must be a creature"
+            );
+            assert!(
+                spirit.card_types.subtypes.iter().any(|s| s == "Spirit"),
+                "Spirit token must carry Spirit subtype"
+            );
+            assert_eq!(spirit.color, vec![ManaColor::White, ManaColor::Black]);
+            assert!(
+                spirit.keywords.contains(&Keyword::Flying),
+                "Spirit token must have flying"
+            );
+        }
     }
 
     /// CR 603 multi-trigger semantics: a permanent that carries BOTH Undying
@@ -8241,6 +8762,19 @@ mod myriad_runtime_tests {
         face
     }
 
+    fn double_team_creature_face(name: &str, instances: usize) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
+            keywords: vec![Keyword::DoubleTeam; instances],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
     fn setup_attack_state(player_count: u8, face: &CardFace) -> (GameState, ObjectId) {
         let mut state = GameState::new(FormatConfig::standard(), player_count, 42);
         state.turn_number = 2;
@@ -8276,8 +8810,8 @@ mod myriad_runtime_tests {
                 attacks: vec![(attacker_id, AttackTarget::Player(defender))],
             },
         )
-        .expect("declare Myriad attacker");
-        // CR 603.3b (#531): multiple Myriad triggers from same controller
+        .expect("declare attacker");
+        // CR 603.3b (#531): multiple triggers from the same controller
         // surface an OrderTriggers prompt; drain with identity for legacy
         // stack-assertion tests.
         crate::game::triggers::drain_order_triggers_with_identity(state);
@@ -8306,6 +8840,65 @@ mod myriad_runtime_tests {
                     .then_some(*id)
             })
             .collect()
+    }
+
+    #[test]
+    fn double_team_attack_creates_tapped_attacking_copy() {
+        let face = double_team_creature_face("Double Team Bear", 1);
+        let (mut state, attacker_id) = setup_attack_state(2, &face);
+
+        declare_attack(&mut state, attacker_id, PlayerId(1));
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "Double Team attack trigger goes on stack"
+        );
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        let tokens = myriad_tokens(&state, &face.name);
+        assert_eq!(tokens.len(), 1, "one tapped attacking copy");
+        let token_id = tokens[0];
+        assert!(state.objects.get(&token_id).unwrap().tapped);
+
+        let token_attacker = state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attackers
+            .iter()
+            .find(|attacker| attacker.object_id == token_id)
+            .expect("Double Team token is attacking");
+        assert_eq!(token_attacker.defending_player, PlayerId(1));
+        assert_eq!(
+            token_attacker.attack_target,
+            AttackTarget::Player(PlayerId(1))
+        );
+        assert!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .attackers
+                .iter()
+                .any(|attacker| attacker.object_id == attacker_id),
+            "original attacker remains in combat"
+        );
+    }
+
+    #[test]
+    fn double_team_multiple_instances_stack_separately() {
+        let face = double_team_creature_face("Double Double Team Bear", 2);
+        let (mut state, attacker_id) = setup_attack_state(2, &face);
+
+        declare_attack(&mut state, attacker_id, PlayerId(1));
+
+        assert_eq!(
+            state.stack.len(),
+            2,
+            "each Double Team instance should synthesize an independent attack trigger"
+        );
     }
 
     #[test]
@@ -10389,6 +10982,97 @@ mod sorcery_speed_invariant_tests {
                     }
                 )),
             "unattach mode is legal only while attached to a creature (CR 702.151a)"
+        );
+    }
+
+    /// CR 702.167a/b: Parsing the Oracle line "craft with creature {4}{b}" must
+    /// produce a `Keyword::Craft` whose materials are the dual-zone
+    /// (battlefield + graveyard) `Or` and count 1, and `synthesize_craft` must
+    /// turn it into exactly one sorcery-speed activated ability whose cost is a
+    /// `Composite[Mana, Exile{SelfRef}, ExileMaterials]` and whose effect returns
+    /// the source from exile transformed. RED on main (no ability synthesized).
+    #[test]
+    fn synthesize_craft_from_oracle_line_builds_sorcery_speed_return_transformed() {
+        use crate::parser::oracle_keyword::parse_keyword_from_oracle;
+        use crate::types::ability::{CostObjectCount, TargetFilter};
+        use crate::types::zones::Zone;
+
+        let kw = parse_keyword_from_oracle("craft with creature {4}{b}")
+            .expect("craft Oracle line parses to a keyword");
+        let (materials, count) = match &kw {
+            Keyword::Craft {
+                materials, count, ..
+            } => (materials.clone(), *count),
+            other => panic!("expected Keyword::Craft, got {other:?}"),
+        };
+        assert_eq!(count, CostObjectCount::exactly(1), "single-material craft");
+        match &materials {
+            TargetFilter::Or { filters } => {
+                assert_eq!(filters.len(), 2, "battlefield + graveyard legs");
+            }
+            other => panic!("expected dual-zone Or materials, got {other:?}"),
+        }
+
+        let mut face = CardFace::default();
+        face.keywords.push(kw);
+        synthesize_craft(&mut face);
+
+        assert_eq!(
+            face.abilities.len(),
+            1,
+            "craft synthesizes exactly one activated ability"
+        );
+        let def = &face.abilities[0];
+        assert!(matches!(def.kind, AbilityKind::Activated));
+        assert!(def.sorcery_speed, "craft is sorcery-speed (CR 702.167a)");
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+
+        // Effect: return self from exile to battlefield transformed.
+        match def.effect.as_ref() {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                enter_transformed,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Exile));
+                assert_eq!(*destination, Zone::Battlefield);
+                assert_eq!(*target, TargetFilter::SelfRef);
+                assert!(*enter_transformed, "CR 712.14a: enters transformed");
+            }
+            other => panic!("expected ChangeZone effect, got {other:?}"),
+        }
+
+        // Cost: Composite[Mana, Exile{SelfRef}, ExileMaterials].
+        let Some(AbilityCost::Composite { costs }) = def.cost.as_ref() else {
+            panic!("expected Composite craft cost, got {:?}", def.cost);
+        };
+        assert!(
+            costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })),
+            "mana sub-cost present"
+        );
+        assert!(
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::Exile {
+                    filter: Some(TargetFilter::SelfRef),
+                    ..
+                }
+            )),
+            "self-exile sub-cost present (CR 702.167a)"
+        );
+        assert!(
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::ExileMaterials {
+                    count: CostObjectCount::Exactly { count: 1 },
+                    ..
+                }
+            )),
+            "materials-exile sub-cost present (CR 702.167a/b)"
         );
     }
 
@@ -13164,6 +13848,55 @@ mod bloodthirst_synthesis_tests {
         merge_extracted_keywords(&mut base, vec![Keyword::Squad(squad_cost.clone())]);
 
         assert_eq!(base, vec![Keyword::Squad(squad_cost)]);
+    }
+
+    #[test]
+    fn build_oracle_face_drops_craft_default_when_material_constraint_is_unparsed() {
+        let mtgjson = AtomicCard {
+            name: "Threefold Thunderhulk".to_string(),
+            mana_cost: Some("{7}".to_string()),
+            colors: Vec::new(),
+            color_identity: Vec::new(),
+            power: Some("0".to_string()),
+            toughness: Some("0".to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some("Craft with two that share a card type {6}".to_string()),
+            layout: "transform".to_string(),
+            type_line: Some("Artifact Creature — Gnome".to_string()),
+            types: vec!["Artifact".to_string(), "Creature".to_string()],
+            subtypes: vec!["Gnome".to_string()],
+            supertypes: Vec::new(),
+            keywords: Some(vec!["Craft:{6}".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 7.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_id: None,
+                scryfall_oracle_id: None,
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert!(
+            face.keywords
+                .iter()
+                .all(|keyword| !matches!(keyword, Keyword::Craft { .. })),
+            "unparsed Craft material constraints must not keep MTGJSON's generic Craft fallback"
+        );
+        assert!(
+            face.abilities
+                .iter()
+                .all(|definition| !matches!(definition.cost, Some(AbilityCost::Composite { .. }))),
+            "unsupported Craft must not synthesize an approximate activated ability"
+        );
     }
 
     /// Re-running synthesis must not duplicate the replacement.

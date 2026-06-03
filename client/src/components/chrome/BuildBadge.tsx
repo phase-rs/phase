@@ -70,28 +70,34 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
     ? `${__GIT_REPO_URL__}/commit/${cardDataMeta.commit}`
     : null;
 
-  // Compact (rail) layout: a narrow vertical stack that fits the 92px rail —
-  // version on top, an update affordance below. The full meta (build hash,
-  // card-data age) stays in the wide pill / Settings → About.
+  // Compact (rail) layout: a single version + refresh row that fits the 92px
+  // rail. Clicking it checks for updates; the build hash and card-data age live
+  // in its hover tooltip (the same meta the wide mobile pill shows inline).
   if (compact) {
+    const tooltip = [
+      `v${__APP_VERSION__} · ${__BUILD_HASH__}`,
+      cardDataMeta &&
+        t("buildBadge.cardDataTitle", {
+          date: cardDataMeta.generated_at,
+          commit: cardDataMeta.commit_short,
+        }),
+      t("buildBadge.checkForUpdates"),
+    ]
+      .filter(Boolean)
+      .join("\n");
     return (
       <div className={`flex flex-col items-center gap-0.5 ${className}`.trim()}>
-        <a
-          href={commitUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="font-mono text-[9px] leading-tight text-slate-500 transition-colors hover:text-white"
-        >
-          v{__APP_VERSION__}
-        </a>
         <button
           type="button"
           onClick={handleCheckUpdate}
-          className={`font-mono text-[10px] leading-none text-slate-600 transition-colors hover:text-white ${isActive ? "animate-spin" : ""}`}
           aria-label={t("buildBadge.checkForUpdates")}
-          title={t("buildBadge.checkForUpdates")}
+          title={tooltip}
+          className="inline-flex items-center gap-1 font-mono text-[10.5px] leading-none text-slate-400 transition-colors hover:text-white"
         >
-          ↻
+          <span>v{__APP_VERSION__}</span>
+          <span className={`text-[11px] text-slate-500 ${isActive ? "animate-spin" : ""}`} aria-hidden>
+            ↻
+          </span>
         </button>
         {statusLabel && (
           <span className="text-center text-[8px] leading-tight text-cyan-300">{statusLabel}</span>

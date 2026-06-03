@@ -23,6 +23,15 @@ unbounded; "two rounds and ship" is not acceptable. This is how the repo keeps
 ad-hoc edits from shipping plausible-but-wrong ASTs, special-cased logic that
 breaks the next card, and unverified CR annotations.
 
+**A final [`/review-impl`](.claude/skills/review-impl/SKILL.md) pass is
+mandatory before any PR opens** — regardless of how the diff was produced (full
+pipeline or a narrow inline edit). The last action before pushing is a
+`/review-impl` review whose findings are addressed *with code*, not merely
+acknowledged. Two checks lead that review and are non-negotiable: (1) the change
+sits at the architecturally correct seam, and (2) the change at that seam is the
+most idiomatic one the codebase allows. A PR that opens without a
+feedback-addressed final review does not meet the bar.
+
 **Narrow exceptions you may edit directly:** non-engine code (frontend,
 transport layers, scripts, docs, CI) and truly mechanical engine edits with no
 behavior or AST change. When in doubt, run the pipeline.

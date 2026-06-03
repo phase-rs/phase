@@ -18,7 +18,7 @@ use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
-use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::counter::{has_positive_counters, CounterMatch, CounterType};
 use crate::types::game_state::{DayNight, GameState, LayersDirty, StaticGateKey};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -38,7 +38,11 @@ struct ActiveCombatAssignmentRuleEffect {
 }
 
 // CR 205.3c: Each subtype is correlated to its appropriate card type.
-fn subtype_matches_core_types(
+/// CR 205.1a: Whether a subtype correlates to at least one of the given core
+/// types — i.e. whether it survives a card-type replacement. Shared with the
+/// token-copy "stamp at creation" path so both the layered and baked
+/// applications of `SetCardTypes` drop the same uncorrelated subtypes.
+pub(crate) fn subtype_matches_core_types(
     subtype: &str,
     core_types: &[CoreType],
     all_creature_types: &[String],
@@ -1280,6 +1284,7 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
 
         if *layer == Layer::Type {
+            apply_prototype_characteristics(state, bf_ids.iter().copied());
             apply_intrinsic_basic_land_mana_abilities(state, &bf_ids);
         }
         if matches!(*layer, Layer::Control | Layer::Type) {
@@ -1722,7 +1727,7 @@ fn entered_object_blocks_incremental(
     //     genuine new entry are sourced by statics already covered by (1)/(2).
     //     A controller differing from the base controller indicates a Layer-2
     //     override the incremental path does not reset for the rest of the board.
-    if !obj.counters.is_empty() {
+    if has_positive_counters(&obj.counters) {
         return true;
     }
     if obj.attached_to.is_some() || !obj.attachments.is_empty() {
@@ -1822,6 +1827,7 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
             apply_pt_counter_modifications(state, entered_ids.iter().copied());
         }
         if *layer == Layer::Type {
+            apply_prototype_characteristics(state, entered_ids.iter().copied());
             let entered_vec: Vec<ObjectId> = entered_ids.iter().copied().collect();
             apply_intrinsic_basic_land_mana_abilities(state, &entered_vec);
         }
@@ -1894,6 +1900,25 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
         .collect()
 }
 
+/// CR 718.3b: A prototyped spell and the permanent it becomes have only their
+/// alternative mana cost and P/T characteristics. If that mana cost contains
+/// colored mana symbols, the spell/permanent is those colors. Reapply this after
+/// layer reset so the prototype marker survives normal layer recomputation.
+fn apply_prototype_characteristics(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
+    for id in ids {
+        let Some(obj) = state.objects.get_mut(&id) else {
+            continue;
+        };
+        let Some(form) = obj.prototype_form.clone() else {
+            continue;
+        };
+        obj.mana_cost = form.mana_cost;
+        obj.power = Some(form.power);
+        obj.toughness = Some(form.toughness);
+        obj.color = form.colors;
+    }
+}
+
 /// CR 613.4c: Fold each permanent's power/toughness counters into its P/T in
 /// layer 7c. Counters are object state rather than continuous effects, so this
 /// runs at the `Layer::CounterPT` step of the layer loop — after the 7c `+N/+N`
@@ -1903,7 +1928,7 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
 fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
     for id in ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            if obj.counters.is_empty() {
+            if !has_positive_counters(&obj.counters) {
                 continue;
             }
 
@@ -3891,6 +3916,71 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    #[test]
+    fn prototyped_permanent_keeps_secondary_characteristics_after_type_change() {
+        let mut state = setup();
+        let prototype = make_creature(&mut state, "Combat Thresher", 3, 3, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&prototype).unwrap();
+            obj.card_types.core_types.insert(0, CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 7,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.base_color.clear();
+            obj.color.clear();
+            obj.prototype_form = Some(crate::game::game_object::PrototypeFormState {
+                mana_cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 2,
+                },
+                power: 1,
+                toughness: 1,
+                colors: vec![ManaColor::White],
+            });
+        }
+
+        evaluate_layers(&mut state);
+        let as_creature = state.objects.get(&prototype).unwrap();
+        assert_eq!(as_creature.mana_cost.mana_value(), 3);
+        assert_eq!(as_creature.power, Some(1));
+        assert_eq!(as_creature.toughness, Some(1));
+        assert_eq!(as_creature.color, vec![ManaColor::White]);
+
+        let type_changer = create_object(
+            &mut state,
+            CardId(161),
+            PlayerId(0),
+            "Prototype Shell".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&type_changer).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: prototype })
+                    .modifications(vec![ContinuousModification::SetCardTypes {
+                        core_types: vec![CoreType::Artifact],
+                    }]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+        let noncreature = state.objects.get(&prototype).unwrap();
+        assert_eq!(noncreature.mana_cost.mana_value(), 3);
+        assert_eq!(noncreature.power, Some(1));
+        assert_eq!(noncreature.toughness, Some(1));
+        assert_eq!(noncreature.color, vec![ManaColor::White]);
+        assert!(!noncreature
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
     }
 
     /// Places a battlefield commander object with the given owner/controller.

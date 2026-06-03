@@ -275,6 +275,12 @@ fn controller_to_scope(c: &ControllerRef) -> ConvResult<ProhibitionScope> {
             engine_type: "ProhibitionScope",
             needed_variant: "DefendingPlayer".into(),
         }),
+        // CR 613.1: A persisted "as ~ enters, choose a player" reference has no
+        // static `ProhibitionScope` meaning — strict-fail (mirrors DefendingPlayer).
+        ControllerRef::SourceChosenPlayer => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ProhibitionScope",
+            needed_variant: "SourceChosenPlayer".into(),
+        }),
         // CR 608.2c: A resolution-time chosen player has no static
         // `ProhibitionScope` meaning — strict-fail.
         ControllerRef::ChosenPlayer { .. } => Err(ConversionGap::EnginePrerequisiteMissing {
