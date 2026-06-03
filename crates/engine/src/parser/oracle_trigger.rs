@@ -2557,6 +2557,13 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         );
     }
 
+    // CR 603.4 + CR 601.2h: "if the amount of mana spent to cast it/that spell
+    // was less than/greater than its mana value" — intervening-if for mana-spent
+    // comparison triggers (Tokka & Rahzar, Liberator, Urza's Battlethopter).
+    if let Some(result) = try_extract_mana_spent_comparison_condition(&lower, text) {
+        return result;
+    }
+
     // CR 603.4 + CR 601.2h: "if no mana was spent to cast it/that spell" —
     // intervening-if for free-spell counter triggers (Lavinia / Vexing Bauble).
     if let Some(result) = try_extract_no_mana_spent_condition(&lower, text) {
@@ -2988,6 +2995,97 @@ fn parse_no_mana_spent_clause(i: &str) -> OracleResult<'_, &str> {
         )),
     ))
     .parse(i)
+}
+
+/// CR 603.4 + CR 601.2h: Extract "if the amount of mana spent to cast it/that spell
+/// was less than/greater than its mana value" — intervening-if for mana-spent
+/// comparison triggers (Tokka & Rahzar, Liberator, Urza's Battlethopter).
+fn try_extract_mana_spent_comparison_condition(
+    lower: &str,
+    text: &str,
+) -> Option<(String, Option<TriggerCondition>)> {
+    use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric, ObjectScope};
+
+    let (before, clause_text, rest) = scan_preceded(lower, |i| {
+        preceded(tag("if "), parse_mana_spent_comparison_clause).parse(i)
+    })?;
+
+    let rest_trimmed = rest.trim_start();
+    if !(rest_trimmed.is_empty() || rest_trimmed.starts_with(',') || rest_trimmed.starts_with('.'))
+    {
+        return None;
+    }
+    let clause_start = before.len();
+    let clause_len = lower.len() - before.len() - rest.len();
+
+    // Parse the clause into a QuantityComparison
+    let (_lhs_text, comparator, _rhs_text) = parse_mana_spent_comparison_structure(clause_text)?;
+
+    // Construct the QuantityRefs directly based on the canonical forms
+    // LHS: "that spell" -> ManaSpentToCast { TriggeringSpell, Total }
+    // RHS: "that spell's mana value" -> ObjectManaValue { EventSource }
+    let lhs_qty = crate::types::ability::QuantityRef::ManaSpentToCast {
+        scope: CastManaObjectScope::TriggeringSpell,
+        metric: CastManaSpentMetric::Total,
+    };
+    let rhs_qty = crate::types::ability::QuantityRef::ObjectManaValue {
+        scope: ObjectScope::EventSource,
+    };
+
+    let cleaned = strip_condition_clause(text, clause_start, clause_len);
+    Some((
+        cleaned,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: crate::types::ability::QuantityExpr::Ref { qty: lhs_qty },
+            comparator,
+            rhs: crate::types::ability::QuantityExpr::Ref { qty: rhs_qty },
+        }),
+    ))
+}
+
+fn parse_mana_spent_comparison_clause(i: &str) -> OracleResult<'_, &str> {
+    recognize((
+        tag("the amount of mana spent to cast "),
+        alt((tag("it"), tag("that spell"), tag("this spell"))),
+        alt((tag(" was "), tag(" is "))),
+        alt((tag("less than"), tag("greater than"))),
+        tag(" its mana value"),
+    ))
+    .parse(i)
+}
+
+fn parse_mana_spent_comparison_structure(clause: &str) -> Option<(&str, Comparator, &str)> {
+    let lower = clause.to_lowercase();
+
+    // allow-noncombinator: input already validated by parse_mana_spent_comparison_clause nom combinator
+    let mana_spent_end = lower.find(" was ").or_else(|| lower.find(" is "))?;
+    let comparator_start = mana_spent_end + 5; // " was " or " is " both have length 5 (including trailing space)
+
+    // allow-noncombinator: input already validated by parse_mana_spent_comparison_clause nom combinator
+    let comparator_end = if lower[comparator_start..].starts_with("less than") {
+        comparator_start + "less than".len()
+    } else {
+        // allow-noncombinator: input already validated by parse_mana_spent_comparison_clause nom combinator
+        if lower[comparator_start..].starts_with("greater than") {
+            comparator_start + "greater than".len()
+        } else {
+            return None;
+        }
+    };
+
+    let comparator = if &lower[comparator_start..comparator_end] == "less than" {
+        Comparator::LT
+    } else {
+        Comparator::GT
+    };
+
+    // Map to canonical forms that parse_quantity_ref can parse
+    // LHS: "the amount of mana spent to cast it/that spell" -> "that spell" (for TriggeringSpell scope)
+    // RHS: "its mana value" -> "that spell's mana value" (for EventSource scope)
+    let lhs_canonical = "that spell";
+    let rhs_canonical = "that spell's mana value";
+
+    Some((lhs_canonical, comparator, rhs_canonical))
 }
 
 /// CR 603.4 + CR 102.1: Extract "if it's / it is / it isn't /
@@ -21456,6 +21554,32 @@ mod tests {
                 text: "no mana was spent to cast it".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn extract_mana_spent_comparison_condition_less_than() {
+        let (cleaned, cond) = extract_if_condition(
+            "if the amount of mana spent to cast it was less than its mana value, ~ deal 3 damage to that player",
+        );
+        eprintln!("cleaned: {:?}", cleaned);
+        eprintln!("cond: {:?}", cond);
+        assert_eq!(cleaned, "~ deal 3 damage to that player");
+        assert!(matches!(
+            cond,
+            Some(TriggerCondition::QuantityComparison { .. })
+        ));
+    }
+
+    #[test]
+    fn extract_mana_spent_comparison_condition_greater_than() {
+        let (cleaned, cond) = extract_if_condition(
+            "if the amount of mana spent to cast that spell was greater than its mana value, put a +1/+1 counter on ~",
+        );
+        assert_eq!(cleaned, "put a +1/+1 counter on ~");
+        assert!(matches!(
+            cond,
+            Some(TriggerCondition::QuantityComparison { .. })
+        ));
     }
 
     // The extractor uses `scan_split_at_phrase`, so the clause doesn't have to

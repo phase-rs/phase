@@ -1370,6 +1370,10 @@ pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, Quant
 pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     let text = text.trim().trim_end_matches('.');
 
+    if let Some(condition) = parse_mana_spent_comparison_condition_text(text) {
+        return Some(condition);
+    }
+
     if let Some(condition) = parse_you_control_urza_land_types_condition_text(text) {
         return Some(condition);
     }
@@ -1401,6 +1405,61 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
         lhs,
         comparator,
         rhs,
+    })
+}
+
+/// CR 608.2c + CR 601.2h: Parse "the amount of mana spent to cast that spell
+/// was less than/greater than its mana value" into a QuantityCheck for spell
+/// effect conditions (Disdainful Stroke).
+fn parse_mana_spent_comparison_condition_text(text: &str) -> Option<AbilityCondition> {
+    use crate::types::ability::{
+        CastManaObjectScope, CastManaSpentMetric, Comparator, ObjectScope,
+    };
+
+    let lower = text.to_lowercase();
+
+    // allow-noncombinator: structural analysis of validated prefix pattern
+    if !lower.starts_with("the amount of mana spent to cast ") {
+        return None;
+    }
+
+    // allow-noncombinator: structural analysis of validated input pattern
+    let mana_spent_end = lower.find(" was ")?;
+    let comparator_start = mana_spent_end + " was ".len();
+
+    // allow-noncombinator: structural analysis of validated input pattern
+    let comparator_end = if lower[comparator_start..].starts_with("less than") {
+        comparator_start + "less than".len()
+    } else {
+        // allow-noncombinator: structural analysis of validated input pattern
+        if lower[comparator_start..].starts_with("greater than") {
+            comparator_start + "greater than".len()
+        } else {
+            return None;
+        }
+    };
+
+    let comparator = if &lower[comparator_start..comparator_end] == "less than" {
+        Comparator::LT
+    } else {
+        Comparator::GT
+    };
+
+    // Construct the QuantityRefs directly based on the canonical forms
+    // LHS: "the amount of mana spent to cast that spell" -> ManaSpentToCast { TriggeringSpell, Total }
+    // RHS: "its mana value" -> ObjectManaValue { EventSource }
+    let lhs_qty = crate::types::ability::QuantityRef::ManaSpentToCast {
+        scope: CastManaObjectScope::TriggeringSpell,
+        metric: CastManaSpentMetric::Total,
+    };
+    let rhs_qty = crate::types::ability::QuantityRef::ObjectManaValue {
+        scope: ObjectScope::EventSource,
+    };
+
+    Some(AbilityCondition::QuantityCheck {
+        lhs: crate::types::ability::QuantityExpr::Ref { qty: lhs_qty },
+        comparator,
+        rhs: crate::types::ability::QuantityExpr::Ref { qty: rhs_qty },
     })
 }
 
@@ -3278,6 +3337,22 @@ mod tests {
             assert_eq!(&condition, expected, "condition mismatch for {input:?}");
             assert_eq!(rest, "draw a card", "rest mismatch for {input:?}");
         }
+    }
+
+    #[test]
+    fn parse_mana_spent_comparison_condition_less_than() {
+        let cond = parse_mana_spent_comparison_condition_text(
+            "the amount of mana spent to cast that spell was less than its mana value",
+        );
+        assert!(matches!(cond, Some(AbilityCondition::QuantityCheck { .. })));
+    }
+
+    #[test]
+    fn parse_mana_spent_comparison_condition_greater_than() {
+        let cond = parse_mana_spent_comparison_condition_text(
+            "the amount of mana spent to cast that spell was greater than its mana value",
+        );
+        assert!(matches!(cond, Some(AbilityCondition::QuantityCheck { .. })));
     }
 
     #[test]
