@@ -58,11 +58,12 @@ export function usePerspectivePlayerId(): PlayerId {
 export function useCanActForWaitingState(): boolean {
   const gameMode = useGameStore((s) => s.gameMode);
   const isSpectator = useMultiplayerStore((s) => s.isSpectator);
-  if (gameMode === "spectate" || isSpectator) return false;
-
   const playerId = usePlayerId();
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
+
+  if (gameMode === "spectate" || isSpectator) return false;
+
   const semanticPlayer = waitingPlayer(waitingFor);
   if (!gameState || semanticPlayer == null) return false;
   if (playerId === SPECTATOR_PLAYER_ID) return false;
