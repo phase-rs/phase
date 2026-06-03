@@ -18,10 +18,10 @@
    No webfont: --font-display is the existing system-serif stack.
    ========================================================================== */
 @theme {
-  /* ---- Display + mono fonts. Fraunces (self-hosted variable serif) leads the
+  /* ---- Display + mono fonts. Newsreader (self-hosted variable serif) leads the
      display stack with the former system serifs as fallbacks; JetBrains Mono
      leads the mono stack for codes / tabular numbers. ---- */
-  --font-display: "Fraunces Variable", "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  --font-display: "Newsreader Variable", "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
   /* ---- Accent tones → bg-ember, text-ember-text, border-ember/18, … ---- */
@@ -190,7 +190,7 @@ body {
 }
 
 .menu-display {
-  font-family: "Fraunces Variable", "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-family: "Newsreader Variable", "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
   font-weight: 600;
   letter-spacing: -0.02em;
 }
