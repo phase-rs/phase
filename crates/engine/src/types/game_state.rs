@@ -3592,6 +3592,10 @@ pub enum CastingVariant {
     /// CR 702.127a: Cast an aftermath half of a split card from a graveyard.
     /// If it was cast from a graveyard, exile it any time it leaves the stack.
     Aftermath,
+    /// CR 702.146a-b + CR 712.8c: Cast transformed from graveyard for disturb
+    /// cost. The stack spell uses its back-face characteristics and the
+    /// permanent enters the battlefield back face up on resolution.
+    Disturb,
     /// CR 601.2a: Cast from graveyard via a static permission source (e.g. Lurrus).
     /// Stores the granting permanent's ObjectId for per-turn tracking.
     /// CR 400.7: Zone change creates new ObjectId, naturally resetting permission.
@@ -3792,6 +3796,7 @@ impl CastingVariant {
             | CastingVariant::Awaken
             | CastingVariant::Cleave
             | CastingVariant::MoreThanMeetsTheEye
+            | CastingVariant::Disturb
             | CastingVariant::Impending
             | CastingVariant::Prototype => true,
             CastingVariant::Normal
@@ -3835,7 +3840,10 @@ impl CastingVariant {
     pub fn restores_front_face_after_stack_exit(self) -> bool {
         matches!(
             self,
-            CastingVariant::Adventure | CastingVariant::Omen | CastingVariant::MoreThanMeetsTheEye
+            CastingVariant::Adventure
+                | CastingVariant::Omen
+                | CastingVariant::MoreThanMeetsTheEye
+                | CastingVariant::Disturb
         )
     }
 }
