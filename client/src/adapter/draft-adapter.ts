@@ -68,6 +68,28 @@ export interface PairingView {
 }
 
 // @sync-with: crates/draft-core/src/view.rs
+export interface SpectatorDraftView {
+  status: DraftStatus;
+  kind: "Quick" | "Premier" | "Traditional";
+  current_pack_number: number;
+  pick_number: number;
+  pass_direction: "Left" | "Right";
+  seats: SeatPublicView[];
+  cards_per_pack: number;
+  pack_count: number;
+  min_deck_size: number;
+  addable_cards: string[];
+  standings: StandingEntry[];
+  current_round: number;
+  tournament_format: TournamentFormat;
+  pod_policy: PodPolicy;
+  pairings: PairingView[];
+  /** Present only when the host enabled omniscient spectator visibility. */
+  pools?: DraftCardInstance[][];
+  current_packs?: (DraftCardInstance[] | null)[];
+}
+
+// @sync-with: crates/draft-core/src/view.rs
 export interface DraftPlayerView {
   status: DraftStatus;
   kind: "Quick" | "Premier" | "Traditional";

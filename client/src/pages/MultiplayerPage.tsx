@@ -535,6 +535,19 @@ export function MultiplayerPage() {
     [joinDraft, showToast, t],
   );
 
+  const handleSpectate = useCallback(
+    (code: string, context?: LobbyGame) => {
+      if (context?.draft_metadata) {
+        navigate(`/draft-spectator?code=${encodeURIComponent(code)}`);
+        return;
+      }
+      const gameId = crypto.randomUUID();
+      useGameStore.setState({ gameId });
+      navigate(`/game/${gameId}?mode=spectate&code=${encodeURIComponent(code)}`);
+    },
+    [navigate],
+  );
+
   // Join from lobby → execute immediately if deck exists, otherwise prompt
   const handleJoinGame = useCallback(
     async (
@@ -779,6 +792,7 @@ export function MultiplayerPage() {
             onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
             onHostDraft={handleHostDraft}
             onJoinGame={handleJoinGame}
+            onSpectate={connectionMode === "server" ? handleSpectate : undefined}
             connectionMode={connectionMode}
             onServerOffline={() => {
               // Only prompt when we're actually trying to use the server; if
