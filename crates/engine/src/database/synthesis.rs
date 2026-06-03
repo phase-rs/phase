@@ -10,14 +10,15 @@ use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, Bracke
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
-    CardPlayMode, CastVariantPaid, ChoiceType, Comparator, ContinuousModification, ControllerRef,
-    CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp,
-    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    CardPlayMode, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
+    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp, KickerVariant,
+    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+    NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    RuntimeHandler, SearchSelectionConstraint, StaticCondition, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -3593,6 +3594,150 @@ fn is_modular_dies_transfer_trigger(t: &TriggerDefinition) -> bool {
     )
 }
 
+/// CR 702.44a: Sunburst — "If this object is entering as a creature, ignoring
+/// any type-changing effects that would affect it, it enters with a +1/+1
+/// counter on it for each color of mana spent to cast it. Otherwise, it enters
+/// with a charge counter on it for each color of mana spent to cast it."
+///
+/// CR 702.44b: counters are added only when the object enters from the stack as
+/// a resolving spell and one or more colored mana was spent on its costs. Both
+/// gates are satisfied for free by the chosen primitives:
+///   * The replacement is a `ReplacementEvent::Moved` on `SelfRef` (mirrors
+///     `synthesize_modular`), so it only fires on the keyword-bearing object's
+///     own battlefield entry. A permanent entering from a zone other than the
+///     stack (e.g. blinked, reanimated) had no mana spent on it, so
+///     `colors_spent_to_cast` is empty (CR 601.2h tracks it only on a cast) and
+///     `DistinctColors` resolves to 0 — no counters are placed, matching CR
+///     702.44b without a separate "from the stack" guard.
+///   * The count is `QuantityRef::ManaSpentToCast { SelfObject, DistinctColors }`,
+///     which the ETB-counter resolver threads against the *entering* object's
+///     per-color mana tally (see `extract_etb_counters`). Colorless and generic
+///     mana never increment a color bucket, so a fully colorless payment yields
+///     0 distinct colors and 0 counters.
+///
+/// CR 702.44a's creature-vs-noncreature branch is resolved at synthesis time on
+/// the face's characteristic-defining (printed) core types — which is precisely
+/// "ignoring any type-changing effects." Every printed Sunburst card is either
+/// a creature card or a noncreature card on its face, so the printed type is the
+/// authoritative branch. A creature face places `Plus1Plus1`; any other face
+/// places `Generic("charge")` (charge counters have no dedicated `CounterType`
+/// variant — they are the canonical generic counter; see Everflowing Chalice).
+///
+/// CR 702.44d: if an object has multiple instances of sunburst, each one works
+/// separately — so one replacement is emitted per `Keyword::Sunburst` instance,
+/// with the same per-instance idempotency discipline as `synthesize_modular`.
+///
+/// CR 702.44c (Sunburst used as a variable for another ability, e.g.
+/// "Modular—Sunburst") is NOT this keyword: that case is parsed as a
+/// `QuantityRef::ManaSpentToCast { DistinctColors }` count on the host ability
+/// and already resolves through the shared mana-spent-to-cast plumbing,
+/// independent of creature/noncreature status.
+///
+/// Build-for-the-class: this is the exact `synthesize_modular` ETB shape with
+/// the count generalized from `Fixed(n)` to the distinct-colors-spent ref and
+/// the counter type chosen by entering-as-creature. Any future
+/// "enters-with-counters-equal-to-a-cast-metric" keyword lifts this directly.
+pub fn synthesize_sunburst(face: &mut CardFace) {
+    let instances = face
+        .keywords
+        .iter()
+        .filter(|kw| matches!(kw, Keyword::Sunburst))
+        .count();
+    if instances == 0 {
+        return;
+    }
+
+    // CR 702.44a: branch on the printed (characteristic-defining) core types,
+    // ignoring type-changing effects.
+    let counter_type = if face.card_type.core_types.contains(&CoreType::Creature) {
+        CounterType::Plus1Plus1
+    } else {
+        CounterType::Generic("charge".to_string())
+    };
+
+    // CR 702.44d: each instance works separately. Emit one replacement per
+    // instance, counting existing synthesized Sunburst replacements so a re-run
+    // adds only the delta (idempotency mirrors `synthesize_modular`).
+    let existing = face
+        .replacements
+        .iter()
+        .filter(|r| is_sunburst_etb_replacement(r, &counter_type))
+        .count();
+
+    let counter_phrase = match &counter_type {
+        CounterType::Plus1Plus1 => "+1/+1",
+        _ => "charge",
+    };
+
+    for _ in existing..instances {
+        let etb_counters = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: counter_type.clone(),
+                // CR 702.44a + CR 601.2h: one counter per *color* (max 5) of mana
+                // spent to cast this object — the distinct-colors metric, not the
+                // total amount.
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::SelfObject,
+                        metric: CastManaSpentMetric::DistinctColors,
+                    },
+                },
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .description(format!(
+            "This permanent enters with a {counter_phrase} counter on it for each color of mana spent to cast it"
+        ));
+
+        let replacement = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(etb_counters)),
+            valid_card: Some(TargetFilter::SelfRef),
+            description: Some(format!(
+                "CR 702.44a: Sunburst — this permanent enters with a {counter_phrase} counter on it for each color of mana spent to cast it."
+            )),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(replacement);
+    }
+}
+
+/// Idempotency-shape predicate for `synthesize_sunburst`'s ETB-with-counters
+/// replacement. True iff `replacement` is a `Moved` replacement on `SelfRef`
+/// whose execute body is `Effect::PutCounter` placing the expected counter type
+/// on `SelfRef` with a `ManaSpentToCast { SelfObject, DistinctColors }` count.
+///
+/// The `expected_ct` argument keys the match to the branch (`Plus1Plus1` for a
+/// creature face, `Generic("charge")` otherwise) so the predicate counts only
+/// replacements this synthesizer would have emitted for the current face.
+fn is_sunburst_etb_replacement(
+    replacement: &ReplacementDefinition,
+    expected_ct: &CounterType,
+) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::DistinctColors,
+                },
+            },
+            target: TargetFilter::SelfRef,
+        } if counter_type == expected_ct
+    )
+}
+
 /// Idempotency-shape predicate for `synthesize_backup`'s ETB trigger.
 /// True iff `trigger` is a ChangesZone (→Battlefield) trigger on SelfRef
 /// whose execute body is `Effect::PutCounter` placing `expected_n` P1P1
@@ -4738,6 +4883,13 @@ pub fn synthesize_all(face: &mut CardFace) {
     // dies-trigger transferring counters (LKI-counted) to a target artifact
     // creature. Each instance functions independently.
     synthesize_modular(face);
+    // CR 702.44a + CR 702.44b + CR 702.44d: Sunburst — as-enters replacement
+    // placing one +1/+1 counter (creature face) or charge counter (noncreature
+    // face) per distinct color of mana spent to cast it. Reuses the Modular ETB
+    // shape with the count generalized to the distinct-colors-spent metric. Each
+    // instance functions independently. Must run after Oracle parsing so
+    // `face.card_type` reflects the printed type for the CR 702.44a branch.
+    synthesize_sunburst(face);
     // CR 702.58a + CR 702.58b: Graft N — ETB-with-N-P1P1 replacement plus a
     // "whenever another creature enters" trigger that optionally moves one
     // +1/+1 counter from this permanent onto the entering creature, gated on
@@ -14375,5 +14527,342 @@ mod reinforce_synthesis_tests {
             }
             other => panic!("expected Composite cost, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod sunburst_synthesis_tests {
+    //! CR 702.44a + CR 702.44b + CR 702.44d: shape tests for the synthesized
+    //! Sunburst ETB-with-counters replacement.
+    //!
+    //! A Sunburst face gets one `ReplacementEvent::Moved` replacement per
+    //! `Keyword::Sunburst` instance whose execute body is `Effect::PutCounter`
+    //! on `SelfRef` with the count read from
+    //! `QuantityRef::ManaSpentToCast { SelfObject, DistinctColors }`. The counter
+    //! type is `Plus1Plus1` for a creature face and `Generic("charge")` for any
+    //! noncreature face.
+    use super::*;
+
+    fn creature_sunburst_face() -> CardFace {
+        let mut face = CardFace {
+            name: "Sunburst Creature".to_string(),
+            power: Some(PtValue::Fixed(0)),
+            toughness: Some(PtValue::Fixed(0)),
+            keywords: vec![Keyword::Sunburst],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Artifact);
+        face.card_type.core_types.push(CoreType::Creature);
+        face
+    }
+
+    fn artifact_sunburst_face() -> CardFace {
+        let mut face = CardFace {
+            name: "Sunburst Artifact".to_string(),
+            keywords: vec![Keyword::Sunburst],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Artifact);
+        face
+    }
+
+    /// CR 702.44a (creature branch): a creature face synthesizes a Moved → SelfRef
+    /// `PutCounter` replacement placing +1/+1 counters, counted by the distinct
+    /// colors of mana spent to cast it.
+    #[test]
+    fn synthesize_sunburst_creature_adds_p1p1_etb_replacement() {
+        let mut face = creature_sunburst_face();
+        synthesize_sunburst(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_sunburst_etb_replacement(r, &CounterType::Plus1Plus1))
+            .expect("creature Sunburst must synthesize a P1P1 ETB replacement");
+
+        assert!(matches!(replacement.event, ReplacementEvent::Moved));
+        assert!(matches!(
+            replacement.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("ETB replacement requires execute body");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("sunburst ETB execute body should be Effect::PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert!(matches!(target, TargetFilter::SelfRef));
+        // CR 702.44a + CR 601.2h: one counter per distinct color of mana spent.
+        assert!(matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::DistinctColors,
+                },
+            }
+        ));
+    }
+
+    /// CR 702.44a (noncreature branch): a noncreature artifact face synthesizes a
+    /// Moved → SelfRef `PutCounter` placing charge counters
+    /// (`Generic("charge")`), counted by distinct colors spent.
+    #[test]
+    fn synthesize_sunburst_artifact_adds_charge_etb_replacement() {
+        let mut face = artifact_sunburst_face();
+        synthesize_sunburst(&mut face);
+
+        let charge = CounterType::Generic("charge".to_string());
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_sunburst_etb_replacement(r, &charge))
+            .expect("noncreature Sunburst must synthesize a charge ETB replacement");
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("requires execute body");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = &*execute.effect
+        else {
+            panic!("expected Effect::PutCounter");
+        };
+        assert_eq!(counter_type, &charge);
+        // The noncreature branch must NOT emit a +1/+1 replacement.
+        assert!(
+            !face
+                .replacements
+                .iter()
+                .any(|r| is_sunburst_etb_replacement(r, &CounterType::Plus1Plus1)),
+            "a noncreature Sunburst face must not place +1/+1 counters (CR 702.44a)"
+        );
+        assert!(matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::DistinctColors,
+                },
+            }
+        ));
+    }
+
+    /// Re-running synthesis must not duplicate the replacement (idempotency
+    /// discipline shared with `synthesize_modular`).
+    #[test]
+    fn synthesize_sunburst_is_idempotent() {
+        let mut face = creature_sunburst_face();
+        synthesize_sunburst(&mut face);
+        synthesize_sunburst(&mut face);
+
+        let count = face
+            .replacements
+            .iter()
+            .filter(|r| is_sunburst_etb_replacement(r, &CounterType::Plus1Plus1))
+            .count();
+        assert_eq!(count, 1, "Sunburst ETB replacement must be emitted once");
+    }
+
+    /// CR 702.44d: two instances of Sunburst each work separately — two
+    /// replacements are emitted (so the counters stack).
+    #[test]
+    fn synthesize_sunburst_emits_one_replacement_per_instance() {
+        let mut face = creature_sunburst_face();
+        face.keywords.push(Keyword::Sunburst);
+        synthesize_sunburst(&mut face);
+
+        let count = face
+            .replacements
+            .iter()
+            .filter(|r| is_sunburst_etb_replacement(r, &CounterType::Plus1Plus1))
+            .count();
+        assert_eq!(
+            count, 2,
+            "two Sunburst instances must each emit their own ETB replacement (CR 702.44d)"
+        );
+    }
+
+    /// A face without `Keyword::Sunburst` is unaffected.
+    #[test]
+    fn synthesize_sunburst_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.card_type.core_types.push(CoreType::Artifact);
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_sunburst(&mut face);
+        assert!(face.replacements.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sunburst_runtime_tests {
+    //! CR 702.44a/b runtime integration: cast a Sunburst object through the full
+    //! casting pipeline paying N distinct colors and assert it enters the
+    //! battlefield with N counters of the branch-correct type. The full cast is
+    //! required so the engine populates the entering object's
+    //! `colors_spent_to_cast` from the actual mana spent (CR 601.2h), which the
+    //! synthesized ETB replacement reads via
+    //! `QuantityRef::ManaSpentToCast { DistinctColors }`.
+    use super::*;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::scenario::GameRunner;
+    use crate::game::zones::create_object;
+    use crate::types::counter::CounterType;
+    use crate::types::game_state::{GameState, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::player::PlayerId;
+
+    const P0: PlayerId = PlayerId(0);
+
+    /// A Sunburst face with the given printed core types, fully synthesized.
+    fn sunburst_face(name: &str, core_types: &[CoreType], pt: Option<i32>) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: pt.map(PtValue::Fixed),
+            toughness: pt.map(PtValue::Fixed),
+            keywords: vec![Keyword::Sunburst],
+            ..CardFace::default()
+        };
+        for ct in core_types {
+            face.card_type.core_types.push(ct.clone());
+        }
+        synthesize_all(&mut face);
+        face
+    }
+
+    /// Stage a Sunburst spell in P0's hand with the given mana cost, fund P0's
+    /// pool with exactly `colors` (one unit each), and park the engine at P0
+    /// priority in a main phase. Returns the runner and the spell object id.
+    fn stage_sunburst_cast(
+        face: &CardFace,
+        shards: Vec<ManaCostShard>,
+        colors: &[ManaColor],
+    ) -> (GameRunner, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+
+        let card_id = CardId(state.next_object_id);
+        let spell = create_object(&mut state, card_id, P0, face.name.clone(), Zone::Hand);
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            apply_card_face_to_object(obj, face);
+            obj.mana_cost = ManaCost::Cost { shards, generic: 0 };
+        }
+
+        let mana: Vec<ManaUnit> = colors
+            .iter()
+            .map(|c| ManaUnit::new(ManaType::from(*c), ObjectId(0), false, Vec::new()))
+            .collect();
+        if let Some(p) = state.players.iter_mut().find(|p| p.id == P0) {
+            p.mana_pool.mana = mana;
+        }
+
+        (GameRunner::from_state(state), spell)
+    }
+
+    fn counters_of(runner: &GameRunner, id: ObjectId, ct: &CounterType) -> u32 {
+        runner
+            .state()
+            .objects
+            .get(&id)
+            .and_then(|o| o.counters.get(ct))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Cast a Sunburst CREATURE (artifact creature) paying three distinct colors
+    /// → it must enter with three +1/+1 counters. CR 702.44a (creature branch).
+    #[test]
+    fn sunburst_creature_paying_three_colors_enters_with_three_p1p1_counters() {
+        let face = sunburst_face(
+            "Sunburst Drake",
+            &[CoreType::Artifact, CoreType::Creature],
+            Some(0),
+        );
+        let (mut runner, spell) = stage_sunburst_cast(
+            &face,
+            vec![
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Black,
+            ],
+            &[ManaColor::White, ManaColor::Blue, ManaColor::Black],
+        );
+
+        runner.cast(spell).resolve();
+
+        assert_eq!(
+            counters_of(&runner, spell, &CounterType::Plus1Plus1),
+            3,
+            "creature Sunburst cast for 3 colors must enter with 3 +1/+1 counters"
+        );
+    }
+
+    /// Cast a Sunburst CREATURE paying a single color (twice) → exactly one
+    /// +1/+1 counter. CR 702.44a counts COLORS, not total mana.
+    #[test]
+    fn sunburst_creature_paying_one_color_enters_with_one_p1p1_counter() {
+        let face = sunburst_face(
+            "Sunburst Imp",
+            &[CoreType::Artifact, CoreType::Creature],
+            Some(0),
+        );
+        // {R}{R}: two mana, one distinct color.
+        let (mut runner, spell) = stage_sunburst_cast(
+            &face,
+            vec![ManaCostShard::Red, ManaCostShard::Red],
+            &[ManaColor::Red, ManaColor::Red],
+        );
+
+        runner.cast(spell).resolve();
+
+        assert_eq!(
+            counters_of(&runner, spell, &CounterType::Plus1Plus1),
+            1,
+            "Sunburst counts distinct colors: {{R}}{{R}} is one color, so one +1/+1 counter"
+        );
+    }
+
+    /// Cast a Sunburst noncreature ARTIFACT paying two distinct colors → it must
+    /// enter with two CHARGE counters and zero +1/+1 counters. CR 702.44a
+    /// (otherwise branch).
+    #[test]
+    fn sunburst_artifact_paying_two_colors_enters_with_two_charge_counters() {
+        let face = sunburst_face("Sunburst Relic", &[CoreType::Artifact], None);
+        let (mut runner, spell) = stage_sunburst_cast(
+            &face,
+            vec![ManaCostShard::White, ManaCostShard::Green],
+            &[ManaColor::White, ManaColor::Green],
+        );
+
+        runner.cast(spell).resolve();
+
+        let charge = CounterType::Generic("charge".to_string());
+        assert_eq!(
+            counters_of(&runner, spell, &charge),
+            2,
+            "noncreature Sunburst cast for 2 colors must enter with 2 charge counters"
+        );
+        assert_eq!(
+            counters_of(&runner, spell, &CounterType::Plus1Plus1),
+            0,
+            "a noncreature Sunburst must not place +1/+1 counters (CR 702.44a)"
+        );
     }
 }

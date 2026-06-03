@@ -722,7 +722,12 @@ pub enum Keyword {
     /// CR 702.166a: Bargain — you may sacrifice an artifact, enchantment, or token
     /// as an additional cost to cast this spell.
     Bargain,
-    /// CR 702.43a: Sunburst — enters with a counter for each color of mana spent to cast it.
+    /// CR 702.44a: Sunburst — as an object enters the battlefield as a resolving
+    /// spell, it enters with a +1/+1 counter (if entering as a creature) or a
+    /// charge counter (otherwise) for each color of mana spent to cast it. Wired
+    /// at runtime by `synthesize_sunburst` as an ETB-counter replacement whose
+    /// count is the distinct-colors-spent metric. Per CR 702.44d each instance
+    /// works separately.
     Sunburst,
     /// CR 702.72a: Champion a [type] — exile a creature of the specified type you control
     /// when this enters; return it when this leaves.
@@ -1113,9 +1118,11 @@ impl Keyword {
     ///   `KeywordTriggerInstaller::install_matching`, invoked from `synthesize_all`.
     ///
     /// Returns `false` for everything else, including:
-    /// - CR 702.44d Sunburst — also "works separately" per instance, but is a
-    ///   STATIC ability never printed as a repeated bare word and not
-    ///   instance-counted, so it is out of this class.
+    /// - CR 702.44d Sunburst — also "works separately" per instance, but it is
+    ///   an as-enters STATIC ability, so its per-instance multiplicity is
+    ///   realized by `synthesize_sunburst` (one ETB-counter replacement per
+    ///   `Keyword::Sunburst`), not by the runtime trigger installer this
+    ///   predicate gates. Out of this class for that reason.
     /// - Prowess — runtime presence is a boolean `has_prowess` check, so counting
     ///   instances would be inert (separate deeper bug, not addressed here).
     pub fn instances_function_separately(&self) -> bool {
