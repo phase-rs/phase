@@ -12,6 +12,8 @@ export interface ParsedDeck {
   main: DeckEntry[];
   sideboard: DeckEntry[];
   commander?: string[];
+  /** Oathbreaker RC: the signature spell card name (0 or 1 entries). */
+  signature_spell?: string[];
   companion?: string;
 }
 
@@ -28,6 +30,8 @@ export interface ExpandedDeck {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  /** Oathbreaker RC: signature spell card name (empty for non-Oathbreaker formats). */
+  signature_spell: string[];
 }
 
 function expandEntries(entries: DeckEntry[]): string[] {
@@ -52,6 +56,7 @@ export function expandParsedDeck(deck: ParsedDeck): ExpandedDeck {
     main_deck: expandEntries(deck.main),
     sideboard: expandEntries(deck.sideboard),
     commander: deck.commander ?? [],
+    signature_spell: deck.signature_spell ?? [],
   };
 }
 

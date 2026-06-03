@@ -1,5 +1,134 @@
 @import "tailwindcss";
 
+/* ============================================================================
+   Design-system theme — the "modern client" redesign vocabulary, registered as
+   Tailwind v4 @theme tokens so they generate first-class utilities
+   (bg-ember, text-ember-text, border-hairline, rounded-card, shadow-panel,
+   text-heading, …) WITH free opacity modifiers (bg-ember/10, border-hairline/18).
+   Values are lifted from the design handoff (colors_and_type.css), itself
+   reverse-engineered from this file, so they match what existing components
+   currently hardcode inline.
+
+   COLLISION RULE: @theme overrides Tailwind defaults BY NAME. We must NOT touch
+   keys the app already relies on — `--radius-sm/md/lg` (264+ uses), `--ease-out`
+   (5), `--font-sans`/`--font-mono` (92) — or every existing utility shifts. So
+   semantic names deliberately diverge: radii use card/panel/row/chip/tile/badge
+   (not sm/md/lg), the springy curve is `--ease-spring` (not --ease-out), and we
+   register only the NEW `--font-display` (sans/mono stay Tailwind defaults).
+   No webfont: --font-display is the existing system-serif stack.
+   ========================================================================== */
+@theme {
+  /* ---- Display + mono fonts. Newsreader (self-hosted variable serif) leads the
+     display stack with the former system serifs as fallbacks; JetBrains Mono
+     leads the mono stack for codes / tabular numbers. ---- */
+  --font-display: "Newsreader Variable", "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* ---- Accent tones → bg-ember, text-ember-text, border-ember/18, … ---- */
+  --color-ember: #f59e0b;
+  --color-ember-bright: #fb923c;
+  --color-ember-text: #fde68a;
+  --color-ember-soft: #fcd34d;
+  --color-arcane: #38bdf8;
+  --color-arcane-text: #bae6fd;
+  --color-arcane-soft: #7dd3fc;
+  --color-jade: #34d399;
+  --color-jade-text: #a7f3d0;
+  --color-jade-soft: #6ee7b7;
+  --color-stone: #cbd5e1;
+
+  /* ---- Extended badge palette (bare names; distinct from Tailwind's *-NNN) ---- */
+  --color-indigo: #818cf8;
+  --color-cyan: #22d3ee;
+  --color-cyan-text: #a5f3fc;
+  --color-purple: #c084fc;
+  --color-rose: #fb7185;
+  --color-teal: #2dd4bf;
+
+  /* ---- Foreground ramp → text-fg, text-fg-muted, … ---- */
+  --color-fg: #ffffff;
+  --color-fg-card-body: rgba(255, 255, 255, 0.50);
+  --color-fg-muted: #94a3b8;
+  --color-fg-meta: #64748b;
+  --color-fg-faint: #475569;
+  --color-fg-dim: rgba(255, 255, 255, 0.42);
+
+  /* ---- Hairline borders → border-hairline, border-hairline-hover, … ---- */
+  --color-hairline: rgba(255, 255, 255, 0.10);
+  --color-hairline-hover: rgba(255, 255, 255, 0.18);
+  --color-hairline-faint: rgba(255, 255, 255, 0.06);
+  --color-hairline-strong: rgba(255, 255, 255, 0.08);
+
+  /* ---- Solid glass surfaces → bg-surface-panel, bg-surface-modal, …
+         (the gradient card surface can't be a color token — see :root below) ---- */
+  --color-surface-panel: rgba(0, 0, 0, 0.18);
+  --color-surface-panel-strong: rgba(0, 0, 0, 0.24);
+  --color-surface-wash: rgba(255, 255, 255, 0.04);
+  --color-surface-modal: rgba(11, 16, 32, 0.96);
+
+  /* ---- Radii → rounded-card/panel/row/chip/tile/badge (pill = rounded-full) ---- */
+  --radius-card: 22px;
+  --radius-panel: 20px;
+  --radius-row: 18px;
+  --radius-chip: 16px;
+  --radius-tile: 12px;
+  --radius-badge: 6px;
+
+  /* ---- Shadows → shadow-panel, shadow-modal, shadow-ember-glow, … ---- */
+  --shadow-panel: 0 18px 54px rgba(0, 0, 0, 0.22);
+  --shadow-modal: 0 25px 80px rgba(0, 0, 0, 0.55);
+  --shadow-tile-inset: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --shadow-ember-glow: 0 0 16px -2px rgba(245, 158, 11, 0.45);
+  --shadow-ember-glow-strong: 0 0 25px rgba(251, 146, 60, 0.5), 0 0 50px rgba(251, 146, 60, 0.2);
+
+  /* ---- Springy entrance curve → ease-spring (NOT --ease-out, which is in use) ---- */
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ---- Type roles → text-display/title/heading/body-lg/body/ui/caption,
+         each carrying its 4px-grid line-height. Body ≥ 1.5 (WCAG 1.4.12). ---- */
+  --text-display: 3rem;        --text-display--line-height: 3.25rem;
+  --text-title: 1.5rem;        --text-title--line-height: 1.75rem;
+  --text-heading: 1.25rem;     --text-heading--line-height: 1.75rem;
+  --text-body-lg: 1.0625rem;   --text-body-lg--line-height: 1.75rem;
+  --text-body: 1rem;           --text-body--line-height: 1.5rem;
+  --text-ui: 0.875rem;         --text-ui--line-height: 1.25rem;
+  --text-caption: 0.75rem;     --text-caption--line-height: 1rem;
+}
+
+/* Gradient/background tokens — NOT color utilities (a gradient is a
+   background-image, not a color). Exposed as the `surface-card` and `bg-app`
+   utilities below. Tabular numerals use Tailwind's built-in `tabular-nums`. */
+:root {
+  --surface-card: linear-gradient(180deg, rgba(13, 18, 29, 0.88), rgba(9, 13, 24, 0.92));
+  --bg-app: radial-gradient(circle at top, rgba(251, 146, 60, 0.12), transparent 30%),
+    linear-gradient(180deg, #040816 0%, #050b1d 36%, #02050f 100%);
+  --measure: 66ch;
+  --measure-tight: 48ch;
+}
+
+/* Raised top-lit glass card surface (the gradient companion to bg-surface-*). */
+@utility surface-card {
+  background: var(--surface-card);
+}
+
+/* Serif display roles: bundle font-family + tracking + balance with the role
+   size, since the bare text-* utility only sets font-size/line-height. */
+@utility ty-display {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-size: clamp(2.2rem, 5vw, var(--text-display));
+  line-height: 1.06;
+  text-wrap: balance;
+}
+@utility ty-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-size: var(--text-title);
+  line-height: var(--text-title--line-height);
+}
+
 :root {
   --card-size-scale: 1;
   --card-viewport-scale: 1;
@@ -61,7 +190,7 @@ body {
 }
 
 .menu-display {
-  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-family: "Newsreader Variable", "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
   font-weight: 600;
   letter-spacing: -0.02em;
 }
@@ -202,6 +331,22 @@ body {
 .menu-scene__sigil--right {
   right: -12rem;
   transform: rotate(-18deg);
+}
+
+/* Modern shell: each legacy menu page still renders its own `.menu-scene`
+   wrapper, but the shell paints the single shared scene behind everything.
+   Neutralize the nested scene's paint (keep its flex layout) so the backdrop,
+   moon, vignette, sigils, and haze don't stack on top of the shell's. */
+.shell-content .menu-scene {
+  background: none;
+  isolation: auto;
+}
+.shell-content .menu-scene::before,
+.shell-content .menu-scene::after,
+.shell-content .menu-scene__vignette,
+.shell-content .menu-scene__sigil,
+.shell-content .menu-scene__haze {
+  display: none;
 }
 
 @media (min-width: 1200px) {

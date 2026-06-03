@@ -1093,6 +1093,16 @@
       "subtitle": "Selecciona qué combinación de maná producir"
     }
   },
+  "specializeColor": {
+    "title": "Elegir especialización",
+    "subtitle": "Elige un color que coincida con la carta que descartaste",
+    "confirm": "Especializar",
+    "white": "Blanco",
+    "blue": "Azul",
+    "black": "Negro",
+    "red": "Rojo",
+    "green": "Verde"
+  },
   "dialogShell": {
     "eyebrow": "Elección de la partida",
     "restoreDialog": "Restaurar diálogo",

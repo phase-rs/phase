@@ -527,6 +527,16 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 614.1c + CR 122.1: "[scope] creatures you control enter with an
+    // additional +1/+1 counter on them." Continuous "enters with" replacement
+    // static (Kalain, Bard Class, Gorma the Gullet, Master Chef). The verb here
+    // is "enter", not "get"/"has", so it must dispatch BEFORE the anthem
+    // "creatures you control ..." branches below (which route to
+    // parse_continuous_gets_has and only recognize get/has verbs).
+    if let Some(def) = parse_enters_with_additional_counters(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Creatures you control [with counter condition] get/have ..." ---
     // Must come BEFORE parse_typed_you_control to prevent core type words like
     // "Creatures" from falling through to the subtype path (A1 fix: 162+ cards).
@@ -1097,6 +1107,30 @@ pub(crate) fn parse_static_line_inner(
 
     if let Some(def) = parse_source_power_block_restriction(&text) {
         return Some(def);
+    }
+
+    // CR 506.5 + CR 508.1a + CR 509.1b: "~ can't attack alone" / "~ can't
+    // block alone" / "~ can't attack or block alone".
+    // Must precede the generic "can't block" / "can't attack" arms below, which
+    // would otherwise swallow these as a blanket CantBlock / CantAttack. The
+    // compound "attack or block alone" emits the attack half here so the
+    // single-return path is non-None; `parse_static_line_multi` emits both halves.
+    if let Some((_, restriction, rest)) =
+        nom_primitives::scan_preceded(tp.lower, parse_alone_combat_restriction)
+    {
+        if rest.trim().is_empty() {
+            let mode = match restriction {
+                AloneCombatRestriction::Attack | AloneCombatRestriction::AttackOrBlock => {
+                    StaticMode::CantAttackAlone
+                }
+                AloneCombatRestriction::Block => StaticMode::CantBlockAlone,
+            };
+            return Some(
+                StaticDefinition::new(mode)
+                    .affected(TargetFilter::SelfRef)
+                    .description(text.to_string()),
+            );
+        }
     }
 
     // --- "~ can't block" ---
@@ -1791,4 +1825,93 @@ pub(crate) fn parse_static_line_inner(
     }
 
     None
+}
+
+/// CR 614.1c + CR 122.1: Parse a continuous "enters with an additional counter"
+/// replacement static.
+///
+/// Grammar (combinator-composed, one `alt()` per axis of variation):
+/// ```text
+/// <subject> " enter[s] with an additional " <counter> " counter on " <pronoun>
+/// ```
+/// where `<subject>` is a controller-scoped creature phrase
+/// ("[Other|Legendary|Nontoken|Token ]creatures you control"), `<counter>` is a
+/// recognized counter type (currently +1/+1 in shipping printings, but the
+/// strict counter-type combinator admits any recognized type so the class is not
+/// special-cased to one counter), and `<pronoun>` is "them"/"it".
+///
+/// The affected-permanent scope rides on `StaticDefinition::affected` exactly
+/// like the anthem statics — reuse `parse_continuous_subject_filter` so every
+/// Other/Legendary/Nontoken/Token qualifier is handled by the shared subject
+/// parser rather than re-enumerated here. The filter MUST anchor to
+/// `ControllerRef::You` (CR 109.5: "you control"); subjects without that anchor
+/// fall through to leave the line Unimplemented.
+///
+/// FIXED-count form only: a dynamic count (Gev, "for each opponent who lost
+/// life") produces no fixed `<counter>` token and so fails the combinator,
+/// leaving the line Unimplemented until a dynamic-count axis exists.
+fn parse_enters_with_additional_counters(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    // Split the subject from the predicate at the " enter[s] with an additional "
+    // verb phrase, scanned at word boundaries so any controlled-creature subject
+    // length is handled.
+    let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(tp.lower, |i| {
+        alt((
+            tag::<_, _, OracleError<'_>>("enter with an additional "),
+            tag("enters with an additional "),
+        ))
+        .parse(i)
+    })?;
+
+    // Parse the predicate: verb phrase, counter type, " counter on ", pronoun.
+    fn parse_predicate(i: &str) -> OracleResult<'_, crate::types::counter::CounterType> {
+        let (i, _) = alt((
+            tag::<_, _, OracleError<'_>>("enter with an additional "),
+            tag("enters with an additional "),
+        ))
+        .parse(i)?;
+        let (i, counter_type) = nom_primitives::parse_strict_counter_type(i)?;
+        let (i, _) = tag(" counter on ").parse(i)?;
+        let (i, _) = alt((tag("them"), tag("it"))).parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        Ok((i, counter_type))
+    }
+    let (_rest, counter_type) = all_consuming(parse_predicate)
+        .parse(predicate_lower.trim_end())
+        .ok()?;
+
+    // CR 109.5: the subject must be a controller-scoped ("you control") creature
+    // phrase. Recover the original-case slice so the shared subject parser sees
+    // the printed capitalization (subtypes/supertypes are capitalized in Oracle).
+    let subject_original = tp.original[..subject_lower.len()].trim();
+    let affected = parse_continuous_subject_filter(subject_original)?;
+    if !filter_is_controller_you(&affected) {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+            counter_type,
+            count: 1,
+        })
+        .affected(affected)
+        .description(text.to_string()),
+    )
+}
+
+/// CR 109.5: True when `filter` is anchored to the source's controller via a
+/// `ControllerRef::You` constraint (directly or within an Or/And composition).
+/// Stricter than `filter_has_source_or_controller_anchor`, which also accepts
+/// `Opponent` — "enters with an additional counter" statics are always
+/// "you control" scoped, so an opponent anchor must NOT match.
+fn filter_is_controller_you(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed.controller == Some(ControllerRef::You),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().all(filter_is_controller_you)
+        }
+        _ => false,
+    }
 }

@@ -162,7 +162,6 @@ fn terra_etb_offers_only_milled_enchantments_not_battlefield() {
 /// Full cast → ETB trigger → mill → put-from-milled path (issue #1298).
 #[test]
 fn terra_cast_etb_offers_only_milled_enchantments() {
-    use engine::types::actions::GameAction;
     use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 
     let parsed = parse_oracle_text(
@@ -225,40 +224,25 @@ fn terra_cast_etb_offers_only_milled_enchantments() {
         .mana_pool
         .add(ManaUnit::new(ManaType::Red, dummy, false, vec![]));
 
-    let card_id = runner.state().objects[&terra_id].card_id;
-    let mut result = runner
-        .act(GameAction::CastSpell {
-            object_id: terra_id,
-            card_id,
-            targets: vec![],
-        })
-        .expect("cast Terra");
+    // Cast Terra and resolve it onto the battlefield. The ETB trigger's
+    // put-from-milled clause halts the pipeline at its `EffectZoneChoice`
+    // (a prompt the cast driver leaves for the caller to inspect), so the
+    // final waiting state is the offered-cards choice we assert on.
+    let outcome = runner.cast(terra_id).resolve();
 
-    let mut guard = 0;
-    loop {
-        guard += 1;
-        assert!(guard < 96, "stuck waiting; last = {:?}", result.waiting_for);
-        match &result.waiting_for {
-            WaitingFor::EffectZoneChoice {
-                cards, destination, ..
-            } => {
-                assert!(cards.contains(&milled_enchantment), "offered = {cards:?}");
-                assert!(
-                    !cards.contains(&battlefield_enchantment),
-                    "battlefield trap offered (issue #1298); offered = {cards:?}"
-                );
-                assert_eq!(*destination, Some(Zone::Hand));
-                return;
-            }
-            WaitingFor::ManaPayment { .. } => {
-                result = runner
-                    .act(GameAction::PassPriority)
-                    .expect("finalize mana payment");
-            }
-            WaitingFor::Priority { .. } => {
-                result = runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            other => panic!("unexpected waiting_for during Terra cast ETB: {other:?}"),
-        }
-    }
+    let WaitingFor::EffectZoneChoice {
+        cards, destination, ..
+    } = outcome.final_waiting_for()
+    else {
+        panic!(
+            "expected EffectZoneChoice for put-from-milled clause, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert!(cards.contains(&milled_enchantment), "offered = {cards:?}");
+    assert!(
+        !cards.contains(&battlefield_enchantment),
+        "battlefield trap offered (issue #1298); offered = {cards:?}"
+    );
+    assert_eq!(*destination, Some(Zone::Hand));
 }

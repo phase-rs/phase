@@ -109,6 +109,12 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // support via is_data_carrying_static() because the variant is
             // parameterized.
             | StaticMode::RevealTopOfLibrary { .. }
+            // CR 614.1c + CR 122.1: EntersWithAdditionalCounters carries the
+            // CounterType + fixed count. Runtime enforcement is in the
+            // battlefield-entry counter hook in effects/change_zone.rs, which
+            // scans active statics whose `affected` filter matches the entering
+            // object. Parameterized — no registry entry; coverage support here.
+            | StaticMode::EntersWithAdditionalCounters { .. }
     )
 }
 
@@ -2087,6 +2093,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::CreateDamageReplacement {
             modification,
             redirect_to,
+            redirect_amount,
             combat_scope,
             redirect_object_filter,
             recipient_object_filter,
@@ -2097,6 +2104,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(r) = redirect_to {
                 d.push(("redirect_to".into(), format!("{r:?}")));
+            }
+            if let Some(a) = redirect_amount {
+                d.push(("redirect_amount".into(), format!("{a:?}")));
             }
             if let Some(cs) = combat_scope {
                 d.push(("combat_scope".into(), format!("{cs:?}")));
@@ -2365,6 +2375,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Investigate
         | Effect::BecomeMonarch
         | Effect::Proliferate
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
         | Effect::SolveCase
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }
@@ -2390,6 +2402,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters
         | Effect::Clash
         | Effect::Vote { .. }
@@ -2400,7 +2414,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::ReturnAsAura { .. } => {}
+        | Effect::ReturnAsAura { .. }
+        | Effect::Specialize => {}
     }
     d
 }
@@ -5349,6 +5364,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // `layers::evaluate_condition_with_context` alongside `ChosenColorIs`.
         StaticCondition::ChosenLabelIs { .. } => ("ChosenLabelIs", Handled),
         StaticCondition::HasCounters { .. } => ("HasCounters", Handled),
+        StaticCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         StaticCondition::RecipientHasCounters { .. } => ("RecipientHasCounters", Handled),
         StaticCondition::RecipientMatchesFilter { .. } => ("RecipientMatchesFilter", Handled),
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
@@ -6585,6 +6601,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
+            StaticMode::CantCrew => {
+                effective_lower.contains("can't crew") || effective_lower.contains("cannot crew")
+            }
             StaticMode::CastWithFlash => {
                 effective_lower.contains("as though it had flash")
                     || effective_lower.contains("as though they had flash")
@@ -7883,7 +7902,6 @@ fn is_keyword_line(lower: &str) -> bool {
         "gravestorm",
         "conspire",
         "retrace",
-        "rebound",
         "miracle ",
         "cipher",
         "extort",
@@ -8396,9 +8414,11 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            is_oathbreaker: false,
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
+            attraction_lights: vec![],
         }
     }
 

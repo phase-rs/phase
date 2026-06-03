@@ -38,7 +38,9 @@ const mockWorkerClient = {
 };
 
 vi.mock("../engine-worker-client", () => ({
-  EngineWorkerClient: vi.fn().mockImplementation(() => mockWorkerClient),
+  EngineWorkerClient: vi.fn().mockImplementation(function () {
+    return mockWorkerClient;
+  }),
 }));
 
 describe("WasmAdapter", () => {

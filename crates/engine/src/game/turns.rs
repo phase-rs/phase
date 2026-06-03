@@ -83,6 +83,46 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     enter_phase(state, next, events);
 }
 
+/// CR 724.1d: End the current turn by skipping straight to the cleanup step.
+/// Discards any extra phases/steps scheduled for this turn (they are skipped)
+/// and enters a fresh cleanup step — per CR 724.1d, even if the turn is ended
+/// during the cleanup step, a new cleanup step begins. Drives `Effect::EndTheTurn`
+/// (Time Stop, Sundial of the Infinite, Obeka, Glorious End, Discontinuity).
+pub fn end_turn_to_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 724.1d: "skip any phases or steps between this phase or step and the
+    // cleanup step" — drop scheduled extra phases for this (now-ending) turn.
+    state.extra_phases.clear();
+    enter_phase(state, Phase::Cleanup, events);
+}
+
+/// CR 724.2d: End the current combat phase by removing everything from combat,
+/// expiring "until end of combat" effects, and skipping straight to the
+/// postcombat main phase. Mirrors the end-of-combat teardown the `EndCombat`
+/// step performs (see the `Phase::EndCombat` arm of `advance_phase`), but skips
+/// the intervening end-of-combat step so its "at end of combat" triggers do not
+/// fire (CR 724.2e). Drives `Effect::EndCombatPhase` (Mandate of Peace).
+pub fn end_combat_phase_to_postcombat(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 724.2d / CR 511.3: Remove all creatures and planeswalkers from combat.
+    state.combat = None;
+    // CR 724.2d: Effects that last "until end of combat" expire — continuous
+    // effects, replacement definitions, and pending damage replacements alike,
+    // matching the normal end-of-combat prune.
+    super::layers::prune_end_of_combat_effects(state);
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        obj.replacement_definitions
+            .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+    }
+    state
+        .pending_damage_replacements
+        .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+
+    // CR 724.2d: Skip straight to the postcombat main phase, skipping any
+    // intervening steps (including the end-of-combat step — CR 724.2e). Any
+    // extra combat phases scheduled for this turn are also skipped.
+    state.extra_phases.clear();
+    enter_phase(state, Phase::PostCombatMain, events);
+}
+
 /// Enter a phase directly: set phase, run the CR 703.4q step-end empty
 /// unspent mana event for each player in APNAP order through the replacement
 /// pipeline, then (when the queue empties) reset priority (CR 117.3a),
@@ -1437,6 +1477,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // to each Saga the active player controls (turn-based action).
                 if state.phase == Phase::PreCombatMain {
                     add_lore_counters_to_sagas(state, events);
+                    super::attractions::perform_roll_to_visit_turn_based_action(state, events);
                     // CR 702.xxx: Paradigm (Strixhaven) — turn-based action at
                     // the start of the active player's first precombat main
                     // phase: offer to cast a copy of each exiled paradigm

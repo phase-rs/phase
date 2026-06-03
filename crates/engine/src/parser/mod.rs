@@ -1,5 +1,6 @@
 pub(crate) mod clause_shell;
 pub mod oracle;
+pub(crate) mod oracle_attraction;
 pub mod oracle_casting;
 pub(crate) mod oracle_class;
 pub(crate) mod oracle_classifier;
@@ -24,6 +25,9 @@ pub(crate) mod oracle_trigger;
 pub mod oracle_util;
 pub(crate) mod oracle_vote;
 pub(crate) mod swallow_check;
+#[cfg(test)]
+#[allow(dead_code)] // shared parser test assertions; ad-hoc call sites converted incrementally
+pub(crate) mod test_support;
 
 pub use oracle::parse_oracle_text;
 

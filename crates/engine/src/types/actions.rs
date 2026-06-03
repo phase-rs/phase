@@ -605,6 +605,10 @@ pub enum GameAction {
     CastPreparedCopy {
         source: ObjectId,
     },
+    /// Digital-only Specialize: pick the color specialization to apply.
+    ChooseSpecializeColor {
+        color: super::mana::ManaColor,
+    },
     /// CR 702.xxx: Paradigm (Strixhaven) — accept the turn-based offer during
     /// `WaitingFor::CastOffer` (Paradigm), casting a token copy of the exiled
     /// source spell without paying its mana cost. The exiled source stays in
@@ -1174,6 +1178,7 @@ impl GameAction {
             | GameAction::PayCombatTax { .. }
             | GameAction::ChooseDungeon { .. }
             | GameAction::ChooseDungeonRoom { .. }
+            | GameAction::ChooseSpecializeColor { .. }
             | GameAction::HarmonizeTap { .. }
             | GameAction::DeclareCompanion { .. }
             | GameAction::CompanionToHand

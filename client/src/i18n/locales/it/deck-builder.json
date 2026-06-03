@@ -177,7 +177,15 @@
     "setAsCommander": "Imposta come comandante:",
     "cardCount": "{{count}}/{{expected}} carte",
     "singletonViolations": "Violazioni singleton: {{cards}}",
-    "colorViolations": "Violazioni dell'identità di colore: {{cards}}"
+    "colorViolations": "Violazioni dell'identità di colore: {{cards}}",
+    "signatureSpell": {
+      "heading": "Magia firma",
+      "noSignatureSpell": "Nessuna magia firma selezionata",
+      "setAsSignatureSpell": "Imposta come magia firma:",
+      "remove": "Rimuovi magia firma",
+      "mustBeInstantOrSorcery": "La magia firma deve essere un'istantanea o una stregoneria",
+      "outsideColorIdentity": "{{name}}: fuori dall'identità di colore dell'Oathbreaker"
+    }
   },
   "manaCurve": {
     "title": "Curva del mana",

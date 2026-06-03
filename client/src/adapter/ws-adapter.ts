@@ -110,9 +110,9 @@ export class WebSocketAdapter implements EngineAdapter {
   private pendingReject: ((error: Error) => void) | null = null;
   private initResolve: (() => void) | null = null;
   private initReject: ((error: Error) => void) | null = null;
-  /** Starting-player contest DieRolled batch captured from the initial
-   *  GameStarted message, handed back by `initializeGame()` so the dice overlay
-   *  animates it. Empty on reconnects (the server drains it after first send). */
+  /** Starting-player contest event captured from the initial GameStarted
+   *  message, handed back by `initializeGame()` so the dice overlay animates it.
+   *  Empty on reconnects (the server drains it after first send). */
   private initStartEvents: GameEvent[] = [];
   private listeners: WsAdapterEventListener[] = [];
   private reconnectAttempt = 0;
@@ -613,11 +613,10 @@ export class WebSocketAdapter implements EngineAdapter {
           ...(playerNames === undefined ? {} : { playerNames }),
         });
         if (this.initResolve) {
-          // CR 103.1: the server sends the starting-player contest DieRolled
-          // batch only on the initial GameStarted (drained server-side, so
-          // reconnects carry none). Stash it for initializeGame() to return,
-          // routing it through the same gameStore.initGame contest path as
-          // local games.
+          // CR 103.1: the server sends the StartingPlayerContest event only on
+          // the initial GameStarted (drained server-side, so reconnects carry
+          // none). Stash it for initializeGame() to return, routing it through
+          // the same gameStore.initGame contest path as local games.
           this.initStartEvents = data.events ?? [];
           this.initResolve();
           this.initResolve = null;

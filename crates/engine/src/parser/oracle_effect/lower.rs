@@ -483,6 +483,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         if parse_controlled_by_different_players_target_constraint(&clause_ir.source_text) {
             def = def.target_constraint(TargetSelectionConstraint::DifferentObjectControllers);
         }
+        if let Some(constraint) = parse_total_mana_value_target_constraint(&clause_ir.source_text) {
+            def = def.target_constraint(constraint);
+        }
         // CR 601.2d: Propagate distribute flag.
         if let Some(ref unit) = clause_ir.parsed.distribute {
             def = def.distribute(unit.clone());
@@ -2588,6 +2591,39 @@ fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
     parser.parse(lower.as_str()).is_ok()
 }
 
+/// CR 202.3 + CR 115.1: Detect a "with total mana value <N|X> or less" target-set
+/// constraint anywhere in the clause and build the typed
+/// `TargetSelectionConstraint::TotalManaValue`. Literal numbers stay fixed;
+/// X remains a variable placeholder for the where-X form (Ancient Brass Dragon)
+/// so `apply_where_x_*` later rebinds it to the die-result `EventContextAmount`.
+///
+/// Target side accepts only the "or less" (LE) comparator — see
+/// `validate_target_constraints` / the parser strip in `oracle_effect/mod.rs`
+/// for why GE is never emitted for targeting.
+fn parse_total_mana_value_target_constraint(text: &str) -> Option<TargetSelectionConstraint> {
+    let lower = text.to_lowercase();
+    let (_, (value, comparator), _) = nom_primitives::scan_preceded(lower.as_str(), |input| {
+        preceded(
+            tag::<_, _, OracleError<'_>>("with total mana value "),
+            (
+                nom_quantity::parse_quantity_expr_number,
+                alt((
+                    value(Comparator::LE, tag(" or less")),
+                    value(Comparator::GE, tag(" or greater")),
+                )),
+            ),
+        )
+        .parse(input)
+    })?;
+    if comparator != Comparator::LE {
+        return None;
+    }
+    Some(TargetSelectionConstraint::TotalManaValue {
+        comparator: Comparator::LE,
+        value,
+    })
+}
+
 pub(super) fn extract_deal_damage_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
     let after_each_of = strip_after(&lower, "damage to each of ")?;
@@ -4234,7 +4270,21 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     {
         return None;
     }
-    parse_cda_quantity(where_x_expression)
+    // CDA-quantity classification takes precedence: it is the more specific
+    // where-X interpreter (object counts, "that spell's mana value",
+    // "the number of age counters on this enchantment", etc.).
+    if let Some(expr) = parse_cda_quantity(where_x_expression) {
+        return Some(expr);
+    }
+    // CR 706.2 + CR 706.4: "where X is the result" of a die roll / coin flip
+    // binds X to the rolled value via the shared `EventContextAmount` channel
+    // (the same one inline "you gain life equal to the result" cards use). This
+    // is a FALLBACK below `parse_cda_quantity` — `parse_event_context_quantity`
+    // has a broad `parse_quantity_ref` fallback that would otherwise mis-classify
+    // CDA-handled phrases, so CDA must win first. `parse_cda_quantity` returns
+    // `None` for the bare die-result phrase (see `cda_quantity_returns_none_for_the_result`),
+    // so this fallback is what binds Ancient Bronze Dragon's "where X is the result".
+    crate::parser::oracle_quantity::parse_event_context_quantity(where_x_expression)
 }
 
 fn parse_where_x_cards_named_in_all_graveyards(where_x_expression: &str) -> Option<QuantityExpr> {
@@ -4469,6 +4519,21 @@ pub(crate) fn apply_where_x_to_filter(
     }
 }
 
+/// CR 107.3i + CR 202.3: Substitute the X binding into a target-set constraint's
+/// dynamic bound. Mirrors `apply_where_x_to_filter_prop`: maps the
+/// `TotalManaValue.value` `QuantityExpr` through `apply_where_x_quantity_expression`
+/// so `Variable("X")` + where-X `"the result"` becomes `EventContextAmount`.
+/// Constraints without a quantity bound (`DifferentTargetPlayers`,
+/// `DifferentObjectControllers`) are left unchanged.
+fn apply_where_x_to_target_constraint(
+    constraint: &mut TargetSelectionConstraint,
+    where_x_expression: Option<&str>,
+) {
+    if let TargetSelectionConstraint::TotalManaValue { value, .. } = constraint {
+        *value = apply_where_x_quantity_expression(value.clone(), where_x_expression);
+    }
+}
+
 fn apply_where_x_to_filter_prop(prop: FilterProp, where_x_expression: Option<&str>) -> FilterProp {
     match prop {
         FilterProp::Cmc { comparator, value } => FilterProp::Cmc {
@@ -4504,6 +4569,14 @@ pub(super) fn apply_where_x_ability_expression(
     }
     if let Some(spec) = def.multi_target.as_mut() {
         spec.map_quantities(|expr| apply_where_x_quantity_expression(expr, where_x_expression));
+    }
+    // CR 107.3i + CR 202.3: Rebind X in the target-set constraints (e.g. the
+    // `TotalManaValue` cap on Ancient Brass Dragon, whose bound is the
+    // `where X is the result` die value). Without this, the reflexive sub
+    // inherits `Variable("X")` with no defining expression and the cap is
+    // effectively unbounded.
+    for constraint in def.target_constraints.iter_mut() {
+        apply_where_x_to_target_constraint(constraint, where_x_expression);
     }
     apply_where_x_effect_expression(def.effect.as_mut(), where_x_expression);
     if let Some(sub) = def.sub_ability.as_mut() {
@@ -4709,5 +4782,111 @@ mod tests {
                 "{expression}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod where_x_tests {
+    use super::parse_where_x_quantity_expression;
+    use crate::types::ability::{QuantityExpr, QuantityRef};
+
+    /// CR 706.2 + CR 706.4: "where X is the result" (of a die roll / coin flip)
+    /// binds X to the rolled value via `EventContextAmount` — the same channel
+    /// the inline "equal to the result" class uses. Building-block guard for
+    /// Ancient Bronze Dragon's reflexive "put X +1/+1 counters … where X is the
+    /// result" (issue #1602, Deliverable 1).
+    #[test]
+    fn where_x_is_the_result_binds_event_context_amount() {
+        assert_eq!(
+            parse_where_x_quantity_expression("the result"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            })
+        );
+    }
+
+    /// The new delegation must NOT shadow `parse_cda_quantity`: "the number of
+    /// …" expressions still route through the CDA-quantity path (the event-
+    /// context combinator returns `None` for them).
+    #[test]
+    fn cda_quantity_returns_none_for_the_result() {
+        // Precondition for the "CDA first, event-context fallback" ordering:
+        // `parse_cda_quantity` does not classify the bare die-result phrase, so
+        // the event-context delegation can safely catch it without shadowing any
+        // CDA-handled where-X binding.
+        assert_eq!(
+            crate::parser::oracle_quantity::parse_cda_quantity("the result"),
+            None
+        );
+    }
+
+    #[test]
+    fn where_x_number_of_phrase_not_shadowed_by_event_context() {
+        // "the number of creatures you control" is a CDA-quantity object count,
+        // not an event-context amount — must not resolve to EventContextAmount.
+        let parsed = parse_where_x_quantity_expression("the number of creatures you control");
+        assert_ne!(
+            parsed,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+            "the number-of phrase must route through parse_cda_quantity, not the \
+             event-context delegation"
+        );
+    }
+
+    /// CR 107.3i + CR 202.3: the where-X traversal rebinds a `TotalManaValue`
+    /// target constraint's `Variable("X")` cap to the die-result
+    /// `EventContextAmount` (Ancient Brass Dragon's "where X is the result").
+    #[test]
+    fn apply_where_x_to_target_constraint_binds_total_mana_value_cap() {
+        use crate::types::ability::Comparator;
+        use crate::types::game_state::TargetSelectionConstraint;
+
+        let mut constraint = TargetSelectionConstraint::TotalManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+        };
+        super::apply_where_x_to_target_constraint(&mut constraint, Some("the result"));
+        assert_eq!(
+            constraint,
+            TargetSelectionConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_total_mana_value_target_constraint_preserves_fixed_cap() {
+        use crate::types::ability::Comparator;
+        use crate::types::game_state::TargetSelectionConstraint;
+
+        assert_eq!(
+            super::parse_total_mana_value_target_constraint(
+                "target creature cards with total mana value 6 or less from graveyards"
+            ),
+            Some(TargetSelectionConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 6 },
+            })
+        );
+    }
+
+    /// Constraints without a quantity bound are left untouched.
+    #[test]
+    fn apply_where_x_to_target_constraint_leaves_non_quantity_unchanged() {
+        use crate::types::game_state::TargetSelectionConstraint;
+
+        let mut constraint = TargetSelectionConstraint::DifferentObjectControllers;
+        super::apply_where_x_to_target_constraint(&mut constraint, Some("the result"));
+        assert_eq!(
+            constraint,
+            TargetSelectionConstraint::DifferentObjectControllers
+        );
     }
 }

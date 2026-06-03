@@ -49,6 +49,8 @@
     "volume": "Volume"
   },
   "hostControl": {
+    "collapse": "Réduire",
+    "expand": "Développer le panneau d'hôte",
     "seatHost": "Hôte",
     "seatPlayer": "Joueur",
     "seatOpen": "Libre",
@@ -201,6 +203,7 @@
   },
   "diceRoll": {
     "rollingForFirst": "Tirage pour savoir qui commence",
+    "tieReroll": "Égalité — on relance !",
     "versus": "VS",
     "skip": "Toucher pour passer",
     "continue": "Toucher pour continuer",

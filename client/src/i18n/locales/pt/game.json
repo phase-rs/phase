@@ -1093,6 +1093,16 @@
       "subtitle": "Selecione qual combinação de mana produzir"
     }
   },
+  "specializeColor": {
+    "title": "Escolher especialização",
+    "subtitle": "Escolha uma cor que corresponda à carta descartada",
+    "confirm": "Especializar",
+    "white": "Branco",
+    "blue": "Azul",
+    "black": "Preto",
+    "red": "Vermelho",
+    "green": "Verde"
+  },
   "dialogShell": {
     "eyebrow": "Escolha do Jogo",
     "restoreDialog": "Restaurar diálogo",

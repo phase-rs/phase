@@ -40,6 +40,7 @@ use server_core::draft_wire_guard::{
     guard_reconnect_draft,
 };
 use server_core::emote_guard::guard_emote;
+use server_core::game_action_payload_guard::guard_game_action_payload;
 use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::legacy_join_guard::guard_legacy_join_game;
@@ -52,7 +53,10 @@ use server_core::protocol::{
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::{ActionResult, GameSession, SessionManager};
-use server_core::spectator_wire_guard::{guard_spectate_draft, guard_spectator_join};
+use server_core::spectator_wire_guard::{
+    guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
+    guard_spectator_join,
+};
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
@@ -89,13 +93,113 @@ type SharedDraftSpectators = Arc<
 /// Spectator senders keyed by game code (live games only).
 type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
 
+async fn remove_game_spectator_sender(
+    game_spectators: &SharedGameSpectators,
+    game_code: &str,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) {
+    let mut specs = game_spectators.lock().await;
+    if let Some(spectators) = specs.get_mut(game_code) {
+        spectators.retain(|sender| !sender.same_channel(tx) && !sender.is_closed());
+        if spectators.is_empty() {
+            specs.remove(game_code);
+        }
+    }
+}
+
+async fn reserve_game_spectator_slot(
+    game_spectators: &SharedGameSpectators,
+    game_code: &str,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) -> Result<(), String> {
+    let mut specs = game_spectators.lock().await;
+    let spectators = specs.entry(game_code.to_string()).or_default();
+    spectators.retain(|sender| !sender.is_closed());
+
+    if spectators.iter().any(|sender| sender.same_channel(tx)) {
+        return Ok(());
+    }
+
+    guard_game_spectator_capacity(spectators.len())?;
+    spectators.push(tx.clone());
+    Ok(())
+}
+
+async fn switch_game_spectator_slot(
+    game_spectators: &SharedGameSpectators,
+    previous_game_code: Option<&str>,
+    game_code: &str,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) -> Result<(), String> {
+    reserve_game_spectator_slot(game_spectators, game_code, tx).await?;
+    if previous_game_code != Some(game_code) {
+        if let Some(previous_game_code) = previous_game_code {
+            remove_game_spectator_sender(game_spectators, previous_game_code, tx).await;
+        }
+    }
+    Ok(())
+}
+
+async fn remove_draft_spectator_sender(
+    draft_spectators: &SharedDraftSpectators,
+    draft_code: &str,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) {
+    let mut specs = draft_spectators.lock().await;
+    if let Some(spectators) = specs.get_mut(draft_code) {
+        spectators.retain(|(_, sender)| !sender.same_channel(tx) && !sender.is_closed());
+        if spectators.is_empty() {
+            specs.remove(draft_code);
+        }
+    }
+}
+
+async fn reserve_draft_spectator_slot(
+    draft_spectators: &SharedDraftSpectators,
+    draft_code: &str,
+    visibility: draft_core::types::SpectatorVisibility,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) -> Result<(), String> {
+    let mut specs = draft_spectators.lock().await;
+    let spectators = specs.entry(draft_code.to_string()).or_default();
+    spectators.retain(|(_, sender)| !sender.is_closed());
+
+    if let Some((existing_visibility, _)) = spectators
+        .iter_mut()
+        .find(|(_, sender)| sender.same_channel(tx))
+    {
+        *existing_visibility = visibility;
+        return Ok(());
+    }
+
+    guard_draft_spectator_capacity(spectators.len())?;
+    spectators.push((visibility, tx.clone()));
+    Ok(())
+}
+
+async fn switch_draft_spectator_slot(
+    draft_spectators: &SharedDraftSpectators,
+    previous_draft_code: Option<&str>,
+    draft_code: &str,
+    visibility: draft_core::types::SpectatorVisibility,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) -> Result<(), String> {
+    reserve_draft_spectator_slot(draft_spectators, draft_code, visibility, tx).await?;
+    if previous_draft_code != Some(draft_code) {
+        if let Some(previous_draft_code) = previous_draft_code {
+            remove_draft_spectator_sender(draft_spectators, previous_draft_code, tx).await;
+        }
+    }
+    Ok(())
+}
+
 /// Build the `GameStarted` message for a single seat.
 ///
 /// `events` carries the engine's start-of-game events (the d20 first-player
-/// contest's `DieRolled` batch). Only the INITIAL post-start fan-out
-/// (`build_game_started_messages`) passes a non-empty batch; late joiners and
-/// reconnects pass an empty `Vec` so they never re-see the contest dice. The
-/// full batch goes to every seat unchanged — rolls are public (no
+/// contest's `StartingPlayerContest` event). Only the INITIAL post-start
+/// fan-out (`build_game_started_messages`) passes a non-empty batch; late
+/// joiners and reconnects pass an empty `Vec` so they never re-see the contest.
+/// The events go to every seat unchanged — the contest is public (no
 /// `visibility.rs` redaction), so this deliberately does NOT apply the
 /// `is_actor` gating used for `legal_actions`.
 fn build_game_started_message(
@@ -144,9 +248,9 @@ fn build_game_started_message(
 }
 
 /// Initial post-start fan-out. DRAINS `session.start_events` so the first-player
-/// contest dice are sent exactly once — every subsequent `GameStarted` build
-/// (late joiners, reconnects) sees an empty batch and never re-shows the dice.
-/// Every seat receives the full contest batch (public; not actor-gated).
+/// contest is sent exactly once — every subsequent `GameStarted` build
+/// (late joiners, reconnects) sees an empty batch and never re-shows the
+/// contest. Every seat receives the contest event (public; not actor-gated).
 fn build_game_started_messages(session: &mut GameSession) -> Vec<(PlayerId, ServerMessage)> {
     let start_events = std::mem::take(&mut session.start_events);
     (0..session.player_count)
@@ -1242,14 +1346,10 @@ async fn handle_socket(
     }
 
     if let Some(game_code) = &identity.spectator_game_code {
-        let mut specs = game_spectators.lock().await;
-        if let Some(spectators) = specs.get_mut(game_code) {
-            spectators.retain(|sender| !sender.same_channel(&tx));
-            spectators.retain(|sender| !sender.is_closed());
-            if spectators.is_empty() {
-                specs.remove(game_code);
-            }
-        }
+        remove_game_spectator_sender(&game_spectators, game_code, &tx).await;
+    }
+    if let Some(draft_code) = &identity.spectator_draft_code {
+        remove_draft_spectator_sender(&draft_spectators, draft_code, &tx).await;
     }
 
     if !identity.seat_reservations.is_empty() {
@@ -2064,6 +2164,8 @@ impl DeckResolver for ServerDeckResolver<'_> {
             main_deck: deck.main_deck,
             sideboard: deck.sideboard,
             commander: deck.commander,
+            attraction_deck: deck.attraction_deck,
+            signature_spell: deck.signature_spell,
             bracket_tier: deck.bracket_tier,
         })
     }
@@ -2450,6 +2552,17 @@ async fn handle_client_message(
             };
 
             debug!(game = %game_code, player = ?identity.player_id, action = ?action, "Action");
+
+            // Bound client-supplied action payload sizes before the clone-heavy
+            // engine reducers process them (mirrors guard_draft_action_payload
+            // for draft actions).
+            if let Err(reason) = guard_game_action_payload(&action) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
 
             // Apply human action and collect AI follow-up results while holding the lock.
             // Filtering is deferred until after the lock is dropped to reduce contention.
@@ -2953,21 +3066,16 @@ async fn handle_client_message(
                 return;
             }
 
-            if let Err(reason) = lobby_broker::guard_inbound(
-                &lobby_broker::LobbyClientMessage::CreateGameWithSettings {
-                    deck: deck.clone(),
-                    display_name: display_name.clone(),
-                    public,
-                    password: password.clone(),
+            if let Err(reason) = lobby_broker::guard_create_game_settings_inbound(
+                lobby_broker::CreateGameSettingsInbound {
+                    deck: &deck,
+                    display_name: &display_name,
+                    password: password.as_deref(),
                     timer_seconds,
                     player_count: requested_player_count,
-                    match_config,
-                    format_config: format_config.clone(),
-                    room_name: room_name.clone(),
+                    room_name: room_name.as_deref(),
                     host_peer_id: None,
                     draft_metadata: None,
-                    start_when_full,
-                    ranked,
                 },
             ) {
                 let msg = ServerMessage::Error { message: reason };
@@ -3617,13 +3725,6 @@ async fn handle_client_message(
         } => {
             info!(game = %game_code, joiner = %display_name, "JoinGameWithPassword");
 
-            if reject_joining_current_game(identity, &game_code, socket)
-                .await
-                .is_err()
-            {
-                return;
-            }
-
             // --- Lobby-only broker path ------------------------------
             //
             // The broker runs the build-commit + password gates, the
@@ -3658,19 +3759,26 @@ async fn handle_client_message(
                 return;
             }
 
-            if let Err(reason) = lobby_broker::guard_inbound(
-                &lobby_broker::LobbyClientMessage::JoinGameWithPassword {
-                    game_code: game_code.clone(),
-                    deck: deck.clone(),
-                    display_name: display_name.clone(),
-                    password: password.clone(),
-                    reservation_token: reservation_token.clone(),
+            if let Err(reason) = lobby_broker::guard_join_game_with_password_inbound(
+                lobby_broker::JoinGameWithPasswordInbound {
+                    game_code: &game_code,
+                    deck: &deck,
+                    display_name: &display_name,
+                    password: password.as_deref(),
+                    reservation_token: reservation_token.as_deref(),
                 },
             ) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
                 }
+                return;
+            }
+
+            if reject_joining_current_game(identity, &game_code, socket)
+                .await
+                .is_err()
+            {
                 return;
             }
 
@@ -4034,7 +4142,7 @@ async fn handle_client_message(
             }
 
             debug!(game = %game_code, "spectator join request");
-            let spectator_msg = {
+            {
                 let mgr = state.lock().await;
                 let Some(session) = mgr.sessions.get(&game_code) else {
                     let msg = ServerMessage::Error {
@@ -4054,15 +4162,51 @@ async fn handle_client_message(
                     }
                     return;
                 }
-                build_spectator_game_started_message(session)
+            }
+
+            if let Err(reason) = switch_game_spectator_slot(
+                game_spectators,
+                identity.spectator_game_code.as_deref(),
+                &game_code,
+                tx,
+            )
+            .await
+            {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
+            let snapshot_result = {
+                let mgr = state.lock().await;
+                match mgr.sessions.get(&game_code) {
+                    Some(session) if session.game_started => {
+                        Ok(build_spectator_game_started_message(session))
+                    }
+                    Some(_) => Err("Game has not started yet".to_string()),
+                    None => Err(format!("Game not found: {game_code}")),
+                }
             };
 
-            identity.spectator_game_code = Some(game_code.clone());
-            {
-                let mut specs = game_spectators.lock().await;
-                specs.entry(game_code.clone()).or_default().push(tx.clone());
+            let spectator_msg = match snapshot_result {
+                Ok(msg) => msg,
+                Err(message) => {
+                    remove_game_spectator_sender(game_spectators, &game_code, tx).await;
+                    let msg = ServerMessage::Error { message };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+
+            if tx.send(spectator_msg).is_err() {
+                remove_game_spectator_sender(game_spectators, &game_code, tx).await;
+                return;
             }
-            let _ = tx.send(spectator_msg);
+            identity.spectator_game_code = Some(game_code.clone());
             info!(game = %game_code, "spectator connected to live game");
         }
 
@@ -4741,35 +4885,73 @@ async fn handle_client_message(
                 return;
             }
 
-            let drafts = draft_state.lock().await;
-            if let Some(session) = drafts.sessions.get(&draft_code) {
-                // Derive visibility from session config (host-configured, per D-07)
-                let visibility = session.config.spectator_visibility;
-                let view = draft_core::view::filter_for_spectator(&session.session, visibility);
-                // Record spectator identity (T-60-09: prevents spectator from sending DraftAction)
-                identity.spectator_draft_code = Some(draft_code.clone());
-                identity.spectator_visibility = Some(visibility);
-                // Register spectator sender for live broadcasts
-                {
-                    let mut specs = draft_spectators.lock().await;
-                    specs
-                        .entry(draft_code.clone())
-                        .or_default()
-                        .push((visibility, tx.clone()));
+            let visibility = {
+                let drafts = draft_state.lock().await;
+                match drafts.sessions.get(&draft_code) {
+                    Some(session) => session.config.spectator_visibility,
+                    None => {
+                        let msg = ServerMessage::Error {
+                            message: "Draft not found".to_string(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
                 }
-                let msg = ServerMessage::DraftSpectatorView { view };
+            };
+
+            if let Err(reason) = switch_draft_spectator_slot(
+                draft_spectators,
+                identity.spectator_draft_code.as_deref(),
+                &draft_code,
+                visibility,
+                tx,
+            )
+            .await
+            {
+                let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
                 }
-                info!(draft = %draft_code, ?visibility, "spectator connected to draft");
-            } else {
-                let msg = ServerMessage::Error {
-                    message: "Draft not found".to_string(),
-                };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
+                return;
+            }
+
+            let snapshot_result = {
+                let drafts = draft_state.lock().await;
+                match drafts.sessions.get(&draft_code) {
+                    Some(session) => {
+                        let visibility = session.config.spectator_visibility;
+                        let view =
+                            draft_core::view::filter_for_spectator(&session.session, visibility);
+                        Ok((visibility, view))
+                    }
+                    None => Err("Draft not found".to_string()),
+                }
+            };
+
+            let (visibility, view) = match snapshot_result {
+                Ok(snapshot) => snapshot,
+                Err(message) => {
+                    remove_draft_spectator_sender(draft_spectators, &draft_code, tx).await;
+                    let msg = ServerMessage::Error { message };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+
+            let msg = ServerMessage::DraftSpectatorView { view };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                if socket.send(Message::text(json)).await.is_err() {
+                    remove_draft_spectator_sender(draft_spectators, &draft_code, tx).await;
+                    return;
                 }
             }
+            identity.spectator_draft_code = Some(draft_code.clone());
+            identity.spectator_visibility = Some(visibility);
+            info!(draft = %draft_code, ?visibility, "spectator connected to draft");
         }
 
         ClientMessage::UnregisterLobby { .. } => {
@@ -4849,6 +5031,9 @@ mod ranked_tests {
 #[cfg(test)]
 mod live_spectator_tests {
     use super::*;
+    use server_core::spectator_wire_guard::{
+        MAX_DRAFT_SPECTATORS_PER_DRAFT, MAX_GAME_SPECTATORS_PER_GAME,
+    };
 
     #[test]
     fn spectator_state_update_keeps_public_status_without_actions() {
@@ -4875,6 +5060,167 @@ mod live_spectator_tests {
             other => panic!("expected spectator StateUpdate, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn game_spectator_reservation_rejects_when_game_is_at_cap() {
+        let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let mut receivers = Vec::new();
+        {
+            let mut specs = spectators.lock().await;
+            let game_spectators = specs.entry("FULL".to_string()).or_default();
+            for _ in 0..MAX_GAME_SPECTATORS_PER_GAME {
+                let (tx, rx) = mpsc::unbounded_channel();
+                game_spectators.push(tx);
+                receivers.push(rx);
+            }
+        }
+        let (overflow_tx, _overflow_rx) = mpsc::unbounded_channel();
+
+        let err = reserve_game_spectator_slot(&spectators, "FULL", &overflow_tx)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("maximum"));
+        assert_eq!(
+            spectators.lock().await.get("FULL").map(Vec::len),
+            Some(MAX_GAME_SPECTATORS_PER_GAME)
+        );
+        drop(receivers);
+    }
+
+    #[tokio::test]
+    async fn game_spectator_reservation_prunes_closed_senders_before_cap_check() {
+        let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut specs = spectators.lock().await;
+            let game_spectators = specs.entry("PRUNE".to_string()).or_default();
+            for _ in 0..MAX_GAME_SPECTATORS_PER_GAME {
+                let (tx, rx) = mpsc::unbounded_channel();
+                drop(rx);
+                game_spectators.push(tx);
+            }
+        }
+        let (new_tx, _new_rx) = mpsc::unbounded_channel();
+
+        reserve_game_spectator_slot(&spectators, "PRUNE", &new_tx)
+            .await
+            .expect("closed senders should be pruned before enforcing cap");
+
+        assert_eq!(spectators.lock().await.get("PRUNE").map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn game_spectator_reservation_is_idempotent_for_same_channel() {
+        let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        reserve_game_spectator_slot(&spectators, "SAME", &tx)
+            .await
+            .unwrap();
+        reserve_game_spectator_slot(&spectators, "SAME", &tx)
+            .await
+            .unwrap();
+
+        assert_eq!(spectators.lock().await.get("SAME").map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn game_spectator_switch_keeps_previous_game_when_new_game_is_full() {
+        let spectators: SharedGameSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let (current_tx, _current_rx) = mpsc::unbounded_channel();
+        let mut full_receivers = Vec::new();
+        {
+            let mut specs = spectators.lock().await;
+            specs
+                .entry("CURRENT".to_string())
+                .or_default()
+                .push(current_tx.clone());
+            let full_game = specs.entry("FULL".to_string()).or_default();
+            for _ in 0..MAX_GAME_SPECTATORS_PER_GAME {
+                let (tx, rx) = mpsc::unbounded_channel();
+                full_game.push(tx);
+                full_receivers.push(rx);
+            }
+        }
+
+        let err = switch_game_spectator_slot(&spectators, Some("CURRENT"), "FULL", &current_tx)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("maximum"));
+        let specs = spectators.lock().await;
+        assert_eq!(specs.get("CURRENT").map(Vec::len), Some(1));
+        assert_eq!(
+            specs.get("FULL").map(Vec::len),
+            Some(MAX_GAME_SPECTATORS_PER_GAME)
+        );
+    }
+
+    #[tokio::test]
+    async fn draft_spectator_reservation_rejects_when_draft_is_at_cap() {
+        let spectators: SharedDraftSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let visibility = draft_core::types::SpectatorVisibility::default();
+        let mut receivers = Vec::new();
+        {
+            let mut specs = spectators.lock().await;
+            let draft_spectators = specs.entry("FULL".to_string()).or_default();
+            for _ in 0..MAX_DRAFT_SPECTATORS_PER_DRAFT {
+                let (tx, rx) = mpsc::unbounded_channel();
+                draft_spectators.push((visibility, tx));
+                receivers.push(rx);
+            }
+        }
+        let (overflow_tx, _overflow_rx) = mpsc::unbounded_channel();
+
+        let err = reserve_draft_spectator_slot(&spectators, "FULL", visibility, &overflow_tx)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("maximum"));
+        assert_eq!(
+            spectators.lock().await.get("FULL").map(Vec::len),
+            Some(MAX_DRAFT_SPECTATORS_PER_DRAFT)
+        );
+        drop(receivers);
+    }
+
+    #[tokio::test]
+    async fn draft_spectator_reservation_prunes_closed_senders_before_cap_check() {
+        let spectators: SharedDraftSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let visibility = draft_core::types::SpectatorVisibility::default();
+        {
+            let mut specs = spectators.lock().await;
+            let draft_spectators = specs.entry("PRUNE".to_string()).or_default();
+            for _ in 0..MAX_DRAFT_SPECTATORS_PER_DRAFT {
+                let (tx, rx) = mpsc::unbounded_channel();
+                drop(rx);
+                draft_spectators.push((visibility, tx));
+            }
+        }
+        let (new_tx, _new_rx) = mpsc::unbounded_channel();
+
+        reserve_draft_spectator_slot(&spectators, "PRUNE", visibility, &new_tx)
+            .await
+            .expect("closed senders should be pruned before enforcing cap");
+
+        assert_eq!(spectators.lock().await.get("PRUNE").map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn draft_spectator_reservation_is_idempotent_for_same_channel() {
+        let spectators: SharedDraftSpectators = Arc::new(Mutex::new(HashMap::new()));
+        let visibility = draft_core::types::SpectatorVisibility::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        reserve_draft_spectator_slot(&spectators, "SAME", visibility, &tx)
+            .await
+            .unwrap();
+        reserve_draft_spectator_slot(&spectators, "SAME", visibility, &tx)
+            .await
+            .unwrap();
+
+        assert_eq!(spectators.lock().await.get("SAME").map(Vec::len), Some(1));
+    }
 }
 
 #[cfg(test)]
@@ -4886,9 +5232,7 @@ mod mode_gate_tests {
     fn deck() -> DeckData {
         DeckData {
             main_deck: vec!["Forest".into()],
-            sideboard: vec![],
-            commander: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -5056,9 +5400,7 @@ mod handshake_tests {
     fn empty_deck() -> DeckData {
         DeckData {
             main_deck: vec!["Forest".into()],
-            sideboard: vec![],
-            commander: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         }
     }
 

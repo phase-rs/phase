@@ -1093,6 +1093,16 @@
       "subtitle": "Seleziona quale combinazione di mana produrre"
     }
   },
+  "specializeColor": {
+    "title": "Scegli specializzazione",
+    "subtitle": "Scegli un colore che corrisponda alla carta scartata",
+    "confirm": "Specializza",
+    "white": "Bianco",
+    "blue": "Blu",
+    "black": "Nero",
+    "red": "Rosso",
+    "green": "Verde"
+  },
   "dialogShell": {
     "eyebrow": "Scelta di gioco",
     "restoreDialog": "Ripristina finestra",

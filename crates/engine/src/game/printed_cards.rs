@@ -168,6 +168,18 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     if card_face.card_type.subtypes.iter().any(|s| s == "Room") {
         obj.room_unlocks.get_or_insert_with(Default::default);
     }
+    if card_face
+        .card_type
+        .subtypes
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("Attraction"))
+    {
+        obj.attraction_lights = if card_face.attraction_lights.is_empty() {
+            super::attractions::default_attraction_lights()
+        } else {
+            card_face.attraction_lights.clone()
+        };
+    }
 }
 
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
@@ -694,6 +706,8 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::TimeTravel
         | Effect::BecomeMonarch
         | Effect::Proliferate
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
         | Effect::SwitchPT { .. }
@@ -748,6 +762,8 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
@@ -801,6 +817,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         // CR 614.12 + CR 303.4: ReturnAsAura.grants carry typed
         // ContinuousModifications, never conjured card names.
         | Effect::ReturnAsAura { .. }
+        | Effect::Specialize
         | Effect::Unimplemented { .. } => {}
     }
 }
@@ -981,6 +998,16 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
                 changed_any = true;
                 changed_battlefield = true;
                 continue;
+            }
+
+            // Digital-only Specialize: load all specialized faces for runtime choice.
+            if obj.specialize_faces.is_none() {
+                if let Some(rules) = db.get_by_name(&card_face.name) {
+                    if let CardLayout::Specialize(_, variants) = &rules.layout {
+                        obj.specialize_faces =
+                            Some(super::specialize::specialize_faces_from_variants(variants));
+                    }
+                }
             }
 
             // Populate back_face for dual-faced layouts so the other face's
@@ -1215,9 +1242,11 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            is_oathbreaker: false,
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
+            attraction_lights: vec![],
         }
     }
 

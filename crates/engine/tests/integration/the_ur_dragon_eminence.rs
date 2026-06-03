@@ -32,7 +32,6 @@ use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{
     ControllerRef, FilterProp, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
 };
-use engine::types::actions::GameAction;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
@@ -92,23 +91,16 @@ fn add_dragon_spell(scenario: &mut GameScenario, name: &str) -> ObjectId {
         .id()
 }
 
+/// Cast the Dragon spell through the canonical pipeline (the engine auto-taps
+/// lands to pay the cost-determined amount — no `ManaPayment` window surfaces)
+/// and count how many of `lands` ended up tapped.
 fn cast_dragon_and_count_tapped(
     runner: &mut GameRunner,
     spell_id: ObjectId,
     lands: &[ObjectId],
 ) -> usize {
-    let card_id = runner.state().objects[&spell_id].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: spell_id,
-            card_id,
-            targets: vec![],
-        })
-        .expect("cast should succeed when sufficient mana is available");
-    lands
-        .iter()
-        .filter(|id| runner.state().objects[id].tapped)
-        .count()
+    let outcome = runner.cast(spell_id).resolve();
+    lands.iter().filter(|&&id| outcome.is_tapped(id)).count()
 }
 
 /// CR 113.6b: With The Ur-Dragon in the command zone, the Eminence static
@@ -238,18 +230,10 @@ fn eminence_does_not_reduce_its_own_cost() {
     // (starting life 40, singleton, commander damage threshold, etc.).
     runner.state_mut().format_config.command_zone = true;
 
-    let card_id = runner.state().objects[&ur_id].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: ur_id,
-            card_id,
-            targets: vec![],
-        })
-        .expect("commander cast from command zone should succeed with {3} available");
-    let tapped = lands
-        .iter()
-        .filter(|id| runner.state().objects[id].tapped)
-        .count();
+    // Commander cast from the command zone — the engine auto-taps lands to pay
+    // the cost-determined amount.
+    let outcome = runner.cast(ur_id).resolve();
+    let tapped = lands.iter().filter(|&&id| outcome.is_tapped(id)).count();
     assert_eq!(
         tapped, 3,
         "CR 109.1: Eminence's `Another` filter must exclude its own source — the spell-being-cast and the static source share an object id, so the {{3}} cost must be paid in full (3 lands tap), not reduced to {{2}}"
