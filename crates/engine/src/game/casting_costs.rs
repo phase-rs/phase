@@ -977,6 +977,13 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
+    // Boundary of the cost-payment events THIS handler produces — captured
+    // before the sacrifice so the death/leaves-the-battlefield `ZoneChanged`
+    // records (and their producer co-departed stamp, below) can be scanned for
+    // observers if the cast pauses before Priority (see the deferred-parking
+    // block after `finish_pending_cost_or_cast`).
+    let cost_event_start = events.len();
+
     // Sacrifice each chosen permanent
     for &id in chosen {
         super::sacrifice::sacrifice_permanent(state, id, player, events)
@@ -988,12 +995,6 @@ pub(crate) fn handle_sacrifice_for_cost(
     // among them observes the rest (look-back-in-time). Single authority — identical
     // wiring to `effects::sacrifice::resolve`. `departed_subset` drops any permanent
     // that did not actually leave (CantBeSacrificed, replacement).
-    // NOTE: this stamp is read only when the cast lands in the SAME action
-    // (`run_post_action_pipeline` scans `events`). If the cast pauses on a later
-    // kicker/target/modal choice before Priority, the cast lands in a future action
-    // with a fresh `events` vector and this stamp is unreadable — that kicker-paused
-    // sub-case shares the cross-action seam gap tracked by
-    // `cost_paid_multi_sacrifice_kicker_paused_under_observes`.
     crate::game::zones::mark_simultaneous_departures(
         events,
         &crate::game::zones::departed_subset(state, chosen),
@@ -1007,7 +1008,39 @@ pub(crate) fn handle_sacrifice_for_cost(
             .set_chosen_x_recursive(chosen.len().try_into().unwrap_or(u32::MAX));
     }
 
-    finish_pending_cost_or_cast(state, player, pending, events)
+    let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
+
+    // CR 603.6c + CR 603.10a + CR 603.3b: When `finish_pending_cost_or_cast`
+    // lands on `Priority` the cast completed in THIS action, so
+    // `run_post_action_pipeline` will scan `events` (including the
+    // cost-sacrifice `ZoneChanged` records stamped just above) and the
+    // leaves-the-battlefield / dies observers fire normally.
+    //
+    // But when the cast PAUSES on a later target/kicker/modal choice
+    // (a non-`Priority` `WaitingFor`), `apply_action` does NOT run the
+    // post-action pipeline over this action's `events` (engine.rs gates the
+    // pipeline on `WaitingFor::Priority`), and the cast lands in a LATER
+    // action whose fresh `events` vector no longer carries these records — so
+    // the producer co-departed stamp would be unreadable and a "whenever a
+    // creature you control dies" / leaves-the-battlefield observer among the
+    // co-sacrificed permanents would under-observe. Mirror the established
+    // B2 parking pattern in `engine_resolution_choices::batch_or_drain_observer_triggers`:
+    // collect the cost-payment observer triggers into `deferred_triggers` now,
+    // where the stamped records are still in scope. They are NOT drained while
+    // the announced spell remains on the stack (`should_drain_deferred_triggers_now`
+    // refuses to drain with a `Spell` entry present), so they reach the stack
+    // at the next true resolution boundary after the cast completes — CR 603.3
+    // ("the next time a player would receive priority").
+    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+        let cost_events: Vec<GameEvent> = events[cost_event_start..]
+            .iter()
+            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .cloned()
+            .collect();
+        crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
+    }
+
+    Ok(waiting_for)
 }
 
 /// CR 118.3 + CR 601.2b: Complete return-to-hand-as-cost after player selection.
@@ -5407,27 +5440,22 @@ mod tests {
         );
     }
 
-    /// CR 603.10a + CR 601.2h (DEFERRED kicker/target-paused sub-case): when an
-    /// additional sacrifice cost is followed by a deferred target/kicker/modal
-    /// pause, the co-departing observer under-observes. After the sacrifice,
-    /// `finish_pending_cost_or_cast` returns a non-`Priority` `WaitingFor`
-    /// (`TargetSelection` here), so `apply_action` does NOT run
-    /// `run_post_action_pipeline` over the cost-sacrifice `ZoneChanged` events,
-    /// and the producer stamp from `handle_sacrifice_for_cost` is never read in
-    /// this action. The cast then lands in a LATER `apply_action` whose fresh
-    /// `events` vector (engine.rs `let mut events = Vec::new();`) does not carry
-    /// the stamped records. This asserts the CURRENT wrong outcome at the pause
-    /// boundary (the observer observes NONE of the co-sacrificed creatures —
-    /// life stays 20); flip the expectation to 22 once the cross-action seam
-    /// lands (see plan Unit B redesign sketch).
+    /// CR 603.6c + CR 603.10a + CR 603.3b (DEFERRED kicker/target-paused
+    /// sub-case): when an additional sacrifice cost is followed by a deferred
+    /// target/kicker/modal pause, `finish_pending_cost_or_cast` returns a
+    /// non-`Priority` `WaitingFor` (`TargetSelection` here), so `apply_action`
+    /// does NOT run `run_post_action_pipeline` over the cost-sacrifice
+    /// `ZoneChanged` events in this action, and the cast lands in a LATER
+    /// `apply_action` whose fresh `events` vector no longer carries the records
+    /// stamped by `handle_sacrifice_for_cost`. To bridge that cross-action seam,
+    /// `handle_sacrifice_for_cost` parks the cost-payment observer triggers into
+    /// `deferred_triggers` at the pause boundary (the established B2 pattern from
+    /// `engine_resolution_choices::batch_or_drain_observer_triggers`); they are
+    /// held while the announced spell remains on the stack and drained at the
+    /// next resolution boundary after the cast completes. The co-departing
+    /// observer therefore fires once per co-sacrificed creature (itself + the
+    /// plain bear): life 20 + 2 = 22.
     #[test]
-    #[ignore = "DEFERRED cross-action seam: when an additional sacrifice cost is \
-                followed by a kicker/target/modal pause, the cost-sacrifice ZoneChanged \
-                events are emitted in the pausing action and gone from the fresh events \
-                vector when the cast lands in a later action — apply_action allocates a \
-                new events Vec per action and only runs run_post_action_pipeline on the \
-                Priority-returning action, so the producer stamp at handle_sacrifice_for_cost \
-                is unreadable. Shares Unit B's cross-action consumption gap. See plan Unit B."]
     fn cost_paid_multi_sacrifice_kicker_paused_under_observes() {
         use crate::game::engine::apply_as_current;
         use crate::types::ability::{TargetFilter, TriggerDefinition};
@@ -5583,19 +5611,53 @@ mod tests {
             state.waiting_for
         );
 
-        // FIXME(unit-b-seam): the cost-sacrifice events were emitted in THIS
-        // (pausing) action but never scanned, and the cast lands in a LATER action
-        // whose fresh `events` vector no longer carries them — so the producer
-        // stamp at `handle_sacrifice_for_cost` is unreadable and the observer
-        // observes NONE of the co-sacrificed creatures at the pause boundary
-        // (life stays 20). Once the cross-action seam routes the cost-payment
-        // events through the post-cast-resolution collection, the observer fires
-        // once per co-sacrificed creature (itself + the plain bear) — flip to 22.
+        // CR 603.6c + CR 603.10a + CR 603.3b: the cost-sacrifice `ZoneChanged`
+        // records (carrying the producer co-departed stamp from
+        // `handle_sacrifice_for_cost`) were emitted in THIS pausing action.
+        // `handle_sacrifice_for_cost` now parks their observer triggers into
+        // `deferred_triggers` because the cast paused on a non-`Priority`
+        // `WaitingFor` (so `run_post_action_pipeline` will not scan this
+        // action's `events`). The parked triggers are NOT drained while the
+        // announced spell remains on the stack, so they fire after the cast
+        // completes. Drive the rest of the cast (choose a damage target, then
+        // resolve the stack) and confirm the co-departing observer fired once
+        // per co-sacrificed creature (itself + the plain bear) — life 20 + 2 = 22.
+        if let WaitingFor::TargetSelection { target_slots, .. } = state.waiting_for.clone() {
+            // Pick the first legal damage target to land the cast on the stack.
+            let target = target_slots
+                .first()
+                .and_then(|slot| slot.legal_targets.first())
+                .cloned()
+                .expect("at least one legal damage target for the paused cast");
+            apply_as_current(
+                &mut state,
+                GameAction::ChooseTarget {
+                    target: Some(target),
+                },
+            )
+            .expect("submit the deferred damage target");
+        } else {
+            panic!(
+                "expected TargetSelection after the additional sacrifice cost (got {:?})",
+                state.waiting_for
+            );
+        }
+
+        // Order any same-controller co-departed observer triggers and resolve
+        // the stack (observer triggers + the spell itself).
+        crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+        for _ in 0..30 {
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) || state.stack.is_empty() {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::PassPriority).expect("pass priority");
+        }
+
         assert_eq!(
-            state.players[0].life, 20,
-            "CURRENT (wrong) outcome: when the cast pauses before Priority the \
-             cost-sacrifice events are never scanned, so the co-departing observer \
-             under-observes (life 20); expected 22 once the cross-action seam lands"
+            state.players[0].life, 22,
+            "co-departing LTB observer must fire once per permanent sacrificed to \
+             pay one additional cost even when the cast PAUSES on target selection \
+             before Priority (20 + 2 = 22)"
         );
     }
 
