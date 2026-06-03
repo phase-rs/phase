@@ -20,8 +20,8 @@ use crate::types::mana::{
 };
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    ActivationExemption, CastFrequency, CastingProhibitionCondition, CostModifyMode, ExileCastCost,
-    ProhibitionScope, StaticMode,
+    ActivationExemption, CastFrequency, CastingProhibitionCondition, CostModifyMode, ExileCardPool,
+    ExileCastCost, ExileCastTiming, ProhibitionScope, StaticMode,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -1323,6 +1323,51 @@ struct ExilePermissionSource<'a> {
     /// spell's normal cost — no shipping card uses this shape today, but the
     /// static keeps the axis available.
     cost: ExileCastCost,
+    /// CR 305.1: `Play` admits lands (played) and non-land cards (cast); `Cast`
+    /// admits only non-land spells. Captured so the cast path can skip lands for
+    /// `Cast` sources and the land-play path can admit lands for `Play` sources.
+    play_mode: CardPlayMode,
+    /// CR 113.6b + CR 406.6: Which exile-link pool the source draws from —
+    /// `ThisTurn` (per-turn rolling list) or `Persistent` (lifetime
+    /// `exile_links`).
+    pool: ExileCardPool,
+    /// CR 117.1c: When the permission functions — `AnyTime` or `YourTurnOnly`.
+    timing: ExileCastTiming,
+}
+
+/// CR 113.6b + CR 406.6: The set of exiled object ids this source's permission
+/// may currently draw from, per its pool scope. `ThisTurn` reads the per-turn
+/// rolling list; `Persistent` reads the lifetime `exile_links` set (the same
+/// source-keyed set that backs `TargetFilter::ExiledBySource`).
+fn exile_permission_pool(state: &GameState, source: &ExilePermissionSource<'_>) -> Vec<ObjectId> {
+    match source.pool {
+        ExileCardPool::ThisTurn => state
+            .cards_exiled_with_source_this_turn
+            .get(&source.source_id)
+            .cloned()
+            .unwrap_or_default(),
+        // CR 406.6: lifetime per-source linked-exile pool.
+        ExileCardPool::Persistent => {
+            crate::game::players::linked_exile_cards_for_source(state, source.source_id)
+                .iter()
+                .map(|entry| entry.exiled_id)
+                .collect()
+        }
+    }
+}
+
+/// CR 117.1c: Whether a source's timing gate is currently satisfied.
+/// `YourTurnOnly` requires the active player to be the source controller;
+/// `AnyTime` is always satisfied.
+fn exile_permission_timing_active(
+    state: &GameState,
+    source: &ExilePermissionSource<'_>,
+    player: PlayerId,
+) -> bool {
+    match source.timing {
+        ExileCastTiming::AnyTime => true,
+        ExileCastTiming::YourTurnOnly => state.active_player == player,
+    }
 }
 
 /// CR 601.2a + CR 113.6b: Enumerate every battlefield permanent controlled by
@@ -1344,15 +1389,16 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                 return None;
             }
             active_static_definitions(state, obj).find_map(|definition| match definition.mode {
-                // CR 305.1: All currently shipping cards in this class use
-                // `CardPlayMode::Cast`. `Play` is permitted for symmetry — the
-                // `spell_objects_available_to_cast` path covers cast mode; a
-                // future land-play sibling would extend a Play-mode helper
-                // analogous to `graveyard_lands_playable_by_permission`.
+                // CR 305.1: `Cast` (Maralen) admits non-land spells; `Play` (The
+                // Matrix of Time) admits lands and non-land cards. Both shapes
+                // are surfaced here; the cast path skips lands and the land-play
+                // path admits them, keyed on `play_mode`.
                 StaticMode::ExileCastPermission {
                     frequency,
-                    play_mode: CardPlayMode::Cast | CardPlayMode::Play,
+                    play_mode,
                     cost,
+                    pool,
+                    timing,
                 } => definition
                     .affected
                     .as_ref()
@@ -1361,6 +1407,9 @@ fn exile_permission_sources(state: &GameState, player: PlayerId) -> Vec<ExilePer
                         filter,
                         frequency,
                         cost,
+                        play_mode,
+                        pool,
+                        timing,
                     }),
                 _ => None,
             })
@@ -1383,14 +1432,14 @@ fn exile_objects_castable_by_permission(
     player: PlayerId,
 ) -> Vec<(ObjectId, ObjectId, CastFrequency)> {
     // Hot-path fast exit: this runs once per legal-actions computation (and so
-    // once per AI-search node). When nothing was exiled "with" a source this
-    // turn, no `ExileCastPermission` static can offer a card — short-circuit
-    // before `exile_permission_sources` scans the whole battlefield and
-    // allocates an `active_static_definitions` iterator per controlled
-    // permanent. Equivalent to the empty-pool `else { continue }` below, but
-    // pays a single `HashMap::is_empty()` instead in the ~100% of board states
-    // with no Maralen-class permanent in play.
-    if state.cards_exiled_with_source_this_turn.is_empty() {
+    // once per AI-search node). When no card is tracked in either exile pool, no
+    // `ExileCastPermission` static can offer a card — short-circuit before
+    // `exile_permission_sources` scans the whole battlefield. The `ThisTurn`
+    // (Maralen) shape reads `cards_exiled_with_source_this_turn`; the
+    // `Persistent` (The Matrix of Time) shape reads `exile_links`. With both
+    // empty there is nothing to offer, matching the ~100% of board states with
+    // no exile-cast permanent in play.
+    if state.cards_exiled_with_source_this_turn.is_empty() && state.exile_links.is_empty() {
         return Vec::new();
     }
     let mut results = Vec::new();
@@ -1399,15 +1448,15 @@ fn exile_objects_castable_by_permission(
         if !exile_cast_frequency_available(state, source.source_id, source.frequency) {
             continue;
         }
-        let Some(pool) = state
-            .cards_exiled_with_source_this_turn
-            .get(&source.source_id)
-        else {
+        // CR 117.1c: A `YourTurnOnly` permission offers nothing outside the
+        // controller's turn.
+        if !exile_permission_timing_active(state, source, player) {
             continue;
-        };
+        }
+        let pool = exile_permission_pool(state, source);
         let ctx =
             super::filter::FilterContext::from_source_with_controller(source.source_id, player);
-        for &exiled_id in pool {
+        for &exiled_id in &pool {
             // CR 400.7: An exiled card may have left exile since being tagged
             // (e.g. milled into a graveyard by another effect). Re-check zone
             // before offering it for cast.
@@ -1417,10 +1466,11 @@ fn exile_objects_castable_by_permission(
             if obj.zone != Zone::Exile {
                 continue;
             }
-            // CR 305.1: Land cards are never offered through the `Cast` path —
-            // they are "played", not "cast" (CR 116.1). The land-play sibling
-            // (analogous to `graveyard_lands_playable_by_permission`) does not
-            // yet exist; once a printing requires it, route through there.
+            // CR 305.1 + CR 116.1: Land cards are never offered through the
+            // cast path — they are "played", not "cast". For `Play` sources
+            // (The Matrix of Time) lands are surfaced via
+            // `exile_lands_playable_by_permission`; for `Cast` sources lands
+            // are never eligible.
             if obj
                 .card_types
                 .core_types
@@ -1472,9 +1522,9 @@ pub(crate) fn exile_cast_permission_source(
         return None;
     }
     // Same empty-pool fast exit as `exile_objects_castable_by_permission`: with
-    // nothing exiled-with-a-source this turn, no static can authorize the cast,
-    // so skip the battlefield scan in `exile_permission_sources`.
-    if state.cards_exiled_with_source_this_turn.is_empty() {
+    // both exile pools empty no static can authorize the cast, so skip the
+    // battlefield scan in `exile_permission_sources`.
+    if state.cards_exiled_with_source_this_turn.is_empty() && state.exile_links.is_empty() {
         return None;
     }
     let sources = exile_permission_sources(state, player);
@@ -1482,9 +1532,23 @@ pub(crate) fn exile_cast_permission_source(
         if !exile_cast_frequency_available(state, source.source_id, source.frequency) {
             return None;
         }
-        let pool = state
-            .cards_exiled_with_source_this_turn
-            .get(&source.source_id)?;
+        // CR 117.1c: A `YourTurnOnly` permission does not authorize a cast
+        // outside the controller's turn.
+        if !exile_permission_timing_active(state, &source, player) {
+            return None;
+        }
+        // CR 305.1 + CR 116.1: Lands are played, not cast — the cast-finalize
+        // path never authorizes a land here. The land-play path
+        // (`exile_lands_playable_by_permission`) admits lands for `Play`
+        // sources.
+        if obj
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Land)
+        {
+            return None;
+        }
+        let pool = exile_permission_pool(state, &source);
         if !pool.contains(&exiled_id) {
             return None;
         }
@@ -1823,8 +1887,50 @@ pub fn graveyard_lands_playable_by_permission(
     results
 }
 
-/// CR 305.1 + CR 601.2a: Find exiled lands with `PlayFromExile` permission
-/// granted to `player`. Returns `(land_id, source_id)` for once-per-turn
+/// CR 305.1 + CR 113.6b + CR 406.6: Find the `StaticMode::ExileCastPermission`
+/// source (if any) authorizing `player` to play the exiled land `land_id`. Only
+/// `play_mode: Play` sources admit lands (CR 305.1: lands are played, not cast);
+/// the source's pool scope, timing gate, frequency slot, and `affected` filter
+/// must all pass. Mirrors `exile_cast_permission_source` for the land-play side.
+fn exile_land_playable_by_static_permission(
+    state: &GameState,
+    player: PlayerId,
+    land_id: ObjectId,
+) -> Option<ObjectId> {
+    if state.cards_exiled_with_source_this_turn.is_empty() && state.exile_links.is_empty() {
+        return None;
+    }
+    let sources = exile_permission_sources(state, player);
+    sources.into_iter().find_map(|source| {
+        // CR 305.1: only `Play` sources let the controller play exiled lands.
+        if source.play_mode != CardPlayMode::Play {
+            return None;
+        }
+        if !exile_cast_frequency_available(state, source.source_id, source.frequency) {
+            return None;
+        }
+        // CR 117.1c: a `YourTurnOnly` permission is inactive outside the
+        // controller's turn.
+        if !exile_permission_timing_active(state, &source, player) {
+            return None;
+        }
+        let pool = exile_permission_pool(state, &source);
+        if !pool.contains(&land_id) {
+            return None;
+        }
+        let ctx =
+            super::filter::FilterContext::from_source_with_controller(source.source_id, player);
+        if !super::filter::matches_target_filter(state, land_id, source.filter, &ctx) {
+            return None;
+        }
+        Some(source.source_id)
+    })
+}
+
+/// CR 305.1 + CR 601.2a + CR 113.6b: Find exiled lands `player` may play, via
+/// either the object-tagged `CastingPermission::PlayFromExile` (impulse draw) or
+/// a battlefield `StaticMode::ExileCastPermission { play_mode: Play }` static
+/// (The Matrix of Time). Returns `(land_id, source_id)` for once-per-turn
 /// tracking by the play-land path.
 pub fn exile_lands_playable_by_permission(
     state: &GameState,
@@ -1842,8 +1948,14 @@ pub fn exile_lands_playable_by_permission(
             {
                 return None;
             }
-            let (source, _) =
-                play_from_exile_permission_source(state, obj, player, state.turn_number)?;
+            // Object-tagged impulse permission first; fall back to the
+            // battlefield-static exile-play permission.
+            if let Some((source, _)) =
+                play_from_exile_permission_source(state, obj, player, state.turn_number)
+            {
+                return Some((obj_id, source));
+            }
+            let source = exile_land_playable_by_static_permission(state, player, obj_id)?;
             Some((obj_id, source))
         })
         .collect()
@@ -32344,6 +32456,33 @@ mod tests {
         name: &str,
         affected: TargetFilter,
     ) -> ObjectId {
+        add_exile_cast_permission_source_with(
+            state,
+            player,
+            name,
+            affected,
+            CastFrequency::OncePerTurn,
+            CardPlayMode::Cast,
+            ExileCastCost::WithoutPayingManaCost,
+            ExileCardPool::ThisTurn,
+            ExileCastTiming::AnyTime,
+        )
+    }
+
+    /// Fully parameterized sibling of `add_exile_cast_permission_source` for
+    /// the persistent / your-turn-only / play-mode shapes (The Matrix of Time).
+    #[allow(clippy::too_many_arguments)]
+    fn add_exile_cast_permission_source_with(
+        state: &mut GameState,
+        player: PlayerId,
+        name: &str,
+        affected: TargetFilter,
+        frequency: CastFrequency,
+        play_mode: CardPlayMode,
+        cost: ExileCastCost,
+        pool: ExileCardPool,
+        timing: ExileCastTiming,
+    ) -> ObjectId {
         use crate::types::ability::StaticDefinition;
         // Test scaffolding: CardId is opaque — `next_object_id` is monotonic
         // so reusing it for the card id keeps each call unique without
@@ -32351,9 +32490,11 @@ mod tests {
         let card_id = crate::types::identifiers::CardId(state.next_object_id);
         let source = create_object(state, card_id, player, name.to_string(), Zone::Battlefield);
         let def = StaticDefinition::new(StaticMode::ExileCastPermission {
-            frequency: CastFrequency::OncePerTurn,
-            play_mode: CardPlayMode::Cast,
-            cost: ExileCastCost::WithoutPayingManaCost,
+            frequency,
+            play_mode,
+            cost,
+            pool,
+            timing,
         })
         .affected(affected);
         let obj = state.objects.get_mut(&source).unwrap();
@@ -32458,6 +32599,160 @@ mod tests {
         assert!(
             !available.contains(&stale_exile),
             "previous-turn exile card must not be surfaced by the static"
+        );
+    }
+
+    /// Add a vanilla land card into exile owned by `player`. Mirrors
+    /// `add_exiled_card` but stamps the Land core type so the play-land path
+    /// (`exile_lands_playable_by_permission`) surfaces it.
+    fn add_exiled_land(state: &mut GameState, player: PlayerId, name: &str) -> ObjectId {
+        let card_id = crate::types::identifiers::CardId(state.next_object_id);
+        let object_id = create_object(state, card_id, player, name.to_string(), Zone::Exile);
+        let obj = state.objects.get_mut(&object_id).unwrap();
+        obj.card_types.core_types = vec![crate::types::card_type::CoreType::Land];
+        object_id
+    }
+
+    /// Link `exiled_id` to `source_id` in the persistent `exile_links` pool
+    /// (CR 406.6 / CR 607.2a) — the lifetime tracker the `Persistent` pool
+    /// scope reads, independent of the per-turn rolling list.
+    fn link_exiled_to_source(state: &mut GameState, exiled_id: ObjectId, source_id: ObjectId) {
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+        state.exile_links.push(ExileLink {
+            exiled_id,
+            source_id,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+    }
+
+    /// CR 113.6b + CR 406.6 + CR 117.1c: The Matrix-of-Time class — a
+    /// persistent, your-turn-only, Play-mode `ExileCastPermission` — surfaces a
+    /// non-land card linked to the source via the lifetime `exile_links` pool,
+    /// even though the per-turn rolling list is empty.
+    #[test]
+    fn persistent_exile_play_permission_surfaces_linked_card() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source_id = add_exile_cast_permission_source_with(
+            &mut state,
+            player,
+            "The Matrix of Time",
+            TargetFilter::Any,
+            CastFrequency::Unlimited,
+            CardPlayMode::Play,
+            ExileCastCost::PayNormalCost,
+            ExileCardPool::Persistent,
+            ExileCastTiming::YourTurnOnly,
+        );
+        let exiled = add_exiled_card(&mut state, player, "Exiled Bear");
+        // Persistent pool only: NOT in `cards_exiled_with_source_this_turn`.
+        link_exiled_to_source(&mut state, exiled, source_id);
+
+        let available = spell_objects_available_to_cast(&state, player);
+        assert!(
+            available.contains(&exiled),
+            "linked exiled spell must be castable via the persistent static"
+        );
+    }
+
+    /// CR 113.6b: A card NOT linked to the source (no `exile_links` entry, not
+    /// in the per-turn list) must not be granted by the persistent static —
+    /// the permission is scoped to the source's own exile pool.
+    #[test]
+    fn persistent_exile_play_permission_rejects_unlinked_card() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source_id = add_exile_cast_permission_source_with(
+            &mut state,
+            player,
+            "The Matrix of Time",
+            TargetFilter::Any,
+            CastFrequency::Unlimited,
+            CardPlayMode::Play,
+            ExileCastCost::PayNormalCost,
+            ExileCardPool::Persistent,
+            ExileCastTiming::YourTurnOnly,
+        );
+        let linked = add_exiled_card(&mut state, player, "Linked Bear");
+        link_exiled_to_source(&mut state, linked, source_id);
+        // A second exiled card that was exiled by some OTHER source — no link.
+        let unlinked = add_exiled_card(&mut state, player, "Unlinked Bear");
+
+        let available = spell_objects_available_to_cast(&state, player);
+        assert!(available.contains(&linked), "linked card is castable");
+        assert!(
+            !available.contains(&unlinked),
+            "card not linked to the source must NOT be granted"
+        );
+    }
+
+    /// CR 117.1c: A `YourTurnOnly` persistent permission grants nothing while it
+    /// is an opponent's turn, and resumes on the controller's turn.
+    #[test]
+    fn persistent_exile_play_permission_your_turn_only_timing() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source_id = add_exile_cast_permission_source_with(
+            &mut state,
+            player,
+            "The Matrix of Time",
+            TargetFilter::Any,
+            CastFrequency::Unlimited,
+            CardPlayMode::Play,
+            ExileCastCost::PayNormalCost,
+            ExileCardPool::Persistent,
+            ExileCastTiming::YourTurnOnly,
+        );
+        let exiled = add_exiled_card(&mut state, player, "Exiled Bear");
+        link_exiled_to_source(&mut state, exiled, source_id);
+
+        // Controller's turn (setup default): granted.
+        assert!(
+            spell_objects_available_to_cast(&state, player).contains(&exiled),
+            "card castable on the controller's own turn"
+        );
+
+        // Opponent's turn: the your-turn-only timing gate closes.
+        state.active_player = PlayerId(1);
+        assert!(
+            !spell_objects_available_to_cast(&state, player).contains(&exiled),
+            "your-turn-only permission grants nothing outside the controller's turn"
+        );
+    }
+
+    /// CR 305.1 + CR 406.6: A `Play`-mode persistent permission lets the
+    /// controller play an exiled LAND linked to the source, surfaced through
+    /// `exile_lands_playable_by_permission`. A `Cast`-mode source would not.
+    #[test]
+    fn persistent_exile_play_permission_surfaces_linked_land() {
+        let mut state = setup_game_at_main_phase();
+        let player = PlayerId(0);
+        let source_id = add_exile_cast_permission_source_with(
+            &mut state,
+            player,
+            "The Matrix of Time",
+            TargetFilter::Any,
+            CastFrequency::Unlimited,
+            CardPlayMode::Play,
+            ExileCastCost::PayNormalCost,
+            ExileCardPool::Persistent,
+            ExileCastTiming::YourTurnOnly,
+        );
+        let land = add_exiled_land(&mut state, player, "Exiled Island");
+        link_exiled_to_source(&mut state, land, source_id);
+
+        let playable = exile_lands_playable_by_permission(&state, player);
+        assert!(
+            playable
+                .iter()
+                .any(|(id, src)| *id == land && *src == source_id),
+            "linked exiled land must be playable via the Play-mode persistent static"
+        );
+
+        // The land must NOT leak into the cast path (CR 116.1: lands are played).
+        assert!(
+            !spell_objects_available_to_cast(&state, player).contains(&land),
+            "lands are never offered on the cast path"
         );
     }
 

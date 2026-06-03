@@ -4886,6 +4886,8 @@ fn exile_cast_permission_maralen_fae_ascendant() {
             frequency: CastFrequency::OncePerTurn,
             play_mode: CardPlayMode::Cast,
             cost: ExileCastCost::WithoutPayingManaCost,
+            pool: ExileCardPool::ThisTurn,
+            timing: ExileCastTiming::AnyTime,
         },
         "expected ExileCastPermission, got {:?}",
         def.mode
@@ -4929,6 +4931,8 @@ fn exile_cast_permission_during_each_of_your_turns_synonym() {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
                 cost: ExileCastCost::WithoutPayingManaCost,
+                pool: ExileCardPool::ThisTurn,
+                timing: ExileCastTiming::AnyTime,
             }
         ),
         "expected ExileCastPermission(OncePerTurn, Cast, free), got {:?}",
@@ -4965,6 +4969,66 @@ fn exile_cast_permission_not_intercepted_by_graveyard_branch() {
     let lower = text.to_lowercase();
     assert!(try_parse_graveyard_cast_permission(text, &lower).is_none());
     assert!(try_parse_exile_cast_permission(text, &lower).is_some());
+}
+
+/// CR 113.6b + CR 305.1 + CR 406.6 + CR 117.1c: The Matrix-of-Time persistent
+/// exile-play line lowers to `ExileCastPermission { pool: Persistent, play_mode:
+/// Play, frequency: Unlimited, timing: YourTurnOnly }` with `affected: Any`.
+#[test]
+fn persistent_exile_play_permission_matrix_form() {
+    let text =
+        "During your turn, you may play lands and cast spells from among cards exiled with ~.";
+    let def = parse_static_line(text).expect("Matrix-class static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+        },
+        "expected persistent your-turn Play permission, got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Any),
+        "the persistent pool is the scope; affected must be Any"
+    );
+}
+
+/// CR 601.3f + CR 305.1: The "you may look at cards exiled with ~, and you may
+/// play lands and cast spells from among those cards." variant lowers to the
+/// same persistent Play permission, but without the your-turn timing gate.
+#[test]
+fn persistent_exile_play_permission_look_at_variant() {
+    let text = "You may look at cards exiled with ~, and you may play lands and cast spells from among those cards.";
+    let def = parse_static_line(text).expect("look-at variant must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::AnyTime,
+        },
+        "expected persistent any-time Play permission, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 113.6b: The persistent handler must NOT swallow the Maralen "this turn"
+/// per-turn-pool line — that belongs to `try_parse_exile_cast_permission`.
+#[test]
+fn persistent_exile_play_permission_rejects_maralen_this_turn() {
+    let text = "Once each turn, you may cast a spell from among cards exiled with ~ this turn.";
+    let lower = text.to_lowercase();
+    assert!(
+        try_parse_persistent_exile_play_permission(text, &lower).is_none(),
+        "the per-turn Maralen line must not match the persistent class"
+    );
 }
 
 #[test]
