@@ -242,6 +242,23 @@ impl KeywordTriggerInstaller {
                 build_suspend_upkeep_removal_trigger(),
                 build_suspend_last_counter_cast_trigger(),
             ],
+            // CR 702.32a + CR 604.1: granted Fading carries the upkeep
+            // counter-removal and "if you can't, sacrifice" triggers. The
+            // ETB-with-N-fade-counters replacement (CR 702.32a clause 1) is a
+            // static ability that functions only as the permanent enters; a
+            // runtime-granted keyword misses that window (the permanent is
+            // already on the battlefield), so the replacement is not installed.
+            Keyword::Fading(_) => vec![
+                build_fade_vanish_upkeep_removal_trigger(CounterType::Fade, "702.32a"),
+                build_fading_sacrifice_trigger(),
+            ],
+            // CR 702.63a + CR 604.1: granted Vanishing carries the upkeep
+            // counter-removal and last-counter sacrifice triggers; the ETB
+            // replacement is not installed for the same reason as Fading.
+            Keyword::Vanishing(_) => vec![
+                build_fade_vanish_upkeep_removal_trigger(CounterType::Time, "702.63a"),
+                build_vanishing_sacrifice_trigger(),
+            ],
             _ => Vec::new(),
         }
     }
@@ -273,6 +290,18 @@ impl KeywordTriggerInstaller {
             // both suspend triggers when the granted keyword is removed.
             Keyword::Suspend { .. } => {
                 is_suspend_upkeep_trigger(trigger) || is_suspend_last_counter_trigger(trigger)
+            }
+            // CR 702.32a + CR 604.1: symmetric removal — `RemoveKeyword` strips
+            // both Fading triggers when the granted keyword is removed.
+            Keyword::Fading(_) => {
+                is_fade_vanish_upkeep_trigger(trigger, &CounterType::Fade)
+                    || is_fading_sacrifice_trigger(trigger)
+            }
+            // CR 702.63a + CR 604.1: symmetric removal — `RemoveKeyword` strips
+            // both Vanishing triggers when the granted keyword is removed.
+            Keyword::Vanishing(_) => {
+                is_fade_vanish_upkeep_trigger(trigger, &CounterType::Time)
+                    || is_vanishing_sacrifice_trigger(trigger)
             }
             _ => false,
         }
@@ -3347,6 +3376,359 @@ fn is_suspend_last_counter_trigger(t: &TriggerDefinition) -> bool {
             .is_some_and(|f| matches!(f.counter_type, CounterType::Time) && f.threshold == Some(0))
 }
 
+// ---------------------------------------------------------------------------
+// Fading (CR 702.32) and Vanishing (CR 702.63)
+//
+// Both keywords share the suspend upkeep counter-removal shape — a
+// `TriggerMode::Phase` upkeep trigger gated `OnlyDuringYourTurn` whose execute
+// body is `Effect::RemoveCounter { count: 1, target: SelfRef }` — and differ
+// only in counter type and the timing of the sacrifice:
+//
+//   * Fading N (CR 702.32a) enters with N *fade* counters and is sacrificed at
+//     the upkeep where it *can't* remove one (the upkeep with 0 fade counters,
+//     one upkeep AFTER its last counter was removed) — so it gets N uses.
+//   * Vanishing N (CR 702.63a) enters with N *time* counters and is sacrificed
+//     *when its last time counter is removed* (the Nth upkeep, the removal that
+//     takes it to 0).
+//
+// The removal trigger is modeled identically to suspend (CR 702.62a) but in the
+// Battlefield zone; the per-keyword difference lives entirely in the sacrifice
+// trigger.
+
+/// CR 702.32a / CR 702.63a: Shared upkeep counter-removal trigger for Fading and
+/// Vanishing. "At the beginning of your upkeep, remove a [fade/time] counter
+/// from this permanent." Mirrors `build_suspend_upkeep_removal_trigger`, but on
+/// the battlefield (Fading/Vanishing permanents are on the battlefield, suspend
+/// cards are in exile).
+///
+/// The `HasCounters { minimum: 1 }` intervening-if (CR 603.4) ensures the
+/// removal only fires while a counter remains. For Vanishing this matches the
+/// printed "if this permanent has a time counter on it" (CR 702.63a). For
+/// Fading the removal is unconditional in the printed text, but gating on
+/// `minimum: 1` is behaviorally identical (there is nothing to remove at 0) and
+/// keeps the "you can't remove → sacrifice" case cleanly owned by the separate
+/// Fading sacrifice trigger below rather than producing a no-op `RemoveCounter`.
+fn build_fade_vanish_upkeep_removal_trigger(
+    counter_type: CounterType,
+    cr: &str,
+) -> TriggerDefinition {
+    let remove_one = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RemoveCounter {
+            counter_type: Some(counter_type.clone()),
+            count: 1,
+            target: TargetFilter::SelfRef,
+        },
+    );
+    TriggerDefinition::new(TriggerMode::Phase)
+        .phase(Phase::Upkeep)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::HasCounters {
+            counters: CounterMatch::OfType(counter_type.clone()),
+            minimum: 1,
+            maximum: None,
+        })
+        .constraint(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn)
+        .execute(remove_one)
+        .description(format!(
+            "CR {cr}: At the beginning of your upkeep, remove a {} counter from this permanent.",
+            counter_type.as_str()
+        ))
+}
+
+/// CR 702.32a (2nd ability, "If you can't, sacrifice the permanent"): Fading's
+/// sacrifice trigger. "At the beginning of your upkeep, … if you can't [remove a
+/// fade counter], sacrifice the permanent." We model "you can't remove a fade
+/// counter" as "there are zero fade counters on it" — a separate upkeep trigger
+/// gated `HasCounters { minimum: 0, maximum: 0 }`. Because the removal trigger
+/// (above) and this sacrifice trigger are independent upkeep triggers with
+/// mutually exclusive intervening-ifs (≥1 vs exactly 0), exactly one fires each
+/// upkeep: while counters remain, one is removed; on the first upkeep with none,
+/// the permanent is sacrificed. A Fading N permanent therefore survives N
+/// upkeeps and is sacrificed on upkeep N+1 — N uses, per CR 702.32a.
+fn build_fading_sacrifice_trigger() -> TriggerDefinition {
+    let sacrifice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+    TriggerDefinition::new(TriggerMode::Phase)
+        .phase(Phase::Upkeep)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Fade),
+            minimum: 0,
+            maximum: Some(0),
+        })
+        .constraint(crate::types::ability::TriggerConstraint::OnlyDuringYourTurn)
+        .execute(sacrifice)
+        .description(
+            "CR 702.32a: At the beginning of your upkeep, if you can't remove a fade counter from this permanent, sacrifice it."
+                .to_string(),
+        )
+}
+
+/// CR 702.63a (3rd ability): Vanishing's sacrifice trigger. "When the last time
+/// counter is removed from this permanent, sacrifice it." Identical shape to the
+/// suspend last-counter trigger (`build_suspend_last_counter_cast_trigger`) —
+/// `TriggerMode::CounterRemoved` with `threshold: Some(0)` (fire only when the
+/// post-removal count is 0) — but on the battlefield and executing a sacrifice
+/// instead of a free cast. This fires on the very upkeep that removes the last
+/// counter (CR 702.63a), one upkeep earlier than Fading's sacrifice.
+fn build_vanishing_sacrifice_trigger() -> TriggerDefinition {
+    let sacrifice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+    TriggerDefinition::new(TriggerMode::CounterRemoved)
+        .valid_card(TargetFilter::SelfRef)
+        .counter_filter(CounterTriggerFilter {
+            counter_type: CounterType::Time,
+            threshold: Some(0),
+        })
+        .execute(sacrifice)
+        .description(
+            "CR 702.63a: When the last time counter is removed from this permanent, sacrifice it."
+                .to_string(),
+        )
+}
+
+/// Structural predicate: true iff `trigger` is the shared Fading/Vanishing
+/// upkeep counter-removal trigger for `counter_type`. Mirrors
+/// `is_suspend_upkeep_trigger`, but on the battlefield.
+fn is_fade_vanish_upkeep_trigger(t: &TriggerDefinition, counter_type: &CounterType) -> bool {
+    // Default `trigger_zones` (empty) means battlefield-only, which is what the
+    // builder leaves — distinguishing this from the suspend upkeep trigger,
+    // which explicitly sets `trigger_zones = [Exile]`.
+    matches!(t.mode, TriggerMode::Phase)
+        && t.phase == Some(Phase::Upkeep)
+        && t.trigger_zones.is_empty()
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::RemoveCounter { counter_type: Some(ct), target: TargetFilter::SelfRef, .. })
+                if ct == counter_type
+        )
+}
+
+/// Structural predicate: true iff `trigger` is the Fading sacrifice trigger
+/// shape (upkeep, gated on zero fade counters, executing a self-sacrifice).
+fn is_fading_sacrifice_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Phase)
+        && t.phase == Some(Phase::Upkeep)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            &t.condition,
+            Some(TriggerCondition::HasCounters {
+                counters: CounterMatch::OfType(CounterType::Fade),
+                minimum: 0,
+                maximum: Some(0),
+            })
+        )
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        )
+}
+
+/// Structural predicate: true iff `trigger` is the Vanishing last-counter
+/// sacrifice trigger shape. Mirrors `is_suspend_last_counter_trigger` but
+/// executes a self-sacrifice rather than a free cast.
+fn is_vanishing_sacrifice_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::CounterRemoved)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && t.counter_filter
+            .as_ref()
+            .is_some_and(|f| matches!(f.counter_type, CounterType::Time) && f.threshold == Some(0))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        )
+}
+
+/// Build the shared "enters with N counters" ETB replacement for Fading /
+/// Vanishing. Mirrors the Modular ETB-with-N-P1P1 replacement
+/// (`synthesize_modular`): a `ReplacementEvent::Moved` replacement on `SelfRef`
+/// whose execute body is `Effect::PutCounter { count: Fixed(n), target: SelfRef }`.
+/// CR 702.32a / CR 702.63a: "This permanent enters with N [fade/time] counters
+/// on it."
+fn build_fade_vanish_etb_replacement(
+    counter_type: CounterType,
+    n: u32,
+    cr: &str,
+) -> ReplacementDefinition {
+    let etb_counters = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: counter_type.clone(),
+            count: QuantityExpr::Fixed { value: n as i32 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description(format!(
+        "This permanent enters with {n} {} counter{} on it",
+        counter_type.as_str(),
+        if n == 1 { "" } else { "s" }
+    ));
+    ReplacementDefinition {
+        event: ReplacementEvent::Moved,
+        execute: Some(Box::new(etb_counters)),
+        valid_card: Some(TargetFilter::SelfRef),
+        description: Some(format!(
+            "CR {cr}: this permanent enters with {n} {} counter{} on it.",
+            counter_type.as_str(),
+            if n == 1 { "" } else { "s" }
+        )),
+        ..ReplacementDefinition::new(ReplacementEvent::Moved)
+    }
+}
+
+/// Idempotency-shape predicate for the Fading/Vanishing ETB-with-counters
+/// replacement. True iff `replacement` is a `Moved` replacement on `SelfRef`
+/// whose execute body places exactly `expected_n` `counter_type` counters on
+/// `SelfRef` with a fixed count. The `expected_n` argument is load-bearing for
+/// the same reason as `is_modular_etb_replacement`: a card carrying both a
+/// printed "enters with K counters" replacement and the keyword with K ≠ N must
+/// not silently dedupe.
+fn is_fade_vanish_etb_replacement(
+    replacement: &ReplacementDefinition,
+    counter_type: &CounterType,
+    expected_n: u32,
+) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    matches!(
+        replacement.execute.as_deref().map(|a| &*a.effect),
+        Some(Effect::PutCounter {
+            counter_type: ct,
+            count: QuantityExpr::Fixed { value },
+            target: TargetFilter::SelfRef,
+        }) if ct == counter_type && *value == expected_n as i32
+    )
+}
+
+/// CR 702.32a: Fading N — synthesize the enters-with-N-fade-counters ETB
+/// replacement, the upkeep fade-counter-removal trigger, and the "if you can't,
+/// sacrifice" upkeep sacrifice trigger. Each Fading instance functions
+/// separately (CR 113.2c); the per-N idempotency mirrors `synthesize_modular`.
+pub fn synthesize_fading(face: &mut CardFace) {
+    let fading_values: Vec<u32> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Fading(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if fading_values.is_empty() {
+        return;
+    }
+
+    // ETB-with-N-fade-counters replacement, per-N idempotent (mirrors Modular).
+    for &n in &fading_values {
+        let needed = fading_values.iter().filter(|m| **m == n).count();
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_fade_vanish_etb_replacement(r, &CounterType::Fade, n))
+            .count();
+        if existing >= needed {
+            continue;
+        }
+        face.replacements.push(build_fade_vanish_etb_replacement(
+            CounterType::Fade,
+            n,
+            "702.32a",
+        ));
+    }
+
+    // Upkeep fade-counter-removal trigger (shape-only idempotency: no N dependence).
+    if !face
+        .triggers
+        .iter()
+        .any(|t| is_fade_vanish_upkeep_trigger(t, &CounterType::Fade))
+    {
+        face.triggers.push(build_fade_vanish_upkeep_removal_trigger(
+            CounterType::Fade,
+            "702.32a",
+        ));
+    }
+
+    // "If you can't, sacrifice" trigger (shape-only idempotency).
+    if !face.triggers.iter().any(is_fading_sacrifice_trigger) {
+        face.triggers.push(build_fading_sacrifice_trigger());
+    }
+}
+
+/// CR 702.63a: Vanishing N — synthesize the enters-with-N-time-counters ETB
+/// replacement, the upkeep time-counter-removal trigger, and the last-counter
+/// sacrifice trigger. Each Vanishing instance functions separately (CR 702.63c);
+/// the per-N idempotency mirrors `synthesize_modular`.
+pub fn synthesize_vanishing(face: &mut CardFace) {
+    let vanishing_values: Vec<u32> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Vanishing(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    if vanishing_values.is_empty() {
+        return;
+    }
+
+    // ETB-with-N-time-counters replacement, per-N idempotent (mirrors Modular).
+    for &n in &vanishing_values {
+        let needed = vanishing_values.iter().filter(|m| **m == n).count();
+        let existing = face
+            .replacements
+            .iter()
+            .filter(|r| is_fade_vanish_etb_replacement(r, &CounterType::Time, n))
+            .count();
+        if existing >= needed {
+            continue;
+        }
+        face.replacements.push(build_fade_vanish_etb_replacement(
+            CounterType::Time,
+            n,
+            "702.63a",
+        ));
+    }
+
+    // Upkeep time-counter-removal trigger (shape-only idempotency).
+    if !face
+        .triggers
+        .iter()
+        .any(|t| is_fade_vanish_upkeep_trigger(t, &CounterType::Time))
+    {
+        face.triggers.push(build_fade_vanish_upkeep_removal_trigger(
+            CounterType::Time,
+            "702.63a",
+        ));
+    }
+
+    // Last-counter sacrifice trigger (shape-only idempotency).
+    if !face.triggers.iter().any(is_vanishing_sacrifice_trigger) {
+        face.triggers.push(build_vanishing_sacrifice_trigger());
+    }
+}
+
 /// Idempotency-shape predicate for `synthesize_dies_return_with_counter`.
 /// True iff `trigger` is the synthesized dies-trigger shape for the given
 /// counter polarity. The check is intentionally narrow — it matches the
@@ -4756,6 +5138,14 @@ pub fn synthesize_all(face: &mut CardFace) {
     // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
     // grouped; idempotent so order against Cycling/Madness is irrelevant.
     synthesize_suspend(face);
+    // CR 702.32a: Fading N — enters-with-N-fade-counters ETB replacement, upkeep
+    // fade-counter-removal trigger, and the "if you can't, sacrifice" upkeep
+    // trigger. Each instance functions separately; idempotent.
+    synthesize_fading(face);
+    // CR 702.63a: Vanishing N — enters-with-N-time-counters ETB replacement,
+    // upkeep time-counter-removal trigger, and the last-counter sacrifice
+    // trigger. Each instance functions separately; idempotent.
+    synthesize_vanishing(face);
     // CR 702.170 + CR 116.2k: Plot — hand-activated special-action-approximated
     // ability that exiles self and grants a Plotted casting permission for
     // free-cast on a later turn. Runs after Suspend; idempotent.
@@ -14375,5 +14765,389 @@ mod reinforce_synthesis_tests {
             }
             other => panic!("expected Composite cost, got {:?}", other),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fading (CR 702.32) and Vanishing (CR 702.63) tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod fading_vanishing_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::{GameState, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::player::PlayerId;
+
+    // --- SHAPE tests: synthesized triggers/replacements on the CardFace ---
+
+    #[test]
+    fn synthesize_fading_adds_etb_replacement_and_two_upkeep_triggers() {
+        // CR 702.32a: Fading 2 enters with 2 fade counters; an upkeep trigger
+        // removes one; a second upkeep trigger sacrifices when none remain.
+        let mut face = CardFace {
+            keywords: vec![Keyword::Fading(2)],
+            ..CardFace::default()
+        };
+        synthesize_fading(&mut face);
+
+        // ETB-with-2-fade-counters replacement.
+        let etb = face
+            .replacements
+            .iter()
+            .find(|r| is_fade_vanish_etb_replacement(r, &CounterType::Fade, 2))
+            .expect("Fading 2 must synthesize an enters-with-2-fade-counters replacement");
+        assert!(matches!(
+            etb.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::PutCounter {
+                counter_type: CounterType::Fade,
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::SelfRef,
+            })
+        ));
+
+        // Upkeep removal trigger: remove a fade counter, gated on having >= 1.
+        let removal = face
+            .triggers
+            .iter()
+            .find(|t| is_fade_vanish_upkeep_trigger(t, &CounterType::Fade))
+            .expect("Fading must synthesize an upkeep fade-counter-removal trigger");
+        assert!(matches!(
+            &removal.condition,
+            Some(TriggerCondition::HasCounters {
+                minimum: 1,
+                maximum: None,
+                ..
+            })
+        ));
+        assert!(matches!(
+            removal.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::RemoveCounter {
+                counter_type: Some(CounterType::Fade),
+                count: 1,
+                target: TargetFilter::SelfRef,
+            })
+        ));
+
+        // Sacrifice trigger: gated on EXACTLY 0 fade counters ("if you can't").
+        let sac = face
+            .triggers
+            .iter()
+            .find(|t| is_fading_sacrifice_trigger(t))
+            .expect("Fading must synthesize an 'if you can't, sacrifice' upkeep trigger");
+        assert!(matches!(
+            &sac.condition,
+            Some(TriggerCondition::HasCounters {
+                minimum: 0,
+                maximum: Some(0),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn synthesize_vanishing_adds_etb_replacement_removal_and_last_counter_sacrifice() {
+        // CR 702.63a: Vanishing 2 enters with 2 time counters; an upkeep trigger
+        // removes one; a CounterRemoved trigger sacrifices when the last is gone.
+        let mut face = CardFace {
+            keywords: vec![Keyword::Vanishing(2)],
+            ..CardFace::default()
+        };
+        synthesize_vanishing(&mut face);
+
+        let etb = face
+            .replacements
+            .iter()
+            .find(|r| is_fade_vanish_etb_replacement(r, &CounterType::Time, 2))
+            .expect("Vanishing 2 must synthesize an enters-with-2-time-counters replacement");
+        assert!(matches!(
+            etb.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::PutCounter {
+                counter_type: CounterType::Time,
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::SelfRef,
+            })
+        ));
+
+        let removal = face
+            .triggers
+            .iter()
+            .find(|t| is_fade_vanish_upkeep_trigger(t, &CounterType::Time))
+            .expect("Vanishing must synthesize an upkeep time-counter-removal trigger");
+        assert!(matches!(
+            removal.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::RemoveCounter {
+                counter_type: Some(CounterType::Time),
+                count: 1,
+                target: TargetFilter::SelfRef,
+            })
+        ));
+
+        // Last-counter sacrifice: CounterRemoved with threshold Some(0).
+        let sac = face
+            .triggers
+            .iter()
+            .find(|t| is_vanishing_sacrifice_trigger(t))
+            .expect("Vanishing must synthesize a last-counter sacrifice trigger");
+        assert!(matches!(sac.mode, TriggerMode::CounterRemoved));
+        assert!(sac
+            .counter_filter
+            .as_ref()
+            .is_some_and(|f| f.counter_type == CounterType::Time && f.threshold == Some(0)));
+    }
+
+    #[test]
+    fn synthesize_fading_and_vanishing_are_idempotent_and_noop_without_keyword() {
+        // Idempotency: re-running synthesis must not duplicate replacements/triggers.
+        let mut fading = CardFace {
+            keywords: vec![Keyword::Fading(3)],
+            ..CardFace::default()
+        };
+        synthesize_fading(&mut fading);
+        synthesize_fading(&mut fading);
+        assert_eq!(
+            fading
+                .replacements
+                .iter()
+                .filter(|r| is_fade_vanish_etb_replacement(r, &CounterType::Fade, 3))
+                .count(),
+            1
+        );
+        assert_eq!(
+            fading
+                .triggers
+                .iter()
+                .filter(|t| is_fade_vanish_upkeep_trigger(t, &CounterType::Fade))
+                .count(),
+            1
+        );
+        assert_eq!(
+            fading
+                .triggers
+                .iter()
+                .filter(|t| is_fading_sacrifice_trigger(t))
+                .count(),
+            1
+        );
+
+        let mut vanishing = CardFace {
+            keywords: vec![Keyword::Vanishing(3)],
+            ..CardFace::default()
+        };
+        synthesize_vanishing(&mut vanishing);
+        synthesize_vanishing(&mut vanishing);
+        assert_eq!(
+            vanishing
+                .triggers
+                .iter()
+                .filter(|t| is_vanishing_sacrifice_trigger(t))
+                .count(),
+            1
+        );
+
+        // No-op without the keyword.
+        let mut other = CardFace {
+            keywords: vec![Keyword::Menace],
+            ..CardFace::default()
+        };
+        synthesize_fading(&mut other);
+        synthesize_vanishing(&mut other);
+        assert!(other.triggers.is_empty());
+        assert!(other.replacements.is_empty());
+    }
+
+    #[test]
+    fn fade_counter_round_trips_through_serialization() {
+        // CR 122.1: the fade counter is a distinct named type, serialized as "fade".
+        assert_eq!(CounterType::Fade.as_str().as_ref(), "fade");
+        let json = serde_json::to_string(&CounterType::Fade).unwrap();
+        assert_eq!(json, "\"fade\"");
+        let back: CounterType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, CounterType::Fade);
+    }
+
+    // --- End-to-end runtime tests: drive real turns and observe behavior ---
+
+    /// Advance real turn progression (through `apply`, the clobber site) until
+    /// `PlayerId(0)` reaches an upkeep strictly later than `after_turn`,
+    /// draining any stack the auto-advance path places (so upkeep triggers
+    /// resolve). Returns the turn number reached.
+    fn run_to_p0_upkeep(state: &mut GameState, after_turn: u32) -> u32 {
+        let mut guard = 0;
+        loop {
+            guard += 1;
+            assert!(guard < 400, "turn progression stalled before P0's upkeep");
+            if state.phase == Phase::Upkeep
+                && state.active_player == PlayerId(0)
+                && state.turn_number > after_turn
+                && state.stack.is_empty()
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+            {
+                return state.turn_number;
+            }
+            if !state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                crate::game::engine::apply_as_current(state, GameAction::PassPriority)
+                    .expect("priority pass to resolve stack");
+                continue;
+            }
+            match &state.waiting_for {
+                WaitingFor::Priority { .. } => {
+                    crate::game::engine::apply_as_current(state, GameAction::PassPriority)
+                        .expect("priority pass to advance the turn");
+                }
+                WaitingFor::DeclareAttackers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        state,
+                        GameAction::DeclareAttackers { attacks: vec![] },
+                    )
+                    .expect("declare no attackers");
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    crate::game::engine::apply_as_current(
+                        state,
+                        GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        },
+                    )
+                    .expect("declare no blockers");
+                }
+                other => panic!("unexpected waiting state during turn progression: {other:?}"),
+            }
+        }
+    }
+
+    /// Build a 2-player state with a battlefield creature controlled by P0 that
+    /// carries `counters` of `counter_type` plus the supplied synthesized
+    /// triggers. Libraries are stocked so neither player decks out. Returns
+    /// `(state, creature_id)`. Starts on P0's turn at the post-upkeep main phase
+    /// so the FIRST upkeep observed by `run_to_p0_upkeep` is a real later turn.
+    fn battlefield_with_triggers(
+        counter_type: CounterType,
+        counters: u32,
+        triggers: Vec<TriggerDefinition>,
+    ) -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        let creature = scenario.add_creature(P0, "Test Permanent", 2, 2).id();
+        let mut runner = scenario.build();
+        {
+            let obj = runner.state_mut().objects.get_mut(&creature).unwrap();
+            obj.counters.insert(counter_type, counters);
+            for t in &triggers {
+                obj.trigger_definitions.push(t.clone());
+                std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(t.clone());
+            }
+        }
+        // Stock libraries to avoid decking out across several turns.
+        let state = runner.state_mut();
+        for player in [PlayerId(0), PlayerId(1)] {
+            for i in 0..20u64 {
+                crate::game::zones::create_object(
+                    state,
+                    CardId(9000 + u64::from(player.0) * 100 + i),
+                    player,
+                    format!("Filler {}-{i}", player.0),
+                    Zone::Library,
+                );
+            }
+        }
+        let state = std::mem::replace(runner.state_mut(), GameState::new_two_player(0));
+        (state, creature)
+    }
+
+    #[test]
+    fn fading_two_survives_two_upkeeps_then_sacrificed_on_third() {
+        // CR 702.32a: Fading 2 — enters with 2 fade counters, survives two of
+        // P0's upkeeps (removing one fade counter each), and is sacrificed on
+        // the THIRD upkeep, the one where it can't remove a counter (count 0).
+        let (mut state, creature) = battlefield_with_triggers(
+            CounterType::Fade,
+            2,
+            vec![
+                build_fade_vanish_upkeep_removal_trigger(CounterType::Fade, "702.32a"),
+                build_fading_sacrifice_trigger(),
+            ],
+        );
+
+        let start = state.turn_number;
+
+        // First P0 upkeep after setup: 2 -> 1 fade counters, still on battlefield.
+        run_to_p0_upkeep(&mut state, start);
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&CounterType::Fade)
+                .copied(),
+            Some(1),
+            "after 1st upkeep, one fade counter removed (2 -> 1)"
+        );
+        assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+
+        // Second P0 upkeep: 1 -> 0 fade counters, still on battlefield (survives).
+        let t2 = state.turn_number;
+        run_to_p0_upkeep(&mut state, t2);
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&CounterType::Fade)
+                .copied()
+                .unwrap_or(0),
+            0,
+            "after 2nd upkeep, last fade counter removed (1 -> 0)"
+        );
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Battlefield,
+            "CR 702.32a: Fading survives the upkeep that removes its LAST counter"
+        );
+
+        // Third P0 upkeep: cannot remove a fade counter (0 remain) -> sacrificed.
+        let t3 = state.turn_number;
+        run_to_p0_upkeep(&mut state, t3);
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Graveyard,
+            "CR 702.32a: Fading is sacrificed on the upkeep where it CAN'T remove a fade counter (the 3rd upkeep)"
+        );
+    }
+
+    #[test]
+    fn vanishing_two_sacrificed_on_second_upkeep_when_last_counter_removed() {
+        // CR 702.63a: Vanishing 2 — enters with 2 time counters, removes one on
+        // the first P0 upkeep (2 -> 1, survives), and is sacrificed on the SECOND
+        // upkeep, the removal that takes it to 0 (one upkeep EARLIER than Fading 2).
+        let (mut state, creature) = battlefield_with_triggers(
+            CounterType::Time,
+            2,
+            vec![
+                build_fade_vanish_upkeep_removal_trigger(CounterType::Time, "702.63a"),
+                build_vanishing_sacrifice_trigger(),
+            ],
+        );
+
+        let start = state.turn_number;
+
+        // First P0 upkeep: 2 -> 1 time counters, still on battlefield.
+        run_to_p0_upkeep(&mut state, start);
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&CounterType::Time)
+                .copied(),
+            Some(1),
+            "after 1st upkeep, one time counter removed (2 -> 1)"
+        );
+        assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+
+        // Second P0 upkeep: removal takes it 1 -> 0 and the last-counter
+        // trigger sacrifices it the SAME upkeep.
+        let t2 = state.turn_number;
+        run_to_p0_upkeep(&mut state, t2);
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Graveyard,
+            "CR 702.63a: Vanishing is sacrificed WHEN its last time counter is removed (the 2nd upkeep)"
+        );
     }
 }

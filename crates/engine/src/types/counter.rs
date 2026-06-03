@@ -32,6 +32,15 @@ pub enum CounterType {
     /// removed, the suspend "play it without paying its mana cost" trigger fires
     /// (CR 702.62a) or the Vanishing sacrifice trigger fires (CR 702.63a).
     Time,
+    /// CR 702.32a + CR 122.1: Fade counters track Fading duration. "Fading N"
+    /// enters the permanent with N fade counters; at the beginning of its
+    /// controller's upkeep one is removed, and if none can be removed the
+    /// permanent is sacrificed. Distinct from `Time` (Vanishing/Suspend): a
+    /// Fading permanent is sacrificed on the upkeep where it has *no* fade
+    /// counter to remove (CR 702.32a), one upkeep later than a Vanishing
+    /// permanent with the same number, which is sacrificed when its last time
+    /// counter is removed (CR 702.63a).
+    Fade,
     /// CR 702.24a + CR 122.1: Age counters track Cumulative Upkeep
     /// duration. Each cumulative-upkeep trigger places one at the start
     /// of its controller's upkeep, and the cost is multiplied by the
@@ -81,6 +90,7 @@ impl CounterType {
             CounterType::Stun => Cow::Borrowed("stun"),
             CounterType::Lore => Cow::Borrowed("lore"),
             CounterType::Time => Cow::Borrowed("time"),
+            CounterType::Fade => Cow::Borrowed("fade"),
             CounterType::Age => Cow::Borrowed("age"),
             CounterType::Keyword(kind) => KEYWORD_COUNTERS
                 .iter()
@@ -117,6 +127,7 @@ impl CounterType {
             | CounterType::Stun
             | CounterType::Lore
             | CounterType::Time
+            | CounterType::Fade
             | CounterType::Age
             | CounterType::Keyword(_)
             | CounterType::Generic(_) => None,
@@ -198,6 +209,7 @@ pub fn try_parse_counter_type(text: &str) -> Option<CounterType> {
         "stun" => return Some(CounterType::Stun),
         "lore" | "LORE" => return Some(CounterType::Lore),
         "time" | "TIME" => return Some(CounterType::Time),
+        "fade" | "FADE" => return Some(CounterType::Fade),
         "age" => return Some(CounterType::Age),
         _ => {}
     }
