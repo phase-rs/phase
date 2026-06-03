@@ -1,4 +1,8 @@
 import { createRoot } from "react-dom/client";
+// Self-hosted variable webfonts (served from node_modules by Vite — no Google
+// CDN). Fraunces = serif display; JetBrains Mono = codes / tabular numbers.
+import "@fontsource-variable/fraunces";
+import "@fontsource-variable/jetbrains-mono";
 import "./index.css";
 import "./i18n"; // initialize i18next before any component renders
 import { App } from "./App";
