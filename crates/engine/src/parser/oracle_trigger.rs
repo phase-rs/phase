@@ -4888,6 +4888,31 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         return (filter, rest);
     }
 
+    // CR 903.3: Possessive commander reference — "your commander" / "your commanders".
+    // The possessive form is not handled by `parse_type_phrase` (which only
+    // recognizes bare "commander"), so intercept it here before the generic
+    // "a "/"an " + type-phrase path.
+    // Uses `Owned { controller: You }` rather than the `controller` field so
+    // that a stolen opponent's commander does not satisfy the filter.
+    if let Ok((after_your, ())) = value((), tag::<_, _, OracleError<'_>>("your ")).parse(text) {
+        if let Ok((rest, _)) =
+            alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander"))).parse(after_your)
+        {
+            return (
+                TargetFilter::Typed(TypedFilter {
+                    properties: vec![
+                        FilterProp::IsCommander,
+                        FilterProp::Owned {
+                            controller: ControllerRef::You,
+                        },
+                    ],
+                    ..Default::default()
+                }),
+                rest.trim_start(),
+            );
+        }
+    }
+
     // "a "/"an " + type phrase (general subject)
     if let Ok((after, ())) = alt((
         value((), tag::<_, _, OracleError<'_>>("a ")),
@@ -11908,6 +11933,27 @@ mod tests {
             Effect::GainEnergy {
                 amount: QuantityExpr::Fixed { value: 1 }
             }
+        );
+    }
+
+    #[test]
+    fn trigger_your_commander_enters_or_attacks() {
+        let def = parse_trigger_line(
+            "Whenever your commander enters or attacks, put a page counter on ~.",
+            "Tome of Legends",
+        );
+        assert_eq!(def.mode, TriggerMode::EntersOrAttacks);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                properties: vec![
+                    FilterProp::IsCommander,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                ],
+                ..Default::default()
+            }))
         );
     }
 
