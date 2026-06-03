@@ -157,6 +157,8 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::Goaded, handle_rule_mod);
     registry.insert(StaticMode::CantAttackAlone, handle_rule_mod);
     registry.insert(StaticMode::CantBlockAlone, handle_rule_mod);
+    // CR 702.122c: CantCrew — creature can't be tapped to pay a crew cost.
+    registry.insert(StaticMode::CantCrew, handle_rule_mod);
     registry.insert(StaticMode::MayLookAtTopOfLibrary, handle_rule_mod);
     // CR 104.3b: CantLoseTheGame — player can't lose the game (Platinum Angel).
     // Runtime enforcement is in sba.rs::player_has_cant_lose().
@@ -1068,6 +1070,14 @@ fn static_condition_matches_context(
     })
 }
 
+/// CR 702.122c: Returns true when the creature has an active "can't crew Vehicles" static.
+pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        super::functioning_abilities::active_static_definitions(state, obj)
+            .any(|def| def.mode == StaticMode::CantCrew)
+    })
+}
+
 /// Check if a static ability named `name` applies to a specific object
 /// (target-scoped query). Used for object-targeted prohibitions like
 /// `CantBeSacrificed`, `CantBeEnchanted`, `CantTransform`, etc.
@@ -1140,6 +1150,8 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::TargetPlayer => false,
                         crate::types::ability::ControllerRef::ParentTargetController => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
+                        // CR 613.1: chosen-player scope has no static context here.
+                        crate::types::ability::ControllerRef::SourceChosenPlayer => false,
                         // CR 109.4: Chosen-player scope has no static context.
                         crate::types::ability::ControllerRef::ChosenPlayer { .. } => false,
                         // CR 603.2 + CR 109.4: Triggering-player scope has no

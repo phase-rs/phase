@@ -75,13 +75,10 @@ fn dalkovan_encampment_delayed_trigger_creates_warrior_tokens() {
         .position(|a| matches!(a.effect.as_ref(), Effect::CreateDelayedTrigger { .. }))
         .expect("Dalkovan Encampment must have a CreateDelayedTrigger ability");
 
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: encampment,
-            ability_index,
-        })
-        .expect("activating {2}{W},{T} should succeed");
-    runner.advance_until_stack_empty();
+    // Activate the {2}{W},{T} ability through the activation pipeline, paying the
+    // mana cost from the funded pool; resolution creates the "Whenever you attack
+    // this turn" delayed trigger (CR 603.7c).
+    runner.activate(encampment, ability_index).resolve();
 
     // Declare the attacker — this is the event the delayed trigger watches.
     runner.pass_both_players();

@@ -76,20 +76,28 @@ export function Rail({ onSettings }: RailProps) {
           <span className="text-[10.5px] font-semibold tracking-[0.02em]">{t("nav.settings")}</span>
         </button>
 
-        {/* Labelled social badges: brand icon on the left, name on the right. */}
-        <div className="flex w-full flex-col gap-1">
+        {/* Icon-only social column. Each rail icon morphs into its full
+            labelled badge on hover — the SAME anchor expands rightward (out
+            past the rail edge) while the single glyph stays put and the
+            brand-tinted label slides in. The slot div reserves a fixed square
+            so the column never reflows; pinning the anchor to the slot's left
+            edge keeps the icon from drifting as the pill grows. */}
+        <div className="flex w-full flex-col items-center gap-1">
           {SOCIAL_LINKS.map(({ key, url, label, Glyph, hover }) => (
-            <a
-              key={key}
-              href={url}
-              onClick={social(url)}
-              aria-label={label}
-              title={label}
-              className={`flex w-full items-center gap-1.5 rounded-[10px] border border-hairline px-1.5 py-1.5 text-fg-meta transition-colors ${hover}`}
-            >
-              <Glyph />
-              <span className="text-[10px] font-semibold tracking-[0.01em]">{label}</span>
-            </a>
+            <div key={key} className="relative h-8 w-8">
+              <a
+                href={url}
+                onClick={social(url)}
+                aria-label={label}
+                title={label}
+                className={`group absolute left-0 top-0 z-50 flex h-8 items-center overflow-hidden rounded-[10px] border border-hairline bg-[rgba(6,10,22,0.65)] pl-[7px] pr-[7px] text-fg-meta shadow-panel backdrop-blur-md transition-[background-color,color,padding] duration-200 ${hover}`}
+              >
+                <Glyph />
+                <span className="max-w-0 overflow-hidden whitespace-nowrap text-[11px] font-semibold tracking-[0.01em] opacity-0 transition-all duration-200 group-hover:ml-1.5 group-hover:max-w-[6rem] group-hover:opacity-100">
+                  {label}
+                </span>
+              </a>
+            </div>
           ))}
         </div>
 
