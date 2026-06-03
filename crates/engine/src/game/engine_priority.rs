@@ -52,14 +52,30 @@ pub(super) fn run_post_action_pipeline(
     // CR 704.3: SBA/trigger loop. SBAs may generate events (e.g., ZoneChanged for
     // dying creatures) that need trigger processing. Repeat until no new SBAs fire,
     // matching the loop pattern in process_combat_damage_triggers.
-    loop {
-        let events_before = events.len();
-        sba::check_state_based_actions(state, events);
-        if events.len() > events_before {
-            let sba_events: Vec<_> = events[events_before..].to_vec();
-            triggers::process_triggers(state, &sba_events);
-        } else {
-            break;
+    //
+    // CR 704.4 + CR 616.1: But do NOT run SBAs while resolution is paused on a
+    // replacement-effect choice. A `ReplacementChoice` is a mid-resolution
+    // pause — the triggering event (e.g. a permanent's "enters with X +1/+1
+    // counters" ETB placement, being doubled/incremented by two or more
+    // order-material replacements like Branching Evolution + Ozolith, so CR
+    // 616.1 makes the application order the controller's choice) has not
+    // finished happening: the counters are not on the object yet. CR 704.4 —
+    // "state-based actions pay no attention to what happens during the
+    // resolution of a spell or ability" — so checking SBAs now would wrongly
+    // send a still-entering 0/0 to the graveyard (CR 704.5f) before its counters
+    // land. The loop runs on the next pipeline pass, once the choice is answered
+    // and resolution settles back to Priority. Player-loss SBAs remain covered
+    // mid-choice by `reconcile_terminal_result`'s narrow safety net.
+    if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+        loop {
+            let events_before = events.len();
+            sba::check_state_based_actions(state, events);
+            if events.len() > events_before {
+                let sba_events: Vec<_> = events[events_before..].to_vec();
+                triggers::process_triggers(state, &sba_events);
+            } else {
+                break;
+            }
         }
     }
 
