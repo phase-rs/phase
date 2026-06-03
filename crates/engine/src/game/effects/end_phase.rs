@@ -40,6 +40,7 @@ pub(super) fn exile_nonresolving_stack_objects(
                 false,
                 None,
                 &[],
+                None,
                 false,
                 events,
             ) {

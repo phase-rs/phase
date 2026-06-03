@@ -3,10 +3,10 @@ use serde::Serialize;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, BounceSelection, CastingPermission,
-    ControllerRef, CounterSourceRider, Duration, Effect, LibraryPosition, ManaProduction,
-    ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool, PaymentCost,
-    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter,
+    ControllerRef, CounterSourceRider, Duration, Effect, FaceDownProfile, LibraryPosition,
+    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool,
+    PaymentCost, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::DistributionUnit;
@@ -276,15 +276,30 @@ pub(crate) enum ContinuationAst {
     /// NOT routed to a fixed destination; subsequent sub_abilities route them
     /// by type via `TargetFilter::TrackedSetFiltered` (Zimone's Experiment).
     DigFromAmong {
-        count: u32,
-        up_to: bool,
+        /// CR 701.20e / CR 701.17c: How many of the from-among set are taken.
+        /// `All` is the mass quantifier ("put all creature cards milled this
+        /// way ..."); `Up(n)` / `Exactly(n)` are the bounded singular forms.
+        quantity: PutCount,
         filter: TargetFilter,
         destination: Option<Zone>,
         /// Set when the same clause encodes both kept and rest destinations, e.g.,
         /// "put two of them into your hand and the rest on the bottom of your library".
         /// When None, a subsequent PutRest continuation handles rest_destination.
         rest_destination: Option<Zone>,
+        /// CR 110.2a: Controller override for the kept cards' battlefield entry
+        /// ("... onto the battlefield ... under your control"). `None` leaves
+        /// them under their owner's control.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under: Option<ControllerRef>,
+        /// CR 708.2a + CR 708.3: When `Some`, the kept cards enter the battlefield
+        /// face down with these characteristics ("... face down ... They're 2/2
+        /// Cyberman artifact creatures."). `None` = normal face-up entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face_down_profile: Option<FaceDownProfile>,
     },
+    /// CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." after a
+    /// put-face-down clause — refines the preceding face-down move's profile.
+    FaceDownProfileSpec { profile: FaceDownProfile },
     /// CR 508.4 / CR 614.1: "It/The token enters tapped and attacking [that player]"
     /// Absorbs into preceding CopyTokenOf, Token, or ChangeZone by setting
     /// enters_attacking and tapped/enter_tapped flags.
@@ -343,6 +358,17 @@ pub(crate) enum ContinuationAst {
     ChooseAndSacrificeRestFilter {
         sacrifice_filter: Option<TargetFilter>,
     },
+}
+
+/// CR 701.20e / CR 701.17c: How many cards a "from among [set]" continuation
+/// takes. `All` is the mass quantifier ("put all creature cards milled this
+/// way ...") that lowers to a `ChangeZoneAll`; the bounded forms lower to a
+/// singular `ChangeZone` (`Up` → up_to, `Exactly` → fixed count).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum PutCount {
+    All,
+    Up(u32),
+    Exactly(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

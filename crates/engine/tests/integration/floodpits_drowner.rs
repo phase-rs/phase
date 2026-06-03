@@ -171,6 +171,7 @@ fn activated_shuffle_both_into_owners_libraries() {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         vec![TargetRef::Object(target_id)],
         drowner_id,
@@ -189,6 +190,7 @@ fn activated_shuffle_both_into_owners_libraries() {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         vec![], // empty targets — SelfRef uses source_id
         drowner_id,

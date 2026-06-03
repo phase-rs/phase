@@ -618,6 +618,7 @@ pub fn route_debug_create_to_battlefield(
         enter_with_counters: vec![],
         controller_override: None,
         enter_transformed: false,
+        face_down_profile: None,
         applied: HashSet::new(),
     };
 
