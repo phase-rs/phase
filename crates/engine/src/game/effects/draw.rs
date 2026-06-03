@@ -90,8 +90,10 @@ pub fn resolve(
     // replacement pipeline filters out the continuation (e.g., simple count modifier).
     // See issue #1964: Teferi's Ageless Insight replacement removes discard sub_ability.
     let had_sub_ability = ability.sub_ability.is_some();
-    if had_sub_ability {
-        let mut sub = (**ability.sub_ability.as_ref().unwrap()).clone();
+    // CR 614.1a + CR 614.6: Stash the original sub_ability before replacement to preserve it
+    // if the replacement pipeline filters out the continuation (e.g., simple count modifier).
+    if let Some(ref sub_ability) = ability.sub_ability {
+        let mut sub = (**sub_ability).clone();
         // Copy targets from parent ability if sub has no targets
         if sub.targets.is_empty() && !ability.targets.is_empty() {
             sub.targets = ability.targets.clone();
