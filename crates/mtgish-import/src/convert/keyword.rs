@@ -10,7 +10,7 @@
 //! type-system lookup; there is no semantic translation. Cost/filter
 //! keywords need real conversion logic, so they land with their phase.
 
-use engine::types::ability::{AbilityCost, QuantityExpr};
+use engine::types::ability::{AbilityCost, CostObjectCount, QuantityExpr};
 use engine::types::keywords::{
     ActivationCadence, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter,
     ProtectionTarget, WardCost,
@@ -362,15 +362,20 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
             Keyword::Specialize(pure_mana(c, "Rule::SpecializeWithModifiers", path)?)
         }
 
-        // CR 702.167a: Craft with [materials] [cost]. The engine keyword
-        // carries only the activation mana cost, matching the native parser;
-        // material requirements are not represented in `Keyword::Craft`.
+        // CR 702.167a/b: Craft with [materials] [cost]. The engine keyword now
+        // carries the materials class and count alongside the activation cost.
+        // This dormant import crate defaults materials to the creature class and
+        // count to 1 (the native Oracle-line parser supplies the precise class);
+        // the goal here is to keep the workspace compiling under the struct
+        // migration.
         Rule::CraftWithACraftable(_, cost)
         | Rule::CraftWithCraftables(_, cost)
         | Rule::CraftWithANumberOfCraftables(_, _, cost)
-        | Rule::CraftWithANumberOfGroupCraftables(_, _, _, cost) => {
-            Keyword::Craft(crate::convert::mana::convert(cost)?)
-        }
+        | Rule::CraftWithANumberOfGroupCraftables(_, _, _, cost) => Keyword::Craft {
+            cost: crate::convert::mana::convert(cost)?,
+            materials: engine::types::keywords::craft_materials_default(),
+            count: CostObjectCount::exactly(1),
+        },
 
         // CR 702.48a: "[Quality] offering" — additional-cost-on-cast
         // sacrificing a permanent of the named quality. The schema's

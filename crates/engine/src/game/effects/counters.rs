@@ -158,6 +158,11 @@ pub(crate) fn apply_counter_addition(
     // sync with the counter map — the field IS the counter count.
     sync_derived_from_counters(obj, &counter_type);
 
+    // CR 122.1: Drop stale zero-count keys left over from prior removals before
+    // recording the object snapshot so counter history never exposes absent
+    // markers as present entries.
+    crate::types::counter::prune_zero_counters(&mut obj.counters);
+
     if counter_type_affects_layers(&counter_type) {
         state.layers_dirty.mark_full();
     }
@@ -212,6 +217,10 @@ pub(crate) fn apply_counter_removal(
     // CR 306.5c / CR 310.4c: Keep obj.loyalty / obj.defense in
     // sync with the counter map — the field IS the counter count.
     sync_derived_from_counters(obj, &counter_type);
+
+    // CR 122.1: Zero-count entries are absent — prune so proliferate and other
+    // "has a counter" checks cannot resurrect removed counter types.
+    crate::types::counter::prune_zero_counters(&mut obj.counters);
 
     if counter_type_affects_layers(&counter_type) {
         state.layers_dirty.mark_full();
@@ -1589,7 +1598,52 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.objects[&obj_id].counters[&CounterType::Plus1Plus1], 0);
+        assert!(
+            !state.objects[&obj_id]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "zero-count +1/+1 entry should be pruned after removal"
+        );
+    }
+
+    #[test]
+    fn apply_counter_removal_prunes_zero_entry() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("charge".to_string()), 1);
+        let mut events = Vec::new();
+
+        apply_counter_removal(
+            &mut state,
+            obj_id,
+            CounterType::Generic("charge".to_string()),
+            1,
+            &mut events,
+        );
+
+        assert!(
+            state.objects[&obj_id].counters.is_empty(),
+            "last charge counter removed should leave an empty map"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::CounterRemoved {
+                counter_type: CounterType::Generic(_),
+                count: 1,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -2609,7 +2663,10 @@ mod tests {
         remove_counter_with_replacement(&mut state, pw_id, CounterType::Loyalty, 5, &mut events);
 
         let obj = &state.objects[&pw_id];
-        assert_eq!(obj.counters.get(&CounterType::Loyalty).copied(), Some(0));
+        assert!(
+            !obj.counters.contains_key(&CounterType::Loyalty),
+            "zero-count loyalty entry should be pruned after removal"
+        );
         assert_eq!(obj.loyalty, Some(0));
     }
 
