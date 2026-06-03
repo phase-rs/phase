@@ -720,13 +720,12 @@ pub(super) fn handle_unless_payment(
         result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
 
         if events.len() > events_before {
-            let resolved_events: Vec<_> = events[events_before..].to_vec();
             // CR 603.2: the declined unless-effect may create normal trigger
             // events while this resume path bypasses run_post_action_pipeline.
             // Scan only the events produced by the resolved effect so
             // sacrifice/dies observers fire without reprocessing earlier
             // payment events.
-            triggers::process_triggers(state, &resolved_events);
+            triggers::process_triggers(state, &events[events_before..]);
         }
 
         // CR 610.3 + #783: The unless-payment resume bypasses
