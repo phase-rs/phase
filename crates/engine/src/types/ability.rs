@@ -495,10 +495,14 @@ pub enum ShieldKind {
     /// a continuous static `damage_modification` (Furnace of Rath), which keeps
     /// `ShieldKind::None` and re-applies to every damage event.
     DamageReplacementOneShot,
-    /// CR 614.9: One-shot redirection shield — replaces the recipient of a
-    /// damage event with `recipient`. Consumed on use, expires at cleanup
-    /// (Soltari Guerrillas, Beacon of Destiny, Jade Monolith, Goblin Psychopath).
-    Redirection { recipient: DamageRedirectTarget },
+    /// CR 614.9: One-shot redirection shield — replaces all or part of a damage
+    /// event's recipient with `recipient`. `All` covers "the next time ... would
+    /// deal damage"; `Next(n)` covers "the next N damage ... is dealt to ..."
+    /// redirections. Consumed on use, expires at cleanup.
+    Redirection {
+        recipient: DamageRedirectTarget,
+        amount: PreventionAmount,
+    },
 }
 
 impl ShieldKind {
@@ -751,6 +755,10 @@ pub enum CountScope {
     /// from "your library" (always caster). Falls back to `Controller`
     /// outside iteration.
     ScopedPlayer,
+    /// CR 607.2d + CR 608.2c: The source's linked persisted chosen player —
+    /// "the chosen player's <zone>" on cards whose source stored
+    /// `ChosenAttribute::Player`.
+    SourceChosenPlayer,
     All,
     Opponents,
 }
@@ -1882,6 +1890,16 @@ pub enum ControllerRef {
     ChosenPlayer {
         index: u8,
     },
+    /// CR 613.1 + CR 109.4: Filter controller is the player PERSISTED on the
+    /// source via `ChosenAttribute::Player` — the player chosen by an
+    /// "as ~ enters the battlefield, choose a player" replacement. Read at
+    /// filter / layer-evaluation time from the source's `chosen_attributes`
+    /// (mirrors `GameObject::protector`). Distinct from `ChosenPlayer { index }`,
+    /// which is resolution-scoped (valid only mid-resolution); this is a durable
+    /// characteristic readable continuously, as a CDA requires. Powers
+    /// "~'s power and toughness are each equal to the number of <X> the chosen
+    /// player controls" (Skyshroud War Beast, Lost Order of Jarkeld).
+    SourceChosenPlayer,
     /// CR 603.2 + CR 109.4: Filter controller is the player identified by the
     /// triggering event (the drawer, life-gainer, attacker, etc.). Resolved
     /// against `state.current_trigger_event` via `extract_player_from_event`.
@@ -2748,6 +2766,13 @@ pub enum PlayerScope {
     /// `ControllerRef::ParentTargetController`. Resolved via
     /// `ability_utils::parent_target_controller`.
     ParentObjectTargetController,
+    /// CR 613.1 + CR 109.4: The player PERSISTED on the source via
+    /// `ChosenAttribute::Player` (an "as ~ enters the battlefield, choose a
+    /// player" replacement). The player-scalar-axis analogue of
+    /// `ControllerRef::SourceChosenPlayer`, read continuously from the source's
+    /// `chosen_attributes` so a CDA P/T can track e.g. the chosen player's hand
+    /// or graveyard size (Entropic Specter, Sewer Nemesis).
+    SourceChosenPlayer,
 }
 
 /// Scope selector for object-axis quantities (Round Π-5). Picks WHICH object
@@ -3671,6 +3696,31 @@ impl QuantityExpr {
                 factor,
                 inner: Box::new(expr.clone()),
             },
+        }
+    }
+
+    /// Returns true if this expression resolves through a
+    /// `QuantityRef::Variable { name: "X" }` anywhere in its tree — i.e. its
+    /// value depends on the spell or ability's chosen X. Single authority for
+    /// "does this quantity use X": the engine cost machinery (X-affordability,
+    /// pay-life-X) and the AI X-value policy all rely on it. The match is
+    /// exhaustive so a new `QuantityExpr` variant forces every consumer to
+    /// reconsider X-dependence rather than silently defaulting to false.
+    pub fn contains_x(&self) -> bool {
+        match self {
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name },
+            } => name == "X",
+            QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::UpTo { max: inner }
+            | QuantityExpr::Power {
+                exponent: inner, ..
+            } => inner.contains_x(),
+            QuantityExpr::Sum { exprs } => exprs.iter().any(QuantityExpr::contains_x),
+            QuantityExpr::Difference { left, right } => left.contains_x() || right.contains_x(),
+            QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
         }
     }
 
@@ -5710,6 +5760,11 @@ pub enum Effect {
     /// to the cleanup step. Time Stop, Sundial of the Infinite, Obeka,
     /// Glorious End, Discontinuity, Day's Undoing.
     EndTheTurn,
+    /// CR 724.2: End the combat phase. Exile every object on the stack, check
+    /// state-based actions, remove everything from combat, expire "until end of
+    /// combat" effects, and skip straight to the postcombat main phase. Does
+    /// nothing outside a combat phase (CR 724.2g). Mandate of Peace.
+    EndCombatPhase,
     /// CR 701.38: Vote — each player chooses one of the listed options, starting
     /// with a specified player and proceeding in turn order. After all votes are
     /// collected, the resolver runs `per_choice_effect[i]` once for each vote
@@ -6460,7 +6515,7 @@ pub enum Effect {
     /// activated/triggered ability at resolution, builds a one-shot
     /// `ReplacementDefinition` tagged with `ShieldKind::DamageReplacementOneShot`
     /// (amount form) or `ShieldKind::Redirection` (redirect form), consumed on
-    /// its single use (CR 614.5) and dropped at cleanup.
+    /// its use (CR 614.5) and dropped at cleanup.
     ///
     /// Exactly one of `modification` / `redirect_to` is `Some`. When
     /// `redirect_to == Some(ChosenObjectTarget)` ("to target creature" —
@@ -6480,6 +6535,12 @@ pub enum Effect {
         modification: Option<DamageModification>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redirect_to: Option<DamageRedirectTarget>,
+        /// CR 614.9: Optional amount cap for redirection shields. `None` means
+        /// the whole damage event is redirected ("the next time ... would deal
+        /// damage"). `Some(Next(n))` redirects only the next N damage from the
+        /// matching event, leaving the remainder on the original recipient.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirect_amount: Option<PreventionAmount>,
         /// CR 115.1: The redirect recipient's target filter for the
         /// `ChosenObjectTarget` form ("...deals that damage to target creature
         /// instead" — Soltari Guerrillas). `None` for the `Controller` /
@@ -6942,6 +7003,9 @@ pub enum Effect {
         /// Number of +1/+1 counters to place.
         count: QuantityExpr,
     },
+    /// Digital-only Specialize: permanently become a color-specific face after
+    /// paying the synthesized activation cost (mana + discard). Not in CR text.
+    Specialize,
     /// CR 702.112a: Renown N — if not renowned, put N +1/+1 counters on this
     /// permanent and it becomes renowned.
     Renown {
@@ -7840,6 +7904,7 @@ impl Effect {
             | Effect::Populate
             | Effect::Clash
             | Effect::EndTheTurn
+            | Effect::EndCombatPhase
             | Effect::Vote { .. }
             | Effect::Cleanup { .. }
             | Effect::RevealTop { .. }
@@ -7890,6 +7955,7 @@ impl Effect {
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
             | Effect::Monstrosity { .. }
+            | Effect::Specialize
             | Effect::Renown { .. }
             | Effect::Bolster { .. }
             | Effect::Adapt { .. }
@@ -7984,6 +8050,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::BecomeMonarch => "BecomeMonarch",
         Effect::Proliferate => "Proliferate",
         Effect::EndTheTurn => "EndTheTurn",
+        Effect::EndCombatPhase => "EndCombatPhase",
         Effect::Populate => "Populate",
         Effect::Clash => "Clash",
         Effect::Vote { .. } => "Vote",
@@ -8080,6 +8147,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Incubate { .. } => "Incubate",
         Effect::Amass { .. } => "Amass",
         Effect::Monstrosity { .. } => "Monstrosity",
+        Effect::Specialize => "Specialize",
         Effect::Renown { .. } => "Renown",
         Effect::Bolster { .. } => "Bolster",
         Effect::Adapt { .. } => "Adapt",
@@ -8169,6 +8237,8 @@ pub enum EffectKind {
     Populate,
     Clash,
     EndTheTurn,
+    /// CR 724.2: End the combat phase — skip to the postcombat main phase.
+    EndCombatPhase,
     /// CR 701.38: Vote — interactive APNAP-ordered choice with per-choice tally effects.
     Vote,
     /// CR 700.3: SeparateIntoPiles — partition objects into two piles, another player chooses one, sub-effect applies.
@@ -8262,6 +8332,7 @@ pub enum EffectKind {
     Incubate,
     Amass,
     Monstrosity,
+    Specialize,
     Renown,
     Bolster,
     Adapt,
@@ -8352,6 +8423,7 @@ impl From<&Effect> for EffectKind {
             Effect::BecomeMonarch => EffectKind::BecomeMonarch,
             Effect::Proliferate => EffectKind::Proliferate,
             Effect::EndTheTurn => EffectKind::EndTheTurn,
+            Effect::EndCombatPhase => EffectKind::EndCombatPhase,
             Effect::Populate => EffectKind::Populate,
             Effect::Clash => EffectKind::Clash,
             Effect::Vote { .. } => EffectKind::Vote,
@@ -8452,6 +8524,7 @@ impl From<&Effect> for EffectKind {
             Effect::Incubate { .. } => EffectKind::Incubate,
             Effect::Amass { .. } => EffectKind::Amass,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
+            Effect::Specialize => EffectKind::Specialize,
             Effect::Renown { .. } => EffectKind::Renown,
             Effect::Bolster { .. } => EffectKind::Bolster,
             Effect::Adapt { .. } => EffectKind::Adapt,
@@ -11268,8 +11341,12 @@ impl ReplacementDefinition {
 
     /// CR 614.9: Mark this replacement as a one-shot redirection shield that
     /// re-targets the damage recipient. Consumed on use, expires at cleanup.
-    pub fn redirection_shield(mut self, recipient: DamageRedirectTarget) -> Self {
-        self.shield_kind = ShieldKind::Redirection { recipient };
+    pub fn redirection_shield(
+        mut self,
+        recipient: DamageRedirectTarget,
+        amount: PreventionAmount,
+    ) -> Self {
+        self.shield_kind = ShieldKind::Redirection { recipient, amount };
         self
     }
 

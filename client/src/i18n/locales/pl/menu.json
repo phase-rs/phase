@@ -67,7 +67,31 @@
     "load": {
       "title": "Wczytaj stan gry"
     },
-    "exit": "Wyjdź"
+    "exit": "Wyjdź",
+    "dashboard": {
+      "welcome": "Witaj ponownie",
+      "enter": "Wejdź",
+      "continue": "Wróć tam, gdzie skończyłeś",
+      "resumeDraft": "Wznów draft",
+      "draftPod": "Pod draftowy",
+      "activeDeck": "Aktywna talia",
+      "noActiveDeck": "Wybierz talię, aby zacząć",
+      "fromFeeds": "Z Twoich kanałów",
+      "feedsEmpty": "Subskrybuj kanał, aby zobaczyć nowe talie",
+      "cards": "karty: {{count}}",
+      "mode": {
+        "ai": "z AI",
+        "online": "Online",
+        "local": "Lokalnie",
+        "p2p-host": "P2P",
+        "p2p-join": "P2P"
+      },
+      "tagline": "Otwartoźródłowy silnik zasad i klient gry Magic: The Gathering",
+      "turn": "Tura {{n}}",
+      "yourTurn": "Twoja tura",
+      "opponentTurn": "Tura przeciwnika",
+      "yourLife": "Ty {{life}}"
+    }
   },
   "loadState": {
     "title": "Wczytaj stan gry",
@@ -242,5 +266,16 @@
   },
   "loadGameState": {
     "readFailed": "Nie udało się odczytać pliku"
+  },
+  "nav": {
+    "label": "Nawigacja główna",
+    "home": "Start",
+    "play": "Graj",
+    "online": "Online",
+    "draft": "Draft",
+    "decks": "Talie",
+    "alpha": "Alfa",
+    "profile": "Profil",
+    "settings": "Ustawienia"
   }
 }

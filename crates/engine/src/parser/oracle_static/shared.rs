@@ -58,6 +58,30 @@ pub(crate) fn when_kind_to_condition(kind: WhenKind) -> CastingProhibitionCondit
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AloneCombatRestriction {
+    Attack,
+    Block,
+    AttackOrBlock,
+}
+
+pub(crate) fn parse_alone_combat_restriction(
+    input: &str,
+) -> OracleResult<'_, AloneCombatRestriction> {
+    terminated(
+        alt((
+            value(
+                AloneCombatRestriction::AttackOrBlock,
+                tag("can't attack or block alone"),
+            ),
+            value(AloneCombatRestriction::Attack, tag("can't attack alone")),
+            value(AloneCombatRestriction::Block, tag("can't block alone")),
+        )),
+        opt(tag(".")),
+    )
+    .parse(input)
+}
+
 /// Try matching a nom `tag()` against the lowercase text, returning the remaining original-case
 /// text on success. This bridges nom's exact-match combinators with the TextPair dual-string
 /// pattern used throughout the parser.
@@ -482,6 +506,23 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
                 .affected(TargetFilter::SelfRef)
                 .description(stripped.to_string()),
         ];
+    }
+
+    // CR 506.5 + CR 508.1a + CR 509.1b: "can't attack or block alone" (Mogg
+    // Flunkies) imposes both the attack-alone and block-alone restrictions.
+    if let Some((_, AloneCombatRestriction::AttackOrBlock, rest)) =
+        nom_primitives::scan_preceded(&lower, parse_alone_combat_restriction)
+    {
+        if rest.trim().is_empty() {
+            return vec![
+                StaticDefinition::new(StaticMode::CantAttackAlone)
+                    .affected(TargetFilter::SelfRef)
+                    .description(stripped.to_string()),
+                StaticDefinition::new(StaticMode::CantBlockAlone)
+                    .affected(TargetFilter::SelfRef)
+                    .description(stripped.to_string()),
+            ];
+        }
     }
 
     // CR 119.7 + CR 119.8: "[scope] life total can't change" — bidirectional
@@ -2022,6 +2063,10 @@ pub(crate) fn parse_combat_rule_static_predicate_nom(
         parse_cant_attack_rule_static_predicate_nom,
         value(RuleStaticPredicate::CantBlock, tag("can't block")),
         value(
+            RuleStaticPredicate::CantCrew,
+            (tag("can't crew"), opt(preceded(space1, tag("vehicles")))),
+        ),
+        value(
             RuleStaticPredicate::MustAttack,
             alt((
                 tag("attacks each combat if able"),
@@ -2058,6 +2103,27 @@ pub(crate) fn parse_combat_rule_static_predicate_nom(
     .parse(input)
 }
 
+pub(crate) fn parse_rule_static_tail_predicate_nom(
+    input: &str,
+) -> OracleResult<'_, RuleStaticPredicate> {
+    alt((
+        parse_rule_static_predicate_nom,
+        value(RuleStaticPredicate::CantBlock, tag("block")),
+        value(
+            RuleStaticPredicate::CantCrew,
+            (tag("crew"), opt(preceded(space1, tag("vehicles")))),
+        ),
+        value(
+            RuleStaticPredicate::CantBeActivated,
+            alt((
+                tag("have its activated abilities activated"),
+                tag("have their activated abilities activated"),
+            )),
+        ),
+    ))
+    .parse(input)
+}
+
 pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleStaticPredicate>> {
     let mut remaining = rest;
     let mut predicates = Vec::new();
@@ -2068,7 +2134,8 @@ pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleSt
             return Some(predicates);
         }
         let (after_separator, _) = parse_rule_static_separator_nom(trimmed).ok()?;
-        let (after_predicate, predicate) = parse_rule_static_predicate_nom(after_separator).ok()?;
+        let (after_predicate, predicate) =
+            parse_rule_static_tail_predicate_nom(after_separator).ok()?;
         predicates.push(predicate);
         remaining = after_predicate;
     }

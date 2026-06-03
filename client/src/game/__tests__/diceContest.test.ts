@@ -14,6 +14,12 @@ const coin = (player_id: number, won: boolean): GameEvent => ({
   data: { player_id, won },
 });
 const gameStarted: GameEvent = { type: "GameStarted" };
+// CR 103.1 starting-player contest: each round is a list of [playerId, value]
+// rolls; round 0 is every seat, later rounds are the tied-max reroll group.
+const contest = (rounds: [number, number][][], winner: number): GameEvent => ({
+  type: "StartingPlayerContest",
+  data: { rounds: rounds.map((rolls) => ({ rolls })), winner },
+});
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -27,45 +33,78 @@ afterEach(() => {
 });
 
 describe("flashStartingPlayerContest", () => {
-  it("builds a startingPlayer die payload using the engine's winner", () => {
-    flashStartingPlayerContest([die(0, 20, 17), die(1, 20, 9), gameStarted], 0);
+  it("builds a startingPlayer die payload from the engine contest event", () => {
+    flashStartingPlayerContest([contest([[[0, 17], [1, 9]]], 0), gameStarted], 0);
     const d = useUiStore.getState().diceRoll;
     expect(d).toMatchObject({ kind: "die", sides: 20, context: "startingPlayer", winner: 0 });
+    expect(d?.kind === "die" && d.rounds).toEqual([
+      [
+        { playerId: 0, value: 17 },
+        { playerId: 1, value: 9 },
+      ],
+    ]);
+    // `rolls` mirrors the decisive (final) round.
     expect(d?.kind === "die" && d.rolls).toEqual([
       { playerId: 0, value: 17 },
       { playerId: 1, value: 9 },
     ]);
   });
 
-  it("shows each player's FINAL roll after tie rerolls", () => {
-    // Round 1 ties at 11; round 2 decides. The overlay should show the decisive
-    // values (18 vs 4), not the tied first round.
+  it("preserves the per-round structure across a tie reroll", () => {
+    // Round 1 ties at 11; round 2 decides (18 vs 4). Each round is kept separate
+    // so within the decisive round the winner (18) is the visible high roller —
+    // no cross-round mixing (the bug this fixes).
     flashStartingPlayerContest(
-      [die(0, 20, 11), die(1, 20, 11), die(0, 20, 18), die(1, 20, 4), gameStarted],
+      [
+        contest(
+          [
+            [
+              [0, 11],
+              [1, 11],
+            ],
+            [
+              [0, 18],
+              [1, 4],
+            ],
+          ],
+          0,
+        ),
+        gameStarted,
+      ],
       0,
     );
     const d = useUiStore.getState().diceRoll;
+    expect(d?.kind === "die" && d.rounds).toEqual([
+      [
+        { playerId: 0, value: 11 },
+        { playerId: 1, value: 11 },
+      ],
+      [
+        { playerId: 0, value: 18 },
+        { playerId: 1, value: 4 },
+      ],
+    ]);
     expect(d?.kind === "die" && d.rolls).toEqual([
       { playerId: 0, value: 18 },
       { playerId: 1, value: 4 },
     ]);
   });
 
-  it("honors the engine winner even when it isn't the highest shown roll (lowest-seat fallback)", () => {
-    // Engine's all-tied-at-cap fallback picks the lowest seat; the winner is
-    // passed in, never recomputed from the rolls.
-    flashStartingPlayerContest([die(0, 20, 7), die(1, 20, 7), gameStarted], 0);
+  it("uses the engine winner, never recomputed from the rolls (lowest-seat fallback)", () => {
+    // The engine's all-tied-at-cap fallback picks the lowest seat; the winner is
+    // passed in, not derived from the shown dice.
+    flashStartingPlayerContest([contest([[[0, 7], [1, 7]]], 0), gameStarted], 0);
     expect(useUiStore.getState().diceRoll).toMatchObject({ winner: 0 });
   });
 
-  it("no-ops when the starter was chosen explicitly (no leading DieRolled)", () => {
+  it("no-ops when the starter was chosen explicitly (no contest event)", () => {
     flashStartingPlayerContest([gameStarted], 1);
     expect(useUiStore.getState().diceRoll).toBeNull();
   });
 
-  it("respects instant animation speed (0): no overlay", () => {
+  it("skips the overlay entirely at instant animation speed (0)", () => {
     usePreferencesStore.setState({ animationSpeedMultiplier: 0 });
-    flashStartingPlayerContest([die(0, 20, 5)], 0);
+    flashStartingPlayerContest([contest([[[0, 5], [1, 3]]], 0), gameStarted], 0);
     expect(useUiStore.getState().diceRoll).toBeNull();
   });
 });

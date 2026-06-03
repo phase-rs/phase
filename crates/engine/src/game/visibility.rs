@@ -127,6 +127,22 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    // CR 717.2: A player's Attraction deck is a hidden-order supplementary
+    // deck, like a library — even its owner doesn't know the order. Redact
+    // every unrevealed Attraction card's identity for all viewers, mirroring
+    // the library treatment above, so the serialized state can't leak the
+    // contents or order of any player's Attraction deck.
+    let all_attraction_ids: Vec<ObjectId> = filtered
+        .players
+        .iter()
+        .flat_map(|p| p.attraction_deck.iter().copied())
+        .collect();
+    for obj_id in all_attraction_ids {
+        if !state.revealed_cards.contains(&obj_id) {
+            hide_card(&mut filtered, obj_id);
+        }
+    }
+
     // CR 406.3: A card exiled face down can't be examined by any player
     // except when an instruction allows it. Foretell is the only modeled
     // face-down-exile look permission today; other face-down exile classes

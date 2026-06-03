@@ -2,8 +2,6 @@
 //! resolve after CR 603.4 condition rechecks.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::ability::TargetRef;
-use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -15,26 +13,6 @@ Create a 1/1 green Squirrel creature token.\n\
 Storm (When you cast this spell, copy it for each spell cast before it this turn. You may choose new targets for the copies.)";
 
 const GRIZZLY_BEARS_ORACLE: &str = "";
-
-fn cast_spell(runner: &mut GameRunner, object_id: ObjectId, targets: Vec<ObjectId>) {
-    let card_id = runner.state().objects[&object_id].card_id;
-    let result = runner
-        .act(GameAction::CastSpell {
-            object_id,
-            card_id,
-            targets: vec![],
-        })
-        .expect("cast spell");
-
-    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
-        runner
-            .act(GameAction::SelectTargets {
-                targets: targets.into_iter().map(TargetRef::Object).collect(),
-            })
-            .expect("select targets");
-    }
-    runner.advance_until_stack_empty();
-}
 
 fn mana(color: ManaType) -> ManaUnit {
     ManaUnit::new(color, ObjectId(0), false, vec![])
@@ -102,14 +80,17 @@ fn chatterstorm_storm_copies_for_each_prior_spell() {
     runner.state_mut().priority_player = P0;
     runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
 
-    cast_spell(&mut runner, lightning_bolt, vec![dummy_creature]);
+    runner
+        .cast(lightning_bolt)
+        .target_object(dummy_creature)
+        .resolve();
     assert_eq!(
         spells_cast_by(&runner, P0),
         1,
         "after Lightning Bolt: should have 1 spell cast this turn"
     );
 
-    cast_spell(&mut runner, grizzly_bears, vec![]);
+    runner.cast(grizzly_bears).resolve();
     assert_eq!(
         spells_cast_by(&runner, P0),
         2,
@@ -121,7 +102,7 @@ fn chatterstorm_storm_copies_for_each_prior_spell() {
         "precondition: no Squirrel tokens before Chatterstorm"
     );
 
-    cast_spell(&mut runner, chatterstorm, vec![]);
+    runner.cast(chatterstorm).resolve();
     assert_eq!(
         spells_cast_by(&runner, P0),
         3,

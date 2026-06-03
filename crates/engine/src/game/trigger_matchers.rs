@@ -168,9 +168,9 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::Proliferate
         | TriggerMode::SeekAll
         | TriggerMode::SetInMotion
-        | TriggerMode::Specializes
         | TriggerMode::Trains
         | TriggerMode::VisitAttraction => match_visit_attraction,
+        TriggerMode::Specializes => match_specializes,
         // CR 603.8: State triggers are not event-based — they are checked separately
         // in the priority pipeline, not through the event-matching trigger system.
         TriggerMode::StateCondition => return None,
@@ -347,6 +347,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // CR 701.52a + CR 702.159a: Attraction visit triggers
     r.insert(TriggerMode::VisitAttraction, match_visit_attraction);
+    r.insert(TriggerMode::Specializes, match_specializes);
 
     // CR 309 / CR 701.49: Dungeon triggers
     r.insert(TriggerMode::DungeonCompleted, match_dungeon_completed);
@@ -425,7 +426,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Mutates,
         TriggerMode::SeekAll,
         TriggerMode::SetInMotion,
-        TriggerMode::Specializes,
+        // TriggerMode::Specializes — moved to real matcher above
         // TriggerMode::Stationed — moved to real matcher below
         TriggerMode::Trains,
         // TriggerMode::VisitAttraction — moved to real matcher above
@@ -781,6 +782,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::Saddled { .. }
         | GameEvent::ReplacementApplied { .. }
         | GameEvent::Transformed { .. }
+        | GameEvent::Specialized { .. }
         | GameEvent::DayNightChanged { .. }
         | GameEvent::TurnedFaceUp { .. }
         | GameEvent::CardsRevealed { .. }
@@ -829,7 +831,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::CascadeMissed { .. }
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
-        | GameEvent::DebugPermissionRevoked { .. } => 0,
+        | GameEvent::DebugPermissionRevoked { .. }
+        | GameEvent::StartingPlayerContest { .. } => 0,
     }
 }
 
@@ -2927,6 +2930,20 @@ pub(super) fn match_vote_resolved(
     _state: &GameState,
 ) -> bool {
     matches!(event, GameEvent::VoteResolved { .. })
+}
+
+/// Digital-only Specialize: "When ~ specializes" triggers.
+pub(super) fn match_specializes(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::Specialized { object_id, .. } = event {
+        *object_id == source_id && valid_card_matches(trigger, state, source_id, source_id)
+    } else {
+        false
+    }
 }
 
 /// CR 701.52a + CR 702.159a: Visit ability on an Attraction permanent.

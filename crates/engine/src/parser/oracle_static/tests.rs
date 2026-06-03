@@ -8,6 +8,9 @@ use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, ObjectProperty,
     PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
 };
+use crate::types::counter::CounterType;
+use crate::types::keywords::Keyword;
+use crate::types::mana::ManaCost;
 
 /// CR 702.16 + CR 609.6: Serra's Emissary's compound-subject keyword grant
 /// "You and creatures you control have protection from the chosen card
@@ -843,6 +846,31 @@ fn static_cant_block() {
     assert!(def.description.is_some());
     // Regression: a plain restriction with no "if"/"unless" stays unconditional.
     assert_eq!(def.condition, None);
+}
+
+#[test]
+fn static_cant_attack_alone() {
+    // CR 506.5 + CR 508.1a: "can't attack alone" must NOT be swallowed by the
+    // generic "can't attack" arm (which would blanket-prohibit attacking).
+    let def = parse_static_line("Bonded Construct can't attack alone.").unwrap();
+    assert_eq!(def.mode, StaticMode::CantAttackAlone);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_cant_block_alone() {
+    let def = parse_static_line("~ can't block alone.").unwrap();
+    assert_eq!(def.mode, StaticMode::CantBlockAlone);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_cant_attack_or_block_alone_emits_both() {
+    // CR 506.5: Mogg Flunkies — both restrictions from one clause.
+    let defs = parse_static_line_multi("Mogg Flunkies can't attack or block alone.");
+    assert_eq!(defs.len(), 2);
+    assert!(defs.iter().any(|d| d.mode == StaticMode::CantAttackAlone));
+    assert!(defs.iter().any(|d| d.mode == StaticMode::CantBlockAlone));
 }
 
 /// CR 508.1: "~ can't attack if defending player controls [filter]" attaches
@@ -10860,6 +10888,38 @@ fn cant_be_activated_compound_aura_mana_exemption_suffix() {
 }
 
 #[test]
+fn cant_be_activated_compound_aura_with_cant_crew() {
+    let defs = parse_static_line_multi(
+        "Enchanted permanent can't attack, block, crew Vehicles, or have its activated abilities activated.",
+    );
+    let modes: Vec<&StaticMode> = defs.iter().map(|def| &def.mode).collect();
+
+    assert!(
+        modes.contains(&&StaticMode::CantAttack),
+        "compound Aura text should emit CantAttack"
+    );
+    assert!(
+        modes.contains(&&StaticMode::CantBlock),
+        "compound Aura text should emit CantBlock"
+    );
+    assert!(
+        modes.contains(&&StaticMode::CantCrew),
+        "compound Aura text should emit CantCrew"
+    );
+    assert!(
+        defs.iter()
+            .any(|def| matches!(def.mode, StaticMode::CantBeActivated { .. })),
+        "compound Aura text should emit CantBeActivated"
+    );
+    assert!(defs.iter().all(|def| {
+        def.affected
+            == Some(TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]),
+            ))
+    }));
+}
+
+#[test]
 fn cant_be_activated_clarion_multi_type_filter() {
     // CR 602.5 + CR 603.2a: Clarion Conqueror — "Activated abilities of artifacts,
     // creatures, and planeswalkers your opponents control can't be activated."
@@ -12564,6 +12624,92 @@ fn static_line_lovisa_coldeyes() {
     assert_eq!(def.modifications.len(), 3);
 }
 
+/// CR 614.1c + CR 122.1: Kalain, Reclusive Painter — "Other creatures you
+/// control enter with an additional +1/+1 counter on them." parses to the
+/// fixed-count `EntersWithAdditionalCounters` static with an Other + you-control
+/// creature affected filter.
+#[test]
+fn enters_with_additional_counter_other_creatures() {
+    let def = parse_static_line(
+        "Other creatures you control enter with an additional +1/+1 counter on them.",
+    )
+    .expect("should parse the Kalain enters-with-counter line");
+    assert_eq!(
+        def.mode,
+        StaticMode::EntersWithAdditionalCounters {
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+        }
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "affected must be creatures, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::Another),
+                "\"Other\" must add FilterProp::Another, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("affected must be Typed(other creatures you control), got {other:?}"),
+    }
+}
+
+/// CR 614.1c + CR 205.4a: Bard Class — "Legendary creatures you control enter
+/// with an additional +1/+1 counter on them." parses with a Legendary supertype
+/// qualifier on the affected filter (no "Other" exclusion).
+#[test]
+fn enters_with_additional_counter_legendary_creatures() {
+    let def = parse_static_line(
+        "Legendary creatures you control enter with an additional +1/+1 counter on them.",
+    )
+    .expect("should parse the Bard Class enters-with-counter line");
+    assert_eq!(
+        def.mode,
+        StaticMode::EntersWithAdditionalCounters {
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+        }
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "affected must be creatures, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                !tf.properties.contains(&FilterProp::Another),
+                "non-\"Other\" subject must NOT carry FilterProp::Another, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("affected must be Typed(legendary creatures you control), got {other:?}"),
+    }
+}
+
+/// CR 122.1: A dynamic-count "enters with" line (Gev-class, "for each opponent
+/// who lost life") has no fixed counter token and must NOT match the fixed-count
+/// parser — it stays Unimplemented rather than silently parsing as count 1.
+#[test]
+fn enters_with_dynamic_count_not_matched_as_fixed() {
+    let def = parse_static_line(
+        "Other creatures you control enter with an additional +1/+1 counter on them for each opponent who lost life this turn.",
+    );
+    if let Some(def) = def {
+        assert!(
+            !matches!(def.mode, StaticMode::EntersWithAdditionalCounters { .. }),
+            "dynamic-count line must not lower to the fixed-count EntersWithAdditionalCounters, got {:?}",
+            def.mode
+        );
+    }
+}
+
 /// CR 205.3 + CR 604.1 + CR 702.18a: "All Slivers have shroud." (Crystalline
 /// Sliver) must land as a TOP-LEVEL continuous static granting Shroud to a
 /// `Typed(Subtype:"Sliver")` subject — NOT a spell-resolution GenericEffect.
@@ -12571,7 +12717,6 @@ fn static_line_lovisa_coldeyes() {
 /// and delegated to `parse_type_phrase`.
 #[test]
 fn static_all_slivers_have_shroud_top_level_typed_subtype() {
-    use crate::types::keywords::Keyword;
     let def =
         parse_static_line("All Slivers have shroud.").expect("All Slivers have shroud must parse");
     assert_eq!(def.mode, StaticMode::Continuous);
@@ -12601,7 +12746,6 @@ fn static_all_slivers_have_shroud_top_level_typed_subtype() {
 /// fix covers the whole "all <type> have <keyword>" class, not one card.
 #[test]
 fn static_all_goblins_have_hexproof_top_level_typed_subtype() {
-    use crate::types::keywords::Keyword;
     let def = parse_static_line("All Goblins have hexproof.")
         .expect("All Goblins have hexproof must parse");
     assert_eq!(def.mode, StaticMode::Continuous);
@@ -12623,7 +12767,6 @@ fn static_all_goblins_have_hexproof_top_level_typed_subtype() {
 /// subtypes).
 #[test]
 fn static_all_creatures_have_shroud_top_level() {
-    use crate::types::keywords::Keyword;
     let def = parse_static_line("All creatures have shroud.")
         .expect("All creatures have shroud must parse");
     assert_eq!(def.mode, StaticMode::Continuous);
@@ -12715,8 +12858,6 @@ fn static_selfref_cant_be_blocked_except_by_disjunction_top_level() {
 /// doc comment at `database/synthesis.rs::synthesize_cycling`.
 #[test]
 fn static_homing_sliver_grants_typecycling_to_slivers_in_hand() {
-    use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaCost;
     // Real Oracle text. The "Each <type> in each player's hand has <keyword>"
     // shape must land as a TOP-LEVEL continuous grant, not a GenericEffect.
     let def = parse_static_line("Each Sliver card in each player's hand has slivercycling {3}.")

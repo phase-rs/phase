@@ -109,6 +109,12 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // support via is_data_carrying_static() because the variant is
             // parameterized.
             | StaticMode::RevealTopOfLibrary { .. }
+            // CR 614.1c + CR 122.1: EntersWithAdditionalCounters carries the
+            // CounterType + fixed count. Runtime enforcement is in the
+            // battlefield-entry counter hook in effects/change_zone.rs, which
+            // scans active statics whose `affected` filter matches the entering
+            // object. Parameterized — no registry entry; coverage support here.
+            | StaticMode::EntersWithAdditionalCounters { .. }
     )
 }
 
@@ -552,6 +558,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::ParentTargetController => "parent target's",
                     ControllerRef::DefendingPlayer => "defending player's",
+                    ControllerRef::SourceChosenPlayer => "the chosen player's",
                     ControllerRef::ChosenPlayer { .. } => "chosen player's",
                     ControllerRef::TriggeringPlayer => "triggering player's",
                 };
@@ -652,6 +659,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::ParentTargetController => "parent target's controller",
                 ControllerRef::DefendingPlayer => "defending player",
+                ControllerRef::SourceChosenPlayer => "the chosen player",
                 ControllerRef::ChosenPlayer { .. } => "chosen player",
                 ControllerRef::TriggeringPlayer => "triggering player",
             };
@@ -719,6 +727,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
         ControllerRef::DefendingPlayer => "defending player controls",
+        ControllerRef::SourceChosenPlayer => "the chosen player controls",
         ControllerRef::ChosenPlayer { .. } => "chosen player controls",
         ControllerRef::TriggeringPlayer => "triggering player controls",
     }
@@ -841,6 +850,7 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::Target => "target player".to_string(),
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::DefendingPlayer => "defending player".to_string(),
+        PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
         PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(*aggregate))
@@ -1170,6 +1180,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             let scope_s = match scope {
                 CountScope::Controller | CountScope::Owner => "you have",
                 CountScope::ScopedPlayer => "the scoped player has",
+                CountScope::SourceChosenPlayer => "the chosen player has",
                 CountScope::Opponents => "each opponent has",
                 CountScope::All => "each player has",
             };
@@ -1485,6 +1496,7 @@ fn fmt_count_scope(scope: &CountScope) -> &'static str {
     match scope {
         CountScope::Controller | CountScope::Owner => "your",
         CountScope::ScopedPlayer => "their",
+        CountScope::SourceChosenPlayer => "the chosen player's",
         CountScope::All => "all",
         CountScope::Opponents => "opponents'",
     }
@@ -2087,6 +2099,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::CreateDamageReplacement {
             modification,
             redirect_to,
+            redirect_amount,
             combat_scope,
             redirect_object_filter,
             recipient_object_filter,
@@ -2097,6 +2110,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(r) = redirect_to {
                 d.push(("redirect_to".into(), format!("{r:?}")));
+            }
+            if let Some(a) = redirect_amount {
+                d.push(("redirect_amount".into(), format!("{a:?}")));
             }
             if let Some(cs) = combat_scope {
                 d.push(("combat_scope".into(), format!("{cs:?}")));
@@ -2366,6 +2382,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::BecomeMonarch
         | Effect::Proliferate
         | Effect::EndTheTurn
+        | Effect::EndCombatPhase
         | Effect::SolveCase
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }
@@ -2403,7 +2420,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::ReturnAsAura { .. } => {}
+        | Effect::ReturnAsAura { .. }
+        | Effect::Specialize => {}
     }
     d
 }
@@ -6589,6 +6607,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
+            StaticMode::CantCrew => {
+                effective_lower.contains("can't crew") || effective_lower.contains("cannot crew")
+            }
             StaticMode::CastWithFlash => {
                 effective_lower.contains("as though it had flash")
                     || effective_lower.contains("as though they had flash")

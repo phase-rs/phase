@@ -12,6 +12,13 @@ use crate::protocol::{DeckChoice, SeatKind, SeatMutation};
 /// Max AI starter deck name length in seat mutations.
 pub const MAX_AI_DECK_NAME_LEN: usize = 128;
 
+fn bound_seat_index(seat_index: u8) -> Result<(), String> {
+    if seat_index >= MAX_PLAYER_COUNT {
+        return Err(format!("seat_index must be less than {MAX_PLAYER_COUNT}"));
+    }
+    Ok(())
+}
+
 fn validate_deck_choice(field: &str, deck: &DeckChoice) -> Result<(), String> {
     match deck {
         DeckChoice::Random => Ok(()),
@@ -26,17 +33,13 @@ fn validate_deck_choice(field: &str, deck: &DeckChoice) -> Result<(), String> {
 pub fn guard_seat_mutation(mutation: &SeatMutation) -> Result<(), String> {
     match mutation {
         SeatMutation::SetKind { seat_index, kind } => {
-            if *seat_index >= MAX_PLAYER_COUNT {
-                return Err(format!("seat_index must be less than {MAX_PLAYER_COUNT}"));
-            }
+            bound_seat_index(*seat_index)?;
             if let SeatKind::Ai { deck, .. } = kind {
                 validate_deck_choice("mutation.kind.ai.deck", deck)?;
             }
         }
         SeatMutation::Remove { seat_index } => {
-            if *seat_index >= MAX_PLAYER_COUNT {
-                return Err(format!("seat_index must be less than {MAX_PLAYER_COUNT}"));
-            }
+            bound_seat_index(*seat_index)?;
         }
         SeatMutation::Start => {}
     }

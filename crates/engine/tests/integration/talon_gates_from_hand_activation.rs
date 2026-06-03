@@ -68,22 +68,10 @@ fn talon_gates_ability_activatable_from_hand() {
     );
 
     // Drive the real activation: handle_activate_ability → zone check →
-    // pay {4} → ChangeZone resolution.
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: gates_id,
-            ability_index: 0,
-        })
-        .expect("activating Talon Gates' from-hand ability must succeed");
+    // pay {4} (from the funded pool) → ChangeZone resolution.
+    let outcome = runner.activate(gates_id, 0).resolve();
 
-    // The ability goes on the stack; resolve it.
-    runner.advance_until_stack_empty();
-
-    assert_eq!(
-        runner.state().objects[&gates_id].zone,
-        Zone::Battlefield,
-        "after resolution, Talon Gates must be on the battlefield",
-    );
+    outcome.assert_zone(&[gates_id], Zone::Battlefield);
 }
 
 #[test]

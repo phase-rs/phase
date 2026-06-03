@@ -26,7 +26,8 @@ describe("HostSetup", () => {
       />,
     );
 
-    expect(screen.getByRole("heading", { name: "Host Direct Match" })).toBeInTheDocument();
+    // The screen heading now lives on the page shell (MultiplayerPage); the
+    // form itself is distinguished by its P2P submit-button labeling.
     expect(screen.getByRole("button", { name: "Host P2P Game" })).toBeInTheDocument();
     expect(screen.queryByText("List in lobby")).not.toBeInTheDocument();
     expect(screen.queryByText("P2P currently supports 2-player Standard.")).not.toBeInTheDocument();
@@ -41,7 +42,8 @@ describe("HostSetup", () => {
       />,
     );
 
-    expect(screen.getByRole("heading", { name: "Host Match" })).toBeInTheDocument();
+    // Heading now lives on the page shell; the form is distinguished by its
+    // server-mode submit button + the server-only "List in lobby" toggle.
     expect(screen.getByRole("button", { name: "Host Game" })).toBeInTheDocument();
     expect(screen.getByText("List in lobby")).toBeInTheDocument();
   });

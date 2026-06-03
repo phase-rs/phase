@@ -707,6 +707,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::BecomeMonarch
         | Effect::Proliferate
         | Effect::EndTheTurn
+        | Effect::EndCombatPhase
         | Effect::Populate
         | Effect::Clash
         | Effect::SwitchPT { .. }
@@ -816,6 +817,7 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         // CR 614.12 + CR 303.4: ReturnAsAura.grants carry typed
         // ContinuousModifications, never conjured card names.
         | Effect::ReturnAsAura { .. }
+        | Effect::Specialize
         | Effect::Unimplemented { .. } => {}
     }
 }
@@ -996,6 +998,16 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
                 changed_any = true;
                 changed_battlefield = true;
                 continue;
+            }
+
+            // Digital-only Specialize: load all specialized faces for runtime choice.
+            if obj.specialize_faces.is_none() {
+                if let Some(rules) = db.get_by_name(&card_face.name) {
+                    if let CardLayout::Specialize(_, variants) = &rules.layout {
+                        obj.specialize_faces =
+                            Some(super::specialize::specialize_faces_from_variants(variants));
+                    }
+                }
             }
 
             // Populate back_face for dual-faced layouts so the other face's

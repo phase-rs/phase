@@ -149,19 +149,43 @@ export function DialogHeader({
 }
 
 /**
- * Vertical pill tab attached to the right edge of a dialog. Pulsing
- * right-side glow signals "actionable affordance — click me to peek."
- * Mirrors the stack panel's collapse pattern but with stronger CTA styling
- * since the dialog is blocking content the player likely wants to see.
+ * Pill tab attached to the edge the dialog slides toward when peeked. The
+ * pulsing glow signals "actionable affordance — click me to peek." Mirrors
+ * `PeekRestoreTab`'s `direction` axis so the collapse cue points the same way
+ * the modal exits: the right edge on wide viewports, the bottom edge on narrow
+ * ones (where the dialog slides down rather than sideways).
  */
-export function PeekTab({ onClick }: { onClick: () => void }) {
+export function PeekTab({
+  onClick,
+  direction = "right",
+}: {
+  onClick: () => void;
+  direction?: "right" | "bottom";
+}) {
   const { t } = useTranslation("game");
   const shouldReduceMotion = useReducedMotion();
 
-  // Glow is offset to the right (+x in box-shadow) so it visually radiates
-  // toward the battlefield the player wants to peek at — directional cue.
-  const restingShadow = "0 18px 36px rgba(0,0,0,0.55), 14px 0 0 -8px rgba(34,211,238,0)";
-  const pulseShadow = "0 18px 36px rgba(0,0,0,0.55), 18px 0 36px rgba(34,211,238,0.65)";
+  // Glow is offset toward the edge the modal slides to (+x right / +y bottom)
+  // so it visually radiates toward the battlefield the player wants to peek at.
+  const restingShadow =
+    direction === "right"
+      ? "0 18px 36px rgba(0,0,0,0.55), 14px 0 0 -8px rgba(34,211,238,0)"
+      : "0 18px 36px rgba(0,0,0,0.55), 0 14px 0 -8px rgba(34,211,238,0)";
+  const pulseShadow =
+    direction === "right"
+      ? "0 18px 36px rgba(0,0,0,0.55), 18px 0 36px rgba(34,211,238,0.65)"
+      : "0 18px 36px rgba(0,0,0,0.55), 0 18px 36px rgba(34,211,238,0.65)";
+
+  const positionClass =
+    direction === "right"
+      ? "right-0 top-1/2 h-24 w-9 -translate-y-1/2 translate-x-1/3"
+      : "bottom-0 left-1/2 h-9 w-24 -translate-x-1/2 translate-y-1/3";
+
+  // The chevron points the way the modal exits: right as-is, down when rotated.
+  const iconClass =
+    direction === "right"
+      ? "group-hover:translate-x-0.5"
+      : "rotate-90 group-hover:translate-y-0.5";
 
   return (
     <motion.button
@@ -179,13 +203,13 @@ export function PeekTab({ onClick }: { onClick: () => void }) {
           ? undefined
           : { duration: 2.4, repeat: Infinity, ease: "easeInOut" }
       }
-      className="group absolute right-0 top-1/2 z-20 flex h-24 w-9 -translate-y-1/2 translate-x-1/3 items-center justify-center rounded-2xl border border-cyan-400/50 bg-[#0b1020]/96 text-cyan-200 backdrop-blur-md transition-colors hover:border-cyan-300 hover:bg-cyan-500/20 hover:text-white"
+      className={`group absolute z-20 flex items-center justify-center rounded-2xl border border-cyan-400/50 bg-[#0b1020]/96 text-cyan-200 backdrop-blur-md transition-colors hover:border-cyan-300 hover:bg-cyan-500/20 hover:text-white ${positionClass}`}
     >
       <svg
         xmlns="http://www.w3.org/2000/svg"
         viewBox="0 0 20 20"
         fill="currentColor"
-        className="h-6 w-6 transition-transform group-hover:translate-x-0.5"
+        className={`h-6 w-6 transition-transform ${iconClass}`}
       >
         <path
           fillRule="evenodd"

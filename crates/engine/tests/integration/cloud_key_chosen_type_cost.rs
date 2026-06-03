@@ -110,18 +110,13 @@ fn cloud_key_reduces_only_the_chosen_card_type_after_etb_choice() {
         }
     }
 
-    let card_id = runner.state().objects[&cloud_key].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: cloud_key,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Cloud Key cast should succeed");
-    runner.advance_until_stack_empty();
+    // Pool-funded cast through the canonical pipeline. Cloud Key's ETB choice
+    // is a prompt the resolution driver does not auto-answer, so it halts there
+    // and surfaces it via `final_waiting_for()` for the caller to inspect/drive.
+    let outcome = runner.cast(cloud_key).resolve();
 
     // Bug B: the ETB choice must surface as a CardType choice keyed to Cloud Key.
-    match &runner.state().waiting_for {
+    match outcome.final_waiting_for() {
         WaitingFor::NamedChoice {
             choice_type,
             source_id,

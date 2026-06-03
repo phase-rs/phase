@@ -111,6 +111,8 @@
   },
   "landing": {
     "title": "Draft",
+    "eyebrow": "Draft",
+    "description": "Szybki draft przeciwko SI, zbuduj cube lub załóż pod ze znajomymi.",
     "startNew": "Rozpocznij nowy",
     "quickDraft": {
       "title": "Szybki draft",

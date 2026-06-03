@@ -20,7 +20,10 @@ pub use broker::{
     MAX_LOBBY_ENTRIES,
 };
 pub use env::BrokerEnv;
-pub use inbound_guard::{guard_inbound, validate_deck_payload};
+pub use inbound_guard::{
+    guard_create_game_settings_inbound, guard_inbound, guard_join_game_with_password_inbound,
+    validate_deck_payload, CreateGameSettingsInbound, JoinGameWithPasswordInbound,
+};
 pub use lobby::{
     JoinTargetInfo, LobbyManager, LobbyReservation, RegisterGameRequest, PUBLIC_SEAT_RESERVATION_MS,
 };
