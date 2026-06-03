@@ -1430,13 +1430,15 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
         }));
     }
 
-    // "can be cast without paying its mana cost" — requires casting infrastructure
-    // changes (alternative cost injection during casting). Deferred.
+    // CR 118.9a: "can be cast without paying its mana cost"
     if tag::<_, _, OracleError<'_>>("can be cast without paying its mana cost")
         .parse(ability_text)
         .is_ok()
     {
-        return None; // Falls through to Unimplemented
+        return Some(parsed_clause(Effect::GrantNextSpellAbility {
+            modifier: NextSpellModifier::WithoutPayingManaCost,
+            spell_filter,
+        }));
     }
 
     // CR 601.2f: "has [keyword]"
@@ -9070,6 +9072,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
             if !matches!(target, TargetFilter::ParentTargetController) =>
         {
             *target = TargetFilter::ParentTarget;
@@ -10173,6 +10176,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::Suspect { target }
         | Effect::Goad { target }
         | Effect::Mill { target, .. }
@@ -12217,6 +12221,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
         | Effect::PutCounter { target, .. }
@@ -12443,6 +12448,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::Draw { target, .. }
         | Effect::Discard { target, .. }
         | Effect::Mill { target, .. }
@@ -26853,6 +26859,23 @@ mod tests {
     }
 
     #[test]
+    fn force_attack_you_this_combat_targets_creature() {
+        let e = parse_effect("Target creature attacks you this combat if able");
+        assert!(
+            matches!(
+                e,
+                Effect::ForceAttack {
+                    target: TargetFilter::Typed(_),
+                    required_player: TargetFilter::Controller,
+                    duration: Duration::UntilEndOfCombat,
+                }
+            ),
+            "Expected ForceAttack with typed target and controller requirement, got {:?}",
+            e
+        );
+    }
+
+    #[test]
     fn force_block_blocks_it_this_combat() {
         // "target creature blocks it this combat if able" (e.g., Avalanche Tusker)
         let e = parse_effect("Target creature blocks it this combat if able");
@@ -27387,6 +27410,48 @@ mod tests {
             }
         );
         assert!(*tapped);
+    }
+
+    /// Issue #1696 — Myrkul, Lord of Bones full chain: an exile that publishes a
+    /// tracked set, followed by "create a token that's a copy of that card,
+    /// except it's an enchantment and loses all other card types." The copy
+    /// clause must (a) rebind its `that card` anaphor to the tracked set
+    /// (CR 603.7) and (b) carry the `SetCardTypes` exception so the token is an
+    /// enchantment, not a creature (CR 205.1a + CR 707.9d). Uses an explicit
+    /// exile target so the chain stitches without trigger-subject context.
+    #[test]
+    fn exile_then_copy_that_card_as_enchantment_uses_tracked_set_and_set_card_types() {
+        let def = parse_effect_chain(
+            "Exile target creature card from a graveyard, then create a token that's a copy of that card, except it's an enchantment and loses all other card types.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::ChangeZone { destination, .. } = def.effect.as_ref() else {
+            panic!("expected ChangeZone, got {:?}", def.effect);
+        };
+        assert_eq!(*destination, Zone::Exile);
+
+        let copy = def.sub_ability.as_deref().expect("copy sub-ability");
+        let Effect::CopyTokenOf {
+            target,
+            additional_modifications,
+            ..
+        } = copy.effect.as_ref()
+        else {
+            panic!("expected CopyTokenOf, got {:?}", copy.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            }
+        );
+        assert_eq!(
+            *additional_modifications,
+            vec![ContinuousModification::SetCardTypes {
+                core_types: vec![CoreType::Enchantment],
+            }]
+        );
     }
 
     /// CR 205.3e + CR 607.2d: "Choose a creature type other than Wall. Target
@@ -36007,6 +36072,25 @@ mod tests {
                 }
             ),
             "Expected GrantNextSpellAbility(CastAsThoughFlash), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn parse_next_spell_without_paying_mana_cost() {
+        let def = parse_effect_chain(
+            "The next instant or sorcery spell you cast this turn can be cast without paying its mana cost",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::GrantNextSpellAbility {
+                    modifier: crate::types::game_state::NextSpellModifier::WithoutPayingManaCost,
+                    ..
+                }
+            ),
+            "Expected GrantNextSpellAbility(WithoutPayingManaCost), got {:?}",
             def.effect
         );
     }

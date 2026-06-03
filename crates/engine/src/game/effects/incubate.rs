@@ -19,8 +19,7 @@ use crate::types::zones::Zone;
 /// Its back face is a 0/0 colorless Phyrexian artifact creature named
 /// "Phyrexian Token."
 ///
-/// Note: The transform activated ability is not yet wired — the Incubator
-/// is created as a colorless artifact with the correct counters.
+/// The transform activated ability is attached via `inject_predefined_token_abilities`.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -71,6 +70,8 @@ pub fn resolve(
         );
     }
 
+    super::token::inject_predefined_token_abilities(state, obj_id);
+
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Incubate,
         source_id: ability.source_id,
@@ -82,7 +83,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::QuantityExpr;
+    use crate::types::ability::{Effect, QuantityExpr};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -119,6 +120,9 @@ mod tests {
         assert_eq!(inc.name, "Incubator");
         // 3 +1/+1 counters
         assert_eq!(inc.counters.get(&CounterType::Plus1Plus1).copied(), Some(3));
+        assert_eq!(inc.abilities.len(), 1);
+        assert!(matches!(*inc.abilities[0].effect, Effect::Transform { .. }));
+        assert!(inc.back_face.is_some());
     }
 
     #[test]

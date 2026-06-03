@@ -290,6 +290,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // Transform changes copiable values (Layer 1) and can flip statics
             // on/off; conservatively all-dirty.
             | GameEvent::Transformed { .. }
+            | GameEvent::Specialized { .. }
             | GameEvent::TurnedFaceUp { .. } => {
                 mark_public_state_all_dirty(state);
                 return;

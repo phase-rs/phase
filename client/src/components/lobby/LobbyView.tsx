@@ -234,10 +234,10 @@ export function LobbyView({
   // the control is noise, and hiding it matches the "don't add UI without
   // clear value" bar. Compared via `=== true` so absent/undefined entries
   // (older server builds pre-`is_p2p`) count as server-run, not unknown.
-  const hasP2PRow = useMemo(() => games.some((g) => g.is_p2p === true), [games]);
-  const hasServerRow = useMemo(() => games.some((g) => g.is_p2p !== true), [games]);
-  const hasDraftRow = useMemo(() => games.some((g) => g.draft_metadata != null), [games]);
-  const showRoomTypeFilter = hasP2PRow && hasServerRow || hasDraftRow;
+  // Show the room-type filter (All / Draft / P2P / Server) whenever any tables
+  // are listed — matching the design's persistent filter row. Still hidden on a
+  // genuinely empty lobby, where it would filter nothing.
+  const showRoomTypeFilter = games.length > 0;
 
   const filteredGames = useMemo(() => {
     return games.filter((g) => {
@@ -250,7 +250,7 @@ export function LobbyView({
   }, [games, formatFilter, roomTypeFilter]);
 
   return (
-    <MenuPanel className="relative z-10 mx-auto flex w-full max-w-xl flex-col gap-6 px-4 py-5">
+    <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col gap-6 px-5 py-6">
       <div className="flex w-full items-center justify-between gap-3">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
           {isP2P ? t("lobbyView.directConnection") : t("lobbyView.onlineLobby")}

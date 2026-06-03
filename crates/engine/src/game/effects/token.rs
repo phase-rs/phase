@@ -2,28 +2,30 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::game::game_object::{AttachTarget, DisplaySource};
+use crate::game::game_object::{AttachTarget, BackFaceData, DisplaySource};
 use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Comparator,
-    ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectError,
-    EffectKind, FilterProp, ManaContribution, ManaProduction, PlayerFilter, PtValue, QuantityExpr,
-    QuantityRef, ResolvedAbility, SearchSelectionConstraint, StaticDefinition, TargetFilter,
-    TargetRef, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CastingPermission,
+    Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
+    EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::proposed_event::TokenSpec;
+use crate::types::statics::CastFrequency;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -1807,6 +1809,125 @@ fn mutagen_ability() -> AbilityDefinition {
     .activation_restrictions(vec![ActivationRestriction::AsSorcery])
 }
 
+/// CR 111.10 (Fallout): Junk — "{T}, Sacrifice this artifact: Exile the top card of your
+/// library. You may play that card this turn. Activate only as a sorcery."
+fn junk_ability() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            face_down: false,
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::GrantCastingPermission {
+            permission: CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfTurn,
+                granted_to: PlayerId(0),
+                frequency: CastFrequency::Unlimited,
+                source_id: None,
+                exiled_by_ability_controller: None,
+                mana_spend_permission: None,
+            },
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            grantee: PermissionGrantee::AbilityController,
+        },
+    ))
+    .cost(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Tap,
+            AbilityCost::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: 1,
+            },
+        ],
+    })
+    .activation_restrictions(vec![ActivationRestriction::AsSorcery])
+}
+
+/// CR 111.10i: Incubator — "{2}: Transform this artifact." Back face is a 0/0
+/// Phyrexian artifact creature (see `incubator_phyrexian_back_face`).
+fn incubator_ability() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Transform {
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .cost(AbilityCost::Mana {
+        cost: ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        },
+    })
+}
+
+/// CR 111.10i: Back face of an Incubator double-faced token.
+fn incubator_phyrexian_back_face() -> BackFaceData {
+    BackFaceData {
+        name: "Phyrexian Token".to_string(),
+        power: Some(0),
+        toughness: Some(0),
+        loyalty: None,
+        defense: None,
+        card_types: CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Artifact, CoreType::Creature],
+            subtypes: vec!["Phyrexian".to_string()],
+        },
+        mana_cost: ManaCost::default(),
+        keywords: vec![],
+        abilities: vec![],
+        trigger_definitions: Default::default(),
+        replacement_definitions: Default::default(),
+        static_definitions: Default::default(),
+        color: vec![],
+        printed_ref: None,
+        modal: None,
+        additional_cost: None,
+        strive_cost: None,
+        casting_restrictions: vec![],
+        casting_options: vec![],
+        layout_kind: None,
+    }
+}
+
+/// CR 111.10 (Duskmourn): Shard — "{2}, Sacrifice this enchantment: Scry 1, then draw a card."
+fn shard_ability() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Scry {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )
+    .sub_ability(AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    ))
+    .cost(AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 2,
+                },
+            },
+            AbilityCost::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: 1,
+            },
+        ],
+    })
+}
+
 /// CR 111.10a–v: Predefined token abilities keyed by subtype.
 /// Returns ability definitions to inject for the given subtype, or empty if none.
 pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
@@ -1821,7 +1942,9 @@ pub fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
         "Spawn" => vec![spawn_ability()],
         "Lander" => vec![lander_ability()],
         "Mutagen" => vec![mutagen_ability()],
-        // TODO: Incubator (transform), Shard, Junk
+        "Junk" => vec![junk_ability()],
+        "Incubator" => vec![incubator_ability()],
+        "Shard" => vec![shard_ability()],
         _ => vec![],
     }
 }
@@ -1840,6 +1963,12 @@ fn predefined_token_rules_text(subtype: &str) -> Option<&'static str> {
             "{2}, {T}, Sacrifice this token: Search your library for a basic \
              land card, put it onto the battlefield tapped, then shuffle.",
         ),
+        "Junk" => Some(
+            "{T}, Sacrifice this artifact: Exile the top card of your library. \
+             You may play that card this turn. Activate only as a sorcery.",
+        ),
+        "Incubator" => Some("{2}: Transform this artifact."),
+        "Shard" => Some("{2}, Sacrifice this enchantment: Scry 1, then draw a card."),
         _ => None,
     }
 }
@@ -2160,6 +2289,12 @@ pub(super) fn inject_predefined_token_abilities(
     if !abilities_to_add.is_empty() {
         Arc::make_mut(&mut obj.abilities).extend(abilities_to_add.clone());
         Arc::make_mut(&mut obj.base_abilities).extend(abilities_to_add);
+    }
+
+    // CR 111.10i: Incubator tokens are double-faced; attach the Phyrexian back face
+    // when predefined abilities are injected (incubate.rs and generic token create).
+    if subtypes.iter().any(|s| s == "Incubator") && obj.back_face.is_none() {
+        obj.back_face = Some(incubator_phyrexian_back_face());
     }
 
     // CR 111.10: expose the predefined token's printed rules text so the
@@ -2779,6 +2914,158 @@ mod tests {
             }
             other => panic!("Lander cost must be Composite, got {other:?}"),
         }
+    }
+
+    /// CR 111.10 (Fallout): Junk chains exile-top to a PlayFromExile grant.
+    #[test]
+    fn predefined_junk_has_exile_top_and_play_permission_chain() {
+        let abilities = predefined_token_abilities("Junk");
+        assert_eq!(abilities.len(), 1);
+        assert!(matches!(
+            *abilities[0].effect,
+            Effect::ExileTop {
+                face_down: false,
+                ..
+            }
+        ));
+        let grant = abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("Junk chains to PlayFromExile grant");
+        assert!(matches!(
+            *grant.effect,
+            Effect::GrantCastingPermission { .. }
+        ));
+        assert!(abilities[0]
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+    }
+
+    #[test]
+    fn predefined_shard_has_scry_then_draw() {
+        let abilities = predefined_token_abilities("Shard");
+        assert_eq!(abilities.len(), 1);
+        assert!(matches!(*abilities[0].effect, Effect::Scry { .. }));
+        assert!(matches!(
+            *abilities[0]
+                .sub_ability
+                .as_ref()
+                .expect("Shard chains to Draw")
+                .effect,
+            Effect::Draw { .. }
+        ));
+    }
+
+    #[test]
+    fn predefined_incubator_has_transform_cost() {
+        let abilities = predefined_token_abilities("Incubator");
+        assert_eq!(abilities.len(), 1);
+        assert!(matches!(
+            *abilities[0].effect,
+            Effect::Transform {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        assert!(matches!(
+            abilities[0].cost.as_ref(),
+            Some(AbilityCost::Mana {
+                cost: ManaCost::Cost { generic: 2, .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn predefined_incubator_back_face_is_artifact_creature() {
+        let back_face = incubator_phyrexian_back_face();
+        assert_eq!(back_face.name, "Phyrexian Token");
+        assert_eq!(back_face.power, Some(0));
+        assert_eq!(back_face.toughness, Some(0));
+        assert!(back_face.color.is_empty());
+        assert!(back_face
+            .card_types
+            .core_types
+            .contains(&CoreType::Artifact));
+        assert!(back_face
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
+        assert!(back_face
+            .card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Phyrexian"));
+    }
+
+    #[test]
+    fn junk_token_injection_attaches_ability_and_rules_text() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Junk".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Artifact];
+            obj.card_types.subtypes.push("Junk".to_string());
+            obj.is_token = true;
+        }
+        inject_predefined_token_abilities(&mut state, obj_id);
+        let obj = &state.objects[&obj_id];
+        assert_eq!(obj.abilities.len(), 1);
+        assert!(obj
+            .token_rules_text
+            .as_ref()
+            .is_some_and(|t| t.contains("Exile")));
+    }
+
+    #[test]
+    fn junk_ability_runtime_exiles_top_card_and_grants_play_permission() {
+        let mut state = GameState::new_two_player(42);
+        let junk = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Junk".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&junk).unwrap();
+            obj.card_types.core_types = vec![CoreType::Artifact];
+            obj.card_types.subtypes.push("Junk".to_string());
+            obj.is_token = true;
+        }
+        inject_predefined_token_abilities(&mut state, junk);
+
+        let top = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(2),
+            PlayerId(0),
+            "Top Card".to_string(),
+            Zone::Library,
+        );
+        let ability_def = state.objects[&junk].abilities[0].clone();
+        let resolved = build_resolved_from_def(&ability_def, junk, PlayerId(0));
+        let mut events = Vec::new();
+
+        super::super::resolve_ability_chain(&mut state, &resolved, &mut events, 0)
+            .expect("Junk ability chain should resolve");
+
+        let top_obj = &state.objects[&top];
+        assert_eq!(top_obj.zone, Zone::Exile);
+        assert!(top_obj
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(
+                permission,
+                CastingPermission::PlayFromExile {
+                    duration: Duration::UntilEndOfTurn,
+                    granted_to,
+                    ..
+                } if *granted_to == PlayerId(0)
+            )));
     }
 
     /// CR 111.10u: the Lander rules-text arm must be present and describe the

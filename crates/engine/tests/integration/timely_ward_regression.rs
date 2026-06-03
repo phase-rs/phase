@@ -95,26 +95,18 @@ fn timely_ward_cast_targeting_commander_succeeds() {
         return;
     };
     let (mut runner, timely_id, commander_id, _plain_id) = build_scenario(db, P1);
-    let card_id = runner.state().objects[&timely_id].card_id;
 
-    let r1 = runner
-        .act(GameAction::CastSpell {
-            object_id: timely_id,
-            card_id,
-            targets: vec![],
-        })
-        .expect("cast announcement should be accepted at instant speed via conditional flash");
+    // Targeting a commander satisfies the conditional flash permission, so the
+    // instant-speed cast is accepted: the driver declares the commander target,
+    // finalizes, and resolves to a clean priority window. The Aura attaches to
+    // the targeted commander (CR 303.4f).
+    let outcome = runner.cast(timely_id).target_object(commander_id).resolve();
     assert!(
-        matches!(r1.waiting_for, WaitingFor::TargetSelection { .. }),
-        "Expected TargetSelection, got {:?}",
-        r1.waiting_for
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "conditional-flash cast targeting a commander must resolve cleanly, got {:?}",
+        outcome.final_waiting_for()
     );
-
-    runner
-        .act(GameAction::SelectTargets {
-            targets: vec![TargetRef::Object(commander_id)],
-        })
-        .expect("targeting a commander must satisfy the conditional flash permission");
+    outcome.assert_zone(&[timely_id], Zone::Battlefield);
 }
 
 #[test]
