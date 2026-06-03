@@ -2294,6 +2294,14 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             })
         }
 
+        // CR 702.176a + CR 603.4: Impending's battlefield trigger checks the
+        // persistent alternative-cost marker, not whether it was paid this turn.
+        StaticCondition::CastVariantPaid { variant } => {
+            Some(TriggerCondition::CastVariantPaidPersistent {
+                variant: *variant,
+            })
+        }
+
         // CR 716.2a: Class level condition.
         StaticCondition::ClassLevelGE { level } => {
             Some(TriggerCondition::ClassLevelGE { level: *level })
@@ -2353,6 +2361,11 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
                     }),
                 })
             }
+            StaticCondition::CastVariantPaid { variant } => Some(TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::CastVariantPaidPersistent {
+                    variant: *variant,
+                }),
+            }),
             _ => None,
         },
 
@@ -17417,6 +17430,31 @@ mod tests {
             "Opponent-Scoped Observer",
         );
         assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        assert_eq!(
+            def.valid_source,
+            Some(becomes_target_source_filter(ControllerRef::Opponent))
+        );
+    }
+
+    #[test]
+    fn trigger_becomes_target_pawpatch_recruit_pattern() {
+        // Pawpatch Recruit pattern: "whenever a creature you control becomes the target
+        // of a spell or ability an opponent controls"
+        // This test verifies both valid_card (creature you control) and valid_source
+        // (opponent controls) are set correctly — the exact pattern from bug #1569.
+        let def = parse_trigger_line(
+            "Whenever a creature you control becomes the target of a spell or ability an opponent controls, put a +1/+1 counter on target creature you control other than that creature.",
+            "Pawpatch Recruit",
+        );
+        assert_eq!(def.mode, TriggerMode::BecomesTarget);
+        // "a creature you control" → valid_card with ControllerRef::You
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))
+        );
+        // "an opponent controls" → valid_source with ControllerRef::Opponent
         assert_eq!(
             def.valid_source,
             Some(becomes_target_source_filter(ControllerRef::Opponent))

@@ -168,6 +168,12 @@ pub struct CardFace {
     /// `brawl_commander` so we stay correct when MTGJSON is missing or stale.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_commander: bool,
+    /// Oathbreaker RC: Whether this card can serve as an Oathbreaker.
+    /// Derived from MTGJSON `leadershipSkills.oathbreaker` UNION type-line
+    /// analysis (legendary Planeswalker). Mirrors the `is_commander` /
+    /// `brawl_commander` synthesis pattern.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_oathbreaker: bool,
     /// CR 100.2a / CR 903.5b: Per-card override to the default constructed copy
     /// limit, parsed from deck-construction Oracle text ("A deck can have any
     /// number of cards named ~." / "A deck can have up to N cards named ~." /
@@ -175,6 +181,9 @@ pub struct CardFace {
     /// singleton) limit applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deck_copy_limit: Option<DeckCopyLimit>,
+    /// CR 717.1: Lit-up roll numbers for Attraction card variants (d6 values 1–6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attraction_lights: Vec<u8>,
     /// Parser diagnostic warnings — silent fallbacks, ignored remainders, bare filters.
     /// Populated at build time by the Oracle parser warning accumulator.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

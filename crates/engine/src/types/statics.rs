@@ -833,6 +833,18 @@ pub enum StaticMode {
     Indestructible,
     /// Permanent cannot be destroyed (distinct from Indestructible).
     CantBeDestroyed,
+    /// CR 701.19c: "[Permanent] can't be regenerated [this turn]." This does not
+    /// stop regeneration abilities from being activated or shields from being
+    /// created; rather, it causes regeneration shields to not be applied the
+    /// next time the affected permanent would be destroyed. The per-target
+    /// `StaticDefinition::affected` filter carries which permanent is marked;
+    /// runtime enforcement bypasses the regen shield in
+    /// `replacement.rs::destroy_applier` (CR 701.19). Distinct from
+    /// `CantBeDestroyed` (which prevents destruction outright) and the inline
+    /// `Effect::Destroy { cant_regenerate }` (the "Destroy X. It can't be
+    /// regenerated." one-shot) — this is the standalone, until-end-of-turn form
+    /// (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort).
+    CantBeRegenerated,
     /// CR 702.34: Flashback — allows casting from graveyard, exiled after resolution.
     FlashBack,
     /// CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
@@ -875,6 +887,8 @@ pub enum StaticMode {
     Goaded,
     CantAttackAlone,
     CantBlockAlone,
+    /// CR 702.122c: This creature can't crew Vehicles.
+    CantCrew,
     MayLookAtTopOfLibrary,
 
     // -- Tier 3: Parser-produced statics --
@@ -1006,6 +1020,29 @@ pub enum StaticMode {
     /// player's normal untap, scanning the battlefield for this variant on
     /// permanents whose controller != active_player.
     UntapsDuringEachOtherPlayersUntapStep,
+    /// CR 614.1c + CR 122.1: Continuous "enters with an additional counter"
+    /// replacement static. A permanent matching `StaticDefinition::affected`
+    /// (e.g. "Other creatures you control", "Legendary creatures you control",
+    /// "Nontoken creatures you control") that would enter the battlefield does
+    /// so with `count` additional counters of `counter_type` on it.
+    ///
+    /// Per CR 614.1c these "enters with …" effects are replacement effects, not
+    /// triggered abilities; the affected-permanent scope rides on
+    /// `StaticDefinition::affected` (the controller-scoped "you control" plus any
+    /// Other/Legendary/Nontoken qualifier), exactly like the anthem statics.
+    /// Runtime integration lives in the battlefield-entry counter hook in
+    /// `effects/change_zone.rs`, which scans active statics whose `affected`
+    /// filter matches the entering object and folds `count` `counter_type`
+    /// counters into the entry's counter list.
+    ///
+    /// Class members (fixed-count form): Kalain, Reclusive Painter; Bard Class;
+    /// Gorma the Gullet; Master Chef. The dynamic-count form (Gev, "for each
+    /// opponent who lost life") is intentionally NOT matched by the parser and
+    /// remains Unimplemented until a dynamic-count axis is added.
+    EntersWithAdditionalCounters {
+        counter_type: super::counter::CounterType,
+        count: u32,
+    },
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -1098,6 +1135,9 @@ impl Hash for StaticMode {
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
+            // CR 614.1c: data-carrying (CounterType + count); consumed by direct
+            // match in change_zone.rs, never used as a HashMap key.
+            | StaticMode::EntersWithAdditionalCounters { .. }
             | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
             _ => {}
@@ -1261,6 +1301,7 @@ impl fmt::Display for StaticMode {
             StaticMode::Protection => write!(f, "Protection"),
             StaticMode::Indestructible => write!(f, "Indestructible"),
             StaticMode::CantBeDestroyed => write!(f, "CantBeDestroyed"),
+            StaticMode::CantBeRegenerated => write!(f, "CantBeRegenerated"),
             StaticMode::FlashBack => write!(f, "FlashBack"),
             StaticMode::Shroud => write!(f, "Shroud"),
             StaticMode::Hexproof => write!(f, "Hexproof"),
@@ -1279,6 +1320,7 @@ impl fmt::Display for StaticMode {
             StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
+            StaticMode::CantCrew => write!(f, "CantCrew"),
             StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
             // Tier 3
             StaticMode::MayChooseNotToUntap => write!(f, "MayChooseNotToUntap"),
@@ -1324,6 +1366,14 @@ impl fmt::Display for StaticMode {
             StaticMode::AssignNoCombatDamage => write!(f, "AssignNoCombatDamage"),
             StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
                 write!(f, "UntapsDuringEachOtherPlayersUntapStep")
+            }
+            // CR 614.1c + CR 122.1: "enters with an additional [counter] counter"
+            // — Display carries both the counter type and the fixed count.
+            StaticMode::EntersWithAdditionalCounters {
+                counter_type,
+                count,
+            } => {
+                write!(f, "EntersWithAdditionalCounters({counter_type:?},{count})")
             }
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
@@ -1562,6 +1612,8 @@ impl FromStr for StaticMode {
             "Protection" => StaticMode::Protection,
             "Indestructible" => StaticMode::Indestructible,
             "CantBeDestroyed" => StaticMode::CantBeDestroyed,
+            // CR 701.19c: "[Permanent] can't be regenerated."
+            "CantBeRegenerated" => StaticMode::CantBeRegenerated,
             "FlashBack" => StaticMode::FlashBack,
             "Shroud" => StaticMode::Shroud,
             "Hexproof" => StaticMode::Hexproof,
@@ -1580,6 +1632,7 @@ impl FromStr for StaticMode {
             "Goaded" => StaticMode::Goaded,
             "CantAttackAlone" => StaticMode::CantAttackAlone,
             "CantBlockAlone" => StaticMode::CantBlockAlone,
+            "CantCrew" => StaticMode::CantCrew,
             "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
             // Tier 3
             "MayChooseNotToUntap" => StaticMode::MayChooseNotToUntap,
@@ -1654,6 +1707,12 @@ impl FromStr for StaticMode {
                 } else if other.starts_with("SuppressTriggers(") {
                     // CR 603.2g: Data-carrying — round-trip preserves discriminant only.
                     // Callers that need the full filter/events read from the typed field.
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if other.starts_with("EntersWithAdditionalCounters(") {
+                    // CR 614.1c: Data-carrying (CounterType + count). The Display
+                    // form uses the Debug rendering of `CounterType`, which has no
+                    // FromStr inverse; round-trip is diagnostic-only and callers
+                    // read the typed field. Mirrors MaximumHandSize / SuppressTriggers.
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
                     .strip_prefix("CantCastDuring(")
@@ -1983,6 +2042,7 @@ mod tests {
             StaticMode::MustBeBlocked,
             StaticMode::CantAttackAlone,
             StaticMode::CantBlockAlone,
+            StaticMode::CantCrew,
             StaticMode::MayLookAtTopOfLibrary,
             // Tier 3: parser-produced statics
             StaticMode::MayChooseNotToUntap,

@@ -18,6 +18,7 @@ import {
   useFeedCacheSnapshot,
 } from "../../services/feedPersistence";
 import { FeedManagerModal } from "./FeedManagerModal";
+import { ManaSymbol } from "../mana/ManaSymbol";
 import { useCardImage } from "../../hooks/useCardImage";
 import {
   evaluateDeckCompatibilityBatch,
@@ -35,7 +36,6 @@ import { MenuPanel } from "./MenuShell";
 import { menuButtonClass } from "./buttonStyles";
 import { useSetSymbol } from "../../hooks/useSetSymbols";
 import {
-  COLOR_DOT_CLASS,
   getDeckCardCount,
   getDeckColorIdentity,
   getRepresentativeCard,
@@ -219,116 +219,134 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
       tabIndex={0}
       onClick={onClick}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onClick(); } }}
-      className={`group relative flex aspect-[4/3] cursor-pointer flex-col justify-end overflow-hidden rounded-xl text-left transition ${
+      className={`group relative flex cursor-pointer flex-col overflow-hidden rounded-xl bg-black/20 text-left transition hover:-translate-y-0.5 ${
         isActive
-          ? "ring-2 ring-white/30 ring-offset-2 ring-offset-[#060a16]"
-          : "ring-1 ring-white/10 hover:ring-white/20"
+          ? "ring-2 ring-emerald-400/55"
+          : "ring-1 ring-white/10 hover:ring-white/25"
       }`}
     >
-      <DeckArtTile cardName={representativeCard} />
+      {/* Inset card-frame hairline — the mockup's "card" look. */}
+      <span className="pointer-events-none absolute inset-1 z-30 rounded-[10px] ring-1 ring-white/[0.06]" />
 
-      {feedBadge && (
-        <span className="absolute right-2 top-2 z-10 rounded-full bg-amber-500/80 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-black">
-          {feedBadge}
-        </span>
-      )}
+      {/* Art header: real Scryfall card art + color identity + source/state badges. */}
+      <div className="relative h-28 overflow-hidden">
+        <DeckArtTile cardName={representativeCard} />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-transparent" />
 
-      {onEdit && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onEdit(); }}
-          className={`absolute right-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-black/70 text-gray-300 opacity-0 transition-opacity hover:bg-indigo-600 hover:text-white group-hover:opacity-100 ${feedBadge ? "top-10" : "top-2"}`}
-          title={t("deckTile.edit", { name: displayName })}
-          aria-label={t("deckTile.edit", { name: displayName })}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
-            <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 2.474L6.226 11.16a2.25 2.25 0 0 1-.892.547l-2.115.705a.5.5 0 0 1-.632-.632l.705-2.115a2.25 2.25 0 0 1 .547-.892l7.174-7.346Z" />
-            <path d="M3.75 13.5a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5h-8.5Z" />
-          </svg>
-        </button>
-      )}
+        {/* Color identity as actual Scryfall mana symbols, clustered top-right.
+            A dark backing chip keeps the bright pips legible over any card art —
+            without it the gold/white symbols wash out against light artwork. */}
+        <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-full bg-black/75 px-2 py-1 shadow-[0_2px_8px_rgba(0,0,0,0.6)] ring-1 ring-white/20 backdrop-blur-sm">
+          {(colors.length ? colors : ["C"]).map((color) => (
+            <ManaSymbol key={color} shard={color} size="xs" />
+          ))}
+        </div>
 
-      {onDelete && (
-        confirmingDelete ? (
-          <div className="absolute left-2 top-2 z-20 flex gap-1">
+        {/* Top-left: selected check only — the source label lives in the body so
+            it never competes with the color-identity mana pips. Hover actions
+            (delete/adopt) overlay this corner. */}
+        {isActive && (
+          <span className="absolute left-2 top-2 z-10 flex h-5 w-5 items-center justify-center rounded-full bg-emerald-400 text-[#04241a]">
+            <svg viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-6.5 6.5a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 1 1 1.06-1.06L6.75 10.19l5.97-5.97a.75.75 0 0 1 1.06 0Z" /></svg>
+          </span>
+        )}
+
+        {onDelete && (
+          confirmingDelete ? (
+            <div className="absolute left-2 top-2 z-20 flex gap-1">
+              <button
+                onClick={(e) => { e.stopPropagation(); onDelete(); setConfirmingDelete(false); }}
+                className="rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-semibold text-white transition-colors hover:bg-red-500"
+              >
+                {t("deckTile.delete")}
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); setConfirmingDelete(false); }}
+                className="rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-medium text-gray-300 transition-colors hover:bg-black/90"
+              >
+                {t("common:actions.cancel")}
+              </button>
+            </div>
+          ) : (
             <button
-              onClick={(e) => { e.stopPropagation(); onDelete(); setConfirmingDelete(false); }}
-              className="rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-semibold text-white transition-colors hover:bg-red-500"
+              onClick={(e) => { e.stopPropagation(); setConfirmingDelete(true); }}
+              className="absolute left-2 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-black/70 text-gray-400 opacity-0 transition-opacity hover:bg-red-600 hover:text-white group-hover:opacity-100"
+              title={t("deckTile.deleteTitle")}
             >
-              {t("deckTile.delete")}
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+                <path fillRule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clipRule="evenodd" />
+              </svg>
             </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); setConfirmingDelete(false); }}
-              className="rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-medium text-gray-300 transition-colors hover:bg-black/90"
-            >
-              {t("common:actions.cancel")}
-            </button>
-          </div>
-        ) : (
+          )
+        )}
+
+        {onAdopt && (
           <button
-            onClick={(e) => { e.stopPropagation(); setConfirmingDelete(true); }}
-            className="absolute left-2 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-black/70 text-gray-400 opacity-0 transition-opacity hover:bg-red-600 hover:text-white group-hover:opacity-100"
-            title={t("deckTile.deleteTitle")}
+            onClick={(e) => { e.stopPropagation(); onAdopt(); }}
+            className="absolute left-2 top-2 z-20 rounded bg-black/70 px-2 py-1 text-[10px] font-medium text-white opacity-0 transition-opacity hover:bg-black/90 group-hover:opacity-100"
+            title={t("deckTile.copyTitle")}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
-              <path fillRule="evenodd" d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5A.75.75 0 0 1 9.95 6Z" clipRule="evenodd" />
-            </svg>
+            {t("deckTile.copy")}
           </button>
-        )
-      )}
+        )}
+      </div>
 
-      {onAdopt && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onAdopt(); }}
-          className="absolute left-2 top-2 z-20 rounded bg-black/70 px-2 py-1 text-[10px] font-medium text-white opacity-0 transition-opacity hover:bg-black/90 group-hover:opacity-100"
-          title={t("deckTile.copyTitle")}
-        >
-          {t("deckTile.copy")}
-        </button>
-      )}
-
-      <div className="relative z-10 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-3 pb-3 pt-8">
+      {/* Solid body: name + edit, then count + legality/coverage badges. */}
+      <div className="relative bg-black/25 px-3 py-2.5">
         {preconDeckOverride?.code && (
-          <div className="mb-1 flex justify-center">
+          <div className="mb-1.5">
             <PreconSetBadge deck={preconDeckOverride} />
           </div>
         )}
-        <p className="truncate text-sm font-semibold text-white">{displayName}</p>
-        <div className="mt-1 flex items-center gap-2">
-          <div className="flex gap-1">
-            {colors.map((color) => (
-              <span
-                key={color}
-                className={`inline-block h-2.5 w-2.5 rounded-full ${COLOR_DOT_CLASS[color] ?? "bg-gray-400"}`}
-              />
-            ))}
-            {colors.length === 0 && (
-              <span className="inline-block h-2.5 w-2.5 rounded-full bg-gray-500" />
-            )}
-          </div>
-          <span className="text-xs text-gray-300">{t("deckTile.cardCount", { count })}</span>
-        </div>
-        <div className="mt-2 flex flex-wrap gap-1">
-          {/* Bracket estimate chip (Commander decks only) */}
-          {catalogCandidate && <BracketChipForDeck candidate={catalogCandidate} />}
-          {/* Feed format/archetype tags */}
-          {feedDeckOverride?.tags?.map((tag) => (
-            <StatusBadge key={tag} label={tag} active={FORMAT_TAGS.has(tag)} />
-          ))}
-          {isPrecon && !preconDeckOverride && !feedDeckOverride?.tags?.length && (
-            <StatusBadge label={t("deckTile.preconBadge")} active />
-          )}
-          {/* Engine compatibility badges */}
-          {compatibility?.standard.compatible && <StatusBadge label="STD" active />}
-          {!preconDeckOverride && compatibility?.commander.compatible && <StatusBadge label="CMD" active />}
-          {compatibility?.bo3_ready && <StatusBadge label="BO3" active />}
-          {compatibility && compatibility.unknown_cards.length > 0 && (
-            <span
-              className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black"
-              title={t("deckTile.unknownCardsTitle", { cards: compatibility.unknown_cards.join("\n") })}
+        <div className="flex items-center gap-2">
+          <p className="min-w-0 flex-1 truncate font-display text-[0.95rem] font-semibold tracking-[-0.01em] text-white">{displayName}</p>
+          {onEdit && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onEdit(); }}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-black/35 text-gray-400 transition-colors hover:bg-indigo-600 hover:text-white"
+              title={t("deckTile.edit", { name: displayName })}
+              aria-label={t("deckTile.edit", { name: displayName })}
             >
-              {t("deckTile.unknown", { count: compatibility.unknown_cards.length })}
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+                <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 2.474L6.226 11.16a2.25 2.25 0 0 1-.892.547l-2.115.705a.5.5 0 0 1-.632-.632l.705-2.115a2.25 2.25 0 0 1 .547-.892l7.174-7.346Z" />
+                <path d="M3.75 13.5a.75.75 0 0 0 0 1.5h8.5a.75.75 0 0 0 0-1.5h-8.5Z" />
+              </svg>
+            </button>
+          )}
+        </div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <span className="font-display text-xs text-slate-400 tabular-nums">{t("deckTile.cardCount", { count })}</span>
+          {feedBadge && (
+            <span
+              className="max-w-[9rem] truncate rounded bg-white/[0.06] px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-slate-400"
+              title={feedBadge}
+            >
+              {feedBadge}
             </span>
           )}
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
+            {/* Bracket estimate chip (Commander decks only) */}
+            {catalogCandidate && <BracketChipForDeck candidate={catalogCandidate} />}
+            {/* Feed format/archetype tags */}
+            {feedDeckOverride?.tags?.map((tag) => (
+              <StatusBadge key={tag} label={tag} active={FORMAT_TAGS.has(tag)} />
+            ))}
+            {isPrecon && !preconDeckOverride && !feedDeckOverride?.tags?.length && (
+              <StatusBadge label={t("deckTile.preconBadge")} active />
+            )}
+            {/* Engine compatibility badges */}
+            {compatibility?.standard.compatible && <StatusBadge label="STD" active />}
+            {!preconDeckOverride && compatibility?.commander.compatible && <StatusBadge label="CMD" active />}
+            {compatibility?.bo3_ready && <StatusBadge label="BO3" active />}
+            {compatibility && compatibility.unknown_cards.length > 0 && (
+              <span
+                className="rounded bg-amber-500/80 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-black"
+                title={t("deckTile.unknownCardsTitle", { cards: compatibility.unknown_cards.join("\n") })}
+              >
+                {t("deckTile.unknown", { count: compatibility.unknown_cards.length })}
+              </span>
+            )}
+          </div>
           {coverage && coverage.supported_unique < coverage.total_unique && (() => {
             const { supported_unique, total_unique, unsupported_cards } = coverage;
             const pct = total_unique > 0 ? (supported_unique / total_unique) * 100 : 0;
@@ -1265,7 +1283,7 @@ export function MyDecks({
                 <span className="ml-2 text-slate-600">{userDecks.length}</span>
               )}
             </h3>
-            <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+            <div className="grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]">
               <AddDeckTile
                 label={t("myDecks.importDeckTile")}
                 onClick={() => setShowImport(true)}
@@ -1312,7 +1330,7 @@ export function MyDecks({
                   {t("myDecks.manageFeeds")}
                 </button>
               </div>
-              <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+              <div className="grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]">
                 {bundledDecks.map((deckName) => (
                   <SavedDeckTile
                     key={deckName}
@@ -1344,7 +1362,7 @@ export function MyDecks({
                   {t("myDecks.browseAll")}
                 </button>
               </div>
-              <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+              <div className="grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]">
                 {displayedPreconDeckNames.map((deckName) => {
                   const candidate = legalPreconByName.get(deckName);
                   return (
@@ -1481,7 +1499,7 @@ function SubscriptionsView({
                 </p>
               </div>
             </div>
-            <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+            <div className="grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]">
               {[...feedDecks].sort((a, b) => a.name.localeCompare(b.name)).map((deck) => (
                 <FeedDeckTile
                   key={deck.name}
@@ -1513,7 +1531,7 @@ function AddDeckTile({ label, icon, onClick }: AddDeckTileProps) {
   return (
     <button
       onClick={onClick}
-      className="group relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl ring-1 ring-white/10 transition hover:bg-white/5 hover:ring-white/20"
+      className="group relative flex h-full min-h-[11rem] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl border border-dashed border-white/12 transition hover:bg-white/5 hover:border-white/25"
     >
       <svg
         xmlns="http://www.w3.org/2000/svg"

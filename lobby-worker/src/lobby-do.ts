@@ -153,10 +153,12 @@ export class LobbyDO {
     const result = JSON.parse(broker.handle(JSON.stringify(conn), text, Date.now())) as CallResult;
 
     if (result.reject) {
-      // Unknown tag / malformed frame — the Rust parser rejected it. Drop it
-      // (no state change, attachment untouched), but log so it surfaces in
-      // Workers Logs.
+      // Unknown tag / malformed frame — the Rust parser rejected it. No state
+      // changed (attachment/snapshot untouched), but the broker attaches an
+      // Error reply so the client's pending RPC fails fast instead of hanging
+      // until its timeout. Deliver it, then log so it surfaces in Workers Logs.
       console.warn({ event: "lobby_frame_rejected", reason: result.reject });
+      this.interpret(ws, result.outbounds);
       return;
     }
 

@@ -39,6 +39,7 @@ export type GameFormat =
   | "PauperCommander"
   | "DuelCommander"
   | "TinyLeaders"
+  | "Oathbreaker"
   | "Brawl"
   | "HistoricBrawl"
   | "FreeForAll"
@@ -130,8 +131,6 @@ export interface LobbyGame {
    * joiners to confirm before entering.
    */
   is_sandbox?: boolean;
-  /** `true` when the room uses competitive ranked rating updates. */
-  is_ranked?: boolean;
   /** Draft-specific metadata. Present when the room is a draft pod. */
   draft_metadata?: DraftLobbyMetadata | null;
 }
@@ -960,7 +959,18 @@ export interface TargetSelectionProgress {
 }
 
 export type TargetSelectionConstraint =
-  | { type: "DifferentTargetPlayers" };
+  | { type: "DifferentTargetPlayers" }
+  // CR 115.1 + CR 601.2c: object targets must be controlled by different players.
+  | { type: "DifferentObjectControllers" }
+  // CR 202.3 + CR 601.2c: the chosen target set's combined mana value must satisfy
+  // `comparator` against `value`. `value` is an engine `QuantityExpr` (internally
+  // tagged); the frontend never evaluates it — legality is delivered via
+  // `current_legal_targets` — so the value shape is left structural.
+  | {
+      type: "TotalManaValue";
+      comparator: "GT" | "LT" | "GE" | "LE" | "EQ" | "NE";
+      value: { type: string; [key: string]: unknown };
+    };
 
 // ── Combat Tax (CR 508.1d + 508.1h + 509.1c + 509.1d) ────────────────────
 
@@ -1057,7 +1067,7 @@ export type WaitingFor =
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
-  | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: ObjectId[]; pending_effect: unknown } }
+  | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: TargetRef[]; pending_effect: unknown } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
   | { type: "CrewVehicle"; data: { player: PlayerId; vehicle_id: ObjectId; crew_power: number; eligible_creatures: ObjectId[] } }
   | { type: "StationTarget"; data: { player: PlayerId; spacecraft_id: ObjectId; eligible_creatures: ObjectId[] } }
@@ -1203,6 +1213,7 @@ export type WaitingFor =
     } }
   | { type: "ChooseDungeon"; data: { player: PlayerId; options: DungeonId[] } }
   | { type: "ChooseDungeonRoom"; data: { player: PlayerId; dungeon: DungeonId; options: number[]; option_names: string[] } }
+  | { type: "SpecializeColor"; data: { player: PlayerId; object_id: ObjectId; options: ManaColor[] } }
   | { type: "CategoryChoice"; data: {
       player: PlayerId;
       target_player: PlayerId;
@@ -1480,6 +1491,7 @@ export type GameAction =
   | { type: "LearnDecision"; data: { choice: LearnOption } }
   | { type: "ChooseDungeon"; data: { dungeon: DungeonId } }
   | { type: "ChooseDungeonRoom"; data: { room_index: number } }
+  | { type: "ChooseSpecializeColor"; data: { color: ManaColor } }
   | { type: "UnlockRoomDoor"; data: { object_id: ObjectId; door: RoomDoor } }
   | { type: "TapForConvoke"; data: { object_id: ObjectId; mana_type: ManaType } }
   | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } }
@@ -1592,6 +1604,16 @@ export type GameEvent =
   // CR 706: a die was rolled. Animated by DiceRollOverlay. `sides`/`result` are
   // the engine's authoritative roll (1..=sides after modifiers).
   | { type: "DieRolled"; data: { player_id: PlayerId; sides: number; result: number } }
+  // CR 103.1: the starting-player d20 roll-off as one structured event. `rounds`
+  // preserves the round boundaries (round 1 = every seat; each later round = the
+  // previous round's tied-max group that rerolled); `winner` is the engine's
+  // authoritative starting player. Each round's `rolls` are [playerId, result]
+  // pairs in seat order. Replaces the flat per-roll DieRolled batch for the
+  // contest; in-game die rolls still emit DieRolled.
+  | {
+      type: "StartingPlayerContest";
+      data: { rounds: { rolls: [PlayerId, number][] }[]; winner: PlayerId };
+    }
   // CR 705: a coin was flipped. `won` is whether the flipping player won the flip
   // (relative to that player) — there is no engine-named face; the heads/tails
   // depiction is a presentation choice.

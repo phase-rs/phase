@@ -145,7 +145,12 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const isRetargetChoiceForMe = waitingFor?.type === "RetargetChoice"
     && waitingFor.data.player === playerId
     && waitingFor.data.scope.type === "Single";
-  const isTargeting = isHumanTargetSelection || isCopyRetargetForMe || isRetargetChoiceForMe;
+  // CR 303.4g + CR 115.1: a returned / non-spell Aura that enchants a player
+  // (a Curse) is hosted by a board pick — opponents are legal click hosts when
+  // they appear in `legal_targets`.
+  const isReturnAsAuraForMe = waitingFor?.type === "ReturnAsAuraTarget"
+    && waitingFor.data.player === playerId;
+  const isTargeting = isHumanTargetSelection || isCopyRetargetForMe || isRetargetChoiceForMe || isReturnAsAuraForMe;
   const currentLegalTargets = useMemo(() => {
     if (isHumanTargetSelection) {
       return waitingFor.data.selection?.current_legal_targets ?? [];
@@ -157,8 +162,11 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     if (isRetargetChoiceForMe) {
       return waitingFor.data.legal_new_targets;
     }
+    if (isReturnAsAuraForMe) {
+      return waitingFor.data.legal_targets;
+    }
     return [];
-  }, [isHumanTargetSelection, isCopyRetargetForMe, isRetargetChoiceForMe, waitingFor]);
+  }, [isHumanTargetSelection, isCopyRetargetForMe, isRetargetChoiceForMe, isReturnAsAuraForMe, waitingFor]);
   const validPlayerTargetIds = useMemo(
     () => currentLegalTargets
       .filter((tgt): tgt is { Player: number } => "Player" in tgt)

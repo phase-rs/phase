@@ -79,12 +79,13 @@ pub fn resolve(
 
     // CR 707.9f: "Some exceptions to the copying process apply only if the
     // copy is or has certain characteristics" — re-evaluate layers so the
-    // copied card_types is realized before checking `if_type` on each
-    // counter-on-enter modification (Spark Double's branches). Counters are
-    // then placed via the shared replacement-aware primitive (Doubling
-    // Season etc. apply normally).
+    // copied card_types is realized. This is required for keyword grants
+    // (e.g., "except it has myriad") to synthesize their associated triggers.
+    // Counters are then placed via the shared replacement-aware primitive
+    // (Doubling Season etc. apply normally).
+    crate::game::layers::evaluate_layers(state);
+
     if !counter_mods.is_empty() {
-        crate::game::layers::evaluate_layers(state);
         for modification in counter_mods {
             if let ContinuousModification::AddCounterOnEnter {
                 counter_type,
@@ -1291,6 +1292,53 @@ mod tests {
         assert!(
             state.objects[&source].abilities.is_empty(),
             "abilities must revert to empty base after copy expires"
+        );
+    }
+
+    // ── Issue #1558: Keyword grants via except clause synthesize triggers ─────
+    #[test]
+    fn become_copy_with_except_it_has_myriad_synthesizes_trigger() {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::keywords::Keyword;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let target = create_creature(&mut state, 1, PlayerId(0), "Target", 2, 2);
+        let source = create_creature(&mut state, 2, PlayerId(0), "Muddle", 1, 1);
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Myriad,
+                }],
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+        // evaluate_layers is now called unconditionally in resolve()
+
+        let source_obj = state.objects.get(&source).unwrap();
+        assert!(
+            source_obj.keywords.contains(&Keyword::Myriad),
+            "Myriad keyword should be granted via except clause"
+        );
+        let has_myriad_trigger = source_obj.trigger_definitions.iter_all().any(|trigger| {
+            matches!(trigger.mode, TriggerMode::Attacks)
+                && matches!(trigger.valid_card, Some(TargetFilter::SelfRef))
+                && trigger.execute.as_deref().is_some_and(|ability| {
+                    ability.optional && matches!(ability.effect.as_ref(), Effect::Myriad)
+                })
+        });
+        assert!(
+            has_myriad_trigger,
+            "Myriad attack trigger should be synthesized when keyword is granted"
         );
     }
 }

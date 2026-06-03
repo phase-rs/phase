@@ -26,6 +26,18 @@ pub(crate) fn lower_rule_static(
                 .affected(affected)
                 .description(description.to_string())
         }
+        RuleStaticPredicate::CantCrew => StaticDefinition::new(StaticMode::CantCrew)
+            .affected(affected)
+            .description(description.to_string()),
+        RuleStaticPredicate::CantBeActivated => {
+            StaticDefinition::new(StaticMode::CantBeActivated {
+                who: ProhibitionScope::AllPlayers,
+                source_filter: TargetFilter::SelfRef,
+                exemption: ActivationExemption::None,
+            })
+            .affected(affected)
+            .description(description.to_string())
+        }
         RuleStaticPredicate::CantBeSacrificed => {
             StaticDefinition::new(StaticMode::Other("CantBeSacrificed".to_string()))
                 .affected(affected)

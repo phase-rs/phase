@@ -19,9 +19,11 @@ import type { DraftPodHostEvent } from "../draftPodHostAdapter";
 const mockLoadCardDatabase = vi.fn(async () => 0);
 
 vi.mock("../draft-adapter", () => ({
-  DraftAdapter: vi.fn().mockImplementation(() => ({
-    loadCardDatabase: mockLoadCardDatabase,
-  })),
+  DraftAdapter: vi.fn().mockImplementation(function () {
+    return {
+      loadCardDatabase: mockLoadCardDatabase,
+    };
+  }),
 }));
 
 vi.mock("../../network/connection", () => ({
@@ -39,12 +41,14 @@ vi.mock("../../services/draftPersistence", () => ({
 }));
 
 vi.mock("../p2p-draft-host", () => ({
-  P2PDraftHost: vi.fn().mockImplementation(() => ({
-    onEvent: vi.fn(() => vi.fn()),
-    initialize: vi.fn(async () => {}),
-    dispose: vi.fn(),
-    terminateDraft: vi.fn(async () => {}),
-  })),
+  P2PDraftHost: vi.fn().mockImplementation(function () {
+    return {
+      onEvent: vi.fn(() => vi.fn()),
+      initialize: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      terminateDraft: vi.fn(async () => {}),
+    };
+  }),
 }));
 
 const originalFetch = globalThis.fetch;

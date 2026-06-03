@@ -329,9 +329,8 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         // CR 702.81: Devour N — engine encodes only N (the "creatures you
         // sacrifice" filter is implicit).
         Rule::Devour(_perm, g) => Keyword::Devour(int_or_gap(g, "Rule::Devour", path)?),
-        // CR 702.163: Prototype — alt-cost cast for a smaller body. The
-        // engine keyword carries only the alt mana cost; the alt-PT is
-        // synthesized separately. CardManaCost is a Vec<ManaSymbolX>.
+        // CR 702.160a: Prototype — alt-cost cast that uses the secondary
+        // power/toughness and mana cost characteristics.
         // CR 702.176a: Impending N—{cost} — alternative cost. "You may
         // choose to pay [cost] rather than pay this spell's mana cost"
         // + "If you chose to pay this permanent's impending cost, it
@@ -339,11 +338,11 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         // permanent's impending cost was paid and it has a time counter
         // on it, it's not a creature" + "At the beginning of your end
         // step, if this permanent's impending cost was paid and it has
-        // a time counter on it, remove a time counter from it." Engine
-        // stores only the mana cost; the N (time-counter count) is
-        // dropped — the engine derives it from a separate metadata
-        // pipeline.
-        Rule::Impending(_n, c) => Keyword::Impending(pure_mana(c, "Rule::Impending", path)?),
+        // a time counter on it, remove a time counter from it."
+        Rule::Impending(n, c) => Keyword::Impending {
+            cost: pure_mana(c, "Rule::Impending", path)?,
+            counters: int_or_gap(n, "Rule::Impending.count", path)?,
+        },
 
         // CR 702.173a: Freerunning {cost} — alternative cost. Mana-only.
         Rule::Freerunning(c) => Keyword::Freerunning(pure_mana(c, "Rule::Freerunning", path)?),
@@ -391,9 +390,11 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         // (`Keyword::TotemArmor`) per the documented Oracle erratum.
         Rule::UmbraArmor => Keyword::TotemArmor,
 
-        Rule::Prototype { mana_cost, .. } => {
-            Keyword::Prototype(crate::convert::mana::convert_x(mana_cost)?)
-        }
+        Rule::Prototype { mana_cost, card_pt } => Keyword::Prototype {
+            cost: crate::convert::mana::convert_x(mana_cost)?,
+            power: Some(card_pt.power),
+            toughness: Some(card_pt.toughness),
+        },
 
         // CR 702.138a: Escape — alternative casting cost from graveyard.
         // mtgish encodes the cost as `Cost::And([PayMana, ExileNumberGraveyardCards(N, ...)])`;

@@ -26,6 +26,7 @@ pub mod additional_phase;
 pub mod amass;
 pub mod animate;
 pub mod attach;
+pub mod attractions;
 pub mod awaken;
 pub mod become_copy;
 pub mod become_monarch;
@@ -67,6 +68,9 @@ pub mod double;
 pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod effect;
+pub mod end_combat_phase;
+pub(super) mod end_phase;
+pub mod end_the_turn;
 pub mod endure;
 pub mod energy;
 pub mod exchange_control;
@@ -108,6 +112,7 @@ pub mod pump;
 pub mod put_on_top;
 pub mod put_on_top_or_bottom;
 pub mod rad_counters;
+pub mod rebound;
 pub mod regenerate;
 pub mod register_bending;
 pub mod remove_from_combat;
@@ -131,6 +136,7 @@ pub mod shuffle;
 pub mod skip_next_step;
 pub mod skip_next_turn;
 pub mod solve_case;
+pub mod specialize;
 pub mod speed_effects;
 pub mod surveil;
 pub mod suspect;
@@ -1677,6 +1683,8 @@ pub fn resolve_effect(
         Effect::TimeTravel => Ok(()),
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
         Effect::Proliferate => proliferate::resolve(state, ability, events),
+        Effect::EndTheTurn => end_the_turn::resolve(state, ability, events),
+        Effect::EndCombatPhase => end_combat_phase::resolve(state, ability, events),
         Effect::Populate => populate::resolve(state, ability, events),
         Effect::Clash => clash::resolve(state, ability, events),
         // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
@@ -1811,6 +1819,7 @@ pub fn resolve_effect(
         Effect::Incubate { .. } => incubate::resolve(state, ability, events),
         Effect::Amass { .. } => amass::resolve(state, ability, events),
         Effect::Monstrosity { .. } => monstrosity::resolve(state, ability, events),
+        Effect::Specialize => specialize::resolve(state, ability, events),
         Effect::Renown { .. } => renown::resolve(state, ability, events),
         Effect::Adapt { .. } => adapt::resolve(state, ability, events),
         Effect::Bolster { .. } => bolster::resolve(state, ability, events),
@@ -1846,6 +1855,9 @@ pub fn resolve_effect(
             venture::resolve_venture_into(state, ability, *dungeon, events)
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
+        Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
+            attractions::resolve(state, ability, events)
+        }
         Effect::ProcessRadCounters => rad_counters::resolve(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
         Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),
@@ -2866,10 +2878,14 @@ pub fn resolve_ability_chain(
         // impossible.
         state.last_vote_ballots = crate::im::Vector::new();
         state.last_effect_amount = None;
-        // CR 706.4: Clear the per-resolution die-roll result at depth-0 chain
-        // entry so a roll consumed by an inline sub_ability cannot leak into a
-        // later, unrelated resolution's EventContextAmount.
-        state.die_result_this_resolution = None;
+        // NOTE: `state.die_result_this_resolution` is intentionally NOT cleared
+        // here. `roll_die::resolve` stamps it AFTER this depth-0 prelude runs
+        // (the prelude runs once at chain top, before `RollDie` executes), so
+        // the inline class still reads a live value. Clearing it here would wipe
+        // the value carried onto a reflexive "When you do … the result"
+        // sub-ability entry before that entry resolves (CR 603.12). Cross-
+        // resolution isolation comes from the four `stack.rs` reset sites and
+        // the `engine.rs` apply() clear. (CR 706.2 + CR 706.4 + CR 603.12)
         state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
         // CR 608.2e: The clause-local equalization snapshot is resolution-
@@ -4176,7 +4192,7 @@ fn resolve_chain_body(
                         let chosen = crate::game::ability_utils::random_select_targets_for_ability(
                             state,
                             &target_slots,
-                            &[],
+                            &sub.target_constraints,
                         )
                         .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
                         let mut reflexive = sub.as_ref().clone();
@@ -4202,7 +4218,7 @@ fn resolve_chain_body(
                         state,
                         sub,
                         &target_slots,
-                        &[],
+                        &sub.target_constraints,
                     )
                     .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
 
@@ -4231,7 +4247,7 @@ fn resolve_chain_body(
                         condition: None,
                         ability: reflexive,
                         timestamp: state.turn_number,
-                        target_constraints: vec![],
+                        target_constraints: sub.target_constraints.clone(),
                         distribute: None,
                         trigger_event: state.current_trigger_event.clone(),
                         modal: None,
@@ -4239,6 +4255,13 @@ fn resolve_chain_body(
                         description: trigger_description.clone(),
                         may_trigger_origin: None,
                         subject_match_count: None,
+                        // CR 706.2 + CR 603.12: capture the live die-roll result
+                        // (still stamped by the inline `roll_die::resolve` of the
+                        // creating ability) onto the reflexive entry so the
+                        // "When you do … the result" sub-ability — which resolves
+                        // on its own stack entry in a later apply() — can re-stamp
+                        // it into resolution scope.
+                        die_result: state.die_result_this_resolution,
                     };
                     let trigger_events =
                         crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
@@ -4256,7 +4279,7 @@ fn resolve_chain_body(
                         player: ability.controller,
                         target_slots,
                         mode_labels: Vec::new(),
-                        target_constraints: vec![],
+                        target_constraints: sub.target_constraints.clone(),
                         selection,
                         source_id: Some(ability.source_id),
                         description: trigger_description,
@@ -8135,6 +8158,7 @@ mod tests {
                         constraint: None,
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -8224,6 +8248,7 @@ mod tests {
                         constraint: None,
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -8287,6 +8312,7 @@ mod tests {
                     constraint: None,
                     granted_to: None,
                     resolution_cleanup: None,
+                    duration: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

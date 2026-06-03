@@ -739,6 +739,84 @@ fn optional_plus_targeted_landfall_trigger_batch_resolves_to_clean_priority() {
     run_optional_landfall_scenario(false, false);
 }
 
+const ANCIENT_GREENWARDEN_ORACLE: &str = "Reach\nYou may play lands from your graveyard.\n\
+    If a land entering causes a triggered ability of a permanent you control to trigger, \
+    that ability triggers an additional time.";
+
+/// Issue #1513: Ancient Greenwarden doubles landfall triggers (CR 603.2d).
+/// With Ob Nixilis (optional + targeted) + Scute Swarm (non-optional) on the
+/// battlefield alongside Greenwarden, playing one land produces FOUR trigger
+/// instances (each landfall ability triggers twice). The engine must drive the
+/// doubled multi-stage WaitingFor sequence to a clean empty-stack Priority for
+/// both accept and decline branches: the engine-innocence guard for the
+/// doubled-trigger softlock.
+fn run_doubled_optional_landfall_scenario(accept: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let ob_nixilis_id = scenario
+        .add_creature_from_oracle(P0, "Ob Nixilis, the Fallen", 3, 3, OB_NIXILIS_ORACLE)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Scute Swarm", 1, 1, SCUTE_SWARM_ORACLE);
+    scenario.add_creature_from_oracle(P0, "Ancient Greenwarden", 5, 7, ANCIENT_GREENWARDEN_ORACLE);
+
+    let forest_id = scenario.add_land_to_hand(P0, "Forest").id();
+    let mut runner = scenario.build();
+
+    let start_life_p1 = runner.state().players[1].life;
+    let card_id = runner.state().objects[&forest_id].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: forest_id,
+            card_id,
+        })
+        .expect("should play Forest");
+
+    resolve_landfall_batch(&mut runner, accept);
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "expected clean Priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "stack must be empty after the doubled landfall batch resolves"
+    );
+
+    // Doubling: Scute's non-optional trigger fires twice → two Insect tokens.
+    assert_eq!(
+        p0_insect_tokens(&runner),
+        2,
+        "Scute Swarm must create two Insect tokens (doubled landfall)"
+    );
+
+    let counters = runner.state().objects[&ob_nixilis_id]
+        .counters
+        .get(&CounterType::Plus1Plus1)
+        .copied()
+        .unwrap_or(0);
+    let life_lost = start_life_p1 - runner.state().players[1].life;
+    if accept {
+        // Both doubled Ob Nixilis triggers accepted: two lose-3-life effects and
+        // two +3-counter effects.
+        assert_eq!(life_lost, 6, "two accepted optionals must drain 6 life");
+        assert_eq!(
+            counters, 6,
+            "two IfYouDo resolutions must place six counters"
+        );
+    } else {
+        assert_eq!(life_lost, 0, "declined optionals must not drain life");
+        assert_eq!(counters, 0, "declined optionals must not place counters");
+    }
+}
+
+#[test]
+fn doubled_optional_targeted_landfall_resolves_to_clean_priority() {
+    run_doubled_optional_landfall_scenario(true);
+    run_doubled_optional_landfall_scenario(false);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

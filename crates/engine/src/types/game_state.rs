@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
     BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
-    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, DelayedTriggerCondition,
-    Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant, ModalChoice,
-    ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint, StaticCondition,
-    TargetFilter, TargetRef, TriggerCondition,
+    ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
+    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
+    ModalChoice, QuantityExpr, ResolvedAbility, SearchDestinationSplit, SearchSelectionConstraint,
+    StaticCondition, TargetFilter, TargetRef, TriggerCondition,
 };
 use super::attribution::ObjectAttribution;
 use super::card::CardFace;
@@ -950,6 +950,15 @@ pub struct PendingCast {
     pub card_id: CardId,
     pub ability: ResolvedAbility,
     pub cost: ManaCost,
+    /// CR 601.2f: The tax-inclusive base mana cost captured at announcement,
+    /// BEFORE any cost reductions/increases or {X} concretization. Lets the
+    /// full concrete cost be recomputed from scratch for any chosen X with
+    /// floors applied LAST (`concrete_cost_for_x`). `None` for activated /
+    /// mana-ability casts and for legacy/in-flight saved games — those paths
+    /// fall back to flooring the already-reduced `cost`. `NoCost` is a real
+    /// base, so `Option` is the only safe sentinel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_cost: Option<ManaCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cost: Option<AbilityCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1028,6 +1037,17 @@ fn default_origin_zone() -> Zone {
     Zone::Hand
 }
 
+/// CR 601.2h + CR 616.1: Resume paying a discard cost after a replacement choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDiscardForCostResume {
+    pub player: PlayerId,
+    pub pending: PendingCast,
+    pub chosen: Vec<ObjectId>,
+    /// Index into `chosen` whose discard was paused; that discard completes
+    /// during `handle_replacement_choice` before this resume runs.
+    pub paused_at_index: usize,
+}
+
 impl PendingCast {
     pub fn new(
         object_id: ObjectId,
@@ -1040,6 +1060,7 @@ impl PendingCast {
             card_id,
             ability,
             cost,
+            base_cost: None,
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: Vec::new(),
@@ -1333,6 +1354,17 @@ pub enum TargetSelectionConstraint {
     DifferentTargetPlayers,
     /// CR 115.1 + CR 601.2c: Object targets must be controlled by different players.
     DifferentObjectControllers,
+    /// CR 202.3 + CR 601.2c: the chosen target set's combined mana value must
+    /// satisfy `comparator` against `value`. `value` is a `QuantityExpr` (not
+    /// `i32` like `SearchSelectionConstraint::TotalManaValue`) because the bound
+    /// is the dynamic where-X die result (`EventContextAmount`). NOT unified with
+    /// `SearchSelectionConstraint::TotalManaValue` — different CR section
+    /// (CR 115.1 / CR 601.2c target declaration vs CR 701.23 search-set) and a
+    /// different value type.
+    TotalManaValue {
+        comparator: Comparator,
+        value: QuantityExpr,
+    },
 }
 
 /// CR 508.1d + CR 509.1c: Which combat step a `WaitingFor::CombatTaxPayment` belongs to.
@@ -1426,6 +1458,13 @@ pub struct PlayerDeckPool {
     pub registered_commander: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub current_commander: std::sync::Arc<Vec<DeckEntry>>,
+    /// Oathbreaker RC: registered and current signature spell entries.
+    /// Empty for all non-Oathbreaker formats. Mirrors the commander Arc pair
+    /// so between-games persistence works correctly.
+    #[serde(default)]
+    pub registered_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
+    #[serde(default)]
+    pub current_signature_spell: std::sync::Arc<Vec<DeckEntry>>,
     /// The declared bracket tier for this player's deck. Used by the AI to
     /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
     /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward
@@ -1647,6 +1686,14 @@ pub enum AlternativeCastKeyword {
     Cleave,
     /// CR 702.162a: Cast converted (back face up, CR 712.14a) for the MTMTE cost.
     MoreThanMeetsTheEye,
+    /// CR 702.176a: Impending alternative cost paid from hand. On resolution the
+    /// permanent enters with N time counters and isn't a creature until the last
+    /// is removed. An end-step trigger removes one counter per turn.
+    Impending,
+    /// CR 702.160a: Prototype alternative cost paid from hand. The resulting
+    /// spell/permanent uses the secondary power, toughness, and mana cost
+    /// characteristics while it is a creature.
+    Prototype,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -2591,6 +2638,12 @@ pub enum WaitingFor {
         options: Vec<u8>,
         option_names: Vec<String>,
     },
+    /// Digital-only Specialize: choose which color specialization to apply.
+    SpecializeColor {
+        player: PlayerId,
+        object_id: crate::types::identifiers::ObjectId,
+        options: Vec<crate::types::mana::ManaColor>,
+    },
     /// CR 118.3 + CR 601.2b + CR 605.3b: Player must select `count` objects
     /// from `choices` to pay a cost, then the engine resumes via `resume`.
     /// Replaces: DiscardForCost, SacrificeForCost, ReturnToHandForCost,
@@ -3202,6 +3255,7 @@ impl WaitingFor {
             | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }
             | WaitingFor::ChooseDungeonRoom { player, .. }
+            | WaitingFor::SpecializeColor { player, .. }
             | WaitingFor::PayCost { player, .. }
             | WaitingFor::ActivationCostOneOfChoice { player, .. }
             | WaitingFor::BlightChoice { player, .. }
@@ -3696,6 +3750,17 @@ pub enum CastingVariant {
     /// permanent enters the battlefield transformed (back face up) via the
     /// existing `enter_transformed` ZoneChange seed. CR 701.28 (Convert).
     MoreThanMeetsTheEye,
+    /// CR 702.176a: Cast from hand via Impending's alternative cost. The printed
+    /// mana cost is replaced by `Keyword::Impending { cost, .. }` at cast
+    /// preparation (mirrors Overload/Evoke). On resolution the permanent enters
+    /// with N time counters (from the keyword) and is not a creature while any
+    /// remain. At the beginning of your end step one time counter is removed.
+    Impending,
+    /// CR 702.160a: Cast from hand prototyped. The printed mana cost is replaced
+    /// by the prototype cost during cast preparation, and the object is tagged so
+    /// stack display plus layer evaluation use the secondary mana cost and P/T
+    /// while it is a creature.
+    Prototype,
 }
 
 impl CastingVariant {
@@ -3789,6 +3854,13 @@ pub enum StackEntryKind {
         /// `valid_card` filter.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject_match_count: Option<u32>,
+        /// CR 706.2 + CR 706.4 + CR 603.12: die-roll result captured at trigger
+        /// push so a reflexive "When you do … the result" sub-ability that
+        /// resolves on its own stack entry (in a later apply(), after the
+        /// original resolution scope cleared) can re-stamp
+        /// `die_result_this_resolution`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        die_result: Option<u8>,
     },
     /// CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     /// enter the stack after cost-payment + target selection and resolve with
@@ -4938,6 +5010,12 @@ pub struct GameState {
     #[serde(skip)]
     pub cost_payment_failed_flag: bool,
 
+    /// CR 601.2h + CR 616.1: Resume state when `handle_discard_for_cost` pauses mid-loop
+    /// for a replacement choice. The card at `paused_at_index` is completed by
+    /// `handle_replacement_choice`; resume continues at `paused_at_index + 1`.
+    #[serde(skip)]
+    pub pending_discard_for_cost: Option<PendingDiscardForCostResume>,
+
     /// Pending cast info saved when entering ManaPayment state (X-cost or convoke).
     /// Consumed by the (ManaPayment, PassPriority) handler to finalize the cast.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5330,6 +5408,7 @@ impl GameState {
             stack_trigger_event_batches: HashMap::new(),
             lki_cache: HashMap::new(),
             cost_payment_failed_flag: false,
+            pending_discard_for_cost: None,
             pending_cast: None,
             ring_level: HashMap::new(),
             ring_bearer: HashMap::new(),
@@ -5810,6 +5889,7 @@ mod tests {
                     PlayerId(0),
                 ),
                 cost: ManaCost::NoCost,
+                base_cost: None,
                 activation_cost: None,
                 activation_ability_index: None,
                 target_constraints: vec![],
@@ -6134,6 +6214,7 @@ mod tests {
                 PlayerId(0),
             ),
             cost: ManaCost::NoCost,
+            base_cost: None,
             activation_cost: None,
             activation_ability_index: None,
             target_constraints: vec![],
@@ -6539,6 +6620,7 @@ mod tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: PendingTrigger = serde_json::from_str(&json).unwrap();
@@ -6604,6 +6686,7 @@ mod tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         });
 
         let json = serde_json::to_string(&state).unwrap();

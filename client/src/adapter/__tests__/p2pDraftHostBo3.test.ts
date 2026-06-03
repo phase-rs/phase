@@ -6,7 +6,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // drive the real P2PDraftHost but overwrite its `adapter` field per-test, so
 // a no-op constructor mock is sufficient.
 vi.mock("../draft-adapter", () => ({
-  DraftAdapter: vi.fn().mockImplementation(() => ({})),
+  DraftAdapter: vi.fn().mockImplementation(function () {
+    return {};
+  }),
 }));
 
 import { P2PDraftHost } from "../p2p-draft-host";

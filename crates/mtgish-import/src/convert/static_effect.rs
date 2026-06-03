@@ -292,6 +292,7 @@ pub fn convert_permanent_rule(
         // CR 509.1b: Attack/block bare prohibitions/requirements.
         P::CantAttack => StaticMode::CantAttack,
         P::CantBlock => StaticMode::CantBlock,
+        P::CantCrew => StaticMode::CantCrew,
         P::CantAttackAlone => StaticMode::CantAttackAlone,
         P::CantBlockAlone => StaticMode::CantBlockAlone,
         P::MustAttack => StaticMode::MustAttack,

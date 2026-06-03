@@ -275,6 +275,9 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             GameEvent::MonarchChanged { player_id }
             | GameEvent::CityBlessingGained { player_id }
             | GameEvent::InitiativeTaken { player_id }
+            | GameEvent::AttractionOpened { player_id, .. }
+            | GameEvent::AttractionsRolledToVisit { player_id, .. }
+            | GameEvent::AttractionVisited { player_id, .. }
             | GameEvent::RingTemptsYou { player_id } => {
                 mark_public_state_player_dirty(state, *player_id);
             }
@@ -287,6 +290,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // Transform changes copiable values (Layer 1) and can flip statics
             // on/off; conservatively all-dirty.
             | GameEvent::Transformed { .. }
+            | GameEvent::Specialized { .. }
             | GameEvent::TurnedFaceUp { .. } => {
                 mark_public_state_all_dirty(state);
                 return;
@@ -343,6 +347,9 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::ClassLevelGained { .. }
             | GameEvent::DieRolled { .. }
             | GameEvent::CoinFlipped { .. }
+            // CR 103.1: starting-player contest carries no public-state delta;
+            // it is rendered from the structured event log, not derived state.
+            | GameEvent::StartingPlayerContest { .. }
             | GameEvent::RoomEntered { .. }
             | GameEvent::RoomDoorUnlocked { .. }
             | GameEvent::BecomesPlotted { .. }
