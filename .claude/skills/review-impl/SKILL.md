@@ -23,6 +23,11 @@ Skip checks CI already enforces:
 
 ## Universal Lenses
 
+Two gates lead every review; apply them before the rest.
+
+1. **Correct seam / location:** Is the change at the architecturally correct location — the layer/module/function the codebase's design says owns this responsibility — or a symptom-patch at the wrong seam that merely makes a test pass? A wrong-location fix is technical debt even when it works: it ossifies a dead or duplicate path and leaves the real seam (and the rest of the card class) untouched. This is the highest-priority check; a wrong seam is disqualifying no matter how clean the code looks. Name the correct seam in the finding.
+2. **Most idiomatic change at the seam:** Given the right seam, is this the implementation a principal engineer steeped in this repository would write — the established building block reused rather than re-implemented, an existing typed enum parameterized rather than a new `bool` or sibling variant, `nom` combinators composed rather than string dispatch? "Works and is in the right place" is not enough when a cleaner house idiom exists; a correct-but-unidiomatic change is a finding, not a style nit.
+
 - **Class vs single case:** Does the change cover a reusable class? Name at least three examples in that class. If there is only one, flag a special-case smell.
 - **Sibling coverage:** If one site in a class changed, name siblings that needed the same treatment and verify they were handled or intentionally unaffected.
 - **Test adequacy:** Ensure tests exercise the failure path and the building block, not only one card or a constructor shortcut that bypasses production wiring.

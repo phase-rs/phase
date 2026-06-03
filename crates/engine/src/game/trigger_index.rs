@@ -292,6 +292,12 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         // listen). Route to unclassified — cost is one consult per such card.
         TriggerMode::LandPlayed => return (keys, true),
 
+        // CR 601.1a + CR 701.18b: "play a card" fires on a SpellCast OR a LandPlayed event
+        // (`match_play_card`). Because it spans two distinct event keys, route
+        // to unclassified so the trigger is consulted for both — narrowing to a
+        // single TriggerEventKey would silently drop one of the two events.
+        TriggerMode::PlayCard => return (keys, true),
+
         // --- Equipment / aura ---
         TriggerMode::Attached | TriggerMode::Unattach => push(TriggerEventKey::AttachmentChanged),
 
