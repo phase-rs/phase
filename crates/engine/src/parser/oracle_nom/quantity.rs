@@ -74,7 +74,7 @@ pub fn parse_half_rounded(input: &str) -> OracleResult<'_, QuantityExpr> {
     parse_fraction_rounded(input)
 }
 
-fn parse_fraction_divisor(input: &str) -> OracleResult<'_, u32> {
+pub(crate) fn parse_fraction_divisor(input: &str) -> OracleResult<'_, u32> {
     alt((
         value(2, tag("half ")),
         value(3, alt((tag("a third "), tag("one third "), tag("third ")))),
@@ -355,7 +355,7 @@ fn quantity_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
 /// expressions. When absent (malformed text or upstream trimming), defaults
 /// to `Down` — the more common direction in actual Magic cards and a safe
 /// fallback for misparses.
-fn parse_rounding_suffix(input: &str) -> OracleResult<'_, RoundingMode> {
+pub(crate) fn parse_rounding_suffix(input: &str) -> OracleResult<'_, RoundingMode> {
     let (rest, rounding) = opt(alt((
         value(RoundingMode::Up, tag(", rounded up")),
         value(RoundingMode::Down, tag(", rounded down")),
