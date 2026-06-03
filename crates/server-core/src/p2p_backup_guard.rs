@@ -27,9 +27,15 @@ pub const MAX_P2P_SNAPSHOT_LEN: usize = 1024 * 1024;
 /// before persistence. `host_peer_id` reuses the same [`validate_token`] bound
 /// (`MAX_TOKEN_LEN`, plus control-character rejection) the WebSocket lobby path
 /// applies to the host peer id; `snapshot_json` is an opaque serialized blob, so
-/// it is bounded by byte length only.
+/// it is required and bounded by byte length only.
 pub fn guard_p2p_backup(host_peer_id: &str, snapshot_json: &str) -> Result<(), String> {
+    if host_peer_id.trim().is_empty() {
+        return Err("host_peer_id must not be empty".to_string());
+    }
     validate_token("host_peer_id", host_peer_id, MAX_TOKEN_LEN)?;
+    if snapshot_json.trim().is_empty() {
+        return Err("snapshot_json must not be empty".to_string());
+    }
     if snapshot_json.len() > MAX_P2P_SNAPSHOT_LEN {
         return Err(format!(
             "snapshot_json must be at most {MAX_P2P_SNAPSHOT_LEN} bytes"
@@ -55,6 +61,12 @@ mod tests {
     }
 
     #[test]
+    fn rejects_blank_host_peer_id() {
+        let err = guard_p2p_backup("  ", "{}").unwrap_err();
+        assert!(err.contains("host_peer_id"));
+    }
+
+    #[test]
     fn rejects_oversized_host_peer_id() {
         let oversized = "p".repeat(MAX_TOKEN_LEN + 1);
         let err = guard_p2p_backup(&oversized, "{}").unwrap_err();
@@ -71,6 +83,12 @@ mod tests {
     fn accepts_snapshot_at_limit() {
         let at_limit = "x".repeat(MAX_P2P_SNAPSHOT_LEN);
         assert!(guard_p2p_backup("peer", &at_limit).is_ok());
+    }
+
+    #[test]
+    fn rejects_blank_snapshot() {
+        let err = guard_p2p_backup("peer", "\n\t ").unwrap_err();
+        assert!(err.contains("snapshot_json"));
     }
 
     #[test]
