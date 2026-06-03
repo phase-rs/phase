@@ -49,6 +49,8 @@
     "volume": "Głośność"
   },
   "hostControl": {
+    "collapse": "Zwiń",
+    "expand": "Rozwiń panel gospodarza",
     "seatHost": "Gospodarz",
     "seatPlayer": "Gracz",
     "seatOpen": "Wolne",

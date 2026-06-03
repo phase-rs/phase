@@ -8,12 +8,13 @@
 //!   Each nonland creature with an everything counter on it is every creature
 //!   type.
 //!
-//! This drives the REAL trigger -> counter -> layer pipeline:
-//!   cast Omo (0-cost) -> resolves onto the battlefield -> ETB trigger fires
-//!   through `process_triggers` -> `WaitingFor::TriggerTargetSelection` over a
-//!   land slot and a creature slot -> `SelectTargets` places an `everything`
-//!   counter on each -> layer evaluation grants the land every land type and
-//!   the creature every creature type.
+//! This drives the REAL trigger -> counter -> layer pipeline via the
+//! opinionated cast harness: `runner.cast(omo).target_objects(..).resolve()`
+//! casts Omo (0-cost), resolves it onto the battlefield, fires its ETB trigger
+//! through `process_triggers`, walks the `TriggerTargetSelection` land + creature
+//! slots from the declared object intent, places an `everything` counter on each,
+//! and runs layer evaluation that grants the land every land type and the
+//! creature every creature type.
 //!
 //! NOT a shape test: no synthetic `pending_trigger`, no hand-rolled counters,
 //! no hand-built `WaitingFor`. The two `PutCounter` siblings, the counter
@@ -22,9 +23,7 @@
 //! CR 122.1 (counters) + CR 205.3i / CR 305.7 (every land type + mana abilities)
 //! + CR 205.3 (every creature type) + CR 601.2c / CR 603.3d (target selection).
 
-use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
 use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 
@@ -71,66 +70,34 @@ fn omo_etb_grants_all_land_and_creature_types_through_pipeline() {
         "Goblin".to_string(),
         "Sliver".to_string(),
     ];
-    let omo_card = runner.state().objects[&omo].card_id;
 
-    runner
-        .act(GameAction::CastSpell {
-            object_id: omo,
-            card_id: omo_card,
-            targets: vec![],
-        })
-        .expect("casting a 0-cost legendary creature should succeed");
-    // Resolve Omo onto the battlefield so its ETB trigger fires.
-    runner.advance_until_stack_empty();
+    // CR 601.2c / CR 603.3d: the harness casts Omo (0-cost, auto-paid), resolves
+    // it onto the battlefield, fires its ETB trigger, and walks the
+    // TriggerTargetSelection land + creature slots from the declared object
+    // intent (forest → land slot, bear → creature slot — object intent is
+    // consumed one per slot).
+    let outcome = runner.cast(omo).target_objects(&[forest, bear]).resolve();
 
-    // The ETB trigger must pause on target selection (land slot + creature slot).
+    // CR 122.1: both objects received an everything counter from the real
+    // resolution.
     assert!(
-        matches!(
-            runner.state().waiting_for,
-            WaitingFor::TriggerTargetSelection { .. }
-        ),
-        "Omo's ETB must pause on TriggerTargetSelection, got {:?}",
-        runner.state().waiting_for
-    );
-
-    // Select the land for the land slot and the creature for the creature slot.
-    runner
-        .act(GameAction::SelectTargets {
-            targets: vec![
-                engine::types::ability::TargetRef::Object(forest),
-                engine::types::ability::TargetRef::Object(bear),
-            ],
-        })
-        .expect("selecting a land and a creature target must succeed");
-    runner.advance_until_stack_empty();
-
-    // Both objects received an everything counter from the real resolution.
-    let forest_obj = runner.state().objects.get(&forest).expect("forest present");
-    assert!(
-        forest_obj
-            .counters
-            .get(&everything_counter())
-            .copied()
-            .unwrap_or(0)
-            >= 1,
+        outcome.counters(forest, everything_counter()) >= 1,
         "land should have an everything counter; counters = {:?}",
-        forest_obj.counters
+        outcome.state().objects[&forest].counters
     );
-    let bear_obj = runner.state().objects.get(&bear).expect("bear present");
     assert!(
-        bear_obj
-            .counters
-            .get(&everything_counter())
-            .copied()
-            .unwrap_or(0)
-            >= 1,
+        outcome.counters(bear, everything_counter()) >= 1,
         "creature should have an everything counter; counters = {:?}",
-        bear_obj.counters
+        outcome.state().objects[&bear].counters
     );
 
     // CR 205.3i + CR 305.7: the land is now every land type (spot-check a
     // spread of basic + nonbasic types) and gains a basic-land mana ability.
-    let forest_obj = runner.state().objects.get(&forest).expect("forest present");
+    let forest_obj = outcome
+        .state()
+        .objects
+        .get(&forest)
+        .expect("forest present");
     for name in [
         "Forest", "Island", "Swamp", "Mountain", "Plains", "Desert", "Gate", "Locus",
     ] {
@@ -143,8 +110,8 @@ fn omo_etb_grants_all_land_and_creature_types_through_pipeline() {
 
     // CR 205.3: the nonland creature is now every creature type — assert it
     // carries the game's global creature-type set.
-    let bear_obj = runner.state().objects.get(&bear).expect("bear present");
-    let all_creature_types = runner.state().all_creature_types.clone();
+    let bear_obj = outcome.state().objects.get(&bear).expect("bear present");
+    let all_creature_types = outcome.state().all_creature_types.clone();
     assert!(
         !all_creature_types.is_empty(),
         "game state must expose the global creature-type set"

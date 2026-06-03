@@ -866,6 +866,15 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // Digital-only Specialize: "specialize {cost}" alternative activation cost.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("specialize ").parse(text) {
+        let cost_str = rest.trim();
+        if !cost_str.is_empty() {
+            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            return Some(Keyword::Specialize(cost));
+        }
+    }
+
     // CR 702.87a: "level up {cost}" — two-word keyword name.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("level up ").parse(text) {
         let cost_str = rest.trim();
@@ -1200,7 +1209,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Outlast(_) => "outlast".to_string(),
         Keyword::Scavenge(_) => "scavenge".to_string(),
         Keyword::Fortify(_) => "fortify".to_string(),
-        Keyword::Prototype(_) => "prototype".to_string(),
+        Keyword::Prototype { .. } => "prototype".to_string(),
         Keyword::Plot(_) => "plot".to_string(),
         Keyword::Craft(_) => "craft".to_string(),
         Keyword::Offspring(_) => "offspring".to_string(),

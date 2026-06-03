@@ -111,6 +111,8 @@
   },
   "landing": {
     "title": "Draft",
+    "eyebrow": "Draft",
+    "description": "Fai un draft veloce contro l’IA, crea un cube oppure ospita un pod con gli amici.",
     "startNew": "Inizia nuovo",
     "quickDraft": {
       "title": "Quick Draft",

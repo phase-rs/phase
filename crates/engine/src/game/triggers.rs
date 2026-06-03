@@ -11110,6 +11110,68 @@ pub mod tests {
         );
     }
 
+    /// CR 601.2h + CR 603.4 + CR 202.3: Tokka & Rahzar's intervening-if
+    /// condition compares the mana actually spent on the triggering spell
+    /// against that same spell's mana value. This pins the detection-time
+    /// trigger-event plumbing for `ManaSpentToCast { TriggeringSpell }` and
+    /// `ObjectManaValue { EventSource }`.
+    #[test]
+    fn mana_spent_less_than_mana_value_condition_uses_triggering_spell() {
+        let mut state = setup();
+        let source = make_creature(&mut state, PlayerId(0), "Tokka & Rahzar", 3, 2);
+        let spell = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Test Spell".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.mana_cost = ManaCost::generic(4);
+        }
+
+        let condition = TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                    metric: crate::types::ability::CastManaSpentMetric::Total,
+                },
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: crate::types::ability::ObjectScope::EventSource,
+                },
+            },
+        };
+        let event = GameEvent::SpellCast {
+            card_id: CardId(2),
+            controller: PlayerId(1),
+            object_id: spell,
+        };
+
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 4;
+        assert!(
+            !check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            "spent 4 on mana value 4 must not satisfy a strict less-than condition"
+        );
+
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .mana_spent_to_cast_amount = 3;
+        assert!(
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(source), Some(&event)),
+            "spent 3 on mana value 4 must satisfy a strict less-than condition"
+        );
+    }
+
     /// CR 107.3 + CR 202.1 + CR 603.2c: "Whenever you cast your first spell with
     /// {X} in its mana cost each turn" — constraint check must:
     /// - fire on the first qualifying spell in `spells_cast_this_turn_by_player`

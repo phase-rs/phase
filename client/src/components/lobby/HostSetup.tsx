@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../../adapter/types";
@@ -7,7 +7,6 @@ import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../stores/multiplayerSt
 import type { AiSeatConfig, HostingSettings } from "../../stores/multiplayerStore";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { expandParsedDeck } from "../../services/deckParser";
-import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
 
 export type { AiSeatConfig };
@@ -53,6 +52,108 @@ const FFA_DECK_SIZE_OPTIONS = [60, 40] as const;
  * formats like Commander can still be hosted while 6-player FreeForAll
  * can't advertise an unreachable configuration. */
 const P2P_MAX_PEERS = 4;
+
+/** Uppercase field label + optional hint wrapper (mirrors the design mockup's
+ *  Host-setup `Field`). Pure presentation. */
+function Field({
+  label,
+  hint,
+  htmlFor,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  htmlFor?: string;
+  children: ReactNode;
+}) {
+  // A wrapping <label> would absorb the control's own text into its accessible
+  // name (breaking getByLabelText and screen-reader labels). Render the label as
+  // a sibling associated by htmlFor instead; fall back to a plain span for
+  // control groups (segmented buttons) that have no single labelable target.
+  return (
+    <div className="flex flex-col gap-1.5">
+      {htmlFor ? (
+        <label htmlFor={htmlFor} className="text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-fg-meta">
+          {label}
+        </label>
+      ) : (
+        <span className="text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-fg-meta">
+          {label}
+        </span>
+      )}
+      {children}
+      {hint && <span className="text-[11.5px] leading-4 text-fg-meta">{hint}</span>}
+    </div>
+  );
+}
+
+/** iOS-style toggle switch (mirrors the mockup's Host-setup `Toggle`). The
+ *  on-state accent follows the connection mode (emerald server / cyan P2P). */
+function Toggle({
+  on,
+  onChange,
+  accent,
+}: {
+  on: boolean;
+  onChange: (next: boolean) => void;
+  accent: "emerald" | "cyan";
+}) {
+  const onBg = accent === "cyan" ? "bg-cyan-400/50" : "bg-emerald-400/50";
+  const knob = on ? (accent === "cyan" ? "bg-cyan-200" : "bg-emerald-200") : "bg-slate-400";
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      onClick={() => onChange(!on)}
+      className={`flex h-6 w-[42px] shrink-0 items-center rounded-full p-0.5 transition-colors ${on ? onBg : "bg-white/12"}`}
+    >
+      <span className={`h-5 w-5 rounded-full transition-transform duration-150 ${knob} ${on ? "translate-x-[18px]" : ""}`} />
+    </button>
+  );
+}
+
+/** A label + description row with a trailing {@link Toggle} (the mockup's
+ *  privacy/timing option rows). */
+function OptionRow({
+  label,
+  desc,
+  on,
+  onChange,
+  accent,
+}: {
+  label: string;
+  desc?: string;
+  on: boolean;
+  onChange: (next: boolean) => void;
+  accent: "emerald" | "cyan";
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div className="min-w-0">
+        <div className="text-sm text-fg-card-body">{label}</div>
+        {desc && <div className="mt-0.5 text-xs text-fg-meta">{desc}</div>}
+      </div>
+      <Toggle on={on} onChange={onChange} accent={accent} />
+    </div>
+  );
+}
+
+/** Host (crown) and waiting/AI (bot) seat glyphs for the Player Seats panel. */
+function CrownGlyph({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
+      <path d="M3 7l4 4 5-6 5 6 4-4-1.5 11h-15L3 7Zm2.4 13h13.2v1.5H5.4V20Z" />
+    </svg>
+  );
+}
+function BotGlyph({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
+      <path d="M12 2a1.5 1.5 0 0 1 1.5 1.5V5H17a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3h3.5V3.5A1.5 1.5 0 0 1 12 2ZM9 10.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm6 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3ZM2 11h1.5v4H2a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1Zm18.5 0H22a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1h-1.5v-4Z" />
+    </svg>
+  );
+}
 
 export function HostSetup({
   onHost,
@@ -111,7 +212,6 @@ export function HostSetup({
   const [matchType, setMatchType] = useState<MatchType>(remembered?.matchType ?? "Bo1");
   const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>(remembered?.aiSeats ?? []);
   const [startWhenFull, setStartWhenFull] = useState(remembered?.startWhenFull ?? true);
-  const [ranked, setRanked] = useState(remembered?.ranked ?? false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const effectiveMatchType = playerCount === 2 ? matchType : "Bo1";
   const aiDeckCatalog = useAiDeckCatalog({
@@ -214,7 +314,9 @@ export function HostSetup({
       matchType: effectiveMatchType,
       isPublic,
       startWhenFull,
-      ranked,
+      // Ranked rating updates aren't implemented in the engine — the room is
+      // always casual. The transport field is retained for protocol parity.
+      ranked: false,
       aiSeats,
     });
     try {
@@ -230,7 +332,7 @@ export function HostSetup({
           ...(defaultAiDeck ? { deck: defaultAiDeck } : {}),
         })),
         startWhenFull,
-        ranked,
+        ranked: false,
         roomName: resolvedRoomName,
       });
       if (ok !== false) return;
@@ -252,104 +354,89 @@ export function HostSetup({
       )
     : FORMAT_OPTIONS;
 
+  // Shared field-input grammar (mockup Host-setup inputs).
+  const inp =
+    "w-full rounded-[12px] border border-hairline bg-black/28 px-3.5 py-2.5 text-sm text-white placeholder-gray-500 outline-none transition-colors focus:border-hairline-hover";
+  const segWrap = "flex rounded-[12px] bg-black/28 p-1 ring-1 ring-white/10";
+  const seg = (on: boolean, extra = "") =>
+    `flex-1 rounded-[9px] px-3 py-1.5 text-xs font-medium transition-colors ${
+      on ? "bg-white/10 text-white" : "text-fg-meta hover:text-slate-200"
+    } ${extra}`;
+  const formatMeta = availableFormats.find((f) => f.format === selectedFormat);
+  const submitDisabled =
+    hostDisabled || isSubmitting || hostingStatus !== "idle" || (aiSeats.length > 0 && !defaultAiDeck);
+
   return (
     <form
       onSubmit={(e) => { e.preventDefault(); void handleHost(); }}
-      className="relative z-10 flex w-full max-w-xl flex-col items-center gap-6"
+      className="relative z-10 flex w-full flex-col gap-5"
     >
-      <MenuPanel className="flex w-full flex-col gap-6">
-        <div className="space-y-2">
-          <h2 className="menu-display text-[1.9rem] leading-tight text-white">
-            {isP2P ? t("hostSetup.hostDirectMatch") : t("hostSetup.hostMatch")}
-          </h2>
-          {isP2P && (
-            <p className="text-sm leading-6 text-slate-400">
-              {t("hostSetup.p2pNotice")}
-            </p>
-          )}
-        </div>
+      {isP2P && (
+        <p className="max-w-2xl text-sm leading-6 text-slate-400">
+          {t("hostSetup.p2pNotice")}
+        </p>
+      )}
 
-        <div className="flex w-full flex-col gap-4">
-        {/* Room name — per-match label. Distinct from the player's name
-            (edited in the `PlayerIdentityBanner` above this form). Blank
-            falls back to the player's name on the server side. */}
-        <div>
-          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400">
-            {t("hostSetup.roomName")} <span className="text-slate-600">{t("hostSetup.optional")}</span>
-          </label>
-          <input
-            type="text"
-            value={roomName}
-            onChange={(e) => setRoomName(e.target.value)}
-            placeholder={
-              displayName
-                ? t("hostSetup.roomNameDefaultPlaceholder", { name: displayName })
-                : t("hostSetup.roomNamePlaceholder")
-            }
-            maxLength={40}
-            className="w-full rounded-[16px] bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
-          />
-          <p className="mt-1 text-[11px] text-slate-500">
-            {t("hostSetup.roomNameHelp")}
-            {displayName ? t("hostSetup.roomNameHelpDefault", { name: displayName }) : ""}
-          </p>
-        </div>
-
-        {/* Format selection -- grouped native <select>. Native is the
-            mobile/tablet UX win here: iOS/Android render full-screen
-            touch-optimized pickers from <select>, while a custom listbox
-            would have to reimplement keyboard avoidance, momentum scroll,
-            and 44/48px hit targets. <optgroup>s mirror the engine's
-            FormatGroup taxonomy. */}
-        <div>
-          <label
-            htmlFor="host-setup-format"
-            className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400"
+      {/* Two-column table-setup grammar (design mockup HostScreen): form panel
+          beside a sticky seat panel + primary CTA. Stacks to one column below lg. */}
+      <div className="grid w-full grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_260px] lg:items-start">
+        {/* ----- left: configuration form ----- */}
+        <div className="surface-card flex flex-col gap-4 rounded-panel border border-hairline p-5">
+          {/* Room name — per-match label, distinct from the player's name
+              (edited in the `PlayerIdentityBanner` above this form). Blank falls
+              back to the player's name on the server side. */}
+          <Field
+            label={`${t("hostSetup.roomName")} (${t("hostSetup.optional")})`}
+            htmlFor="host-setup-room"
+            hint={`${t("hostSetup.roomNameHelp")}${displayName ? t("hostSetup.roomNameHelpDefault", { name: displayName }) : ""}`}
           >
-            {t("hostSetup.format")}
-          </label>
-          <select
-            id="host-setup-format"
-            value={selectedFormat}
-            onChange={(e) => handleFormatSelect(e.target.value as GameFormat)}
-            className="w-full min-h-[48px] rounded-[16px] border border-white/10 bg-black/18 px-3 py-3 text-base font-medium text-white outline-none ring-1 ring-white/10 focus:border-white/18 focus:ring-white/20"
-          >
-            {(Object.keys(GROUP_ORDER) as FormatGroup[])
-              .sort((a, b) => GROUP_ORDER[a] - GROUP_ORDER[b])
-              .map((group) => {
-                const items = availableFormats.filter((f) => f.group === group);
-                if (items.length === 0) return null;
-                return (
-                  <optgroup key={group} label={group} className="bg-[#0a0f1b] text-slate-100">
-                    {items.map((opt) => (
-                      <option
-                        key={opt.format}
-                        value={opt.format}
-                        title={opt.description}
-                        className="bg-[#0a0f1b] text-slate-100"
-                      >
-                        {opt.label}
-                      </option>
-                    ))}
-                  </optgroup>
-                );
-              })}
-          </select>
-          {(() => {
-            const meta = availableFormats.find((f) => f.format === selectedFormat);
-            return meta ? (
-              <p className="mt-1.5 text-[11px] leading-4 text-slate-500">{meta.description}</p>
-            ) : null;
-          })()}
-        </div>
+            <input
+              id="host-setup-room"
+              type="text"
+              value={roomName}
+              onChange={(e) => setRoomName(e.target.value)}
+              placeholder={
+                displayName
+                  ? t("hostSetup.roomNameDefaultPlaceholder", { name: displayName })
+                  : t("hostSetup.roomNamePlaceholder")
+              }
+              maxLength={40}
+              className={inp}
+            />
+          </Field>
 
-        {/* Format-specific settings */}
-        <div className="rounded-[18px] border border-white/10 bg-black/18 p-3">
-          <div className="flex flex-col gap-3">
-            {/* Starting life */}
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-gray-400">{t("hostSetup.startingLife")}</span>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            {/* Format — grouped native <select>. Native is the mobile/tablet UX
+                win: iOS/Android render touch-optimized pickers from <select>.
+                <optgroup>s mirror the engine's FormatGroup taxonomy. */}
+            <Field label={t("hostSetup.format")} htmlFor="host-setup-format" hint={formatMeta?.description}>
+              <select
+                id="host-setup-format"
+                value={selectedFormat}
+                onChange={(e) => handleFormatSelect(e.target.value as GameFormat)}
+                className={`${inp} min-h-[44px] cursor-pointer font-medium`}
+              >
+                {(Object.keys(GROUP_ORDER) as FormatGroup[])
+                  .sort((a, b) => GROUP_ORDER[a] - GROUP_ORDER[b])
+                  .map((group) => {
+                    const items = availableFormats.filter((f) => f.group === group);
+                    if (items.length === 0) return null;
+                    return (
+                      <optgroup key={group} label={group} className="bg-[#0a0f1b] text-slate-100">
+                        {items.map((opt) => (
+                          <option key={opt.format} value={opt.format} title={opt.description} className="bg-[#0a0f1b] text-slate-100">
+                            {opt.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    );
+                  })}
+              </select>
+            </Field>
+
+            <Field label={t("hostSetup.startingLife")} htmlFor="host-setup-life">
               <input
+                id="host-setup-life"
                 type="number"
                 value={formatConfig.starting_life}
                 onChange={(e) =>
@@ -359,277 +446,186 @@ export function HostSetup({
                   }))
                 }
                 min={1}
-                className="w-16 rounded-xl bg-black/18 px-2 py-1 text-center text-sm text-white outline-none ring-1 ring-white/10 focus:ring-white/20"
+                className={inp}
               />
-            </div>
+            </Field>
+          </div>
 
-            {selectedFormat === "FreeForAll" && (
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-gray-400">{t("hostSetup.deckSize")}</span>
-                <div className="flex rounded-[14px] bg-black/18 p-0.5 ring-1 ring-white/10">
-                  {FFA_DECK_SIZE_OPTIONS.map((deckSize) => (
-                    <button
-                      type="button"
-                      key={deckSize}
-                      onClick={() => handleDeckSizeChange(deckSize)}
-                      className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-                        formatConfig.deck_size === deckSize
-                          ? "bg-white/10 text-white"
-                          : "text-gray-400 hover:text-gray-200"
-                      }`}
-                    >
-                      {deckSize}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             {/* Player count — hidden for fixed-seat formats like Standard
-                (min==max==2). Shown in both server and P2P modes when the
-                format supports a range; `maxPlayers` already clamps to the
-                P2P mesh ceiling so the P2P picker never offers a seat the
-                transport can't host. */}
+                (min==max==2). `maxPlayers` already clamps to the P2P mesh
+                ceiling so the picker never offers an unhostable seat. */}
             {formatConfig.min_players !== maxPlayers && (
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-gray-400">{t("hostSetup.players")}</span>
-                <div className="flex rounded-[14px] bg-black/18 p-0.5 ring-1 ring-white/10">
+              <Field label={t("hostSetup.players")}>
+                <div className={segWrap}>
                   {Array.from(
                     { length: maxPlayers - formatConfig.min_players + 1 },
                     (_, i) => formatConfig.min_players + i,
                   ).map((count) => (
-                    <button
-                      type="button"
-                      key={count}
-                      onClick={() => handlePlayerCountChange(count)}
-                      className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-                        playerCount === count
-                          ? "bg-white/10 text-white"
-                          : "text-gray-400 hover:text-gray-200"
-                      }`}
-                    >
+                    <button type="button" key={count} onClick={() => handlePlayerCountChange(count)} className={seg(playerCount === count)}>
                       {count}
                     </button>
                   ))}
                 </div>
-              </div>
+              </Field>
             )}
 
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-gray-400">{t("hostSetup.matchType")}</span>
-              <div className="flex rounded-[14px] bg-black/18 p-0.5 ring-1 ring-white/10">
-                <button
-                  type="button"
-                  onClick={() => setMatchType("Bo1")}
-                  className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-                    matchType === "Bo1"
-                      ? "bg-white/10 text-white"
-                      : "text-gray-400 hover:text-gray-200"
-                  }`}
-                >
+            <Field label={t("hostSetup.matchType")}>
+              <div className={segWrap}>
+                <button type="button" onClick={() => setMatchType("Bo1")} className={seg(matchType === "Bo1")}>
                   {t("hostSetup.bo1")}
                 </button>
                 <button
                   type="button"
                   onClick={() => setMatchType("Bo3")}
                   disabled={playerCount !== 2}
-                  className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
-                    matchType === "Bo3"
-                      ? "bg-white/10 text-white"
-                      : "text-gray-400 hover:text-gray-200"
-                  } ${playerCount !== 2 ? "cursor-not-allowed opacity-40" : ""}`}
+                  className={seg(matchType === "Bo3", playerCount !== 2 ? "cursor-not-allowed opacity-40" : "")}
                 >
                   {t("hostSetup.bo3")}
                 </button>
               </div>
-            </div>
-            {playerCount !== 2 && (
-              <p className="text-xs text-gray-500">{t("hostSetup.bo3Note")}</p>
-            )}
-
-            {/* Commander damage threshold (Commander only) */}
-            {formatConfig.commander_damage_threshold != null && (
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-gray-400">{t("hostSetup.commanderDamage")}</span>
-                <input
-                  type="number"
-                  value={formatConfig.commander_damage_threshold ?? 21}
-                  onChange={(e) =>
-                    setLocalFormatConfig((prev) => ({
-                      ...prev,
-                      commander_damage_threshold: Math.max(1, parseInt(e.target.value) || 21),
-                    }))
-                  }
-                  min={1}
-                  className="w-16 rounded-xl bg-black/18 px-2 py-1 text-center text-sm text-white outline-none ring-1 ring-white/10 focus:ring-white/20"
-                />
-              </div>
-            )}
+            </Field>
           </div>
-        </div>
+          {playerCount !== 2 && <p className="-mt-1 text-xs text-fg-meta">{t("hostSetup.bo3Note")}</p>}
 
-        {/* AI seat configuration */}
-        {playerCount > 1 && (
-          <div>
-            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400">
-              {t("hostSetup.playerSeats")}
-            </label>
-            <div className="flex flex-col gap-1.5">
-              {/* Seat 0 is always the host */}
-              <div className="flex items-center gap-2 rounded-[16px] border border-white/10 bg-black/18 px-3 py-2">
-                <span className="text-xs font-medium text-emerald-400">{t("hostSetup.seat", { number: 1 })}</span>
-                <span className="flex-1 text-xs text-gray-300">{t("hostSetup.youHost")}</span>
+          {/* Free-for-all deck size (FFA only) */}
+          {selectedFormat === "FreeForAll" && (
+            <Field label={t("hostSetup.deckSize")}>
+              <div className={segWrap}>
+                {FFA_DECK_SIZE_OPTIONS.map((deckSize) => (
+                  <button type="button" key={deckSize} onClick={() => handleDeckSizeChange(deckSize)} className={seg(formatConfig.deck_size === deckSize)}>
+                    {deckSize}
+                  </button>
+                ))}
               </div>
-              {/* Seats 1..playerCount-1 */}
-              {Array.from({ length: playerCount - 1 }, (_, i) => i + 1).map((seatIndex) => {
-                const aiSeat = aiSeats.find((s) => s.seatIndex === seatIndex);
-                return (
-                  <div
-                    key={seatIndex}
-                    className="flex items-center gap-2 rounded-[16px] border border-white/10 bg-black/18 px-3 py-2"
-                  >
-                    <span className="text-xs font-medium text-gray-400">{t("hostSetup.seat", { number: seatIndex + 1 })}</span>
-                    <button
-                      type="button"
-                      onClick={() => toggleAiSeat(seatIndex)}
-                      className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${
-                        aiSeat
-                          ? "bg-amber-500/20 text-amber-300"
-                          : "bg-cyan-500/20 text-cyan-300"
-                      }`}
-                    >
-                      {aiSeat ? t("hostSetup.ai") : t("hostSetup.human")}
-                    </button>
-                    {aiSeat && (
-                      <select
-                        value={aiSeat.difficulty}
-                        onChange={(e) => setAiDifficulty(seatIndex, e.target.value)}
-                        className="rounded bg-gray-700 px-1.5 py-0.5 text-xs text-white outline-none"
-                      >
-                        {DIFFICULTY_OPTIONS.map((d) => (
-                          <option
-                            key={d}
-                            value={d}
-                            className="bg-[#0a0f1b] text-slate-100"
-                          >
-                            {d}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                    {!aiSeat && (
-                      <span className="flex-1 text-right text-xs text-gray-500">
-                        {t("hostSetup.waitingForPlayer")}
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
+            </Field>
+          )}
 
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={startWhenFull}
-            onChange={(e) => setStartWhenFull(e.target.checked)}
-            className={isP2P ? "accent-cyan-500" : "accent-emerald-500"}
-          />
-          <span className="text-sm text-gray-300">{t("hostSetup.startWhenFull")}</span>
-        </label>
+          {/* Commander damage threshold (Commander only) */}
+          {formatConfig.commander_damage_threshold != null && (
+            <Field label={t("hostSetup.commanderDamage")} htmlFor="host-setup-cmd-dmg">
+              <input
+                id="host-setup-cmd-dmg"
+                type="number"
+                value={formatConfig.commander_damage_threshold ?? 21}
+                onChange={(e) =>
+                  setLocalFormatConfig((prev) => ({
+                    ...prev,
+                    commander_damage_threshold: Math.max(1, parseInt(e.target.value) || 21),
+                  }))
+                }
+                min={1}
+                className={inp}
+              />
+            </Field>
+          )}
 
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={ranked}
-            onChange={(e) => setRanked(e.target.checked)}
-            className={isP2P ? "accent-cyan-500" : "accent-emerald-500"}
-          />
-          <span className="text-sm text-gray-300">{t("hostSetup.ranked")}</span>
-        </label>
+          <div className="border-t border-hairline-strong" />
 
-        {/* List in lobby (server mode only) */}
-        {!isP2P && (
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={isPublic}
-              onChange={(e) => setIsPublic(e.target.checked)}
-              className="accent-emerald-500"
-            />
-            <span className="text-sm text-gray-300">{t("hostSetup.listInLobby")}</span>
-          </label>
-        )}
-
-        {/* Sandbox mode — capability flag, orthogonal to format. When enabled
-            at game creation, the host can submit debug actions and may grant
-            permission to other players. Off by default. Immutable for the
-            life of the session. */}
-        <div>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={formatConfig.allow_debug_actions}
-              onChange={(e) =>
-                setLocalFormatConfig((prev) => ({
-                  ...prev,
-                  allow_debug_actions: e.target.checked,
-                }))
-              }
-              className="accent-amber-500"
-            />
-            <span className="text-sm text-gray-300">
-              {t("hostSetup.sandboxMode")}
-            </span>
-          </label>
-          <p className="mt-1 pl-6 text-[11px] leading-4 text-slate-500">
-            {t("hostSetup.sandboxModeHelp")}
-          </p>
-        </div>
-
-        {/* Password toggle and input */}
-        <div>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={showPassword}
-              onChange={(e) => {
-                setShowPassword(e.target.checked);
-                if (!e.target.checked) setPassword("");
-              }}
-              className={isP2P ? "accent-cyan-500" : "accent-emerald-500"}
-            />
-            <span className="text-sm text-gray-300">{t("hostSetup.setPassword")}</span>
-          </label>
-          {showPassword && (
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={t("hostSetup.passwordPlaceholder")}
-              maxLength={32}
-              className="mt-2 w-full rounded-[16px] bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
+          {/* Privacy / timing options — iOS-toggle rows (design mockup). */}
+          {!isP2P && (
+            <OptionRow
+              label={t("hostSetup.listInLobby")}
+              on={isPublic}
+              onChange={setIsPublic}
+              accent={accentTone}
             />
           )}
+          <OptionRow label={t("hostSetup.startWhenFull")} on={startWhenFull} onChange={setStartWhenFull} accent={accentTone} />
+          {/* Sandbox mode — capability flag, orthogonal to format; lets the host
+              submit debug actions. Off by default; immutable for the session. */}
+          <OptionRow
+            label={t("hostSetup.sandboxMode")}
+            desc={t("hostSetup.sandboxModeHelp")}
+            on={formatConfig.allow_debug_actions}
+            onChange={(v) => setLocalFormatConfig((prev) => ({ ...prev, allow_debug_actions: v }))}
+            accent={accentTone}
+          />
+          <div className="flex flex-col gap-2.5">
+            <OptionRow
+              label={t("hostSetup.setPassword")}
+              on={showPassword}
+              onChange={(v) => {
+                setShowPassword(v);
+                if (!v) setPassword("");
+              }}
+              accent={accentTone}
+            />
+            {showPassword && (
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={t("hostSetup.passwordPlaceholder")}
+                maxLength={32}
+                className={inp}
+              />
+            )}
+          </div>
         </div>
 
-      </div>
+        {/* ----- right: seat panel + primary CTA (sticky on lg) ----- */}
+        <div className="flex flex-col gap-4 lg:sticky lg:top-4">
+          {playerCount > 1 && (
+            <div className="surface-card rounded-panel border border-hairline p-4">
+              <div className="mb-3 text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-fg-meta">
+                {t("hostSetup.playerSeats")}
+              </div>
+              <div className="flex flex-col gap-2">
+                {/* Seat 0 is always the host */}
+                <div className="flex items-center gap-2.5 rounded-[12px] border border-hairline bg-black/20 px-3 py-2">
+                  <span className="w-3.5 shrink-0 text-center font-mono text-[11px] text-fg-meta">1</span>
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[9px] border border-ember/50 bg-ember/15 text-ember-soft">
+                    <CrownGlyph />
+                  </span>
+                  <span className="text-[13px] font-medium text-amber-200">{t("hostSetup.youHost")}</span>
+                </div>
+                {/* Seats 1..playerCount-1 */}
+                {Array.from({ length: playerCount - 1 }, (_, i) => i + 1).map((seatIndex) => {
+                  const aiSeat = aiSeats.find((s) => s.seatIndex === seatIndex);
+                  return (
+                    <div key={seatIndex} className="flex items-center gap-2.5 rounded-[12px] border border-hairline bg-black/20 px-3 py-2">
+                      <span className="w-3.5 shrink-0 text-center font-mono text-[11px] text-fg-meta">{seatIndex + 1}</span>
+                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[9px] border border-hairline bg-white/5 text-fg-meta">
+                        <BotGlyph />
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => toggleAiSeat(seatIndex)}
+                        className={`rounded-badge px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                          aiSeat ? "bg-amber-500/20 text-amber-300" : "bg-cyan-500/20 text-cyan-300"
+                        }`}
+                      >
+                        {aiSeat ? t("hostSetup.ai") : t("hostSetup.human")}
+                      </button>
+                      {aiSeat ? (
+                        <select
+                          value={aiSeat.difficulty}
+                          onChange={(e) => setAiDifficulty(seatIndex, e.target.value)}
+                          className="ml-auto rounded-[8px] border border-hairline bg-black/30 px-1.5 py-1 text-[11px] text-white outline-none"
+                        >
+                          {DIFFICULTY_OPTIONS.map((d) => (
+                            <option key={d} value={d} className="bg-[#0a0f1b] text-slate-100">
+                              {d}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="ml-auto text-[11px] text-fg-meta">{t("hostSetup.waitingForPlayer")}</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
-        <div className="flex justify-end gap-3">
-          <button
-            type="button"
-            onClick={onBack}
-            className={menuButtonClass({ tone: "neutral", size: "sm" })}
-          >
-            {t("hostSetup.back")}
-          </button>
           <button
             type="submit"
-            disabled={hostDisabled || isSubmitting || hostingStatus !== "idle" || (aiSeats.length > 0 && !defaultAiDeck)}
+            disabled={submitDisabled}
             title={hostDisabled ? hostDisabledReason : undefined}
-            aria-disabled={hostDisabled || isSubmitting || hostingStatus !== "idle" || (aiSeats.length > 0 && !defaultAiDeck) || undefined}
-            className={`${menuButtonClass({ tone: accentTone, size: "md" })} disabled:cursor-not-allowed disabled:opacity-50`}
+            aria-disabled={submitDisabled || undefined}
+            className={`${menuButtonClass({ tone: accentTone, size: "md" })} w-full disabled:cursor-not-allowed disabled:opacity-50`}
           >
             {isSubmitting || hostingStatus !== "idle"
               ? t("hostSetup.opening")
@@ -637,8 +633,15 @@ export function HostSetup({
                 ? t("hostSetup.hostP2PGame")
                 : t("hostSetup.hostGame")}
           </button>
+          <button
+            type="button"
+            onClick={onBack}
+            className={`${menuButtonClass({ tone: "neutral", size: "sm" })} w-full`}
+          >
+            {t("hostSetup.back")}
+          </button>
         </div>
-      </MenuPanel>
+      </div>
     </form>
   );
 }

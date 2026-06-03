@@ -142,15 +142,6 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
           SANDBOX
         </span>
       )}
-      {game.is_ranked === true && (
-        <span
-          className="flex-shrink-0 rounded bg-rose-500/20 px-1.5 py-0.5 text-xs font-semibold text-rose-300"
-          title={t("gameListItem.rankedBadgeTitle")}
-        >
-          {t("gameListItem.rankedBadge")}
-        </span>
-      )}
-
       {/* Room title and metadata. When the host set an explicit room name
           we show it as the primary title and demote the host's player name
           to the secondary line; otherwise fall back to showing the player

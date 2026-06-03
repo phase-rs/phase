@@ -624,6 +624,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ChooseDungeonRoom { options, .. } => options
             .first()
             .map(|&room_index| GameAction::ChooseDungeonRoom { room_index }),
+        WaitingFor::SpecializeColor { options, .. } => options
+            .first()
+            .copied()
+            .map(|color| GameAction::ChooseSpecializeColor { color }),
 
         // Paradigm: pass.
         WaitingFor::CastOffer {
