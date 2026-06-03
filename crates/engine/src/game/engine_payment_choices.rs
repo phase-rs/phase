@@ -20,6 +20,7 @@ use super::engine::{
 use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::mana_abilities;
 use super::restrictions;
+use super::triggers;
 use super::zones;
 
 pub(super) fn handle_optional_effect_choice(
@@ -711,11 +712,22 @@ pub(super) fn handle_unless_payment(
         // when the unless prompt was first surfaced (`effects::mod` strips
         // it before sending the pending effect into `WaitingFor`), so no
         // further stripping is needed here.
+        let events_before = events.len();
         let previous_trigger_event = state.current_trigger_event.clone();
         state.current_trigger_event = trigger_event.clone();
         let result = effects::resolve_ability_chain(state, &ability, events, 0);
         state.current_trigger_event = previous_trigger_event;
         result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+        if events.len() > events_before {
+            let resolved_events: Vec<_> = events[events_before..].to_vec();
+            // CR 603.2: the declined unless-effect may create normal trigger
+            // events while this resume path bypasses run_post_action_pipeline.
+            // Scan only the events produced by the resolved effect so
+            // sacrifice/dies observers fire without reprocessing earlier
+            // payment events.
+            triggers::process_triggers(state, &resolved_events);
+        }
 
         // CR 610.3 + #783: The unless-payment resume bypasses
         // `run_post_action_pipeline` (see the inline-scan note in

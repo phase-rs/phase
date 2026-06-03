@@ -12,7 +12,7 @@
 //!
 //! After the #495 fix and the bare-anaphoric-possessive classifier fix (Yuriko,
 //! the Tiger's Shadow / Dark Confidant class — `classify_possessive_referent`
-//! in `parser/oracle_quantity.rs`), exactly **244** cards in the exported card
+//! in `parser/oracle_quantity.rs`), exactly **258** cards in the exported card
 //! data retain a runtime `ObjectScope::Anaphoric` in a `DealDamage` /
 //! `GainLife` / `LoseLife` (or similar) amount. This test holds that set as a
 //! sorted constant and fails if a card leaks in or out of it — a tripwire,
@@ -334,6 +334,7 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "sin prodder",
     "singe-mind ogre",
     "sister hospitaller",
+    "sly spy",
     "solitude",
     "sorin the mirthless",
     "sorin, grim nemesis",
@@ -430,7 +431,7 @@ fn anaphoric_scope_set_is_frozen() {
         leaked.is_empty(),
         "New card(s) leaked a runtime ObjectScope::Anaphoric and are not in the \
          frozen allowlist: {leaked:?}. Classify each: a legitimate new \
-         category-1/2/3 case (see module doc) should be added to \
+         category-1/2/3/4 case (see module doc) should be added to \
          ANAPHORIC_SCOPE_CARDS; a real regression must be fixed in the parser. \
          Categories 2 & 3 are tracked in #512, Dark Confidant's reveal-referent \
          in #511."
