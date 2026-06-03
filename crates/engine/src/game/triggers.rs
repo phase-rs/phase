@@ -11981,9 +11981,7 @@ pub mod tests {
         );
         {
             let obj = state.objects.get_mut(&dino).unwrap();
-            obj.card_types
-                .core_types
-                .push(CoreType::Creature);
+            obj.card_types.core_types.push(CoreType::Creature);
             obj.card_types.subtypes.push("Dinosaur".to_string());
         }
         let other = create_object(
@@ -11995,9 +11993,7 @@ pub mod tests {
         );
         {
             let obj = state.objects.get_mut(&other).unwrap();
-            obj.card_types
-                .core_types
-                .push(CoreType::Creature);
+            obj.card_types.core_types.push(CoreType::Creature);
             obj.card_types.subtypes.push("Soldier".to_string());
         }
         let event = GameEvent::AttackersDeclared {
@@ -12036,9 +12032,7 @@ pub mod tests {
         );
         {
             let obj = state.objects.get_mut(&dino2).unwrap();
-            obj.card_types
-                .core_types
-                .push(CoreType::Creature);
+            obj.card_types.core_types.push(CoreType::Creature);
             obj.card_types.subtypes.push("Dinosaur".to_string());
         }
         let two_dinos = GameEvent::AttackersDeclared {
