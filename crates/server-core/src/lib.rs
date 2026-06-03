@@ -37,7 +37,9 @@ pub use game_reconnect_guard::guard_game_reconnect;
 pub use legacy_deck_guard::guard_legacy_deck;
 pub use legacy_join_guard::guard_legacy_join_game;
 pub use lobby::LobbyManager;
-pub use lookup_join_guard::guard_lookup_join_target;
+pub use lookup_join_guard::{
+    guard_lookup_join_target, guard_lookup_join_target_inbound, LookupJoinTargetInbound,
+};
 pub use persist::{PersistedLobbyMeta, PersistedSession};
 pub use protocol::{
     AiSeatRequest, ClientMessage, DeckChoice, DeckData, LobbyGame, PlayerSlotInfo, SeatKind,
