@@ -1,6 +1,7 @@
 use crate::types::keywords::KeywordKind;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 /// Counter types serialize as flat strings so they can be used as JSON map keys
 /// in `HashMap<CounterType, u32>`. Without this, `Generic("quest")` would serialize
@@ -279,9 +280,34 @@ fn format_counter_delta(value: i32, paired_value: i32) -> String {
     }
 }
 
+/// CR 122.1: A counter with count zero is treated as absent. Stale map keys must
+/// not satisfy "has a counter" checks (e.g. proliferate CR 701.34a).
+pub fn has_positive_counters(counters: &HashMap<CounterType, u32>) -> bool {
+    counters.values().any(|&count| count > 0)
+}
+
+/// Counter types currently present on an object or LKI snapshot (count > 0 only).
+pub fn positive_counter_types(counters: &HashMap<CounterType, u32>) -> Vec<CounterType> {
+    counters
+        .iter()
+        .filter(|(_, &count)| count > 0)
+        .map(|(ct, _)| ct.clone())
+        .collect()
+}
+
+/// CR 122.1: Drop zero-count entries after removal so counter presence stays
+/// aligned with rules text and downstream eligibility checks.
+pub fn prune_zero_counters(counters: &mut HashMap<CounterType, u32>) {
+    counters.retain(|_, count| *count > 0);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_counter_type, try_parse_counter_type, CounterType};
+    use super::{
+        has_positive_counters, parse_counter_type, positive_counter_types, prune_zero_counters,
+        try_parse_counter_type, CounterType,
+    };
+    use std::collections::HashMap;
 
     #[test]
     fn parses_legacy_power_toughness_counter_deltas() {
@@ -363,5 +389,35 @@ mod tests {
         let back: CounterType = serde_json::from_str(&json).unwrap();
         assert_eq!(back, CounterType::Age);
         assert_eq!(c.power_toughness_delta(), None);
+    }
+
+    #[test]
+    fn has_positive_counters_ignores_zero_entries() {
+        let mut counters = HashMap::new();
+        counters.insert(CounterType::Plus1Plus1, 0);
+        assert!(!has_positive_counters(&counters));
+        counters.insert(CounterType::Lore, 1);
+        assert!(has_positive_counters(&counters));
+    }
+
+    #[test]
+    fn positive_counter_types_skips_zero_entries() {
+        let mut counters = HashMap::new();
+        counters.insert(CounterType::Plus1Plus1, 0);
+        counters.insert(CounterType::Generic("charge".to_string()), 2);
+        assert_eq!(
+            positive_counter_types(&counters),
+            vec![CounterType::Generic("charge".to_string())]
+        );
+    }
+
+    #[test]
+    fn prune_zero_counters_drops_stale_keys() {
+        let mut counters = HashMap::new();
+        counters.insert(CounterType::Plus1Plus1, 0);
+        counters.insert(CounterType::Stun, 1);
+        prune_zero_counters(&mut counters);
+        assert!(!counters.contains_key(&CounterType::Plus1Plus1));
+        assert_eq!(counters.get(&CounterType::Stun), Some(&1));
     }
 }
