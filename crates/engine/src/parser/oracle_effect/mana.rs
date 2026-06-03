@@ -730,32 +730,20 @@ pub(super) fn apply_where_x_count_expression(
             },
             Some(expression),
         ) if name.eq_ignore_ascii_case("X") => {
-            let parsed_count = parse_mana_where_x_count_expression(expression);
-            let target = parsed_count
-                .as_ref()
-                .and_then(|_| where_x_expression_target_filter(expression));
-            let count = parsed_count.unwrap_or_else(|| QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: expression.to_string(),
+            if let Some(count) = super::parse_where_x_quantity_expression(expression) {
+                return (count, where_x_expression_target_filter(expression));
+            }
+            (
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: expression.to_string(),
+                    },
                 },
-            });
-            (count, target)
+                None,
+            )
         }
         _ => (count, None),
     }
-}
-
-/// CR 106.1: Recognize where-X count expressions for mana effects.
-fn parse_mana_where_x_count_expression(expression: &str) -> Option<QuantityExpr> {
-    super::parse_where_x_quantity_expression(expression).or_else(|| {
-        let lower = expression.to_ascii_lowercase();
-        super::parse_where_x_quantity_expression(&lower).or_else(|| {
-            let (clause, _) = tag::<_, _, OracleError<'_>>("the number of ")
-                .parse(lower.as_str())
-                .ok()?;
-            crate::parser::oracle_quantity::parse_for_each_clause_expr(clause)
-        })
-    })
 }
 
 /// CR 115.1: Extract target player filters from where-X expressions.
