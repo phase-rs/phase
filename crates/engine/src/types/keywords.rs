@@ -870,8 +870,7 @@ pub enum Keyword {
     /// total cost is reduced by the sacrificed permanent's mana cost (CR 702.48c),
     /// and you may cast this spell any time you could cast an instant. Carries
     /// the canonical subtype string (e.g. "Spirit", "Dragon"). Runtime behavior
-    /// is fully wired: timing unlock, sacrifice selection, and cost reduction via
-    /// `effective_offering_additional_cost` / `apply_offering_cost_reduction` in
+    /// is fully wired: timing unlock, sacrifice selection, and cost reduction in
     /// `casting_costs.rs`.
     Offering(String),
 

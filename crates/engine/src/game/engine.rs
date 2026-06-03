@@ -1837,7 +1837,16 @@ fn apply_action(
         ) => match resume {
             CostResume::Spell {
                 spell: pending_cast,
-            } => match kind {
+            }
+            | CostResume::SpellCost {
+                spell: pending_cast,
+                ..
+            } => {
+                let paid_cost = match resume {
+                    CostResume::SpellCost { cost, .. } => Some(cost.as_ref()),
+                    _ => None,
+                };
+                match kind {
                 PayCostKind::Discard => engine_casting::handle_discard_for_cost(
                     state,
                     *player,
@@ -1851,6 +1860,7 @@ fn apply_action(
                     state,
                     *player,
                     *pending_cast.clone(),
+                    paid_cost,
                     (*min_count, *count),
                     choices,
                     &chosen,
@@ -1927,7 +1937,8 @@ fn apply_action(
                         "ExileFromManaZone cost cannot resume a spell cast".into(),
                     ));
                 }
-            },
+                }
+            }
             CostResume::ManaAbility {
                 mana_ability: pending_mana_ability,
             } => match kind {
@@ -1989,6 +2000,10 @@ fn apply_action(
                 resume:
                     CostResume::Spell {
                         spell: pending_cast,
+                    }
+                    | CostResume::SpellCost {
+                        spell: pending_cast,
+                        ..
                     },
                 ..
             },
@@ -10576,7 +10591,6 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
-            offering_sacrifice: None,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),
@@ -10958,7 +10972,6 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
-            offering_sacrifice: None,
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),

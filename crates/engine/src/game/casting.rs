@@ -3802,7 +3802,10 @@ fn shard_reduction_color(shard: ManaCostShard) -> Option<ManaColor> {
     }
 }
 
-fn cost_shard_matches_reduction(cost_shard: ManaCostShard, reduction: ManaCostShard) -> bool {
+pub(super) fn cost_shard_matches_reduction(
+    cost_shard: ManaCostShard,
+    reduction: ManaCostShard,
+) -> bool {
     shard_reduction_color(reduction).is_some_and(|color| cost_shard.contributes_to(color))
         || cost_shard == reduction
 }
@@ -6672,19 +6675,18 @@ fn continue_with_prepared(
         // When cast_timing_permission == Offering, the player used Offering to unlock
         // instant-speed timing and is required to pay the sacrifice. Otherwise it is
         // optional (sorcery-speed cast with optional Offering).
-        if let Some(offering_cost) =
-            casting_costs::effective_offering_additional_cost(state, player, prepared.object_id)
+        if let Some(offering_quality) =
+            casting_costs::effective_offering_quality(state, player, prepared.object_id)
         {
+            let offering_cost = casting_costs::effective_offering_additional_cost(
+                state,
+                player,
+                prepared.object_id,
+            )
+            .expect("offering quality implies offering additional cost");
             let required = prepared.cast_timing_permission == Some(CastTimingPermission::Offering);
             if required {
                 // CR 702.48b: Required when cast used instant-speed timing via Offering.
-                let AbilityCost::Sacrifice { target, count } = (match &offering_cost {
-                    AdditionalCost::Optional { cost, .. } => cost,
-                    _ => unreachable!("offering_cost is always Optional"),
-                })
-                .clone() else {
-                    unreachable!("offering cost is always a Sacrifice")
-                };
                 return casting_costs::begin_required_cost_before_targets(
                     state,
                     player,
@@ -6693,7 +6695,7 @@ fn continue_with_prepared(
                     resolved,
                     prepared.mana_cost,
                     Some(prepared.base_mana_cost.clone()),
-                    AbilityCost::Sacrifice { target, count },
+                    casting_costs::offering_sacrifice_cost(&offering_quality),
                     prepared.casting_variant,
                     prepared.cast_timing_permission,
                     prepared

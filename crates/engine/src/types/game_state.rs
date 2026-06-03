@@ -1034,14 +1034,6 @@ pub struct PendingCast {
     pub cancel_restore_prepared_source: Option<ObjectId>,
     #[serde(default)]
     pub payment_mode: CastPaymentMode,
-    /// CR 702.48b: ObjectId of the permanent declared for Offering sacrifice.
-    /// Set when the player accepts the Offering additional cost and chooses which
-    /// qualifying permanent to sacrifice; used by `apply_offering_cost_reduction`
-    /// to read the permanent's mana cost before it leaves the battlefield so the
-    /// spell's total cost can be reduced per CR 702.48c. `None` when the Offering
-    /// was declined or the spell has no Offering keyword.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offering_sacrifice: Option<ObjectId>,
 }
 
 fn default_origin_zone() -> Zone {
@@ -1089,7 +1081,6 @@ impl PendingCast {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
-            offering_sacrifice: None,
         }
     }
 
@@ -1758,6 +1749,11 @@ pub enum CostResume {
     Spell {
         #[serde(rename = "Spell")]
         spell: Box<PendingCast>,
+    },
+    SpellCost {
+        #[serde(rename = "Spell")]
+        spell: Box<PendingCast>,
+        cost: Box<AbilityCost>,
     },
     ManaAbility {
         #[serde(rename = "ManaAbility")]
@@ -3379,6 +3375,10 @@ impl WaitingFor {
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
+                }
+                | CostResume::SpellCost {
+                    spell: pending_cast,
+                    ..
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. } => None,
             },
@@ -3405,6 +3405,10 @@ impl WaitingFor {
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
+                }
+                | CostResume::SpellCost {
+                    spell: pending_cast,
+                    ..
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. } => None,
             },
@@ -5967,7 +5971,6 @@ mod tests {
                 convoked_creatures: Vec::new(),
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
-                offering_sacrifice: None,
             })
         }
 
@@ -6293,7 +6296,6 @@ mod tests {
             convoked_creatures: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
-            offering_sacrifice: None,
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),

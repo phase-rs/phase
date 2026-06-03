@@ -21,7 +21,7 @@ impl SacrificeValuePolicy {
             ctx.decision.waiting_for,
             WaitingFor::PayCost {
                 kind: PayCostKind::Sacrifice,
-                resume: CostResume::Spell { .. },
+                resume: CostResume::Spell { .. } | CostResume::SpellCost { .. },
                 ..
             } | WaitingFor::WardSacrificeChoice { .. }
         ) {
