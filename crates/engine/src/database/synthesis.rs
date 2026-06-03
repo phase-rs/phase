@@ -216,6 +216,28 @@ impl KeywordTriggerInstaller {
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
             Keyword::Renown(n) => vec![build_renown_trigger(*n)],
             Keyword::Mentor => vec![build_mentor_trigger()],
+            // CR 702.45a: Bushido N — "Whenever this creature blocks or becomes
+            // blocked, it gets +N/+N until end of turn." Two triggers because a
+            // creature blocks (as a blocker) XOR becomes blocked (as an
+            // attacker) in a given combat; modeling both modes covers either
+            // role. CR 702.45b: each instance triggers separately, satisfied by
+            // `triggers_for` being invoked per keyword instance.
+            Keyword::Bushido(n) => build_bushido_triggers(*n),
+            // CR 702.91a: Battle cry — "Whenever this creature attacks, each
+            // other attacking creature gets +1/+0 until end of turn."
+            Keyword::Battlecry => vec![build_battle_cry_trigger()],
+            // CR 702.25a: Flanking — "Whenever this creature becomes blocked by
+            // a creature without flanking, the blocking creature gets -1/-1
+            // until end of turn."
+            Keyword::Flanking => vec![build_flanking_trigger()],
+            // CR 702.23a: Rampage N — "Whenever this creature becomes blocked,
+            // it gets +N/+N until end of turn for each creature blocking it
+            // beyond the first."
+            Keyword::Rampage(n) => vec![build_rampage_trigger(*n)],
+            // CR 702.121a: Melee — "Whenever this creature attacks, it gets
+            // +1/+1 until end of turn for each opponent you attacked with a
+            // creature this combat."
+            Keyword::Melee => vec![build_melee_trigger()],
             // CR 702.58a + CR 604.1: granted Graft installs only the
             // "another creature enters" trigger. The ETB-with-N replacement
             // (CR 702.58a clause 1) is a static ability that functions only as
@@ -259,6 +281,13 @@ impl KeywordTriggerInstaller {
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
             Keyword::Renown(_) => is_renown_trigger(trigger),
             Keyword::Mentor => is_mentor_trigger(trigger),
+            // CR 702.45a + CR 604.1: symmetric removal — matches either of the
+            // two synthesized Bushido modes (Blocks / BecomesBlocked).
+            Keyword::Bushido(_) => is_bushido_trigger(trigger),
+            Keyword::Battlecry => is_battle_cry_trigger(trigger),
+            Keyword::Flanking => is_flanking_trigger(trigger),
+            Keyword::Rampage(_) => is_rampage_trigger(trigger),
+            Keyword::Melee => is_melee_trigger(trigger),
             // CR 702.58a + CR 604.1: symmetric removal — `RemoveKeyword`
             // strips the Graft enters-trigger when the granted keyword is
             // removed.
@@ -2429,6 +2458,25 @@ pub fn synthesize_exalted(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Exalted));
 }
 
+/// Synthesize the combat keyword-trigger family — Bushido (CR 702.45a),
+/// Battle cry (CR 702.91a), Flanking (CR 702.25a), Rampage (CR 702.23a), and
+/// Melee (CR 702.121a). Each is installed per keyword instance; the respective
+/// CRs (702.45b / 702.91b / 702.25b / 702.23c / 702.121b) specify that multiple
+/// instances trigger separately, which is satisfied by `install_matching`
+/// keying one trigger (set) per matching keyword.
+pub fn synthesize_combat_keyword_triggers(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| {
+        matches!(
+            kw,
+            Keyword::Bushido(_)
+                | Keyword::Battlecry
+                | Keyword::Flanking
+                | Keyword::Rampage(_)
+                | Keyword::Melee
+        )
+    });
+}
+
 /// CR 702.101a: Extort — a spell-cast trigger that lets you pay {W/B} to drain
 /// each opponent for 1 life. CR 702.101b: each instance triggers separately,
 /// so one trigger is synthesized per `Keyword::Extort` instance.
@@ -2960,6 +3008,295 @@ fn build_mentor_trigger() -> TriggerDefinition {
             "CR 702.134a: Mentor — whenever this creature attacks, put a \
              +1/+1 counter on target attacking creature with power less than \
              this creature's power."
+                .to_string(),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// Combat keyword triggers: Bushido, Battle cry, Flanking, Rampage, Melee
+// ---------------------------------------------------------------------------
+
+/// Idempotency-shape predicate for the synthesized Bushido triggers. True iff
+/// `t` is either of the two Bushido modes: a `Blocks`/`BecomesBlocked` trigger
+/// with `valid_card = SelfRef` whose execute is a `Pump` of the source.
+///
+/// CR 702.45a: both modes carry the same +N/+N self-pump shape, so a single
+/// predicate recognizes either for synthesis idempotency and `RemoveKeyword`
+/// symmetry (CR 604.1).
+fn is_bushido_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Blocks | TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        )
+}
+
+/// CR 702.45a: Bushido N — "Whenever this creature blocks or becomes blocked,
+/// it gets +N/+N until end of turn." Synthesized as two triggers sharing the
+/// same +N/+N self-pump effect: one on `TriggerMode::Blocks` (this creature as
+/// a blocker, CR 509.1h) and one on `TriggerMode::BecomesBlocked` (this
+/// creature as an attacker that gains a blocker, CR 509.1h + CR 603.2e). A
+/// creature is in exactly one of those roles per combat, so the two triggers
+/// never both fire for the same event — there is no double-pump.
+fn build_bushido_triggers(n: u32) -> Vec<TriggerDefinition> {
+    let mode_description = |mode: &str| {
+        format!(
+            "CR 702.45a: Bushido {n} — whenever this creature {mode}, it gets +{n}/+{n} until end of turn."
+        )
+    };
+    let make = |mode: TriggerMode, text: String| {
+        // CR 702.45a + CR 611.2a: the +N/+N is an until-end-of-turn pump of the
+        // Bushido creature itself; `Effect::Pump` registers the transient
+        // continuous effect through the layer system.
+        let pump = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Pump {
+                power: PtValue::Fixed(n as i32),
+                toughness: PtValue::Fixed(n as i32),
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .description(format!("Bushido {n} — +{n}/+{n} until end of turn"));
+        TriggerDefinition::new(mode)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(pump)
+            .description(text)
+    };
+    vec![
+        make(TriggerMode::Blocks, mode_description("blocks")),
+        make(
+            TriggerMode::BecomesBlocked,
+            mode_description("becomes blocked"),
+        ),
+    ]
+}
+
+/// Idempotency-shape predicate for the synthesized Battle cry trigger
+/// (`Attacks` + `valid_card = SelfRef` + execute = `PumpAll(+1/+0)` over other
+/// attacking creatures).
+fn is_battle_cry_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Attacks)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::PumpAll {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(0),
+                ..
+            })
+        )
+}
+
+/// CR 702.91a: Battle cry — "Whenever this creature attacks, each other
+/// attacking creature gets +1/+0 until end of turn." CR 702.91b: each instance
+/// triggers separately (one trigger synthesized per keyword instance).
+///
+/// "Each other attacking creature" is a non-targeting set, so the boost is an
+/// `Effect::PumpAll` over `Attacking` creatures excluding the source itself
+/// (`FilterProp::Another`, which resolves to `object_id != source.id`). The
+/// filter is evaluated against live combat state at resolution time.
+fn build_battle_cry_trigger() -> TriggerDefinition {
+    let pump_all = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PumpAll {
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(0),
+            target: TargetFilter::Typed(
+                // CR 702.91a + CR 508.1a: every OTHER attacking creature.
+                TypedFilter::creature()
+                    .properties(vec![FilterProp::Attacking, FilterProp::Another]),
+            ),
+        },
+    )
+    .description("Battle cry — each other attacking creature gets +1/+0".to_string());
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(pump_all)
+        .description(
+            "CR 702.91a: Battle cry — whenever this creature attacks, each \
+             other attacking creature gets +1/+0 until end of turn."
+                .to_string(),
+        )
+}
+
+/// Idempotency-shape predicate for the synthesized Flanking trigger
+/// (`BecomesBlocked` + `valid_card = SelfRef` + execute = `PumpAll(-1/-1)` over
+/// blockers without flanking).
+fn is_flanking_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::PumpAll {
+                power: PtValue::Fixed(-1),
+                toughness: PtValue::Fixed(-1),
+                ..
+            })
+        )
+}
+
+/// CR 702.25a: Flanking — "Whenever this creature becomes blocked by a creature
+/// without flanking, the blocking creature gets -1/-1 until end of turn."
+/// CR 702.25b: each instance triggers separately.
+///
+/// Per-blocker semantics are expressed with `Effect::PumpAll` over the set of
+/// creatures that are currently blocking the source (`FilterProp::BlockingSource`,
+/// CR 509.1g) and lack flanking (`FilterProp::WithoutKeyword`, CR 509.1h). Every
+/// such blocker independently gets -1/-1, which is exactly the per-blocker
+/// reading — blockers that have flanking are excluded by the filter.
+fn build_flanking_trigger() -> TriggerDefinition {
+    let pump_all = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PumpAll {
+            power: PtValue::Fixed(-1),
+            toughness: PtValue::Fixed(-1),
+            target: TargetFilter::Typed(
+                // CR 702.25a + CR 509.1g: each creature blocking the source that
+                // does not itself have flanking.
+                TypedFilter::creature().properties(vec![
+                    FilterProp::BlockingSource,
+                    FilterProp::WithoutKeyword {
+                        value: Keyword::Flanking,
+                    },
+                ]),
+            ),
+        },
+    )
+    .description("Flanking — each blocker without flanking gets -1/-1".to_string());
+
+    TriggerDefinition::new(TriggerMode::BecomesBlocked)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(pump_all)
+        .description(
+            "CR 702.25a: Flanking — whenever this creature becomes blocked by a \
+             creature without flanking, the blocking creature gets -1/-1 until \
+             end of turn."
+                .to_string(),
+        )
+}
+
+/// Idempotency-shape predicate for the synthesized Rampage trigger
+/// (`BecomesBlocked` + `valid_card = SelfRef` + execute = `Pump` of the source
+/// by a dynamic per-blocker-beyond-first quantity).
+fn is_rampage_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                power: PtValue::Quantity(_),
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        )
+}
+
+/// CR 702.23a: Rampage N — "Whenever this creature becomes blocked, it gets
+/// +N/+N until end of turn for each creature blocking it beyond the first."
+/// CR 702.23b: the bonus is calculated once, when the ability resolves (the
+/// `Effect::Pump` resolver snapshots the dynamic quantity into a fixed
+/// `AddPower`/`AddToughness` at resolution, so later blocker changes don't
+/// alter it). CR 702.23c: each instance triggers separately.
+///
+/// "For each creature blocking it beyond the first" is the count of creatures
+/// blocking the source (`QuantityRef::ObjectCount` over `FilterProp::BlockingSource`,
+/// CR 509.1g) minus one (`QuantityExpr::Offset { offset: -1 }`), scaled by N.
+/// `BecomesBlocked` only fires with at least one blocker, so the offset count is
+/// never negative.
+fn build_rampage_trigger(n: u32) -> TriggerDefinition {
+    let blockers_beyond_first = QuantityExpr::Offset {
+        inner: Box::new(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::BlockingSource]),
+                ),
+            },
+        }),
+        offset: -1,
+    }
+    .scaled_by(n);
+
+    let pump = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Pump {
+            power: PtValue::Quantity(blockers_beyond_first.clone()),
+            toughness: PtValue::Quantity(blockers_beyond_first),
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description(format!(
+        "Rampage {n} — +{n}/+{n} for each blocker beyond the first"
+    ));
+
+    TriggerDefinition::new(TriggerMode::BecomesBlocked)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(pump)
+        .description(format!(
+            "CR 702.23a: Rampage {n} — whenever this creature becomes blocked, \
+             it gets +{n}/+{n} until end of turn for each creature blocking it \
+             beyond the first."
+        ))
+}
+
+/// Idempotency-shape predicate for the synthesized Melee trigger (`Attacks` +
+/// `valid_card = SelfRef` + execute = `Pump` of the source by a dynamic
+/// per-opponent-attacked quantity).
+fn is_melee_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Attacks)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                power: PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::OpponentAttackedThisTurn,
+                    },
+                }),
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        )
+}
+
+/// CR 702.121a: Melee — "Whenever this creature attacks, it gets +1/+1 until
+/// end of turn for each opponent you attacked with a creature this combat."
+/// CR 702.121b: each instance triggers separately.
+///
+/// "Each opponent you attacked with a creature this combat" is the count of
+/// opponents the controller has attacked (`QuantityRef::PlayerCount` over
+/// `PlayerFilter::OpponentAttackedThisTurn`, CR 508.6, backed by
+/// `state.has_attacked`). The keyword's "this combat" and the ref's "this turn"
+/// coincide: the Melee trigger resolves immediately after attackers are
+/// declared (CR 508.1) in the only combat phase of the turn, so every opponent
+/// counted was attacked in the current combat.
+fn build_melee_trigger() -> TriggerDefinition {
+    let opponents_attacked = QuantityExpr::Ref {
+        qty: QuantityRef::PlayerCount {
+            filter: PlayerFilter::OpponentAttackedThisTurn,
+        },
+    };
+    let pump = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Pump {
+            power: PtValue::Quantity(opponents_attacked.clone()),
+            toughness: PtValue::Quantity(opponents_attacked),
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("Melee — +1/+1 for each opponent you attacked this combat".to_string());
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(pump)
+        .description(
+            "CR 702.121a: Melee — whenever this creature attacks, it gets +1/+1 \
+             until end of turn for each opponent you attacked with a creature \
+             this combat."
                 .to_string(),
         )
 }
@@ -4715,6 +5052,12 @@ pub fn synthesize_all(face: &mut CardFace) {
     // whenever a creature you control attacks alone. CR 702.83b: each instance
     // triggers separately.
     synthesize_exalted(face);
+    // CR 702.45a / 702.91a / 702.25a / 702.23a / 702.121a: combat keyword
+    // triggers — Bushido, Battle cry, Flanking, Rampage, Melee. Each fires on
+    // attack/block/becomes-blocked and applies an until-end-of-turn P/T boost
+    // (fixed, per-other-attacker, per-non-flanking-blocker, per-blocker-beyond-
+    // first, or per-opponent-attacked).
+    synthesize_combat_keyword_triggers(face);
     // CR 702.101a: Extort — spell-cast trigger that lets you pay {W/B} to drain
     // each opponent for 1 life. CR 702.101b: each instance triggers separately.
     synthesize_extort(face);
@@ -14375,5 +14718,491 @@ mod reinforce_synthesis_tests {
             }
             other => panic!("expected Composite cost, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod combat_keyword_trigger_tests {
+    //! Unit (`TriggerDefinition`-shape) + runtime combat-resolution coverage for
+    //! the synthesized combat keywords: Bushido (CR 702.45a), Battle cry
+    //! (CR 702.91a), Flanking (CR 702.25a), Rampage (CR 702.23a), Melee
+    //! (CR 702.121a).
+    //!
+    //! Runtime tests build keyworded creature faces, run the full `synthesize_all`
+    //! pipeline so the triggers are installed, place attackers/blockers and
+    //! populate `state.combat`, fire the corresponding combat `GameEvent` through
+    //! `process_triggers`, resolve the synthesized trigger off the stack via
+    //! `resolve_top`, then `evaluate_layers` and assert the resulting P/T deltas.
+
+    use super::*;
+    use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+    use crate::game::layers::evaluate_layers;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::stack::resolve_top;
+    use crate::game::triggers::process_triggers;
+    use crate::game::zones::create_object;
+    use crate::types::card_type::CoreType;
+    use crate::types::events::GameEvent;
+    use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::phase::Phase;
+    use crate::types::player::PlayerId;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    /// Build a creature face carrying `keywords` and run the full synthesis
+    /// pipeline so any synthesized triggers are installed on the face.
+    fn keyworded_face(name: &str, power: i32, toughness: i32, keywords: Vec<Keyword>) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: Some(PtValue::Fixed(power)),
+            toughness: Some(PtValue::Fixed(toughness)),
+            keywords,
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_all(&mut face);
+        face
+    }
+
+    /// Place a battlefield creature from a (possibly synthesized) face.
+    fn place_creature(state: &mut GameState, face: &CardFace, controller: PlayerId) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card_id,
+            controller,
+            face.name.clone(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        apply_card_face_to_object(obj, face);
+        obj.entered_battlefield_turn = Some(1);
+        obj.summoning_sick = false;
+        id
+    }
+
+    /// Place a vanilla battlefield creature (no keywords) with explicit P/T.
+    fn place_vanilla(
+        state: &mut GameState,
+        name: &str,
+        power: i32,
+        toughness: i32,
+        controller: PlayerId,
+    ) -> ObjectId {
+        let face = keyworded_face(name, power, toughness, vec![]);
+        place_creature(state, &face, controller)
+    }
+
+    /// CR 508.6: record that `attacker` declared a creature attacking
+    /// `defender` this turn — mirrors `restrictions::record_attackers_declared`
+    /// for the low-level event-driven tests that bypass the declare-attackers
+    /// turn-based action. Backs Melee's `OpponentAttackedThisTurn` count.
+    fn record_attacked(state: &mut GameState, attacker: PlayerId, defender: PlayerId) {
+        state
+            .attacked_defenders_this_turn
+            .entry(attacker)
+            .or_default()
+            .insert(defender);
+    }
+
+    fn fresh_state() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        state
+    }
+
+    /// Resolve the single trigger that the preceding event placed on the stack.
+    fn resolve_pending_trigger(state: &mut GameState) {
+        assert!(
+            state
+                .stack
+                .iter()
+                .any(|entry| matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. })),
+            "a synthesized combat trigger must be on the stack"
+        );
+        let mut events = Vec::new();
+        resolve_top(state, &mut events);
+        evaluate_layers(state);
+    }
+
+    fn power_of(state: &GameState, id: ObjectId) -> i32 {
+        state.objects.get(&id).unwrap().power.unwrap()
+    }
+    fn toughness_of(state: &GameState, id: ObjectId) -> i32 {
+        state.objects.get(&id).unwrap().toughness.unwrap()
+    }
+
+    // -- Shape tests -------------------------------------------------------
+
+    #[test]
+    fn build_bushido_emits_blocks_and_becomes_blocked_self_pumps() {
+        let triggers = build_bushido_triggers(2);
+        assert_eq!(triggers.len(), 2, "Bushido synthesizes two modes");
+        let modes: Vec<_> = triggers.iter().map(|t| t.mode.clone()).collect();
+        assert!(modes.contains(&TriggerMode::Blocks));
+        assert!(modes.contains(&TriggerMode::BecomesBlocked));
+        for t in &triggers {
+            assert!(is_bushido_trigger(t));
+            assert_eq!(t.valid_card, Some(TargetFilter::SelfRef));
+            match t.execute.as_deref().map(|a| &*a.effect) {
+                Some(Effect::Pump {
+                    power: PtValue::Fixed(2),
+                    toughness: PtValue::Fixed(2),
+                    target: TargetFilter::SelfRef,
+                }) => {}
+                other => panic!("expected +2/+2 self pump, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn build_battle_cry_pumps_other_attackers_plus_one_plus_zero() {
+        let t = build_battle_cry_trigger();
+        assert!(is_battle_cry_trigger(&t));
+        assert_eq!(t.mode, TriggerMode::Attacks);
+        assert_eq!(t.valid_card, Some(TargetFilter::SelfRef));
+        match t.execute.as_deref().map(|a| &*a.effect) {
+            Some(Effect::PumpAll {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(0),
+                target: TargetFilter::Typed(tf),
+            }) => {
+                assert!(tf.properties.contains(&FilterProp::Attacking));
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("expected PumpAll(+1/+0) over other attackers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_flanking_pumps_non_flanking_blockers_minus_one_minus_one() {
+        let t = build_flanking_trigger();
+        assert!(is_flanking_trigger(&t));
+        assert_eq!(t.mode, TriggerMode::BecomesBlocked);
+        match t.execute.as_deref().map(|a| &*a.effect) {
+            Some(Effect::PumpAll {
+                power: PtValue::Fixed(-1),
+                toughness: PtValue::Fixed(-1),
+                target: TargetFilter::Typed(tf),
+            }) => {
+                assert!(tf.properties.contains(&FilterProp::BlockingSource));
+                assert!(tf.properties.contains(&FilterProp::WithoutKeyword {
+                    value: Keyword::Flanking
+                }));
+            }
+            other => panic!("expected PumpAll(-1/-1) over non-flanking blockers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_rampage_uses_blockers_beyond_first_quantity() {
+        let t = build_rampage_trigger(3);
+        assert!(is_rampage_trigger(&t));
+        assert_eq!(t.mode, TriggerMode::BecomesBlocked);
+        match t.execute.as_deref().map(|a| &*a.effect) {
+            Some(Effect::Pump {
+                power: PtValue::Quantity(expr),
+                target: TargetFilter::SelfRef,
+                ..
+            }) => {
+                // (blockers - 1) * 3
+                match expr {
+                    QuantityExpr::Multiply { factor: 3, inner } => match inner.as_ref() {
+                        QuantityExpr::Offset {
+                            offset: -1,
+                            inner: count,
+                        } => assert!(matches!(
+                            count.as_ref(),
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCount { .. }
+                            }
+                        )),
+                        other => panic!("expected Offset(-1) inner, got {other:?}"),
+                    },
+                    other => panic!("expected Multiply(3) of (blockers-1), got {other:?}"),
+                }
+            }
+            other => panic!("expected dynamic self Pump, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_melee_uses_opponents_attacked_quantity() {
+        let t = build_melee_trigger();
+        assert!(is_melee_trigger(&t));
+        assert_eq!(t.mode, TriggerMode::Attacks);
+        match t.execute.as_deref().map(|a| &*a.effect) {
+            Some(Effect::Pump {
+                power:
+                    PtValue::Quantity(QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::PlayerCount {
+                                filter: PlayerFilter::OpponentAttackedThisTurn,
+                            },
+                    }),
+                target: TargetFilter::SelfRef,
+                ..
+            }) => {}
+            other => panic!("expected dynamic self Pump on opponents-attacked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn installer_round_trips_each_combat_keyword() {
+        for kw in [
+            Keyword::Bushido(1),
+            Keyword::Battlecry,
+            Keyword::Flanking,
+            Keyword::Rampage(1),
+            Keyword::Melee,
+        ] {
+            let triggers = KeywordTriggerInstaller::triggers_for(&kw);
+            assert!(
+                !triggers.is_empty(),
+                "{kw:?} must synthesize at least one trigger"
+            );
+            for t in &triggers {
+                assert!(
+                    KeywordTriggerInstaller::trigger_matches_keyword_kind(t, &kw),
+                    "removal predicate must recognize the synthesized {kw:?} trigger"
+                );
+            }
+        }
+    }
+
+    // -- Runtime resolution tests -----------------------------------------
+
+    /// Fire an `AttackersDeclared` event for `attacker` attacking P1 with the
+    /// given full set of co-attacker ids, after populating `state.combat`.
+    fn declare_attack(state: &mut GameState, attackers: &[ObjectId]) {
+        state.combat = Some(CombatState {
+            attackers: attackers
+                .iter()
+                .map(|id| AttackerInfo::new(*id, AttackTarget::Player(P1), P1))
+                .collect(),
+            ..Default::default()
+        });
+        // CR 508.6: record the attacked defender so Melee's
+        // `OpponentAttackedThisTurn` count is populated.
+        record_attacked(state, P0, P1);
+        process_triggers(
+            state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: attackers.to_vec(),
+                defending_player: P1,
+                attacks: attackers
+                    .iter()
+                    .map(|id| (*id, AttackTarget::Player(P1)))
+                    .collect(),
+            }],
+        );
+    }
+
+    /// Populate `state.combat` with `attacker` blocked by `blockers`, then fire
+    /// the `BlockersDeclared` event so block/become-blocked triggers fire.
+    fn declare_block(state: &mut GameState, attacker: ObjectId, blockers: &[ObjectId]) {
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::new(attacker, AttackTarget::Player(P1), P1)],
+            ..Default::default()
+        };
+        combat.attackers[0].blocked = true;
+        combat
+            .blocker_assignments
+            .insert(attacker, blockers.to_vec());
+        for b in blockers {
+            combat.blocker_to_attacker.insert(*b, vec![attacker]);
+        }
+        state.combat = Some(combat);
+        process_triggers(
+            state,
+            &[GameEvent::BlockersDeclared {
+                assignments: blockers.iter().map(|b| (*b, attacker)).collect(),
+            }],
+        );
+    }
+
+    #[test]
+    fn bushido_becomes_blocked_pumps_attacker() {
+        let mut state = fresh_state();
+        let face = keyworded_face("Bushido Bear", 2, 2, vec![Keyword::Bushido(2)]);
+        let bushi = place_creature(&mut state, &face, P0);
+        let blocker = place_vanilla(&mut state, "Wall", 0, 4, P1);
+
+        declare_block(&mut state, bushi, &[blocker]);
+        resolve_pending_trigger(&mut state);
+
+        // CR 702.45a: +2/+2 until end of turn → 4/4.
+        assert_eq!(power_of(&state, bushi), 4);
+        assert_eq!(toughness_of(&state, bushi), 4);
+    }
+
+    #[test]
+    fn bushido_blocks_pumps_blocker() {
+        let mut state = fresh_state();
+        let attacker = place_vanilla(&mut state, "Raider", 3, 3, P0);
+        let face = keyworded_face("Bushido Blocker", 1, 1, vec![Keyword::Bushido(2)]);
+        let bushi = place_creature(&mut state, &face, P1);
+
+        // The Bushido creature is the blocker → `Blocks` mode fires.
+        declare_block(&mut state, attacker, &[bushi]);
+        resolve_pending_trigger(&mut state);
+
+        // CR 702.45a: blocking creature gets +2/+2 → 3/3.
+        assert_eq!(power_of(&state, bushi), 3);
+        assert_eq!(toughness_of(&state, bushi), 3);
+    }
+
+    #[test]
+    fn battle_cry_pumps_each_other_attacker_only() {
+        let mut state = fresh_state();
+        let face = keyworded_face("Battle Crier", 2, 2, vec![Keyword::Battlecry]);
+        let crier = place_creature(&mut state, &face, P0);
+        let ally1 = place_vanilla(&mut state, "Ally One", 1, 1, P0);
+        let ally2 = place_vanilla(&mut state, "Ally Two", 3, 3, P0);
+
+        declare_attack(&mut state, &[crier, ally1, ally2]);
+        resolve_pending_trigger(&mut state);
+
+        // CR 702.91a: each OTHER attacking creature gets +1/+0; the crier itself
+        // is unchanged.
+        assert_eq!(power_of(&state, crier), 2, "source unchanged");
+        assert_eq!(power_of(&state, ally1), 2);
+        assert_eq!(toughness_of(&state, ally1), 1);
+        assert_eq!(power_of(&state, ally2), 4);
+        assert_eq!(toughness_of(&state, ally2), 3);
+    }
+
+    #[test]
+    fn flanking_weakens_non_flanking_blockers_only() {
+        let mut state = fresh_state();
+        let face = keyworded_face("Flanking Knight", 2, 2, vec![Keyword::Flanking]);
+        let knight = place_creature(&mut state, &face, P0);
+        let plain_blocker = place_vanilla(&mut state, "Plain Blocker", 2, 2, P1);
+        let flanker_face = keyworded_face("Other Flanker", 2, 2, vec![Keyword::Flanking]);
+        let flanker_blocker = place_creature(&mut state, &flanker_face, P1);
+
+        declare_block(&mut state, knight, &[plain_blocker, flanker_blocker]);
+        resolve_pending_trigger(&mut state);
+
+        // CR 702.25a: only the blocker WITHOUT flanking gets -1/-1.
+        assert_eq!(power_of(&state, plain_blocker), 1);
+        assert_eq!(toughness_of(&state, plain_blocker), 1);
+        assert_eq!(
+            power_of(&state, flanker_blocker),
+            2,
+            "flanking blocker spared"
+        );
+        assert_eq!(toughness_of(&state, flanker_blocker), 2);
+    }
+
+    #[test]
+    fn rampage_scales_with_blockers_beyond_first() {
+        // Rampage 2, blocked by 2 → (2-1)*2 = +2/+2.
+        let mut state = fresh_state();
+        let face = keyworded_face("Rampaging Beast", 3, 3, vec![Keyword::Rampage(2)]);
+        let beast = place_creature(&mut state, &face, P0);
+        let b1 = place_vanilla(&mut state, "B1", 1, 1, P1);
+        let b2 = place_vanilla(&mut state, "B2", 1, 1, P1);
+        declare_block(&mut state, beast, &[b1, b2]);
+        resolve_pending_trigger(&mut state);
+        assert_eq!(
+            power_of(&state, beast),
+            5,
+            "Rampage 2 with 2 blockers → +2/+2"
+        );
+        assert_eq!(toughness_of(&state, beast), 5);
+
+        // Rampage 2, blocked by 3 → (3-1)*2 = +4/+4.
+        let mut state = fresh_state();
+        let face = keyworded_face("Rampaging Beast", 3, 3, vec![Keyword::Rampage(2)]);
+        let beast = place_creature(&mut state, &face, P0);
+        let b1 = place_vanilla(&mut state, "B1", 1, 1, P1);
+        let b2 = place_vanilla(&mut state, "B2", 1, 1, P1);
+        let b3 = place_vanilla(&mut state, "B3", 1, 1, P1);
+        declare_block(&mut state, beast, &[b1, b2, b3]);
+        resolve_pending_trigger(&mut state);
+        assert_eq!(
+            power_of(&state, beast),
+            7,
+            "Rampage 2 with 3 blockers → +4/+4"
+        );
+        assert_eq!(toughness_of(&state, beast), 7);
+    }
+
+    #[test]
+    fn rampage_single_blocker_no_bonus() {
+        // CR 702.23a: a single blocker leaves zero "beyond the first".
+        let mut state = fresh_state();
+        let face = keyworded_face("Rampaging Beast", 3, 3, vec![Keyword::Rampage(2)]);
+        let beast = place_creature(&mut state, &face, P0);
+        let b1 = place_vanilla(&mut state, "B1", 1, 1, P1);
+        declare_block(&mut state, beast, &[b1]);
+        // The trigger still fires (becomes blocked) but resolves to +0/+0.
+        if state
+            .stack
+            .iter()
+            .any(|e| matches!(&e.kind, StackEntryKind::TriggeredAbility { .. }))
+        {
+            let mut events = Vec::new();
+            resolve_top(&mut state, &mut events);
+            evaluate_layers(&mut state);
+        }
+        assert_eq!(power_of(&state, beast), 3, "no bonus with one blocker");
+        assert_eq!(toughness_of(&state, beast), 3);
+    }
+
+    #[test]
+    fn melee_scales_with_opponents_attacked() {
+        // Two-player game: attacking P1 is one opponent → +1/+1.
+        let mut state = fresh_state();
+        let face = keyworded_face("Melee Marauder", 2, 2, vec![Keyword::Melee]);
+        let marauder = place_creature(&mut state, &face, P0);
+        declare_attack(&mut state, &[marauder]);
+        resolve_pending_trigger(&mut state);
+        assert_eq!(
+            power_of(&state, marauder),
+            3,
+            "Melee +1/+1 for one opponent"
+        );
+        assert_eq!(toughness_of(&state, marauder), 3);
+
+        // Three-player game: attack two opponents → +2/+2.
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        let face = keyworded_face("Melee Marauder", 2, 2, vec![Keyword::Melee]);
+        let marauder = place_creature(&mut state, &face, P0);
+        let p2 = PlayerId(2);
+        // Attack both opponents with a creature this combat.
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(marauder, AttackTarget::Player(P1), P1)],
+            ..Default::default()
+        });
+        record_attacked(&mut state, P0, P1);
+        record_attacked(&mut state, P0, p2);
+        process_triggers(
+            &mut state,
+            &[GameEvent::AttackersDeclared {
+                attacker_ids: vec![marauder],
+                defending_player: P1,
+                attacks: vec![(marauder, AttackTarget::Player(P1))],
+            }],
+        );
+        resolve_pending_trigger(&mut state);
+        assert_eq!(
+            power_of(&state, marauder),
+            4,
+            "Melee +2/+2 for two opponents"
+        );
+        assert_eq!(toughness_of(&state, marauder), 4);
     }
 }
