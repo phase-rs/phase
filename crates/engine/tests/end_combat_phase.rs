@@ -5,6 +5,7 @@
 
 use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
 use engine::game::effects::end_combat_phase::resolve;
+use engine::game::stack::resolve_top;
 use engine::game::zones::create_object;
 use engine::types::ability::{Effect, EffectKind, ResolvedAbility};
 use engine::types::events::GameEvent;
@@ -106,6 +107,46 @@ fn end_combat_phase_exiles_stack_clears_combat_and_enters_postcombat_main() {
     );
 }
 
+/// CR 724.2b: resolving "end the combat phase" during combat exiles the
+/// resolving object itself through the production stack-resolution path.
+#[test]
+fn end_combat_phase_spell_exiles_resolving_object_during_combat() {
+    let mut state = GameState::new_two_player(42);
+    state.phase = Phase::DeclareAttackers;
+
+    let spell_id = create_object(
+        &mut state,
+        CardId(7242),
+        PlayerId(0),
+        "Mandate of Peace".to_string(),
+        Zone::Stack,
+    );
+    let ability = ResolvedAbility::new(Effect::EndCombatPhase, vec![], spell_id, PlayerId(0));
+    state.stack.push_back(StackEntry {
+        id: spell_id,
+        source_id: spell_id,
+        controller: PlayerId(0),
+        kind: StackEntryKind::Spell {
+            card_id: CardId(7242),
+            ability: Some(ability),
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 0,
+        },
+    });
+
+    let mut events = Vec::new();
+    resolve_top(&mut state, &mut events);
+
+    assert_eq!(
+        state.objects.get(&spell_id).map(|o| o.zone),
+        Some(Zone::Exile),
+        "the resolving spell should be exiled during the CR 724.2 process"
+    );
+    assert!(state.exile.contains(&spell_id));
+    assert!(!state.players[0].graveyard.contains(&spell_id));
+    assert_eq!(state.phase, Phase::PostCombatMain);
+}
+
 /// CR 724.2g: if it isn't a combat phase, nothing happens — the stack is left
 /// intact and the phase is unchanged. This is the behavior that distinguishes
 /// "end the combat phase" from "end the turn".
@@ -146,4 +187,44 @@ fn end_combat_phase_outside_combat_does_nothing() {
         resolved(&events),
         "the effect still resolves (as a no-op) and emits EffectResolved"
     );
+}
+
+/// CR 724.2g + CR 608.2n: outside combat, the end-combat procedure does
+/// nothing, so the resolving instant follows normal post-resolution routing.
+#[test]
+fn end_combat_phase_spell_goes_to_graveyard_outside_combat() {
+    let mut state = GameState::new_two_player(7);
+    state.phase = Phase::PreCombatMain;
+
+    let spell_id = create_object(
+        &mut state,
+        CardId(7243),
+        PlayerId(0),
+        "Mandate of Peace".to_string(),
+        Zone::Stack,
+    );
+    let ability = ResolvedAbility::new(Effect::EndCombatPhase, vec![], spell_id, PlayerId(0));
+    state.stack.push_back(StackEntry {
+        id: spell_id,
+        source_id: spell_id,
+        controller: PlayerId(0),
+        kind: StackEntryKind::Spell {
+            card_id: CardId(7243),
+            ability: Some(ability),
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 0,
+        },
+    });
+
+    let mut events = Vec::new();
+    resolve_top(&mut state, &mut events);
+
+    assert_eq!(
+        state.objects.get(&spell_id).map(|o| o.zone),
+        Some(Zone::Graveyard),
+        "outside combat, the spell should use normal instant/sorcery routing"
+    );
+    assert!(state.players[0].graveyard.contains(&spell_id));
+    assert!(!state.exile.contains(&spell_id));
+    assert_eq!(state.phase, Phase::PreCombatMain);
 }

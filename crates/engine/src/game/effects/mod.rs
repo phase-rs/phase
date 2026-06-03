@@ -69,6 +69,7 @@ pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod effect;
 pub mod end_combat_phase;
+pub(super) mod end_phase;
 pub mod end_the_turn;
 pub mod endure;
 pub mod energy;

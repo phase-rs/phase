@@ -9802,14 +9802,7 @@ fn evaluate_casting_prohibition_condition(
         // CR 109.5: "during your turn" — bound to the static's source controller.
         CastingProhibitionCondition::DuringYourTurn => state.active_player == source_controller,
         // CR 506.1: "during combat" — any combat phase, game-wide.
-        CastingProhibitionCondition::DuringCombat => matches!(
-            state.phase,
-            Phase::BeginCombat
-                | Phase::DeclareAttackers
-                | Phase::DeclareBlockers
-                | Phase::CombatDamage
-                | Phase::EndCombat
-        ),
+        CastingProhibitionCondition::DuringCombat => state.phase.is_combat(),
         // CR 109.5 + CR 117.1a + CR 604.1: "only during your turn" — blocked
         // when it is NOT the source-controller's turn (Fires of Invention's
         // "your turn"). Differs from `NotDuringAffectedPlayersTurn`: this

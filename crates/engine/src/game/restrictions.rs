@@ -684,7 +684,7 @@ fn activation_restriction_applies(
             state.active_player == player && state.phase == Phase::Upkeep
         }
         // CR 508.1c / CR 509.1b: Combat-phase restrictions on activation timing.
-        ActivationRestriction::DuringCombat => is_combat_phase(state.phase),
+        ActivationRestriction::DuringCombat => state.phase.is_combat(),
         ActivationRestriction::BeforeAttackersDeclared => is_before_attackers_declared(state),
         ActivationRestriction::BeforeCombatDamage => is_before_combat_damage(state.phase),
         // CR 602.5b: Per-turn activation limit tracked via ability activation counter.
@@ -777,7 +777,7 @@ fn casting_restriction_applies(
     match restriction {
         // CR 307.1: A player may cast a sorcery during a main phase of their turn when the stack is empty.
         CastingRestriction::AsSorcery => is_sorcery_speed_window(state, player),
-        CastingRestriction::DuringCombat => is_combat_phase(state.phase),
+        CastingRestriction::DuringCombat => state.phase.is_combat(),
         CastingRestriction::DuringOpponentsTurn => state.active_player != player,
         CastingRestriction::DuringYourTurn => state.active_player == player,
         CastingRestriction::DuringYourUpkeep => {
@@ -1436,19 +1436,6 @@ fn is_before_attackers_declared(state: &crate::types::game_state::GameState) -> 
     // without turn-control, where the seat and submitter are the same player.
     super::turn_control::priority_seat(state) == state.active_player
         && matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
-}
-
-/// CR 506.1: The combat phase has five steps: beginning of combat, declare attackers,
-/// declare blockers, combat damage, and end of combat.
-fn is_combat_phase(phase: Phase) -> bool {
-    matches!(
-        phase,
-        Phase::BeginCombat
-            | Phase::DeclareAttackers
-            | Phase::DeclareBlockers
-            | Phase::CombatDamage
-            | Phase::EndCombat
-    )
 }
 
 fn is_before_combat_damage(phase: Phase) -> bool {
