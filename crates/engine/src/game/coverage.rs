@@ -73,6 +73,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // the attacker that must be blocked (Provoke). Enforced by direct
             // match in combat.rs declare-blockers validation.
             | StaticMode::MustBlockAttacker { .. }
+            // CR 508.1d: MustAttackPlayer carries the `PlayerId` that must be
+            // attacked (Alluring Siren). Enforced by direct match in combat.rs
+            // declare-attackers validation.
+            | StaticMode::MustAttackPlayer { .. }
             // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
             // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
             | StaticMode::CantBeBlockedByMoreThan { .. }
@@ -558,6 +562,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::ParentTargetController => "parent target's",
                     ControllerRef::DefendingPlayer => "defending player's",
+                    ControllerRef::SourceChosenPlayer => "the chosen player's",
                     ControllerRef::ChosenPlayer { .. } => "chosen player's",
                     ControllerRef::TriggeringPlayer => "triggering player's",
                 };
@@ -658,6 +663,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::ParentTargetController => "parent target's controller",
                 ControllerRef::DefendingPlayer => "defending player",
+                ControllerRef::SourceChosenPlayer => "the chosen player",
                 ControllerRef::ChosenPlayer { .. } => "chosen player",
                 ControllerRef::TriggeringPlayer => "triggering player",
             };
@@ -725,6 +731,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
         ControllerRef::DefendingPlayer => "defending player controls",
+        ControllerRef::SourceChosenPlayer => "the chosen player controls",
         ControllerRef::ChosenPlayer { .. } => "chosen player controls",
         ControllerRef::TriggeringPlayer => "triggering player controls",
     }
@@ -847,6 +854,7 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::Target => "target player".to_string(),
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::DefendingPlayer => "defending player".to_string(),
+        PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
         PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(*aggregate))
@@ -1176,6 +1184,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             let scope_s = match scope {
                 CountScope::Controller | CountScope::Owner => "you have",
                 CountScope::ScopedPlayer => "the scoped player has",
+                CountScope::SourceChosenPlayer => "the chosen player has",
                 CountScope::Opponents => "each opponent has",
                 CountScope::All => "each player has",
             };
@@ -1491,6 +1500,7 @@ fn fmt_count_scope(scope: &CountScope) -> &'static str {
     match scope {
         CountScope::Controller | CountScope::Owner => "your",
         CountScope::ScopedPlayer => "their",
+        CountScope::SourceChosenPlayer => "the chosen player's",
         CountScope::All => "all",
         CountScope::Opponents => "opponents'",
     }
@@ -1606,6 +1616,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::Transform { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
@@ -5554,6 +5565,7 @@ fn oracle_line_mentions_counter_type(lower: &str, counter_type: &CounterType) ->
         | CounterType::Lore
         | CounterType::Time
         | CounterType::Age
+        | CounterType::Shield
         | CounterType::Generic(_) => {
             let needle = format!("{} counter", counter_type.as_str()).to_lowercase();
             lower.contains(&needle)

@@ -1150,6 +1150,8 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::TargetPlayer => false,
                         crate::types::ability::ControllerRef::ParentTargetController => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
+                        // CR 613.1: chosen-player scope has no static context here.
+                        crate::types::ability::ControllerRef::SourceChosenPlayer => false,
                         // CR 109.4: Chosen-player scope has no static context.
                         crate::types::ability::ControllerRef::ChosenPlayer { .. } => false,
                         // CR 603.2 + CR 109.4: Triggering-player scope has no

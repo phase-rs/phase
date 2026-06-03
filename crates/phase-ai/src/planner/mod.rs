@@ -7,6 +7,7 @@ use engine::ai_support::{
 };
 use engine::game::engine::apply_as_current;
 use engine::game::players;
+use engine::types::counter::{has_positive_counters, positive_counter_entries};
 use engine::types::game_state::{DayNight, GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
@@ -191,17 +192,21 @@ pub fn quick_state_hash(state: &GameState) -> u64 {
             obj.toughness.hash(&mut hasher);
             obj.damage_marked.hash(&mut hasher);
             obj.controller.hash(&mut hasher);
-            // Counters: HashMap iteration order is non-deterministic,
-            // so hash count + sorted entries for stability.
+            // Counters: HashMap iteration order is non-deterministic, so hash
+            // count + sorted positive-count entries for stability. Internal
+            // zero-count map keys are absent markers under the engine's counter
+            // model and must not perturb AI cache keys.
             // Sort by as_str() to break ties between Generic variants.
-            obj.counters.len().hash(&mut hasher);
-            if !obj.counters.is_empty() {
-                let mut counter_entries: Vec<_> = obj.counters.iter().collect();
-                counter_entries.sort_by_key(|(ct, _)| ct.as_str());
-                for (ct, count) in counter_entries {
-                    ct.hash(&mut hasher);
+            if has_positive_counters(&obj.counters) {
+                let mut counter_entries: Vec<_> = positive_counter_entries(&obj.counters).collect();
+                counter_entries.sort_by_key(|(counter_type, _)| counter_type.as_str());
+                counter_entries.len().hash(&mut hasher);
+                for (counter_type, count) in counter_entries {
+                    counter_type.hash(&mut hasher);
                     count.hash(&mut hasher);
                 }
+            } else {
+                0usize.hash(&mut hasher);
             }
         }
     }
@@ -911,6 +916,7 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::actions::{GameAction, MulliganChoice};
     use engine::types::card_type::CoreType;
+    use engine::types::counter::CounterType;
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::CardId;
     use engine::types::phase::Phase;
@@ -992,6 +998,44 @@ mod tests {
         budget.tick();
         budget.tick();
         assert!(budget.exhausted());
+    }
+
+    #[test]
+    fn quick_state_hash_ignores_stale_zero_count_counter_entries() {
+        let mut absent = make_state();
+        let object_id = create_object(
+            &mut absent,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        absent
+            .objects
+            .get_mut(&object_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut stale = absent.clone();
+        stale
+            .objects
+            .get_mut(&object_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 0);
+
+        let mut positive = absent.clone();
+        positive
+            .objects
+            .get_mut(&object_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        assert_eq!(quick_state_hash(&absent), quick_state_hash(&stale));
+        assert_ne!(quick_state_hash(&absent), quick_state_hash(&positive));
     }
 
     #[test]
