@@ -1901,9 +1901,9 @@ fn spell_matches_pending_next_spell_filter(
     spell_id: ObjectId,
     spell_filter: &Option<TargetFilter>,
 ) -> bool {
-    spell_filter.as_ref().map_or(true, |filter| {
-        spell_matches_cost_filter(state, caster, spell_id, filter, spell_id)
-    })
+    spell_filter
+        .as_ref()
+        .is_none_or(|filter| spell_matches_cost_filter(state, caster, spell_id, filter, spell_id))
 }
 
 /// CR 601.2f: First pending next-spell modifier index matching `caster`, `spell_id`, and `predicate`.
@@ -1946,7 +1946,7 @@ fn apply_pending_next_spell_keyword_grants(
     }
 }
 
-/// CR 601.2f + CR 702.26b: Stamp stack-resident grants from pending next-spell modifiers.
+/// CR 601.2a + CR 113.6g: Stamp stack-resident grants from pending next-spell modifiers.
 pub(super) fn apply_pending_next_spell_stack_grants(
     state: &mut GameState,
     caster: PlayerId,
@@ -2695,8 +2695,8 @@ fn prepare_spell_cast_with_variant_override_inner(
     };
     let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
     // CR 601.2f + CR 118.9a: One-shot "the next spell … without paying its mana cost".
-    let next_spell_without_paying =
-        pending_next_spell_modifier_index(state, player, object_id, |modifier| {
+    let next_spell_without_paying = !casting_variant.uses_alternative_cost()
+        && pending_next_spell_modifier_index(state, player, object_id, |modifier| {
             matches!(modifier, NextSpellModifier::WithoutPayingManaCost)
         })
         .is_some();
@@ -29263,6 +29263,42 @@ mod tests {
                 "expected DestroyAll after overload transform, got {:?}",
                 def.effect
             );
+        }
+
+        #[test]
+        fn next_spell_without_paying_does_not_replace_overload_cost() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::White, 4);
+            let obj = create_damn_in_hand(&mut state, PlayerId(0));
+            state.pending_next_spell_modifiers.push(
+                crate::types::game_state::PendingNextSpellModifier {
+                    player: PlayerId(0),
+                    modifier: NextSpellModifier::WithoutPayingManaCost,
+                    spell_filter: None,
+                },
+            );
+
+            let normal_prepared = prepare_spell_cast(&state, PlayerId(0), obj).unwrap();
+            assert!(matches!(normal_prepared.mana_cost, ManaCost::NoCost));
+
+            let overload_prepared = prepare_spell_cast_with_variant_override(
+                &state,
+                PlayerId(0),
+                obj,
+                Some(CastingVariant::Overload),
+            )
+            .expect("overload prepare succeeds");
+            assert_eq!(overload_prepared.casting_variant, CastingVariant::Overload);
+            match overload_prepared.mana_cost {
+                ManaCost::Cost {
+                    ref shards,
+                    generic,
+                } => {
+                    assert_eq!(generic, 2);
+                    assert_eq!(shards.len(), 2);
+                }
+                other => panic!("expected overload cost to remain selected, got {:?}", other),
+            }
         }
     }
 
