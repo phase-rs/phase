@@ -50,6 +50,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Untaps | TriggerMode::UntapAll => match_untaps,
         TriggerMode::LifeGained => match_life_gained,
         TriggerMode::LifeLost | TriggerMode::LifeLostAll => match_life_lost,
+        TriggerMode::LifeChanged => match_life_changed,
         TriggerMode::Drawn => match_drawn,
         TriggerMode::Discarded | TriggerMode::DiscardedAll => match_discarded,
         TriggerMode::Sacrificed | TriggerMode::SacrificedOnce => match_sacrificed,
@@ -134,6 +135,8 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::LosesGame => match_loses_game,
         // CR 702.26c: Phasing triggers fire when a permanent phases in.
         TriggerMode::PhaseIn => match_phase_in,
+        // CR 702.26b: Phasing triggers fire when a permanent phases out.
+        TriggerMode::PhaseOut => match_phase_out,
         TriggerMode::DamagePreventedOnce
         | TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
@@ -143,7 +146,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll
         | TriggerMode::PayLife
-        | TriggerMode::PhaseOut
         | TriggerMode::PhaseOutAll
         | TriggerMode::NewGame
         | TriggerMode::Championed
@@ -238,6 +240,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::LifeGained, match_life_gained);
     r.insert(TriggerMode::LifeLost, match_life_lost);
     r.insert(TriggerMode::LifeLostAll, match_life_lost);
+    r.insert(TriggerMode::LifeChanged, match_life_changed);
     r.insert(TriggerMode::Drawn, match_drawn);
     r.insert(TriggerMode::Discarded, match_discarded);
     r.insert(TriggerMode::DiscardedAll, match_discarded);
@@ -383,6 +386,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 702.26c: Phasing triggers fire when a permanent phases in.
     r.insert(TriggerMode::PhaseIn, match_phase_in);
 
+    // CR 702.26b: Phasing triggers fire when a permanent phases out.
+    r.insert(TriggerMode::PhaseOut, match_phase_out);
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -394,7 +400,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::CounterPlayerAddedAll,
         TriggerMode::CounterTypeAddedAll,
         TriggerMode::PayLife,
-        TriggerMode::PhaseOut,
+        // TriggerMode::PhaseOut — moved to real matcher above
         TriggerMode::PhaseOutAll,
         TriggerMode::NewGame,
         // TriggerMode::TakesInitiative — moved to real matcher above
@@ -1704,6 +1710,23 @@ pub(super) fn match_life_lost(
 ) -> bool {
     if let GameEvent::LifeChanged { player_id, amount } = event {
         if *amount >= 0 {
+            return false;
+        }
+        valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
+/// CR 119.3: Match life changed events (gain or loss). Fires when `amount != 0`.
+pub(super) fn match_life_changed(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::LifeChanged { player_id, amount } = event {
+        if *amount == 0 {
             return false;
         }
         valid_player_matches(trigger, state, *player_id, source_id)
@@ -3196,6 +3219,28 @@ pub(super) fn match_phase_in(
     if let GameEvent::PermanentPhasedIn { object_id } = event {
         if trigger.valid_card.is_some() {
             valid_card_matches(trigger, state, *object_id, source_id)
+        } else {
+            *object_id == source_id
+        }
+    } else {
+        false
+    }
+}
+/// CR 702.26b: Matches when a permanent phases out.
+/// Uses phased-out-aware filter because the object's phase_status is already
+/// set to PhasedOut when this event fires (see `phase_out_object`).
+pub(super) fn match_phase_out(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::PermanentPhasedOut { object_id, .. } = event {
+        if let Some(filter) = &trigger.valid_card {
+            let ctx = super::filter::FilterContext::from_source(state, source_id);
+            super::filter::matches_target_filter_including_phased_out(
+                state, *object_id, filter, &ctx,
+            )
         } else {
             *object_id == source_id
         }
@@ -6751,6 +6796,57 @@ mod tests {
             },
             &trigger,
             observer,
+            &state
+        ));
+    }
+
+    #[test]
+    fn phase_out_matcher_registered_and_matches_source() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Teferi's Imp Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::PhaseOut);
+        let registry = build_trigger_registry();
+
+        assert!(trigger_matcher(TriggerMode::PhaseOut).is_some());
+        assert!(registry.contains_key(&TriggerMode::PhaseOut));
+        assert!(match_phase_out(
+            &GameEvent::PermanentPhasedOut {
+                object_id: source,
+                indirect: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        assert!(!match_phase_out(
+            &GameEvent::PermanentPhasedOut {
+                object_id: ObjectId(2),
+                indirect: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+
+        let self_ref_trigger =
+            make_trigger(TriggerMode::PhaseOut).valid_card(TargetFilter::SelfRef);
+        state.objects.get_mut(&source).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+        assert!(match_phase_out(
+            &GameEvent::PermanentPhasedOut {
+                object_id: source,
+                indirect: false,
+            },
+            &self_ref_trigger,
+            source,
             &state
         ));
     }
