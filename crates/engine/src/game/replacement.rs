@@ -3890,14 +3890,14 @@ pub(crate) fn replacement_ordering_is_material(
                     // CR 616.1: For EventField::Count, check if the quantity
                     // modifications commute. Pure doublers commute and can be
                     // auto-resolved without a prompt.
-                    if field == EventField::Count
-                        && quantity_modifications_commute(state, candidates)
+                    if !(field == EventField::Count
+                        && quantity_modifications_commute(state, candidates))
                     {
-                        return false;
+                        return true;
                     }
-                    return true;
+                } else {
+                    seen_fields.push(field);
                 }
-                seen_fields.push(field);
             }
             CandidateMateriality::Disjoint => {}
         }
@@ -8822,6 +8822,125 @@ mod tests {
         );
         assert_eq!(count_subtype("Clue"), 2, "Clue batch doubled once");
         assert_eq!(count_subtype("Food"), 2, "Food batch doubled once");
+    }
+
+    /// CR 616.1: When candidates have both commuting Count modifications
+    /// AND non-commutative EnterTapped modifications, the set must still
+    /// be material and trigger a prompt. This catches the early-return bug
+    /// where commuting Count would incorrectly return false before checking
+    /// other candidates.
+    #[test]
+    fn commuting_count_plus_non_commuting_entertapped_material() {
+        use crate::types::ability::{AbilityKind, Effect, QuantityModification};
+
+        let doubler1 = ObjectId(10);
+        let doubler2 = ObjectId(15);
+        let tap_effect1 = ObjectId(20);
+        let tap_effect2 = ObjectId(25);
+
+        let doubler_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .quantity_modification(QuantityModification::Double);
+
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ),
+        );
+
+        let untap_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Untap {
+                    target: TargetFilter::SelfRef,
+                },
+            ),
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let mut ds1 = GameObject::new(
+            doubler1,
+            CardId(1),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        ds1.replacement_definitions = vec![doubler_repl.clone()].into();
+        let mut ds2 = GameObject::new(
+            doubler2,
+            CardId(2),
+            PlayerId(0),
+            "Adrix and Nev".to_string(),
+            Zone::Battlefield,
+        );
+        ds2.replacement_definitions = vec![doubler_repl].into();
+        let mut te1 = GameObject::new(
+            tap_effect1,
+            CardId(3),
+            PlayerId(0),
+            "Tap Effect".to_string(),
+            Zone::Battlefield,
+        );
+        te1.replacement_definitions = vec![tap_repl].into();
+        let mut te2 = GameObject::new(
+            tap_effect2,
+            CardId(4),
+            PlayerId(0),
+            "Untap Effect".to_string(),
+            Zone::Battlefield,
+        );
+        te2.replacement_definitions = vec![untap_repl].into();
+
+        state.objects.insert(doubler1, ds1);
+        state.objects.insert(doubler2, ds2);
+        state.objects.insert(tap_effect1, te1);
+        state.objects.insert(tap_effect2, te2);
+        state.battlefield.push_back(doubler1);
+        state.battlefield.push_back(doubler2);
+        state.battlefield.push_back(tap_effect1);
+        state.battlefield.push_back(tap_effect2);
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(TokenSpec {
+                characteristics: crate::types::proposed_event::TokenCharacteristics {
+                    display_name: "Token".to_string(),
+                    power: None,
+                    toughness: None,
+                    core_types: vec![crate::types::card_type::CoreType::Creature],
+                    subtypes: Vec::new(),
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
+                script_name: "Token".to_string(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: PlayerId(0),
+                attach_to: None,
+            }),
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // Should trigger a prompt since EnterTapped is non-commutative
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!(
+                "expected NeedsChoice for non-commutative EnterTapped, got {:?}",
+                result
+            );
+        };
+        assert_eq!(player, PlayerId(0));
     }
 
     /// CR 121.1 + CR 504.1 + CR 614.6 — Alhammarret's Archive's
