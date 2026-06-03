@@ -1,5 +1,6 @@
 pub mod ability_utils;
 pub mod arithmetic;
+pub mod attractions;
 pub mod bending;
 pub mod bracket_estimate;
 pub mod casting;
@@ -61,6 +62,7 @@ pub(crate) mod sacrifice;
 pub mod sba;
 pub mod scenario;
 pub mod scenario_db;
+pub mod specialize;
 pub mod speed;
 pub mod stack;
 pub mod static_abilities;

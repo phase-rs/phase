@@ -43,7 +43,8 @@ fn player_context_target(
     if matches!(target_filter, TargetFilter::SourceChosenPlayer) {
         // CR 607.2d + CR 608.2c: Resolve "the chosen player" from the
         // source's linked persisted choice.
-        return super::source_chosen_player(state, ability.source_id).map(TargetRef::Player);
+        return crate::game::game_object::source_chosen_player(state, ability.source_id)
+            .map(TargetRef::Player);
     }
 
     if matches!(

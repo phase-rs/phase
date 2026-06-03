@@ -507,13 +507,20 @@ fn damage_done_applier(
         return ApplyResult::Modified(event);
     }
 
-    // Branch 1b: CR 614.9 — one-shot redirection shield. Replace the damage
-    // event's recipient with the redirection target, then consume the shield.
-    if let Some(ShieldKind::Redirection { recipient }) = shield_kind_for_rid(state, rid) {
+    // Branch 1b: CR 614.9 — one-shot redirection shield. Whole-event
+    // redirections replace the damage event's recipient; amount-capped
+    // redirections split the event, route the redirected portion through the
+    // same replacement/damage application path, and leave any remainder on the
+    // original recipient.
+    if let Some(ShieldKind::Redirection {
+        recipient,
+        amount: redirect_amount,
+    }) = shield_kind_for_rid(state, rid)
+    {
         if let ProposedEvent::Damage {
             source_id,
             target,
-            amount,
+            amount: damage_amount,
             is_combat,
             applied,
         } = event
@@ -521,11 +528,11 @@ fn damage_done_applier(
             // CR 614.7a: A source that would deal 0 damage deals no damage at
             // all — there is no damage event to redirect. Pass through and do
             // not consume the shield (no opportunity was spent).
-            if amount == 0 {
+            if damage_amount == 0 {
                 return ApplyResult::Modified(ProposedEvent::Damage {
                     source_id,
                     target,
-                    amount,
+                    amount: damage_amount,
                     is_combat,
                     applied,
                 });
@@ -542,23 +549,95 @@ fn damage_done_applier(
                     )
                 });
 
-            // CR 614.5: The one-shot opportunity is spent on this event whether
-            // or not the redirection succeeds — consume the shield in both the
-            // success and the "does nothing" (illegal recipient per CR 614.9)
-            // outcomes.
-            consume_prevention_shield(state, rid, None);
+            match redirect_amount {
+                PreventionAmount::All => {
+                    // CR 614.5: The one-shot opportunity is spent on this event
+                    // whether or not the redirection succeeds — consume the
+                    // shield in both the success and the "does nothing" (illegal
+                    // recipient per CR 614.9) outcomes.
+                    consume_prevention_shield(state, rid, None);
 
-            // CR 614.9: A legal recipient takes the damage instead; an illegal
-            // one (left the battlefield, no longer a battle/creature/planeswalker,
-            // or a player who left the game) makes the redirection do nothing,
-            // so the damage stays on the original recipient.
-            return ApplyResult::Modified(ProposedEvent::Damage {
-                source_id,
-                target: new_recipient.unwrap_or(target),
-                amount,
-                is_combat,
-                applied,
-            });
+                    // CR 614.9: A legal recipient takes the damage instead; an
+                    // illegal one (left the battlefield, no longer a
+                    // battle/creature/planeswalker, or a player who left the
+                    // game) makes the redirection do nothing, so the damage
+                    // stays on the original recipient.
+                    return ApplyResult::Modified(ProposedEvent::Damage {
+                        source_id,
+                        target: new_recipient.unwrap_or(target),
+                        amount: damage_amount,
+                        is_combat,
+                        applied,
+                    });
+                }
+                PreventionAmount::Next(n) => {
+                    let redirected_amount = damage_amount.min(n);
+                    let remaining_amount = damage_amount.saturating_sub(redirected_amount);
+                    if redirected_amount == n {
+                        consume_prevention_shield(state, rid, None);
+                    } else {
+                        update_redirection_shield(
+                            state,
+                            rid,
+                            recipient,
+                            PreventionAmount::Next(n - redirected_amount),
+                        );
+                    }
+
+                    if let Some(new_target) = new_recipient.filter(|_| redirected_amount > 0) {
+                        let redirected_event = ProposedEvent::Damage {
+                            source_id,
+                            target: new_target,
+                            amount: redirected_amount,
+                            is_combat,
+                            applied: applied.clone(),
+                        };
+                        match replace_event(state, redirected_event, events) {
+                            ReplacementResult::Execute(event) => {
+                                let ctx = super::effects::deal_damage::DamageContext::from_source(
+                                    state, source_id,
+                                )
+                                .unwrap_or_else(|| {
+                                    let controller = state
+                                        .objects
+                                        .get(&source_id)
+                                        .map(|obj| obj.controller)
+                                        .unwrap_or(PlayerId(0));
+                                    super::effects::deal_damage::DamageContext::fallback(
+                                        source_id, controller,
+                                    )
+                                });
+                                let _ = super::effects::deal_damage::apply_damage_after_replacement(
+                                    state, &ctx, event, is_combat, events,
+                                );
+                            }
+                            ReplacementResult::Prevented => {}
+                            ReplacementResult::NeedsChoice(_) => {
+                                state.pending_replacement = None;
+                            }
+                        }
+                    } else {
+                        return ApplyResult::Modified(ProposedEvent::Damage {
+                            source_id,
+                            target,
+                            amount: damage_amount,
+                            is_combat,
+                            applied,
+                        });
+                    }
+
+                    if remaining_amount == 0 {
+                        return ApplyResult::Prevented;
+                    }
+                    return ApplyResult::Modified(ProposedEvent::Damage {
+                        source_id,
+                        target,
+                        amount: remaining_amount,
+                        is_combat,
+                        applied,
+                    });
+                }
+            }
         }
         return ApplyResult::Modified(event);
     }
@@ -710,10 +789,48 @@ fn consume_prevention_shield(
     }
 }
 
+fn update_redirection_shield(
+    state: &mut GameState,
+    rid: ReplacementId,
+    recipient: crate::types::ability::DamageRedirectTarget,
+    amount: PreventionAmount,
+) {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get_mut(rid.index)
+    } else {
+        state
+            .objects
+            .get_mut(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get_mut(rid.index))
+    };
+
+    if let Some(repl) = repl {
+        repl.shield_kind = ShieldKind::Redirection { recipient, amount };
+    }
+}
+
 // --- 3. Destroy ---
 
 fn destroy_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::Destroy { .. })
+}
+
+/// CR 701.19c: Returns true if `object_id` is currently marked with an active
+/// `StaticMode::CantBeRegenerated` static. The standalone "[creature] can't be
+/// regenerated this turn" effect (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort)
+/// grants this mode onto the affected creature's `static_definitions` via a
+/// transient until-end-of-turn continuous effect (CR 514.2 auto-expiry at
+/// cleanup), so the mark is observed directly on the object through the
+/// CR-gated `active_static_definitions` iterator.
+fn object_has_active_cant_be_regenerated(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        super::functioning_abilities::active_static_definitions(state, obj).any(|def| {
+            matches!(
+                def.mode,
+                crate::types::statics::StaticMode::CantBeRegenerated
+            )
+        })
+    })
 }
 
 /// CR 701.19: Regeneration shield applier for Destroy events.
@@ -742,12 +859,24 @@ fn destroy_applier(
         return ApplyResult::Modified(event);
     }
 
-    // CR 701.19: "It can't be regenerated" bypasses regeneration shields.
-    if let ProposedEvent::Destroy {
-        cant_regenerate: true,
-        ..
-    } = &event
-    {
+    // CR 701.19c: Regeneration shields are not applied when the destruction
+    // forbids regeneration. Two sources of this prohibition:
+    //   1. The inline "Destroy X. It can't be regenerated." one-shot rides on the
+    //      event's `cant_regenerate: true` flag (Effect::Destroy { cant_regenerate }).
+    //   2. The standalone "[creature] can't be regenerated this turn" effect marks
+    //      the destroy target with an active `StaticMode::CantBeRegenerated` static
+    //      (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort).
+    // In both cases the shield is left unconsumed (CR 701.19c: shields are not
+    // applied, not destroyed) and destruction proceeds.
+    let target_cant_regenerate = match &event {
+        ProposedEvent::Destroy {
+            object_id,
+            cant_regenerate,
+            ..
+        } => *cant_regenerate || object_has_active_cant_be_regenerated(state, *object_id),
+        _ => false,
+    };
+    if target_cant_regenerate {
         return ApplyResult::Modified(event);
     }
 
@@ -2268,7 +2397,7 @@ fn matches_damage_target_filter(
                 // CR 607.2d + CR 614.1a: A damage replacement can scope
                 // "the chosen player" through the replacement source's linked
                 // persisted choice.
-                crate::game::effects::source_chosen_player(state, repl_source)
+                crate::game::game_object::source_chosen_player(state, repl_source)
                     .is_some_and(|chosen| player == chosen)
             }
             DamageTargetPlayerScope::Specific(specific) => player == *specific,
@@ -2417,6 +2546,9 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
+                // CR 613.1: "the chosen player" is undefined at replacement-check
+                // time here. Fail closed.
+                Some(ControllerRef::SourceChosenPlayer) => false,
                 // CR 109.4: Chosen-player scope is undefined at replacement-check
                 // time (no resolution context). Fail closed.
                 Some(ControllerRef::ChosenPlayer { .. }) => false,
@@ -2449,6 +2581,9 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
+                // CR 613.1: "the chosen player" is undefined at replacement-check
+                // time here. Fail closed.
+                Some(ControllerRef::SourceChosenPlayer) => false,
                 // CR 109.4: Chosen-player scope is undefined at replacement-check
                 // time (no resolution context). Fail closed.
                 Some(ControllerRef::ChosenPlayer { .. }) => false,
@@ -2577,6 +2712,7 @@ fn evaluate_replacement_condition(
                 | ControllerRef::TargetPlayer
                 | ControllerRef::ParentTargetController
                 | ControllerRef::DefendingPlayer
+                | ControllerRef::SourceChosenPlayer
                 | ControllerRef::ChosenPlayer { .. }
                 | ControllerRef::TriggeringPlayer => false,
             }
@@ -2849,6 +2985,9 @@ pub fn find_applicable_replacements(
                                     false
                                 }
                                 crate::types::ability::ControllerRef::DefendingPlayer => false,
+                                // CR 613.1: chosen-player scope has no meaning
+                                // for static token-creation replacements.
+                                crate::types::ability::ControllerRef::SourceChosenPlayer => false,
                                 // CR 109.4: Chosen-player scope has no meaning
                                 // for static token-creation replacements.
                                 crate::types::ability::ControllerRef::ChosenPlayer { .. } => false,
@@ -7199,6 +7338,69 @@ mod tests {
         // Shield not consumed
         let obj = state.objects.get(&bear_id).unwrap();
         assert!(!obj.replacement_definitions[0].is_consumed);
+    }
+
+    /// CR 701.19c: A creature marked with `StaticMode::CantBeRegenerated`
+    /// (granted by the standalone "[creature] can't be regenerated this turn"
+    /// effect — Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort) has its
+    /// regeneration shield bypassed at destroy time, even though the Destroy
+    /// event itself carries `cant_regenerate: false`. Mirrors
+    /// `cant_regenerate_bypasses_shield` but exercises the static-driven path.
+    #[test]
+    fn cant_be_regenerated_static_bypasses_shield() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+
+        // Grant the regeneration prohibition onto the creature, mirroring the
+        // transient until-end-of-turn continuous effect's `AddStaticMode`
+        // propagation onto the affected creature's `static_definitions`.
+        state
+            .objects
+            .get_mut(&bear_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                crate::types::ability::StaticDefinition::new(
+                    crate::types::statics::StaticMode::CantBeRegenerated,
+                )
+                .affected(TargetFilter::SelfRef),
+            );
+
+        // Helper observes the active mark.
+        assert!(object_has_active_cant_be_regenerated(&state, bear_id));
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: Some(ObjectId(100)),
+            // Note: the inline flag is false — the bypass is driven purely by the
+            // static mark, not by the destroy event.
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // Destruction proceeds; the shield does NOT save the creature.
+        assert!(
+            matches!(
+                result,
+                ReplacementResult::Execute(ProposedEvent::Destroy { .. })
+            ),
+            "CantBeRegenerated static should bypass the shield, got {:?}",
+            result
+        );
+        // CR 701.19c: shields are not applied, not consumed.
+        let obj = state.objects.get(&bear_id).unwrap();
+        assert!(!obj.replacement_definitions[0].is_consumed);
+    }
+
+    /// Negative control for `object_has_active_cant_be_regenerated`: a creature
+    /// with no regeneration prohibition is not reported as marked.
+    #[test]
+    fn object_without_cant_be_regenerated_is_not_marked() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_regen_shield(&mut state, PlayerId(0), "Bear");
+        assert!(!object_has_active_cant_be_regenerated(&state, bear_id));
     }
 
     #[test]

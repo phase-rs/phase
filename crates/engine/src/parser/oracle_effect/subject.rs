@@ -11,9 +11,9 @@ use super::animation::{
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    StaticDefinition, TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+    Duration, Effect, FilterProp, MultiTargetSpec, PlayerFilter, PlayerScope, PtValue,
+    QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -389,6 +389,43 @@ fn try_parse_subject_restriction_clause(
             source_filter: TargetFilter::SelfRef,
             exemption,
         };
+        return Some(ParsedEffectClause {
+            effect: Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::new(mode.clone())
+                    .affected(affected)
+                    .modifications(vec![ContinuousModification::AddStaticMode { mode }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: application.target,
+            },
+            distribute: None,
+            multi_target: None,
+            duration: Some(Duration::UntilEndOfTurn),
+            sub_ability: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
+    // CR 701.19c: "[subject] can't be regenerated [this turn]" — the standalone,
+    // until-end-of-turn form (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort).
+    // Marks the subject so regeneration shields are not applied the next time it
+    // would be destroyed. Splits the same way as the `must be blocked` /
+    // `activated abilities can't be activated` arms: `before` is the subject
+    // ("target creature", "that creature", "it", "~"). Bare pronoun/anaphor
+    // subjects bind to `ParentTarget` via `subject_application_for_cant_be_activated`
+    // (Lim-Dûl's Cohort: "Destroy target creature ... That creature can't be
+    // regenerated this turn." → "that creature" → ParentTarget), while
+    // "target creature" routes through the full subject grammar. The predicate
+    // itself is an anchored nom production that absorbs the optional "this turn"
+    // suffix; the duration is encoded directly as `UntilEndOfTurn`.
+    if let Some((before_lower, (), _)) =
+        nom_primitives::scan_preceded(&lower, parse_cant_be_regenerated_predicate)
+    {
+        let subject = text[..before_lower.len()].trim();
+        let application = subject_application_for_cant_be_activated(subject, ctx)?;
+        let affected = static_affected_for_application(&application);
+        let mode = StaticMode::CantBeRegenerated;
         return Some(ParsedEffectClause {
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(mode.clone())
@@ -1855,6 +1892,37 @@ fn build_become_clause(
         return Some(clause);
     }
 
+    // CR 205.3e + CR 607.2d: "becomes that type" applies the creature type chosen
+    // by the preceding "Choose a creature type" instruction in the same ability
+    // (Imagecrafter, Unnatural Selection, Mistform Mutant, Standardize). Unlike
+    // the "of your choice" arm above, the choice is already made upstream, so this
+    // emits only the apply half — a continuous `AddChosenSubtype` that reads the
+    // source's chosen creature type at resolution. Must intercept before
+    // parse_animation_spec, which would mis-tokenize "that"/"type" as subtypes.
+    if become_text.eq_ignore_ascii_case("that type") {
+        let affected = static_affected_for_application(&application);
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                }])
+                .description(become_text.to_string())],
+            duration: duration.clone(),
+            target: application.target.clone(),
+        };
+        return Some(ParsedEffectClause {
+            effect,
+            duration,
+            sub_ability: None,
+            distribute: None,
+            multi_target: None,
+            condition: None,
+            optional: false,
+            unless_pay: None,
+        });
+    }
+
     // CR 702.xxx: Prepare (Strixhaven) — "becomes prepared" / "becomes
     // unprepared" toggles the PreparedState on the target creature. Must
     // intercept before parse_animation_spec which would try to classify
@@ -2095,16 +2163,26 @@ fn try_parse_set_life_total(
     become_text: &str,
     application: &SubjectApplication,
 ) -> Option<ParsedEffectClause> {
-    let lower = become_text.to_lowercase();
+    let full_lower = become_text.to_lowercase();
+    // CR 119.5: "life total becomes equal to <quantity>" — strip the optional
+    // "equal to" connector via a nom combinator so the quantity parser below
+    // sees the bare quantity ("equal to your starting life total" → "your
+    // starting life total"; Oketra's Last Mercy, Resolute Archangel). Forms
+    // without the connector ("becomes half ...", "becomes 10") pass through
+    // unchanged because `opt` never fails.
+    let lower = opt(tag::<_, _, OracleError<'_>>("equal to "))
+        .parse(full_lower.as_str())
+        .map_or(full_lower.as_str(), |(rest, _)| rest)
+        .trim();
 
-    let amount = if nom_primitives::scan_contains(&lower, "starting life total") {
+    let amount = if nom_primitives::scan_contains(lower, "starting life total") {
         let amount_text = lower.trim().trim_end_matches('.');
         let (rest, amount) = nom_quantity::parse_quantity(amount_text).ok()?;
         if !rest.trim().is_empty() {
             return None;
         }
         amount
-    } else if let Some((n, rest)) = parse_number(&lower) {
+    } else if let Some((n, rest)) = parse_number(lower) {
         // Guard: reject if substantial text remains after the number.
         // "a 3/3 red goblin creature" matches "a" as 1 but the rest
         // "3/3 red goblin creature" indicates this is an animation, not
@@ -2122,7 +2200,7 @@ fn try_parse_set_life_total(
         // "life total becomes <quantity>" card composes. `parse_cda_quantity`
         // returns `Some` only when it fully consumes the phrase, so an
         // unrecognized trailer yields `None` here — no false positives.
-        oracle_quantity::parse_cda_quantity(&lower)?
+        oracle_quantity::parse_cda_quantity(lower)?
     };
 
     // CR 119.5: Use the parsed target if targeted ("target player's life total"),
@@ -2414,6 +2492,7 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
         StaticMode::CantBlock
             | StaticMode::CantAttack
             | StaticMode::CantAttackOrBlock
+            | StaticMode::CantCrew
             | StaticMode::CantBeBlocked
             | StaticMode::CantBeBlockedBy { .. }
             | StaticMode::CantBeBlockedExceptBy { .. }
@@ -2422,6 +2501,11 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             | StaticMode::CantLoseLife
             | StaticMode::CantLoseTheGame
             | StaticMode::CantWinTheGame
+            // CR 701.19c: CantBeRegenerated is granted to a target/anaphor creature
+            // and must propagate onto its `static_definitions` so the regen-shield
+            // bypass in replacement.rs::destroy_applier observes it via
+            // active_static_definitions.
+            | StaticMode::CantBeRegenerated
     )
 }
 
@@ -2456,6 +2540,13 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // CR 701.27: "~ can't transform" — prohibition on transform (e.g., Immerwolf).
     if lower == "can't transform" || lower == "cannot transform" {
         return Some(vec![StaticMode::Other("CantTransform".to_string())]);
+    }
+    // CR 701.19c: "~ can't be regenerated" — marks the subject so regeneration
+    // shields are not applied. Backstop for the "cannot" phrasing and any caller
+    // that routes through the generic " can't " / " cannot " split before
+    // reaching the dedicated arm in `try_parse_subject_restriction_clause`.
+    if parse_cant_be_regenerated_predicate(lower.trim()).is_ok() {
+        return Some(vec![StaticMode::CantBeRegenerated]);
     }
     // CR 101.2: Spell/ability restriction predicate; the subject path owns
     // the "spells you control" / "green spells you control" grammar.
@@ -2492,6 +2583,26 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // CR 508.1d + CR 509.1a: Compound "can't attack or block"
     if lower == "can't attack or block" || lower == "cannot attack or block" {
         return Some(vec![StaticMode::CantAttack, StaticMode::CantBlock]);
+    }
+    // CR 702.122c: "~ can't crew [Vehicles]"
+    if lower == "can't crew"
+        || lower == "cannot crew"
+        || lower == "can't crew vehicles"
+        || lower == "cannot crew vehicles"
+    {
+        return Some(vec![StaticMode::CantCrew]);
+    }
+    // CR 508.1d + CR 509.1a + CR 702.122c: Bound in Gold / Intercessor's Arrest
+    if lower == "can't attack, block, or crew vehicles"
+        || lower == "cannot attack, block, or crew vehicles"
+        || lower == "can't attack, block, or crew"
+        || lower == "cannot attack, block, or crew"
+    {
+        return Some(vec![
+            StaticMode::CantAttack,
+            StaticMode::CantBlock,
+            StaticMode::CantCrew,
+        ]);
     }
     // CR 509.1a + "can't be blocked": Compound "can't block or be blocked"
     if lower == "can't block or be blocked" || lower == "cannot block or be blocked" {
@@ -2638,6 +2749,22 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     }
 
     None
+}
+
+fn parse_cant_be_regenerated_predicate(input: &str) -> OracleResult<'_, ()> {
+    all_consuming(value(
+        (),
+        (
+            alt((
+                tag::<_, _, OracleError<'_>>("can't"),
+                tag::<_, _, OracleError<'_>>("cannot"),
+            )),
+            tag(" be regenerated"),
+            opt(tag(" this turn")),
+            opt(tag(".")),
+        ),
+    ))
+    .parse(input)
 }
 
 fn extract_pump_modifiers(
@@ -3040,6 +3167,33 @@ mod tests {
             "expected TakeTheInitiative, got {:?}",
             ability.effect
         );
+    }
+
+    #[test]
+    fn set_life_total_becomes_equal_to_starting_life_total() {
+        for (text, expected) in [
+            (
+                // Oketra's Last Mercy, Resolute Archangel.
+                "Your life total becomes equal to your starting life total.",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal,
+                },
+            ),
+            (
+                "Your life total becomes equal to 10.",
+                QuantityExpr::Fixed { value: 10 },
+            ),
+        ] {
+            let ability =
+                crate::parser::oracle_effect::parse_effect_chain(text, AbilityKind::Spell);
+            let Effect::SetLifeTotal { amount, .. } = &*ability.effect else {
+                panic!(
+                    "expected SetLifeTotal for {text:?}, got {:?}",
+                    ability.effect
+                );
+            };
+            assert_eq!(amount, &expected, "wrong amount for {text:?}");
+        }
     }
 
     #[test]
@@ -3769,6 +3923,45 @@ mod tests {
         assert_eq!(
             parse_restriction_modes("can't transform"),
             Some(vec![StaticMode::Other("CantTransform".to_string())])
+        );
+    }
+
+    #[test]
+    fn parse_restriction_modes_cant_crew_variants() {
+        assert_eq!(
+            parse_restriction_modes("can't crew"),
+            Some(vec![StaticMode::CantCrew])
+        );
+        assert_eq!(
+            parse_restriction_modes("cannot crew vehicles"),
+            Some(vec![StaticMode::CantCrew])
+        );
+    }
+
+    #[test]
+    fn parse_restriction_modes_cant_attack_block_or_crew_vehicles_compound() {
+        assert_eq!(
+            parse_restriction_modes("can't attack, block, or crew vehicles"),
+            Some(vec![
+                StaticMode::CantAttack,
+                StaticMode::CantBlock,
+                StaticMode::CantCrew,
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_restriction_modes_cant_be_regenerated_variants() {
+        let expected = Some(vec![StaticMode::CantBeRegenerated]);
+        assert_eq!(parse_restriction_modes("can't be regenerated"), expected);
+        assert_eq!(parse_restriction_modes("cannot be regenerated"), expected);
+        assert_eq!(
+            parse_restriction_modes("can't be regenerated this turn"),
+            expected
+        );
+        assert_eq!(
+            parse_restriction_modes("cannot be regenerated this turn."),
+            expected
         );
     }
 

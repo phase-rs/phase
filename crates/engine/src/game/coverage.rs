@@ -73,6 +73,10 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // the attacker that must be blocked (Provoke). Enforced by direct
             // match in combat.rs declare-blockers validation.
             | StaticMode::MustBlockAttacker { .. }
+            // CR 508.1d: MustAttackPlayer carries the `PlayerId` that must be
+            // attacked (Alluring Siren). Enforced by direct match in combat.rs
+            // declare-attackers validation.
+            | StaticMode::MustAttackPlayer { .. }
             // CR 509.1b: CantBeBlockedByMoreThan carries the blocker maximum
             // (Stalking Tiger). Enforced in combat.rs declare-blockers validation.
             | StaticMode::CantBeBlockedByMoreThan { .. }
@@ -109,6 +113,12 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // support via is_data_carrying_static() because the variant is
             // parameterized.
             | StaticMode::RevealTopOfLibrary { .. }
+            // CR 614.1c + CR 122.1: EntersWithAdditionalCounters carries the
+            // CounterType + fixed count. Runtime enforcement is in the
+            // battlefield-entry counter hook in effects/change_zone.rs, which
+            // scans active statics whose `affected` filter matches the entering
+            // object. Parameterized — no registry entry; coverage support here.
+            | StaticMode::EntersWithAdditionalCounters { .. }
     )
 }
 
@@ -552,6 +562,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     ControllerRef::TargetPlayer => "target player's",
                     ControllerRef::ParentTargetController => "parent target's",
                     ControllerRef::DefendingPlayer => "defending player's",
+                    ControllerRef::SourceChosenPlayer => "the chosen player's",
                     ControllerRef::ChosenPlayer { .. } => "chosen player's",
                     ControllerRef::TriggeringPlayer => "triggering player's",
                 };
@@ -652,6 +663,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::ParentTargetController => "parent target's controller",
                 ControllerRef::DefendingPlayer => "defending player",
+                ControllerRef::SourceChosenPlayer => "the chosen player",
                 ControllerRef::ChosenPlayer { .. } => "chosen player",
                 ControllerRef::TriggeringPlayer => "triggering player",
             };
@@ -719,6 +731,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::ParentTargetController => "parent target's controller controls",
         ControllerRef::DefendingPlayer => "defending player controls",
+        ControllerRef::SourceChosenPlayer => "the chosen player controls",
         ControllerRef::ChosenPlayer { .. } => "chosen player controls",
         ControllerRef::TriggeringPlayer => "triggering player controls",
     }
@@ -841,6 +854,7 @@ fn fmt_player_scope(scope: &PlayerScope) -> String {
         PlayerScope::Target => "target player".to_string(),
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::DefendingPlayer => "defending player".to_string(),
+        PlayerScope::SourceChosenPlayer => "the chosen player".to_string(),
         PlayerScope::ParentObjectTargetController => "parent target's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(*aggregate))
@@ -1170,6 +1184,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             let scope_s = match scope {
                 CountScope::Controller | CountScope::Owner => "you have",
                 CountScope::ScopedPlayer => "the scoped player has",
+                CountScope::SourceChosenPlayer => "the chosen player has",
                 CountScope::Opponents => "each opponent has",
                 CountScope::All => "each player has",
             };
@@ -1485,6 +1500,7 @@ fn fmt_count_scope(scope: &CountScope) -> &'static str {
     match scope {
         CountScope::Controller | CountScope::Owner => "your",
         CountScope::ScopedPlayer => "their",
+        CountScope::SourceChosenPlayer => "the chosen player's",
         CountScope::All => "all",
         CountScope::Opponents => "opponents'",
     }
@@ -1600,6 +1616,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
         | Effect::ForceBlock { target }
+        | Effect::ForceAttack { target, .. }
         | Effect::Transform { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
@@ -2087,6 +2104,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::CreateDamageReplacement {
             modification,
             redirect_to,
+            redirect_amount,
             combat_scope,
             redirect_object_filter,
             recipient_object_filter,
@@ -2097,6 +2115,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if let Some(r) = redirect_to {
                 d.push(("redirect_to".into(), format!("{r:?}")));
+            }
+            if let Some(a) = redirect_amount {
+                d.push(("redirect_amount".into(), format!("{a:?}")));
             }
             if let Some(cs) = combat_scope {
                 d.push(("combat_scope".into(), format!("{cs:?}")));
@@ -2365,6 +2386,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Investigate
         | Effect::BecomeMonarch
         | Effect::Proliferate
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
         | Effect::SolveCase
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }
@@ -2390,6 +2413,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
         | Effect::ProcessRadCounters
         | Effect::Clash
         | Effect::Vote { .. }
@@ -2400,7 +2425,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::AddPendingETBCounters { .. }
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::ReturnAsAura { .. } => {}
+        | Effect::ReturnAsAura { .. }
+        | Effect::Specialize => {}
     }
     d
 }
@@ -5349,6 +5375,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         // `layers::evaluate_condition_with_context` alongside `ChosenColorIs`.
         StaticCondition::ChosenLabelIs { .. } => ("ChosenLabelIs", Handled),
         StaticCondition::HasCounters { .. } => ("HasCounters", Handled),
+        StaticCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         StaticCondition::RecipientHasCounters { .. } => ("RecipientHasCounters", Handled),
         StaticCondition::RecipientMatchesFilter { .. } => ("RecipientMatchesFilter", Handled),
         StaticCondition::ClassLevelGE { .. } => ("ClassLevelGE", Handled),
@@ -6585,6 +6612,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantAttack => effective_lower.contains("can't attack"),
             StaticMode::CantBlock => effective_lower.contains("can't block"),
             StaticMode::CantAttackOrBlock => effective_lower.contains("can't attack or block"),
+            StaticMode::CantCrew => {
+                effective_lower.contains("can't crew") || effective_lower.contains("cannot crew")
+            }
             StaticMode::CastWithFlash => {
                 effective_lower.contains("as though it had flash")
                     || effective_lower.contains("as though they had flash")
@@ -7883,7 +7913,6 @@ fn is_keyword_line(lower: &str) -> bool {
         "gravestorm",
         "conspire",
         "retrace",
-        "rebound",
         "miracle ",
         "cipher",
         "extort",
@@ -8396,9 +8425,11 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             is_commander: false,
+            is_oathbreaker: false,
             deck_copy_limit: None,
             metadata: Default::default(),
             rarities: Default::default(),
+            attraction_lights: vec![],
         }
     }
 

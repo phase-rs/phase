@@ -64,6 +64,9 @@ import { ChooseOneOfBranchModal } from "../components/modal/ChooseOneOfBranchMod
 import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
+import { PeekTab } from "../components/modal/DialogShell.tsx";
+import { PeekRestoreTab } from "../components/modal/DialogHost.tsx";
+import { useModalPeek } from "../components/modal/useModalPeek.ts";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
@@ -1643,38 +1646,66 @@ function MulliganPanel({
   children,
   footer,
 }: MulliganPanelProps) {
+  // Reuse the DialogHost peek affordance so the player can slide the (large)
+  // mulligan modal out of the way to see the table — identical collapse
+  // muscle-memory to engine dialogs, via the shared slide math + tab components.
+  const { peeked, togglePeek, setPeeked, isNarrow, slideTransform } = useModalPeek();
+
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto px-2 py-2 lg:px-4 lg:py-6">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]" />
+    <>
+    <div
+      className="fixed inset-0 z-50 overflow-x-hidden overflow-y-auto px-2 py-2 lg:px-4 lg:py-6"
+      style={{ pointerEvents: peeked ? "none" : undefined }}
+    >
+      <motion.div
+        className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(31,41,55,0.55),rgba(2,6,23,0.92)_58%,rgba(2,6,23,0.98))]"
+        animate={{ opacity: peeked ? 0 : 1 }}
+        transition={{ duration: 0.24, ease: "easeOut" }}
+      />
       <div className="relative flex min-h-full items-center justify-center pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]">
         <motion.div
-          className="card-scale-reset relative z-10 flex w-full max-w-6xl flex-col overflow-hidden rounded-[14px] lg:rounded-[28px] border border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md"
+          className="card-scale-reset pointer-events-auto relative z-10 w-full max-w-6xl"
           initial={{ opacity: 0, y: 18, scale: 0.98 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
+          animate={{ opacity: 1, scale: 1, ...slideTransform }}
           transition={{ duration: 0.24, ease: "easeOut" }}
         >
-          <div className="modal-header-compact border-b border-white/10">
-            <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500">
-              {eyebrow}
+          <div className="flex w-full flex-col overflow-hidden rounded-[14px] lg:rounded-[28px] border border-white/10 bg-[#0b1020]/94 shadow-[0_32px_90px_rgba(0,0,0,0.48)] backdrop-blur-md">
+            <div className="modal-header-compact border-b border-white/10">
+              <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500">
+                {eyebrow}
+              </div>
+              <h2 className="font-semibold text-white">
+                {title}
+              </h2>
+              <p className="modal-subtitle max-w-2xl text-slate-400">
+                {subtitle}
+              </p>
             </div>
-            <h2 className="font-semibold text-white">
-              {title}
-            </h2>
-            <p className="modal-subtitle max-w-2xl text-slate-400">
-              {subtitle}
-            </p>
+
+            <div className="flex flex-1 flex-col px-2 py-2 lg:px-5 lg:py-5">{children}</div>
+
+            {footer && (
+              <div className="border-t border-white/10 bg-black/15 px-3 py-2 lg:px-6 lg:py-4">
+                {footer}
+              </div>
+            )}
           </div>
-
-          <div className="flex flex-1 flex-col px-2 py-2 lg:px-5 lg:py-5">{children}</div>
-
-          {footer && (
-            <div className="border-t border-white/10 bg-black/15 px-3 py-2 lg:px-6 lg:py-4">
-              {footer}
-            </div>
-          )}
+          <PeekTab
+            direction={isNarrow ? "bottom" : "right"}
+            onClick={togglePeek}
+          />
         </motion.div>
       </div>
     </div>
+    {/* Sibling of the (pointer-events:none while peeked) overlay so the restore
+        tab itself stays clickable and board taps pass through behind it. */}
+    {peeked && (
+      <PeekRestoreTab
+        direction={isNarrow ? "bottom" : "right"}
+        onClick={() => setPeeked(false)}
+      />
+    )}
+    </>
   );
 }
 

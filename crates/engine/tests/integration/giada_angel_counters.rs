@@ -28,8 +28,7 @@
 //!   - CR 109.1: "Angel" is an object characteristic; the count is over Angel
 //!     permanents under the source's controller.
 
-use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::actions::GameAction;
+use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -40,37 +39,14 @@ const GIADA: &str = "Flying, vigilance\nEach other Angel you control enters with
 an additional +1/+1 counter on it for each Angel you already control.\n{T}: Add \
 {W}. Spend this mana only to cast an Angel spell.";
 
-/// Count `+1/+1` counters on a battlefield object.
-fn p1p1_counters(runner: &engine::game::scenario::GameRunner, id: ObjectId) -> u32 {
-    runner
-        .state()
-        .objects
-        .get(&id)
-        .expect("object still present")
-        .counters
-        .get(&CounterType::Plus1Plus1)
-        .copied()
-        .unwrap_or(0)
-}
-
-/// Drive a creature spell from a player's hand through the real
-/// cast → stack → resolve pipeline. Scenario-built creatures have
-/// `ManaCost::zero()`, so casting needs no mana payment prompt.
-fn cast_creature_from_hand(runner: &mut engine::game::scenario::GameRunner, hand_card: ObjectId) {
-    let card_id = runner
-        .state()
-        .objects
-        .get(&hand_card)
-        .expect("hand card exists")
-        .card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: hand_card,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting a 0-cost creature should succeed");
-    runner.advance_until_stack_empty();
+/// Drive a creature spell from a player's hand through the canonical cast
+/// pipeline. Scenario-built creatures have `ManaCost::zero()`, so the cast
+/// auto-pays and needs no mana payment prompt.
+fn cast_creature_from_hand(
+    runner: &mut engine::game::scenario::GameRunner,
+    hand_card: ObjectId,
+) -> CastOutcome {
+    runner.cast(hand_card).resolve()
 }
 
 /// Core fix: with Giada plus one other Angel already on the battlefield, a
@@ -99,24 +75,12 @@ fn giada_other_angels_enter_with_counters() {
         .id();
 
     let mut runner = scenario.build();
-    cast_creature_from_hand(&mut runner, newcomer);
+    let outcome = cast_creature_from_hand(&mut runner, newcomer);
 
-    assert_eq!(
-        runner
-            .state()
-            .objects
-            .get(&newcomer)
-            .expect("newcomer present")
-            .zone,
-        Zone::Battlefield,
-        "the cast Angel must resolve onto the battlefield"
-    );
-    assert_eq!(
-        p1p1_counters(&runner, newcomer),
-        2,
-        "the entering Angel must enter with 2 +1/+1 counters — one per Angel \
-         (Giada + Resident Angel) controlled before it entered (CR 122.6)"
-    );
+    outcome.assert_zone(&[newcomer], Zone::Battlefield);
+    // The entering Angel must enter with 2 +1/+1 counters — one per Angel
+    // (Giada + Resident Angel) controlled before it entered (CR 122.6).
+    outcome.assert_counters(newcomer, CounterType::Plus1Plus1, 2);
 }
 
 /// The entering Angel must NOT count itself — "Angels you *already* control".
@@ -138,15 +102,12 @@ fn giada_does_not_double_count_self() {
         .id();
 
     let mut runner = scenario.build();
-    cast_creature_from_hand(&mut runner, newcomer);
+    let outcome = cast_creature_from_hand(&mut runner, newcomer);
 
-    assert_eq!(
-        p1p1_counters(&runner, newcomer),
-        1,
-        "with Giada the only other Angel, the entering Angel gets exactly 1 \
-         counter and does not count itself (CR 122.6 — 'Angels you already \
-         control')"
-    );
+    // With Giada the only other Angel, the entering Angel gets exactly 1
+    // counter and does not count itself (CR 122.6 — "Angels you already
+    // control").
+    outcome.assert_counters(newcomer, CounterType::Plus1Plus1, 1);
 }
 
 /// A token Angel must also receive the ETB counters. Token entry is a
@@ -175,24 +136,11 @@ fn giada_token_angel_receives_counters() {
 
     let mut runner = scenario.build();
 
-    let card_id = runner
-        .state()
-        .objects
-        .get(&token_maker)
-        .expect("token maker present")
-        .card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: token_maker,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting a 0-cost token sorcery should succeed");
-    runner.advance_until_stack_empty();
+    let outcome = runner.cast(token_maker).resolve();
 
     // The token is a new battlefield object — locate the Angel token by its
     // token identity and Angel subtype (CR 111.1).
-    let token = runner
+    let token = outcome
         .state()
         .objects
         .values()
@@ -201,18 +149,12 @@ fn giada_token_angel_receives_counters() {
                 && o.zone == Zone::Battlefield
                 && o.card_types.subtypes.iter().any(|s| s == "Angel")
         })
+        .map(|o| o.id)
         .expect("an Angel token must be on the battlefield");
-    assert_eq!(
-        token
-            .counters
-            .get(&CounterType::Plus1Plus1)
-            .copied()
-            .unwrap_or(0),
-        2,
-        "the Angel token must enter with 2 +1/+1 counters (Giada + Resident \
-         Angel) — external ETB-counter replacements route through ChangeZone \
-         so tokens are covered (CR 614.12)"
-    );
+    // The Angel token must enter with 2 +1/+1 counters (Giada + Resident
+    // Angel) — external ETB-counter replacements route through ChangeZone so
+    // tokens are covered (CR 614.12).
+    outcome.assert_counters(token, CounterType::Plus1Plus1, 2);
 }
 
 /// Giada herself entering gets NO ETB counter — "each *other* Angel" excludes
@@ -229,14 +171,11 @@ fn giada_self_does_not_get_extra_counters() {
         .id();
 
     let mut runner = scenario.build();
-    cast_creature_from_hand(&mut runner, giada);
+    let outcome = cast_creature_from_hand(&mut runner, giada);
 
-    assert_eq!(
-        p1p1_counters(&runner, giada),
-        0,
-        "Giada's own entry gets no ETB counter — 'each OTHER Angel' excludes \
-         the source (FilterProp::Another)"
-    );
+    // Giada's own entry gets no ETB counter — "each OTHER Angel" excludes the
+    // source (FilterProp::Another).
+    outcome.assert_counters(giada, CounterType::Plus1Plus1, 0);
 }
 
 /// A non-Angel creature entering gets no counter — validates the
@@ -256,14 +195,11 @@ fn non_angel_creature_unaffected() {
         .id();
 
     let mut runner = scenario.build();
-    cast_creature_from_hand(&mut runner, bear);
+    let outcome = cast_creature_from_hand(&mut runner, bear);
 
-    assert_eq!(
-        p1p1_counters(&runner, bear),
-        0,
-        "a non-Angel creature must not receive Giada's ETB counters — the \
-         replacement's valid_card filter is Subtype(\"Angel\")"
-    );
+    // A non-Angel creature must not receive Giada's ETB counters — the
+    // replacement's valid_card filter is Subtype("Angel").
+    outcome.assert_counters(bear, CounterType::Plus1Plus1, 0);
 }
 
 /// An opponent's Angel entering does NOT receive counters — "Angel YOU
@@ -290,12 +226,9 @@ fn opponent_angel_unaffected() {
         state.waiting_for = engine::types::game_state::WaitingFor::Priority { player: P1 };
     }
 
-    cast_creature_from_hand(&mut runner, opp_angel);
+    let outcome = cast_creature_from_hand(&mut runner, opp_angel);
 
-    assert_eq!(
-        p1p1_counters(&runner, opp_angel),
-        0,
-        "an opponent's Angel must not receive Giada's ETB counters — the \
-         replacement's valid_card filter is controller: You"
-    );
+    // An opponent's Angel must not receive Giada's ETB counters — the
+    // replacement's valid_card filter is controller: You.
+    outcome.assert_counters(opp_angel, CounterType::Plus1Plus1, 0);
 }

@@ -177,7 +177,15 @@
     "setAsCommander": "Definir como comandante:",
     "cardCount": "{{count}}/{{expected}} cartas",
     "singletonViolations": "Violações de singleton: {{cards}}",
-    "colorViolations": "Violações de identidade de cor: {{cards}}"
+    "colorViolations": "Violações de identidade de cor: {{cards}}",
+    "signatureSpell": {
+      "heading": "Feitiço de assinatura",
+      "noSignatureSpell": "Nenhum feitiço de assinatura selecionado",
+      "setAsSignatureSpell": "Definir como feitiço de assinatura:",
+      "remove": "Remover feitiço de assinatura",
+      "mustBeInstantOrSorcery": "O feitiço de assinatura deve ser uma mágica instantânea ou feitiçaria",
+      "outsideColorIdentity": "{{name}}: fora da identidade de cor do Oathbreaker"
+    }
   },
   "manaCurve": {
     "title": "Curva de Mana",

@@ -1,6 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::space1;
 use nom::combinator::{all_consuming, eof, map, not, opt, rest, value};
 use nom::error::ParseError;
 use nom::sequence::{preceded, terminated};
@@ -17,7 +18,7 @@ use super::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_nom::bridge::nom_on_lower;
+use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
@@ -1582,6 +1583,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 // `grant_permission::resolve`.
                 granted_to: None,
                 resolution_cleanup: None,
+                duration: None,
             },
             target,
             grantee: Default::default(),
@@ -5026,6 +5028,33 @@ pub(super) fn parse_imperative_family_ast(
 ) -> Option<ImperativeFamilyAst> {
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
+    // CR 724.1: "end the turn" (Time Stop, Sundial of the Infinite, Obeka,
+    // Glorious End, Discontinuity, Day's Undoing). Whole-phrase imperative
+    // with no target; parse it as an anchored nom production rather than a
+    // substring scan so unrelated clauses cannot accidentally match it.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("end the turn"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn));
+    }
+
+    // CR 724.2: "end the combat phase" (Mandate of Peace). Whole-phrase
+    // imperative with no target; anchored nom production mirroring the
+    // "end the turn" parse so unrelated clauses cannot accidentally match it.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("end the combat phase"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase));
+    }
+
     // CR 500.8: Additional step/phase effects can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
     // Intercept early regardless of first_word.
@@ -5428,10 +5457,29 @@ pub(super) fn parse_imperative_family_ast(
             .ok()
             .map(|(_, ast)| ast)
         }
-        // CR 706 + CR 706.2: "roll a d20" with an optional "and add/subtract X"
-        // modifier suffix attached as a typed `DieRollModifier`.
-        "roll" | "rolls" => try_parse_roll_die_with_modifier(lower)
-            .map(|(sides, modifier)| ImperativeFamilyAst::RollDie { sides, modifier }),
+        // CR 701.52: "roll to visit your Attractions" (not a generic d20/d6 roll).
+        "roll" | "rolls" => {
+            if nom_parse_lower(lower, |input| {
+                value(
+                    ImperativeFamilyAst::RollToVisitAttractions,
+                    (
+                        alt((tag("roll"), tag("rolls"))),
+                        tag(" to visit your attractions"),
+                        eof,
+                    ),
+                )
+                .parse(input)
+            })
+            .is_some()
+            {
+                Some(ImperativeFamilyAst::RollToVisitAttractions)
+            } else {
+                try_parse_roll_die_with_modifier(lower)
+                    .map(|(sides, modifier)| ImperativeFamilyAst::RollDie { sides, modifier })
+            }
+        }
+        // CR 701.51b: "open an Attraction" / "open two Attractions"
+        "open" | "opens" => parse_open_attraction_imperative(lower),
         // CR 725.1: "become the monarch"
         "become" | "becomes" => {
             if lower == "become the monarch" || lower == "becomes the monarch" {
@@ -5639,8 +5687,9 @@ pub(super) fn parse_imperative_family_ast(
             } else if let Some(effect) =
                 try_parse_gain_keyword(text).or_else(|| try_parse_gain_quoted_ability(text))
             {
-                // CR 702.1b: keyword-ability grant (CR 113.3 + CR 604.1: or
-                // quoted-ability grant). Checked BEFORE the life-gain branch because the bare
+                // CR 113.3 + CR 604.1: grant a keyword ability (or, via
+                // try_parse_gain_quoted_ability, a quoted ability) to an object.
+                // Checked BEFORE the life-gain branch because the bare
                 // `scan_contains(lower, "life")` guard below also matches
                 // keywords whose name contains "life" — e.g. "gain lifelink",
                 // which otherwise misrouted to the numeric life-gain parser and
@@ -6086,6 +6135,42 @@ fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
     Some((sides, after_word))
 }
 
+/// CR 701.51b: "open N attraction(s)" after the open/opens prefix.
+fn parse_open_attractions_count_imperative(input: &str) -> OracleResult<'_, ImperativeFamilyAst> {
+    let (rest, count) = nom_primitives::parse_number(input)?;
+    let (rest, _) = space1(rest)?;
+    let (rest, _) = alt((tag("attractions"), tag("attraction"))).parse(rest)?;
+    Ok((rest, ImperativeFamilyAst::OpenAttractions { count }))
+}
+
+/// CR 701.51b: "open an Attraction" / "open two Attractions".
+fn parse_open_attraction_imperative(lower: &str) -> Option<ImperativeFamilyAst> {
+    nom_parse_lower(lower, |input| {
+        map(
+            (
+                alt((tag("open "), tag("opens "))),
+                alt((
+                    value(
+                        ImperativeFamilyAst::OpenAttractions { count: 1 },
+                        tag("an attraction"),
+                    ),
+                    value(
+                        ImperativeFamilyAst::OpenAttractions { count: 1 },
+                        tag("a attraction"),
+                    ),
+                    parse_open_attractions_count_imperative,
+                )),
+                opt(nom::bytes::complete::take_while(|c: char| {
+                    c == '.' || c == ','
+                })),
+                eof,
+            ),
+            |(_, ast, _, _)| ast,
+        )
+        .parse(input)
+    })
+}
+
 /// CR 706 + CR 706.2: Try to parse a full `"roll a d{N}"` clause, including
 /// an optional trailing `" and (add|subtract) {quantity}"` modifier that the
 /// resolver applies to the natural roll before result-table lookup.
@@ -6392,6 +6477,11 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
             target: TargetFilter::Any,
         },
+        ImperativeFamilyAst::ForceAttack { duration } => Effect::ForceAttack {
+            target: TargetFilter::Any,
+            required_player: TargetFilter::Controller,
+            duration,
+        },
         // CR 701.15a: Goad target creature. Subject injection fills target from parsed text.
         ImperativeFamilyAst::Goad => Effect::Goad {
             target: TargetFilter::Any,
@@ -6432,6 +6522,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             dungeon: crate::game::dungeon::DungeonId::Undercity,
         },
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
+        ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
+        ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
         // CR 701.56a: Time travel.
         ImperativeFamilyAst::TimeTravel => Effect::TimeTravel,
@@ -6933,15 +7025,11 @@ fn try_parse_adapt(lower: &str) -> Option<Effect> {
     Some(Effect::Adapt { count })
 }
 
-/// CR 508.1d: Parse "attacks/attack [player] this turn/combat if able" as a temporary MustAttack.
+/// CR 508.1d: Parse "attacks/attack [player] this turn/combat if able" requirements.
 ///
-/// Handles bare forms ("attacks this turn if able") and player-targeted forms
-/// ("attacks you this turn if able", "attacks that opponent this combat if able",
-/// "attacks target opponent this turn if able"). The player target is currently
-/// not enforced at runtime — MustAttack forces the creature to attack if able,
-/// but the specific-player constraint requires additional engine support.
-///
-/// Emits a `GenericEffect` with `StaticMode::MustAttack` and the appropriate duration.
+/// Bare forms ("attacks this turn if able") emit a temporary `MustAttack`.
+/// Player-bound "attacks you ..." forms emit `ForceAttack`, whose resolver binds
+/// "you" to the resolving ability controller and grants `MustAttackPlayer`.
 fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let trimmed = lower.trim_end_matches('.');
 
@@ -6972,51 +7060,34 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
         }));
     }
 
-    // Second try: player-targeted forms — "attacks [player] this turn/combat if able".
-    // Strip verb prefix, skip over the player phrase, then match the duration suffix.
-    let rest = if let Ok((r, _)) =
-        alt((tag::<_, _, OracleError<'_>>("attacks "), tag("attack "))).parse(trimmed)
-    {
-        r
-    } else {
-        return None;
-    };
+    let targeted: Result<(&str, Duration), nom::Err<OracleError<'_>>> = (
+        alt((tag("attacks"), tag("attack"))),
+        preceded(tag(" "), tag("you")),
+        preceded(
+            tag(" "),
+            alt((
+                value(Duration::UntilEndOfTurn, tag("this turn if able")),
+                value(
+                    Duration::UntilEndOfCombat,
+                    alt((
+                        tag("this combat if able"),
+                        tag("that combat if able"),
+                        tag("each combat if able"),
+                    )),
+                ),
+            )),
+        ),
+    )
+        .map(|(_, _, duration)| duration)
+        .parse(trimmed);
 
-    // Match duration suffix: "this turn if able" or "this combat if able"
-    let duration_suffix: Result<(&str, Duration), nom::Err<OracleError<'_>>> = alt((
-        value(Duration::UntilEndOfTurn, tag(" this turn if able")),
-        value(Duration::UntilEndOfCombat, tag(" this combat if able")),
-        value(Duration::UntilEndOfCombat, tag(" each combat if able")),
-    ))
-    .parse(rest);
-
-    // If a duration suffix is found somewhere in the remaining text,
-    // the player phrase is whatever sits between the verb and the suffix.
-    if duration_suffix.is_err() {
-        // Try scanning for the suffix by finding it anywhere after the verb
-        for (suffix_tag, dur) in [
-            (" this turn if able", Duration::UntilEndOfTurn),
-            (" this combat if able", Duration::UntilEndOfCombat),
-            (" each combat if able", Duration::UntilEndOfCombat),
-        ] {
-            if rest.ends_with(suffix_tag) {
-                return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-                    static_abilities: vec![must_attack_static_definition()],
-                    duration: Some(dur),
-                    target: None,
-                }));
-            }
+    if let Ok((rest, duration)) = targeted {
+        if rest.is_empty() {
+            return Some(ImperativeFamilyAst::ForceAttack { duration });
         }
-        return None;
     }
 
-    let (_, duration) = duration_suffix.ok()?;
-
-    Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-        static_abilities: vec![must_attack_static_definition()],
-        duration: Some(duration),
-        target: None,
-    }))
+    None
 }
 
 /// CR 508.1d: Build the `StaticDefinition` for a transient "attacks if able"
@@ -9852,6 +9923,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_attack_you_this_combat_if_able() {
+        let result = try_parse_attack_if_able("attacks you this combat if able");
+        assert!(
+            result.is_some(),
+            "Should parse 'attacks you this combat if able'"
+        );
+        match result.unwrap() {
+            ImperativeFamilyAst::ForceAttack { duration } => {
+                assert_eq!(duration, Duration::UntilEndOfCombat);
+            }
+            other => panic!("Expected ForceAttack, got {other:?}"),
+        }
+    }
+
     /// CR 508.1d / CR 509.1c: the standalone-combat-requirement recognizer
     /// used to gate the conjunction split. Recognizes both attack and
     /// must-be-blocked forms, and rejects non-requirements.
@@ -10351,6 +10437,41 @@ mod tests {
             ),
             _ => panic!("expected GainKeyword(Lifelink)"),
         }
+    }
+
+    /// CR 724.1: "end the turn" parses to the no-target `Effect::EndTheTurn`
+    /// (Time Stop, Sundial of the Infinite, Obeka, Glorious End).
+    #[test]
+    fn end_the_turn_parses_to_end_the_turn_effect() {
+        let ast = parse_imperative_family_ast(
+            "end the turn",
+            "end the turn",
+            &mut ParseContext::default(),
+        )
+        .expect("'end the turn' should parse");
+        assert!(
+            matches!(ast, ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn)),
+            "expected Effect::EndTheTurn"
+        );
+    }
+
+    /// CR 724.2: "end the combat phase" parses to the no-target
+    /// `Effect::EndCombatPhase` (Mandate of Peace).
+    #[test]
+    fn end_the_combat_phase_parses_to_end_combat_phase_effect() {
+        let ast = parse_imperative_family_ast(
+            "end the combat phase",
+            "end the combat phase",
+            &mut ParseContext::default(),
+        )
+        .expect("'end the combat phase' should parse");
+        assert!(
+            matches!(
+                ast,
+                ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase)
+            ),
+            "expected Effect::EndCombatPhase"
+        );
     }
 
     /// Regression: a genuine life-gain clause must still reach the numeric

@@ -16,21 +16,24 @@ const p2pMocks = vi.hoisted(() => ({
 vi.mock("../../network/connection", () => ({
   hostRoom: vi.fn(async () => ({
     peer: { id: "peer-id", destroy: p2pMocks.hostDestroy },
+    destroy: p2pMocks.hostDestroy,
     roomCode: "ABCDE",
     onGuestConnected: vi.fn(),
   })),
 }));
 
 vi.mock("../../adapter/p2p-adapter", () => ({
-  P2PHostAdapter: vi.fn().mockImplementation(() => ({
-    onEvent: vi.fn(),
-    initialize: p2pMocks.initialize,
-    applySeatMutation: p2pMocks.applySeatMutation,
-    startNow: p2pMocks.startNow,
-    startPregameGame: p2pMocks.startPregameGame,
-    getPlayerSlots: p2pMocks.getPlayerSlots,
-    dispose: p2pMocks.dispose,
-  })),
+  P2PHostAdapter: vi.fn().mockImplementation(function () {
+    return {
+      onEvent: vi.fn(),
+      initialize: p2pMocks.initialize,
+      applySeatMutation: p2pMocks.applySeatMutation,
+      startNow: p2pMocks.startNow,
+      startPregameGame: p2pMocks.startPregameGame,
+      getPlayerSlots: p2pMocks.getPlayerSlots,
+      dispose: p2pMocks.dispose,
+    };
+  }),
 }));
 
 describe("multiplayerStore", () => {

@@ -254,6 +254,7 @@ fn synthesize_prepared_copy_object(
             constraint: None,
             granted_to: Some(controller),
             resolution_cleanup: None,
+            duration: None,
         });
     state.objects.insert(copy_id, copy_obj);
 

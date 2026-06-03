@@ -96,6 +96,9 @@ pub struct Player {
     pub library: im::Vector<ObjectId>,
     pub hand: im::Vector<ObjectId>,
     pub graveyard: im::Vector<ObjectId>,
+    /// CR 717.2: Supplementary Attraction deck (command zone), top at front.
+    #[serde(default)]
+    pub attraction_deck: im::Vector<ObjectId>,
 
     // Tracking
     pub has_drawn_this_turn: bool,
@@ -191,6 +194,7 @@ impl Default for Player {
             library: im::Vector::new(),
             hand: im::Vector::new(),
             graveyard: im::Vector::new(),
+            attraction_deck: im::Vector::new(),
             has_drawn_this_turn: false,
             lands_played_this_turn: 0,
             poison_counters: 0,

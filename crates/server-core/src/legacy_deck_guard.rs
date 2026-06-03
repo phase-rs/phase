@@ -25,7 +25,7 @@ mod tests {
             main_deck: v(main),
             sideboard: v(sideboard),
             commander: v(commander),
-            bracket_tier: Default::default(),
+            ..Default::default()
         }
     }
 

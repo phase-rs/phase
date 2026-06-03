@@ -15,6 +15,7 @@ use crate::types::ability::{
 };
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaRestriction, ManaSpellGrant};
+use crate::types::zones::Zone;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
 use super::super::oracle_quantity::{parse_cda_quantity, parse_event_context_quantity};
@@ -1159,9 +1160,13 @@ pub(crate) fn parse_mana_spend_restriction(
         return Some((ManaSpendRestriction::ActivateOnly, vec![]));
     }
 
-    // "spend this mana only on costs that include" -- X-cost restriction
+    // "spend this mana only on costs that include/contain {X}" -- X-cost restriction
     if nom_on_lower(base, &base_lower, |i| {
-        value((), tag("on costs that include")).parse(i)
+        value(
+            (),
+            alt((tag("on costs that include"), tag("on costs that contain"))),
+        )
+        .parse(i)
     })
     .is_some()
     {
@@ -1188,6 +1193,15 @@ pub(crate) fn parse_mana_spend_restriction(
     if let Some((comparator, value)) = parse_mana_value_threshold(rest) {
         return Some((
             ManaSpendRestriction::SpellWithManaValue { comparator, value },
+            grants,
+        ));
+    }
+
+    // CR 105.2 + CR 106.6: "spells with exactly N colors" / "a spell with N or
+    // more colors" — parameterized over Comparator by the color-count suffix.
+    if let Some((comparator, count)) = parse_color_count(rest) {
+        return Some((
+            ManaSpendRestriction::SpellWithColorCount { comparator, count },
             grants,
         ));
     }
@@ -1225,6 +1239,13 @@ pub(crate) fn parse_mana_spend_restriction(
         ));
     }
 
+    // CR 106.6 + CR 400.7: "[a spell|spells] from your graveyard" / "from exile"
+    // — zone-gated spend (no keyword required). Checked before the type-phrase
+    // fallback, which does not recognize a "from <zone>" tail.
+    if let Some(zone) = parse_spell_from_zone(rest) {
+        return Some((ManaSpendRestriction::SpellFromZone(zone), grants));
+    }
+
     // CR 106.6: Check for "or activate abilities of [type]" suffix.
     // If present, emit a combined SpellTypeOrAbilityActivation restriction.
     let (spell_part, activation_source_quality) = split_restricted_spell_and_activation(rest);
@@ -1249,6 +1270,36 @@ pub(crate) fn parse_mana_spend_restriction(
         Some(_) => None,
         None => Some((ManaSpendRestriction::SpellType(type_phrase), grants)),
     }
+}
+
+/// CR 106.6 + CR 400.7: Parse "[a spell|spells] from <zone>" (the post-"to cast"
+/// remainder of a zone-gated spend restriction) into the origin `Zone`. Handles
+/// graveyard / exile / hand with the usual "your"/"a" determiners. Returns
+/// `None` when the remainder is not a bare spell-from-zone phrase (e.g. it
+/// carries a keyword or type qualifier handled by other arms).
+fn parse_spell_from_zone(rest: &str) -> Option<Zone> {
+    let rest_lower = rest.to_lowercase();
+    let (_, after_prefix) = nom_on_lower(rest, &rest_lower, |i| {
+        value(
+            (),
+            (
+                alt((tag("a spell"), tag("spells"))),
+                tag(" from "),
+                opt(alt((tag("your "), tag("a ")))),
+            ),
+        )
+        .parse(i)
+    })?;
+    let after_lower = after_prefix.to_lowercase();
+    let (zone, _) = nom_on_lower(after_prefix, &after_lower, |i| {
+        all_consuming(alt((
+            value(Zone::Graveyard, tag("graveyard")),
+            value(Zone::Exile, tag("exile")),
+            value(Zone::Hand, tag("hand")),
+        )))
+        .parse(i)
+    })?;
+    Some(zone)
 }
 
 /// CR 106.6: Parse the "[spells|a spell] with mana value N [or greater|or
@@ -1300,6 +1351,81 @@ fn parse_mana_value_threshold(rest: &str) -> Option<(Comparator, u32)> {
         return None;
     };
     Some((comparator, value_n))
+}
+
+/// CR 105.2 + CR 106.6: Parse the "[spells|a spell] with [exactly] N [or more|or
+/// fewer] color(s)" tail of a spend restriction into a `(Comparator, count)`.
+/// "exactly N color(s)" and bare "N color(s)" read as exact (`EQ`); "or more /
+/// or greater color(s)" reads as `GE`; "or fewer / or less color(s)" reads as `LE`.
+/// Colorless spells have a color count of 0, so `count` may be 0.
+///
+/// This file's `nom_on_lower` returns `(value, remainder)`, so the consumed
+/// remainder is the second tuple element. Mirrors `parse_mana_value_threshold`.
+fn parse_color_count(rest: &str) -> Option<(Comparator, u32)> {
+    let rest_lower = rest.to_lowercase();
+    let (_, after_prefix) = nom_on_lower(rest, &rest_lower, |i| {
+        value((), alt((tag("spells with "), tag("a spell with ")))).parse(i)
+    })?;
+    // Optional "exactly " forces an exact (EQ) reading regardless of suffix.
+    let after_prefix_lower = after_prefix.to_lowercase();
+    let (exactly, after_exactly) = nom_on_lower(after_prefix, &after_prefix_lower, |i| {
+        opt(value((), tag("exactly "))).parse(i)
+    })
+    .map(|(exactly, rest)| (exactly.is_some(), rest))?;
+    // parse_number consumes the leading integer N (returns u32, handles word numbers).
+    let after_exactly_lower = after_exactly.to_lowercase();
+    let (count, after_num) = nom_on_lower(
+        after_exactly,
+        &after_exactly_lower,
+        nom_primitives::parse_number,
+    )?;
+    let after_num = after_num.trim();
+    let after_num_lower = after_num.to_lowercase();
+    // Suffix -> comparator. Bare "color(s)" or "exactly N color(s)" = exact (EQ).
+    let comparator = if exactly {
+        if nom_on_lower(after_num, &after_num_lower, |i| {
+            all_consuming(parse_color_word).parse(i)
+        })
+        .is_some()
+        {
+            Comparator::EQ
+        } else {
+            return None;
+        }
+    } else if nom_on_lower(after_num, &after_num_lower, |i| {
+        all_consuming(parse_color_word).parse(i)
+    })
+    .is_some()
+    {
+        Comparator::EQ
+    } else if nom_on_lower(after_num, &after_num_lower, |i| {
+        all_consuming(alt((
+            value((), (tag("or more "), parse_color_word)),
+            value((), (tag("or greater "), parse_color_word)),
+        )))
+        .parse(i)
+    })
+    .is_some()
+    {
+        Comparator::GE
+    } else if nom_on_lower(after_num, &after_num_lower, |i| {
+        all_consuming(alt((
+            value((), (tag("or fewer "), parse_color_word)),
+            value((), (tag("or less "), parse_color_word)),
+        )))
+        .parse(i)
+    })
+    .is_some()
+    {
+        Comparator::LE
+    } else {
+        return None;
+    };
+    Some((comparator, count))
+}
+
+fn parse_color_word(input: &str) -> OracleResult<'_, ()> {
+    value((), (tag("color"), opt(tag("s")))).parse(input)
 }
 
 /// CR 106.6: Parse a standalone "that spell can't be countered" clause.

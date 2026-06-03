@@ -365,6 +365,10 @@ pub(crate) enum ImperativeFamilyAst {
     Connive,
     /// CR 509.1g: Block this turn if able.
     ForceBlock,
+    /// CR 508.1d: Attack the source controller this turn/combat if able.
+    ForceAttack {
+        duration: Duration,
+    },
     /// CR 701.15a: Goad target creature.
     Goad,
     /// CR 701.12a: Exchange control of two target permanents. Carries a distinct
@@ -406,6 +410,12 @@ pub(crate) enum ImperativeFamilyAst {
     VentureIntoUndercity,
     /// CR 725: "take the initiative"
     TakeTheInitiative,
+    /// CR 701.51b: "open N Attractions"
+    OpenAttractions {
+        count: u32,
+    },
+    /// CR 701.52: "roll to visit your Attractions"
+    RollToVisitAttractions,
     Proliferate,
     /// CR 701.56a: Time travel — add or remove time counters.
     TimeTravel,

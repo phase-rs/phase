@@ -24,9 +24,11 @@ import { loadDraftHostSession } from "../../services/draftPersistence";
 // the Set-mode tests below never exercise that path, so a no-op mock is
 // sufficient.
 vi.mock("../draft-adapter", () => ({
-  DraftAdapter: vi.fn().mockImplementation(() => ({
-    loadCardDatabase: vi.fn(async () => 0),
-  })),
+  DraftAdapter: vi.fn().mockImplementation(function () {
+    return {
+      loadCardDatabase: vi.fn(async () => 0),
+    };
+  }),
 }));
 
 // Mock the connection module
@@ -56,23 +58,25 @@ const mockHostTerminateDraft = vi.fn(async () => {});
 const mockHostRestoreFromPersisted = vi.fn(async (): Promise<DraftPlayerView | null> => null);
 
 vi.mock("../p2p-draft-host", () => ({
-  P2PDraftHost: vi.fn().mockImplementation(() => ({
-    onEvent: mockHostOnEvent,
-    initialize: mockHostInitialize,
-    startDraft: mockHostStartDraft,
-    submitHostPick: mockHostSubmitHostPick,
-    submitHostDeck: mockHostSubmitHostDeck,
-    getHostView: mockHostGetHostView,
-    kickPlayer: mockHostKickPlayer,
-    requestPause: mockHostRequestPause,
-    requestResume: mockHostRequestResume,
-    dispose: mockHostDispose,
-    terminateDraft: mockHostTerminateDraft,
-    restoreFromPersisted: mockHostRestoreFromPersisted,
-    isFull: false,
-    isStarted: false,
-    isPaused: false,
-  })),
+  P2PDraftHost: vi.fn().mockImplementation(function () {
+    return {
+      onEvent: mockHostOnEvent,
+      initialize: mockHostInitialize,
+      startDraft: mockHostStartDraft,
+      submitHostPick: mockHostSubmitHostPick,
+      submitHostDeck: mockHostSubmitHostDeck,
+      getHostView: mockHostGetHostView,
+      kickPlayer: mockHostKickPlayer,
+      requestPause: mockHostRequestPause,
+      requestResume: mockHostRequestResume,
+      dispose: mockHostDispose,
+      terminateDraft: mockHostTerminateDraft,
+      restoreFromPersisted: mockHostRestoreFromPersisted,
+      isFull: false,
+      isStarted: false,
+      isPaused: false,
+    };
+  }),
 }));
 
 // Mock P2PDraftGuest
@@ -83,16 +87,18 @@ const mockGuestSubmitDeck = vi.fn(async () => {});
 const mockGuestLeave = vi.fn(async () => {});
 
 vi.mock("../p2p-draft-guest", () => ({
-  P2PDraftGuest: vi.fn().mockImplementation(() => ({
-    onEvent: mockGuestOnEvent,
-    initialize: mockGuestInitialize,
-    submitPick: mockGuestSubmitPick,
-    submitDeck: mockGuestSubmitDeck,
-    leave: mockGuestLeave,
-    view: null,
-    seat: null,
-    token: null,
-  })),
+  P2PDraftGuest: vi.fn().mockImplementation(function () {
+    return {
+      onEvent: mockGuestOnEvent,
+      initialize: mockGuestInitialize,
+      submitPick: mockGuestSubmitPick,
+      submitDeck: mockGuestSubmitDeck,
+      leave: mockGuestLeave,
+      view: null,
+      seat: null,
+      token: null,
+    };
+  }),
 }));
 
 // ── Helpers ────────────────────────────────────────────────────────────

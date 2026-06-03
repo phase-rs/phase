@@ -26,15 +26,14 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    DelayedTriggerCondition, Effect, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    DelayedTriggerCondition, Effect, TargetFilter, TypeFilter, TypedFilter,
 };
-use engine::types::actions::GameAction;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 
 use engine::types::player::PlayerId;
 
-use super::rules::{run_combat, WaitingFor};
+use super::rules::run_combat;
 
 /// Count cards in a player's hand. `GameRunner` exposes `life` directly but no
 /// hand accessor, so read it off the filtered game state.
@@ -85,38 +84,12 @@ fn setup() -> (GameRunner, ObjectId, ObjectId) {
 }
 
 /// Cast Hunter's Insight from P0's hand, targeting `target`, and resolve the
-/// spell so the delayed trigger is created.
+/// spell so the delayed trigger is created. The outer `TargetOnly` slot is
+/// answered with the declared `target` (CR 601.2c) — explicit so Case C's two
+/// legal creatures are disambiguated — and the spell resolves to create the
+/// delayed trigger (CR 603.7d).
 fn cast_targeting(runner: &mut GameRunner, hunters_insight: ObjectId, target: ObjectId) {
-    let card_id = runner
-        .state()
-        .objects
-        .get(&hunters_insight)
-        .expect("Hunter's Insight present in hand")
-        .card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: hunters_insight,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting Hunter's Insight should succeed");
-    // The outer `TargetOnly` slot surfaces a `TargetSelection` when more than
-    // one creature is a legal target (CR 601.2c). Resolve it explicitly to
-    // `target` — `choose_first_legal_target` would be ambiguous in Case C.
-    // With a single legal creature the engine resolves the slot during the
-    // cast and proceeds straight to `Priority`.
-    if matches!(
-        runner.state().waiting_for,
-        WaitingFor::TargetSelection { .. }
-    ) {
-        runner
-            .act(GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(target)),
-            })
-            .expect("choosing the target creature should succeed");
-    }
-    // Resolve the spell — creates the delayed trigger (CR 603.7d).
-    runner.advance_until_stack_empty();
+    runner.cast(hunters_insight).target_object(target).resolve();
 }
 
 /// Case A — the targeted creature deals combat damage to a player. The

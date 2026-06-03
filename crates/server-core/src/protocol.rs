@@ -298,11 +298,11 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         player_token: Option<String>,
         /// Engine events produced by `start_game` — currently the d20
-        /// first-player contest (`DieRolled`) batch. Populated ONLY on the
-        /// initial post-start broadcast; empty for late joiners and reconnects
-        /// (a reconnecting player must not re-see the contest dice). Rolls are
-        /// public (no `visibility.rs` redaction), so the full batch goes to
-        /// every seat. `serde(default)` keeps this back-compat for older clients.
+        /// first-player contest (`StartingPlayerContest`) event. Populated ONLY
+        /// on the initial post-start broadcast; empty for late joiners and
+        /// reconnects (a reconnecting player must not re-see the contest). The
+        /// contest is public (no `visibility.rs` redaction), so it goes to every
+        /// seat. `serde(default)` keeps this back-compat for older clients.
         #[serde(default)]
         events: Vec<GameEvent>,
     },
@@ -478,7 +478,7 @@ mod tests {
                 main_deck: vec!["Lightning Bolt".to_string(); 4],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -499,7 +499,7 @@ mod tests {
                 main_deck: vec!["Forest".to_string()],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -600,7 +600,7 @@ mod tests {
                 main_deck: vec!["Forest".to_string()],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             display_name: "Alice".to_string(),
             public: true,
@@ -671,7 +671,7 @@ mod tests {
                 main_deck: vec!["Forest".to_string()],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             display_name: "Bob".to_string(),
             password: None,
@@ -1054,7 +1054,7 @@ mod tests {
                 main_deck: vec!["Forest".to_string()],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             display_name: "Host".to_string(),
             public: false,
@@ -1096,9 +1096,7 @@ mod tests {
                     difficulty: AiDifficulty::Medium,
                     deck: DeckChoice::DeckList(Box::new(DeckData {
                         main_deck: vec!["Forest".to_string(); 60],
-                        sideboard: Vec::new(),
-                        commander: Vec::new(),
-                        bracket_tier: Default::default(),
+                        ..Default::default()
                     })),
                 },
             },
@@ -1364,7 +1362,7 @@ mod tests {
                 main_deck: vec!["Forest".to_string()],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             display_name: "Alice".to_string(),
             public: true,

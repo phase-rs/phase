@@ -107,20 +107,22 @@ const mockGetState = mocks.getState as unknown as AsyncMockWithResolvedValueOnce
 const mockGetAiAction = mocks.getAiAction as unknown as AsyncMockWithResolvedValueOnce;
 
 vi.mock("../wasm-adapter", () => ({
-  WasmAdapter: vi.fn().mockImplementation(() => ({
-    initialize: vi.fn(async () => undefined),
-    initializeGame: mocks.initializeGame,
-    submitAction: mocks.submitAction,
-    getState: mocks.getState,
-    getLegalActions: mocks.getLegalActions,
-    getLegalActionsForViewer: mocks.getLegalActionsForViewer,
-    getFilteredState: mocks.getFilteredState,
-    getViewerSnapshot: mocks.getViewerSnapshot,
-    getAiAction: mocks.getAiAction,
-    applySeatMutation: mocks.applySeatMutation,
-    setMultiplayerMode: mocks.setMultiplayerMode,
-    dispose: vi.fn(),
-  })),
+  WasmAdapter: vi.fn().mockImplementation(function () {
+    return {
+      initialize: vi.fn(async () => undefined),
+      initializeGame: mocks.initializeGame,
+      submitAction: mocks.submitAction,
+      getState: mocks.getState,
+      getLegalActions: mocks.getLegalActions,
+      getLegalActionsForViewer: mocks.getLegalActionsForViewer,
+      getFilteredState: mocks.getFilteredState,
+      getViewerSnapshot: mocks.getViewerSnapshot,
+      getAiAction: mocks.getAiAction,
+      applySeatMutation: mocks.applySeatMutation,
+      setMultiplayerMode: mocks.setMultiplayerMode,
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 // Stub crypto.randomUUID for deterministic token assertions

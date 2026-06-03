@@ -1082,6 +1082,38 @@ mod tests {
         );
     }
 
+    /// Issue #1696 — Myrkul, Lord of Bones: "create a token that's a copy of
+    /// that card, except it's an enchantment and loses all other card types."
+    /// CR 205.1a + CR 707.9d: the "loses all other card types" suffix is the
+    /// set-replacement signal, so the copy carries `SetCardTypes`, replacing
+    /// (not adding to) the copied creature's card types. The "that card"
+    /// anaphor stays `ParentTarget` here (the exile→tracked-set rewrite happens
+    /// during chain stitching, exercised by `parse_effect_chain` elsewhere).
+    #[test]
+    fn myrkul_copy_token_carries_set_card_types_enchantment() {
+        let effect = try_parse_token(
+            "create a token that's a copy of that card, except it's an enchantment and loses all other card types",
+            "Create a token that's a copy of that card, except it's an enchantment and loses all other card types.",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            target,
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::ParentTarget);
+        assert_eq!(
+            additional_modifications,
+            vec![ContinuousModification::SetCardTypes {
+                core_types: vec![CoreType::Enchantment],
+            }]
+        );
+    }
+
     /// Issue #1424 — The Scarab God activated: 4/4 black Zombie copy exceptions.
     /// CR 707.9d: with no "in addition to its other types" carve-out, color and
     /// creature subtypes REPLACE the copied values — `SetColor` (not `AddColor`)

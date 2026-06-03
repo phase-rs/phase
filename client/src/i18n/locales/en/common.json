@@ -49,6 +49,8 @@
     "volume": "Volume"
   },
   "hostControl": {
+    "collapse": "Collapse",
+    "expand": "Expand host panel",
     "seatHost": "Host",
     "seatPlayer": "Player",
     "seatOpen": "Open",
@@ -201,6 +203,7 @@
   },
   "diceRoll": {
     "rollingForFirst": "Rolling for first player",
+    "tieReroll": "Tie — reroll!",
     "versus": "VS",
     "skip": "Tap to skip",
     "continue": "Tap to continue",

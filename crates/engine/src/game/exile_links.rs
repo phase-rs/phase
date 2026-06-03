@@ -187,6 +187,7 @@ mod tests {
                 cast_transformed: false,
                 alt_ability_cost: None,
                 constraint: None,
+                duration: None,
             },
             vec![],
             ObjectId(1),

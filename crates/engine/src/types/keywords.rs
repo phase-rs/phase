@@ -591,17 +591,26 @@ pub enum Keyword {
         cost: ManaCost,
     },
     Fortify(ManaCost),
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler. CR 702.160a: Prototype — alt-cast using the
-    /// secondary P/T and mana cost characteristics.
-    Prototype(ManaCost),
+    /// CR 702.160a: Prototype — a player may cast this spell prototyped; if
+    /// they do, the alternative power, toughness, and mana cost characteristics
+    /// are used.
+    Prototype {
+        cost: ManaCost,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        toughness: Option<i32>,
+    },
     Plot(ManaCost),
     Craft(ManaCost),
     Offspring(ManaCost),
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler. CR 702.176a: Impending N—{cost} — alt-cast that
-    /// enters with N time counters and is not a creature until they're gone.
-    Impending(ManaCost),
+    /// CR 702.176a: Impending N—{cost} — alternative cast that enters with
+    /// `counters` time counters and is not a creature until the last is removed.
+    /// At the beginning of your end step the permanent loses one time counter.
+    Impending {
+        cost: ManaCost,
+        counters: u32,
+    },
     /// CR 702.87a: Level up is an activated ability that puts a level counter
     /// on this permanent. Activate only as a sorcery.
     LevelUp(ManaCost),
@@ -1055,7 +1064,7 @@ impl Keyword {
             | Keyword::Gravestorm
             | Keyword::Haunt
             | Keyword::Hideaway(_)
-            | Keyword::Impending(_)
+            | Keyword::Impending { .. }
             | Keyword::Improvise
             | Keyword::Ingest
             | Keyword::LevelUp(_)
@@ -1068,7 +1077,7 @@ impl Keyword {
             | Keyword::Nightbound
             | Keyword::Overload(_)
             | Keyword::Poisonous(_)
-            | Keyword::Prototype(_)
+            | Keyword::Prototype { .. }
             | Keyword::Provoke
             | Keyword::Prowl(_)
             | Keyword::Ravenous
@@ -1090,6 +1099,36 @@ impl Keyword {
             | Keyword::Typecycling { .. }
             | Keyword::WebSlinging(_) => KeywordKind::Unknown,
         }
+    }
+
+    /// CR 113.2c: keywords whose multiple instances each function separately AND
+    /// are printed in Oracle text as repeated bare words, so every printed
+    /// occurrence must survive as a distinct `Keyword` on the card face (MTGJSON
+    /// dedupes them to one). Two distinct runtime consumption shapes both rely on
+    /// the surviving instance count:
+    ///
+    /// - Cascade (CR 702.85c: each instance triggers separately) / Storm
+    ///   (CR 702.40b: each instance triggers separately) — stack-functioning
+    ///   triggered abilities whose instance count is consumed by `for _ in 0..count`
+    ///   loops in `game/triggers.rs`.
+    /// - Myriad (CR 702.116a: a triggered ability; CR 702.116b: each instance
+    ///   triggers separately) / Exalted (CR 702.83a: a triggered ability;
+    ///   per-instance multiplicity grounded in the general CR 113.2c rule, since
+    ///   CR 702.83 has no card-specific multiplicity clause) — one trigger is
+    ///   installed per face `Keyword` instance by
+    ///   `KeywordTriggerInstaller::install_matching`, invoked from `synthesize_all`.
+    ///
+    /// Returns `false` for everything else, including:
+    /// - CR 702.44d Sunburst — also "works separately" per instance, but is a
+    ///   STATIC ability never printed as a repeated bare word and not
+    ///   instance-counted, so it is out of this class.
+    /// - Prowess — runtime presence is a boolean `has_prowess` check, so counting
+    ///   instances would be inert (separate deeper bug, not addressed here).
+    pub fn instances_function_separately(&self) -> bool {
+        matches!(
+            self,
+            Keyword::Cascade | Keyword::Storm | Keyword::Myriad | Keyword::Exalted
+        )
     }
 }
 
@@ -1452,6 +1491,18 @@ impl FromStr for Keyword {
                         return Ok(Keyword::Affinity(tf));
                     }
                 }
+                // CR 702.176a: "Impending N—{cost}" — space-separated form from Oracle
+                // text and MTGJSON keyword arrays (no colon). Extract N before the em-dash.
+                if kw == "impending" {
+                    let (counters, cost_str) = rest
+                        .split_once('\u{2014}')
+                        .map(|(n, c)| (n.trim().parse().unwrap_or(0), c.trim()))
+                        .unwrap_or((0, rest));
+                    return Ok(Keyword::Impending {
+                        cost: parse_keyword_mana_cost(cost_str),
+                        counters,
+                    });
+                }
             }
         }
 
@@ -1592,12 +1643,30 @@ impl FromStr for Keyword {
                     // Fall through to Unknown
                 }
                 "fortify" => return Ok(Keyword::Fortify(parse_keyword_mana_cost(p))),
-                "prototype" => return Ok(Keyword::Prototype(parse_keyword_mana_cost(p))),
+                "prototype" => {
+                    return Ok(Keyword::Prototype {
+                        cost: parse_keyword_mana_cost(p),
+                        power: None,
+                        toughness: None,
+                    });
+                }
                 "plot" => return Ok(Keyword::Plot(parse_keyword_mana_cost(p))),
                 "craft" => return Ok(Keyword::Craft(parse_keyword_mana_cost(p))),
                 "offspring" => return Ok(Keyword::Offspring(parse_keyword_mana_cost(p))),
-                "impending" => return Ok(Keyword::Impending(parse_keyword_mana_cost(p))),
+                "impending" => {
+                    // CR 702.176a: "Impending N—{cost}" — extract N before the em-dash,
+                    // then parse the mana cost from the remainder.
+                    let (counters, cost_str) = p
+                        .split_once('\u{2014}')
+                        .map(|(n, c)| (n.trim().parse().unwrap_or(0), c.trim()))
+                        .unwrap_or((0, p));
+                    return Ok(Keyword::Impending {
+                        cost: parse_keyword_mana_cost(cost_str),
+                        counters,
+                    });
+                }
                 "levelup" | "level up" => return Ok(Keyword::LevelUp(parse_keyword_mana_cost(p))),
+                "specialize" => return Ok(Keyword::Specialize(parse_keyword_mana_cost(p))),
                 "warp" => return Ok(Keyword::Warp(parse_keyword_mana_cost(p))),
                 "sneak" => return Ok(Keyword::Sneak(parse_keyword_mana_cost(p))),
                 "web-slinging" | "webslinging" => {
@@ -2252,11 +2321,46 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             Ok(Keyword::Awaken { count, cost })
         }
         "Fortify" => Ok(Keyword::Fortify(mana(data)?)),
-        "Prototype" => Ok(Keyword::Prototype(mana(data)?)),
+        "Prototype" => {
+            if let Some(cost_val) = data.get("cost") {
+                let cost = mana(cost_val)?;
+                let power = data.get("power").and_then(|v| v.as_i64()).map(|v| v as i32);
+                let toughness = data
+                    .get("toughness")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32);
+                Ok(Keyword::Prototype {
+                    cost,
+                    power,
+                    toughness,
+                })
+            } else {
+                Ok(Keyword::Prototype {
+                    cost: mana(data)?,
+                    power: None,
+                    toughness: None,
+                })
+            }
+        }
         "Plot" => Ok(Keyword::Plot(mana(data)?)),
         "Craft" => Ok(Keyword::Craft(mana(data)?)),
         "Offspring" => Ok(Keyword::Offspring(mana(data)?)),
-        "Impending" => Ok(Keyword::Impending(mana(data)?)),
+        "Impending" => {
+            // New format: {"Impending": {"cost": {...}, "counters": N}}
+            // Legacy format: {"Impending": {mana_cost}} — treat as counters=0 fallback.
+            if let Some(cost_val) = data.get("cost") {
+                let counters = data.get("counters").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                Ok(Keyword::Impending {
+                    cost: mana(cost_val)?,
+                    counters,
+                })
+            } else {
+                Ok(Keyword::Impending {
+                    cost: mana(data)?,
+                    counters: 0,
+                })
+            }
+        }
         "LevelUp" => Ok(Keyword::LevelUp(mana(data)?)),
         // Parameterized: u32
         "Dredge" => Ok(Keyword::Dredge(uint(data))),
@@ -2904,6 +3008,27 @@ mod tests {
         // CR 702.157: Squad
         let squad = Keyword::from_str("Squad:{2}").unwrap();
         assert!(matches!(squad, Keyword::Squad(ManaCost::Cost { .. })));
+    }
+
+    #[test]
+    /// CR 702.176a: Impending N—{cost} parses N (counter count) and mana cost.
+    fn parse_impending_from_str() {
+        // Oracle keyword line: "Impending 5—{1}{B}"
+        let kw = Keyword::from_str("Impending 5\u{2014}{1}{B}").unwrap();
+        match kw {
+            Keyword::Impending { counters, cost } => {
+                assert_eq!(counters, 5);
+                assert!(matches!(cost, ManaCost::Cost { .. }));
+            }
+            other => panic!("expected Impending, got {other:?}"),
+        }
+
+        // "Impending 3—{2}{U}{U}"
+        let kw2 = Keyword::from_str("Impending 3\u{2014}{2}{U}{U}").unwrap();
+        match kw2 {
+            Keyword::Impending { counters, .. } => assert_eq!(counters, 3),
+            other => panic!("expected Impending, got {other:?}"),
+        }
     }
 
     #[test]
