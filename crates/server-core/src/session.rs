@@ -116,10 +116,10 @@ pub struct GameSession {
     /// Ranked rooms apply rating updates when a match completes.
     pub ranked: bool,
     /// Engine events produced by `start_game` (the d20 first-player contest's
-    /// `DieRolled` batch). Captured here so the INITIAL post-start broadcast can
-    /// surface them to clients; cleared after that broadcast so late joiners and
-    /// reconnects do not re-receive the contest dice. Empty when the game has
-    /// not started or the events have already been broadcast.
+    /// `StartingPlayerContest` event). Captured here so the INITIAL post-start
+    /// broadcast can surface them to clients; cleared after that broadcast so
+    /// late joiners and reconnects do not re-receive the contest. Empty when the
+    /// game has not started or the events have already been broadcast.
     pub start_events: Vec<GameEvent>,
 }
 

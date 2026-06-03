@@ -92,15 +92,10 @@ fn evelyn_play_permission_uses_live_static_and_exile_provenance() {
     let forest = make_library_land(runner.state_mut(), 100, P0, "Forest");
     let _opponent_top = make_library_land(runner.state_mut(), 101, PlayerId(1), "Island");
 
-    let source_a_card_id = runner.state().objects[&source_a].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: source_a,
-            card_id: source_a_card_id,
-            targets: vec![],
-        })
-        .expect("cast parsed Evelyn A");
-    runner.advance_until_stack_empty();
+    // Cast Evelyn A; the cast driver resolves the spell and its ETB exile
+    // trigger (no target/optional prompts), parking the live runner at the
+    // post-resolution priority window.
+    runner.cast(source_a).resolve();
 
     let exiled_forest = &runner.state().objects[&forest];
     assert_eq!(exiled_forest.zone, Zone::Exile);

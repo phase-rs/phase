@@ -68,6 +68,8 @@ pub mod double;
 pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod effect;
+pub mod end_combat_phase;
+pub(super) mod end_phase;
 pub mod end_the_turn;
 pub mod endure;
 pub mod energy;
@@ -134,6 +136,7 @@ pub mod shuffle;
 pub mod skip_next_step;
 pub mod skip_next_turn;
 pub mod solve_case;
+pub mod specialize;
 pub mod speed_effects;
 pub mod surveil;
 pub mod suspect;
@@ -1681,6 +1684,7 @@ pub fn resolve_effect(
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
         Effect::Proliferate => proliferate::resolve(state, ability, events),
         Effect::EndTheTurn => end_the_turn::resolve(state, ability, events),
+        Effect::EndCombatPhase => end_combat_phase::resolve(state, ability, events),
         Effect::Populate => populate::resolve(state, ability, events),
         Effect::Clash => clash::resolve(state, ability, events),
         // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
@@ -1815,6 +1819,7 @@ pub fn resolve_effect(
         Effect::Incubate { .. } => incubate::resolve(state, ability, events),
         Effect::Amass { .. } => amass::resolve(state, ability, events),
         Effect::Monstrosity { .. } => monstrosity::resolve(state, ability, events),
+        Effect::Specialize => specialize::resolve(state, ability, events),
         Effect::Renown { .. } => renown::resolve(state, ability, events),
         Effect::Adapt { .. } => adapt::resolve(state, ability, events),
         Effect::Bolster { .. } => bolster::resolve(state, ability, events),

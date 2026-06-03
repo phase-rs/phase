@@ -8,7 +8,6 @@ use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
-use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::{CardId, ObjectId};
@@ -58,17 +57,6 @@ fn add_permanent(
     obj.card_types.core_types.push(core_type);
     obj.base_card_types = obj.card_types.clone();
     id
-}
-
-fn assert_in_zone(
-    state: &engine::types::game_state::GameState,
-    object_id: ObjectId,
-    expected: Zone,
-) {
-    assert_eq!(
-        state.objects.get(&object_id).map(|obj| obj.zone),
-        Some(expected)
-    );
 }
 
 /// Loads Obliterate from the generated card-data export and resolves it through
@@ -138,31 +126,26 @@ fn obliterate_destroys_all_artifacts_creatures_and_lands_from_card_data() {
         ],
     );
 
-    let card_id = runner.state().objects[&obliterate].card_id;
-    let result = runner
-        .act(GameAction::CastSpell {
-            object_id: obliterate,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Obliterate cast should be accepted");
+    // Non-targeted, pool-funded mass destruction: the driver auto-pays from the
+    // pool and resolves to a clean Priority window (it never surfaces a target
+    // prompt — Obliterate has no targets).
+    let outcome = runner.cast(obliterate).resolve();
     assert!(
-        matches!(result.waiting_for, WaitingFor::Priority { .. }),
-        "Obliterate must not request target selection, got {:?}",
-        result.waiting_for
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Obliterate must resolve to a clean priority window, got {:?}",
+        outcome.final_waiting_for()
     );
 
-    runner.advance_until_stack_empty();
-
-    for destroyed in [
-        p0_artifact,
-        p0_creature,
-        p0_land,
-        p1_artifact,
-        p1_creature,
-        p1_land,
-    ] {
-        assert_in_zone(runner.state(), destroyed, Zone::Graveyard);
-    }
-    assert_in_zone(runner.state(), p1_enchantment, Zone::Battlefield);
+    outcome.assert_zone(
+        &[
+            p0_artifact,
+            p0_creature,
+            p0_land,
+            p1_artifact,
+            p1_creature,
+            p1_land,
+        ],
+        Zone::Graveyard,
+    );
+    outcome.assert_zone(&[p1_enchantment], Zone::Battlefield);
 }

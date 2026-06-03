@@ -507,13 +507,20 @@ fn damage_done_applier(
         return ApplyResult::Modified(event);
     }
 
-    // Branch 1b: CR 614.9 — one-shot redirection shield. Replace the damage
-    // event's recipient with the redirection target, then consume the shield.
-    if let Some(ShieldKind::Redirection { recipient }) = shield_kind_for_rid(state, rid) {
+    // Branch 1b: CR 614.9 — one-shot redirection shield. Whole-event
+    // redirections replace the damage event's recipient; amount-capped
+    // redirections split the event, route the redirected portion through the
+    // same replacement/damage application path, and leave any remainder on the
+    // original recipient.
+    if let Some(ShieldKind::Redirection {
+        recipient,
+        amount: redirect_amount,
+    }) = shield_kind_for_rid(state, rid)
+    {
         if let ProposedEvent::Damage {
             source_id,
             target,
-            amount,
+            amount: damage_amount,
             is_combat,
             applied,
         } = event
@@ -521,11 +528,11 @@ fn damage_done_applier(
             // CR 614.7a: A source that would deal 0 damage deals no damage at
             // all — there is no damage event to redirect. Pass through and do
             // not consume the shield (no opportunity was spent).
-            if amount == 0 {
+            if damage_amount == 0 {
                 return ApplyResult::Modified(ProposedEvent::Damage {
                     source_id,
                     target,
-                    amount,
+                    amount: damage_amount,
                     is_combat,
                     applied,
                 });
@@ -542,23 +549,95 @@ fn damage_done_applier(
                     )
                 });
 
-            // CR 614.5: The one-shot opportunity is spent on this event whether
-            // or not the redirection succeeds — consume the shield in both the
-            // success and the "does nothing" (illegal recipient per CR 614.9)
-            // outcomes.
-            consume_prevention_shield(state, rid, None);
+            match redirect_amount {
+                PreventionAmount::All => {
+                    // CR 614.5: The one-shot opportunity is spent on this event
+                    // whether or not the redirection succeeds — consume the
+                    // shield in both the success and the "does nothing" (illegal
+                    // recipient per CR 614.9) outcomes.
+                    consume_prevention_shield(state, rid, None);
 
-            // CR 614.9: A legal recipient takes the damage instead; an illegal
-            // one (left the battlefield, no longer a battle/creature/planeswalker,
-            // or a player who left the game) makes the redirection do nothing,
-            // so the damage stays on the original recipient.
-            return ApplyResult::Modified(ProposedEvent::Damage {
-                source_id,
-                target: new_recipient.unwrap_or(target),
-                amount,
-                is_combat,
-                applied,
-            });
+                    // CR 614.9: A legal recipient takes the damage instead; an
+                    // illegal one (left the battlefield, no longer a
+                    // battle/creature/planeswalker, or a player who left the
+                    // game) makes the redirection do nothing, so the damage
+                    // stays on the original recipient.
+                    return ApplyResult::Modified(ProposedEvent::Damage {
+                        source_id,
+                        target: new_recipient.unwrap_or(target),
+                        amount: damage_amount,
+                        is_combat,
+                        applied,
+                    });
+                }
+                PreventionAmount::Next(n) => {
+                    let redirected_amount = damage_amount.min(n);
+                    let remaining_amount = damage_amount.saturating_sub(redirected_amount);
+                    if redirected_amount == n {
+                        consume_prevention_shield(state, rid, None);
+                    } else {
+                        update_redirection_shield(
+                            state,
+                            rid,
+                            recipient,
+                            PreventionAmount::Next(n - redirected_amount),
+                        );
+                    }
+
+                    if let Some(new_target) = new_recipient.filter(|_| redirected_amount > 0) {
+                        let redirected_event = ProposedEvent::Damage {
+                            source_id,
+                            target: new_target,
+                            amount: redirected_amount,
+                            is_combat,
+                            applied: applied.clone(),
+                        };
+                        match replace_event(state, redirected_event, events) {
+                            ReplacementResult::Execute(event) => {
+                                let ctx = super::effects::deal_damage::DamageContext::from_source(
+                                    state, source_id,
+                                )
+                                .unwrap_or_else(|| {
+                                    let controller = state
+                                        .objects
+                                        .get(&source_id)
+                                        .map(|obj| obj.controller)
+                                        .unwrap_or(PlayerId(0));
+                                    super::effects::deal_damage::DamageContext::fallback(
+                                        source_id, controller,
+                                    )
+                                });
+                                let _ = super::effects::deal_damage::apply_damage_after_replacement(
+                                    state, &ctx, event, is_combat, events,
+                                );
+                            }
+                            ReplacementResult::Prevented => {}
+                            ReplacementResult::NeedsChoice(_) => {
+                                state.pending_replacement = None;
+                            }
+                        }
+                    } else {
+                        return ApplyResult::Modified(ProposedEvent::Damage {
+                            source_id,
+                            target,
+                            amount: damage_amount,
+                            is_combat,
+                            applied,
+                        });
+                    }
+
+                    if remaining_amount == 0 {
+                        return ApplyResult::Prevented;
+                    }
+                    return ApplyResult::Modified(ProposedEvent::Damage {
+                        source_id,
+                        target,
+                        amount: remaining_amount,
+                        is_combat,
+                        applied,
+                    });
+                }
+            }
         }
         return ApplyResult::Modified(event);
     }
@@ -707,6 +786,26 @@ fn consume_prevention_shield(
             None => repl.is_consumed = true,
             Some(amt) => repl.shield_kind = ShieldKind::Prevention { amount: amt },
         }
+    }
+}
+
+fn update_redirection_shield(
+    state: &mut GameState,
+    rid: ReplacementId,
+    recipient: crate::types::ability::DamageRedirectTarget,
+    amount: PreventionAmount,
+) {
+    let repl = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get_mut(rid.index)
+    } else {
+        state
+            .objects
+            .get_mut(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get_mut(rid.index))
+    };
+
+    if let Some(repl) = repl {
+        repl.shield_kind = ShieldKind::Redirection { recipient, amount };
     }
 }
 

@@ -1093,6 +1093,16 @@
       "subtitle": "Sélectionnez quelle combinaison de mana produire"
     }
   },
+  "specializeColor": {
+    "title": "Choisir la spécialisation",
+    "subtitle": "Choisissez une couleur correspondant à la carte défaussée",
+    "confirm": "Spécialiser",
+    "white": "Blanc",
+    "blue": "Bleu",
+    "black": "Noir",
+    "red": "Rouge",
+    "green": "Vert"
+  },
   "dialogShell": {
     "eyebrow": "Choix de partie",
     "restoreDialog": "Restaurer la boîte de dialogue",

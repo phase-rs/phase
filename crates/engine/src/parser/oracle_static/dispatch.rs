@@ -1099,6 +1099,30 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 506.5 + CR 508.1a + CR 509.1b: "~ can't attack alone" / "~ can't
+    // block alone" / "~ can't attack or block alone".
+    // Must precede the generic "can't block" / "can't attack" arms below, which
+    // would otherwise swallow these as a blanket CantBlock / CantAttack. The
+    // compound "attack or block alone" emits the attack half here so the
+    // single-return path is non-None; `parse_static_line_multi` emits both halves.
+    if let Some((_, restriction, rest)) =
+        nom_primitives::scan_preceded(tp.lower, parse_alone_combat_restriction)
+    {
+        if rest.trim().is_empty() {
+            let mode = match restriction {
+                AloneCombatRestriction::Attack | AloneCombatRestriction::AttackOrBlock => {
+                    StaticMode::CantAttackAlone
+                }
+                AloneCombatRestriction::Block => StaticMode::CantBlockAlone,
+            };
+            return Some(
+                StaticDefinition::new(mode)
+                    .affected(TargetFilter::SelfRef)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
     // --- "~ can't block" ---
     if nom_primitives::scan_contains(tp.lower, "can't block")
         && !nom_primitives::scan_contains(tp.lower, "can't be blocked")

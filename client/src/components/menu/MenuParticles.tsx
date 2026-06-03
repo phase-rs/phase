@@ -1,5 +1,7 @@
 import { useEffect, useRef } from "react";
 
+import { useInShell } from "../chrome/ShellContext";
+
 interface Particle {
   x: number;
   y: number;
@@ -34,7 +36,12 @@ function createParticle(canvasWidth: number, canvasHeight: number): Particle {
   };
 }
 
-export function MenuParticles() {
+/**
+ * The raw rising-ember particle canvas. Rendered directly by the modern
+ * AppShell (once, behind everything) and by the page-facing `MenuParticles`
+ * wrapper when a page is shown outside the shell.
+ */
+export function SceneParticles() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -103,4 +110,14 @@ export function MenuParticles() {
       aria-hidden="true"
     />
   );
+}
+
+/**
+ * Page-facing particle layer. Inside the modern shell the shell renders the one
+ * shared `SceneParticles`, so this renders nothing to avoid stacking a second
+ * canvas. Outside the shell it renders the canvas as before.
+ */
+export function MenuParticles() {
+  if (useInShell()) return null;
+  return <SceneParticles />;
 }

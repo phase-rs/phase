@@ -16,6 +16,8 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@fontsource-variable/newsreader": "^5.2.10",
     "@supabase/supabase-js": "^2.106.2",
     "@tailwindcss/vite": "^4.2.1",
     "@tauri-apps/api": "^2",

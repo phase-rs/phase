@@ -25,6 +25,7 @@ import { CancelButton, ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from 
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
+import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
 import {
   SeparatePilesChoiceModal,
   SeparatePilesPartitionModal,
@@ -323,6 +324,9 @@ export function CardChoiceModal() {
     case "ChooseManaColor":
       if (!canActForWaitingState) return null;
       return <ManaColorChoiceModal data={waitingFor.data} />;
+    case "SpecializeColor":
+      if (!canActForWaitingState) return null;
+      return <SpecializeColorModal data={waitingFor.data} />;
     default:
       return null;
   }

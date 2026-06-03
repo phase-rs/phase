@@ -766,6 +766,19 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
     ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantLoseLife)
 }
 
+/// CR 702.11e: Check if `player_id` may target creatures as though they didn't
+/// have hexproof, including "hexproof from [quality]" variants.
+pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::IgnoreHexproof,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::IgnoreHexproof)
+}
+
 /// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static
 /// ability prohibits `player_id` from paying life as a cost.
 ///

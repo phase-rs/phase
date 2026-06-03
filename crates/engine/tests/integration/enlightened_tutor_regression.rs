@@ -45,18 +45,10 @@ fn enlightened_tutor_search_shuffle_puts_found_card_on_top() {
     engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
     add_white_mana(&mut runner);
 
-    let card_id = runner.state().objects[&tutor].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: tutor,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Enlightened Tutor cast should succeed");
-
-    runner.advance_until_stack_empty();
-
-    match &runner.state().waiting_for {
+    // The cast driver resolves the tutor and stops at the SearchChoice boundary
+    // (default SearchPolicy::Stop), exposing it via `final_waiting_for()`.
+    let outcome = runner.cast(tutor).resolve();
+    match outcome.final_waiting_for() {
         WaitingFor::SearchChoice { cards, .. } => {
             assert!(
                 cards.contains(&sol_ring),
