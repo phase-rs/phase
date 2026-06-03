@@ -25,6 +25,7 @@ import { CancelButton, ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from 
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
+import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
 import {
   SeparatePilesChoiceModal,
   SeparatePilesPartitionModal,
@@ -38,6 +39,7 @@ import { ProliferateModal } from "./ProliferateModal.tsx";
 import { CategoryChoiceModal } from "./CategoryChoiceModal.tsx";
 
 type ScryChoice = Extract<WaitingFor, { type: "ScryChoice" }>;
+type CoinFlipKeepChoice = Extract<WaitingFor, { type: "CoinFlipKeepChoice" }>;
 type DigChoice = Extract<WaitingFor, { type: "DigChoice" }>;
 type SurveilChoice = Extract<WaitingFor, { type: "SurveilChoice" }>;
 type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
@@ -65,6 +67,45 @@ type SaddleMount = Extract<WaitingFor, { type: "SaddleMount" }>;
 type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type ChooseRingBearer = Extract<WaitingFor, { type: "ChooseRingBearer" }>;
 const CHOICE_CARD_IMAGE_CLASS = "";
+
+type EffectZoneMode = "Sacrifice" | "Topdeck" | "Hand" | "Battlefield";
+
+const EFFECT_ZONE_VISUAL_CLASSES: Record<EffectZoneMode, { ring: string; overlay: string; badge: string }> = {
+  Sacrifice: {
+    ring: "ring-red-400/80",
+    overlay: "bg-red-500/20",
+    badge: "bg-red-500/90",
+  },
+  Topdeck: {
+    ring: "ring-sky-300/80",
+    overlay: "bg-sky-500/20",
+    badge: "bg-sky-500/90",
+  },
+  Hand: {
+    ring: "ring-sky-300/80",
+    overlay: "bg-sky-500/20",
+    badge: "bg-sky-500/90",
+  },
+  Battlefield: {
+    ring: "ring-emerald-400/80",
+    overlay: "bg-emerald-500/20",
+    badge: "bg-emerald-500/90",
+  },
+};
+
+const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
+  Sacrifice: "cardChoice.effectZone.labelConfirm",
+  Topdeck: "cardChoice.effectZone.labelTop",
+  Hand: "cardChoice.effectZone.labelReturn",
+  Battlefield: "cardChoice.effectZone.labelPut",
+};
+
+const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
+  Sacrifice: "cardChoice.badges.sacrifice",
+  Topdeck: "cardChoice.badges.put",
+  Hand: "cardChoice.badges.return",
+  Battlefield: "cardChoice.badges.put",
+};
 
 function CostActionFooter({
   onCancel,
@@ -167,6 +208,9 @@ export function CardChoiceModal() {
     case "ScryChoice":
       if (!canActForWaitingState) return null;
       return <ScryModal data={waitingFor.data} />;
+    case "CoinFlipKeepChoice":
+      if (!canActForWaitingState) return null;
+      return <CoinFlipKeepModal data={waitingFor.data} />;
     case "DigChoice":
       if (!canActForWaitingState) return null;
       return <DigModal data={waitingFor.data} />;
@@ -319,6 +363,9 @@ export function CardChoiceModal() {
     case "ChooseManaColor":
       if (!canActForWaitingState) return null;
       return <ManaColorChoiceModal data={waitingFor.data} />;
+    case "SpecializeColor":
+      if (!canActForWaitingState) return null;
+      return <SpecializeColorModal data={waitingFor.data} />;
     default:
       return null;
   }
@@ -537,6 +584,57 @@ function ScryModal({ data }: { data: ScryChoice["data"] }) {
       reorderHint={t("cardChoice.reorderHint")}
       keepTone="emerald"
     />
+  );
+}
+
+// ── Coin Flip Keep Modal (Krark's Thumb) ────────────────────────────────────
+
+function CoinFlipKeepModal({ data }: { data: CoinFlipKeepChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+
+  const keepFlip = useCallback(
+    (index: number) => {
+      dispatch({
+        type: "SelectCoinFlips",
+        data: { keep_indices: [index] },
+      });
+    },
+    [dispatch],
+  );
+
+  return (
+    <ChoiceOverlay
+      title={t("coinFlip.keep.title")}
+      subtitle={t("coinFlip.keep.subtitle")}
+    >
+      <div className="flex items-center justify-center gap-6 py-4">
+        {data.results.map((won, index) => (
+          <motion.button
+            key={index}
+            className="flex flex-col items-center gap-2 rounded-lg p-3 ring-2 ring-transparent transition hover:ring-emerald-400/80 hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+            initial={{ opacity: 0, y: 40, scale: 0.85 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ delay: 0.1 + index * 0.08, duration: 0.3 }}
+            whileHover={{ scale: 1.05, y: -4 }}
+            onClick={() => keepFlip(index)}
+          >
+            <span
+              className={`flex h-16 w-16 items-center justify-center rounded-full text-sm font-bold ${
+                won
+                  ? "bg-amber-400/90 text-amber-950"
+                  : "bg-slate-500/80 text-slate-100"
+              }`}
+            >
+              {won ? t("coinFlip.keep.heads") : t("coinFlip.keep.tails")}
+            </span>
+            <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
+              {t("coinFlip.buttons.keep")}
+            </span>
+          </motion.button>
+        ))}
+      </div>
+    </ChoiceOverlay>
   );
 }
 
@@ -1270,34 +1368,31 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   if (!objects) return null;
 
   const isTopdeck = data.effect_kind === "PutAtLibraryPosition";
+  const mode: EffectZoneMode = isSacrifice
+    ? "Sacrifice"
+    : isTopdeck
+      ? "Topdeck"
+      : data.destination === "Hand"
+        ? "Hand"
+        : "Battlefield";
+  const visualClasses = EFFECT_ZONE_VISUAL_CLASSES[mode];
   const selectedOrder = isTopdeck ? Array.from(selected) : [];
   const selectedOrderLabels = selectedOrder.map((_, index) => formatTopdeckOrderLabel(index, t));
   const isReady = isUpTo
     ? selected.size >= minCount && selected.size <= data.count
     : selected.size === data.count;
-  const kind = isSacrifice ? "Sacrifice" : isTopdeck ? "Topdeck" : "Battlefield";
-  const title = isSacrifice
-    ? t("cardChoice.effectZone.titleSacrifice")
-    : isTopdeck
-      ? t("cardChoice.effectZone.titleTopdeck")
-      : t("cardChoice.effectZone.titleBattlefield");
-  const subtitle = isUpTo
+  const subtitleKey = isUpTo
     ? minCount > 0
-      ? t(`cardChoice.effectZone.subtitle${kind}Range`, { min: minCount, count: data.count })
-      : t(`cardChoice.effectZone.subtitle${kind}UpTo`, { count: data.count })
-    : t(`cardChoice.effectZone.subtitle${kind}Exact`, { count: data.count });
+      ? `cardChoice.effectZone.subtitle${mode}Range`
+      : `cardChoice.effectZone.subtitle${mode}UpTo`
+    : `cardChoice.effectZone.subtitle${mode}Exact`;
+  const title = t(`cardChoice.effectZone.title${mode}`);
+  const subtitle = t(subtitleKey, { min: minCount, count: data.count });
   const actionLabel = selected.size === 0 && isUpTo && minCount === 0
     ? (isSacrifice ? t("cardChoice.effectZone.labelSkip") : t("cardChoice.effectZone.labelDecline"))
     : isTopdeck && selectedOrderLabels.length > 0
       ? t("cardChoice.effectZone.labelPutOnTop", { order: selectedOrderLabels.join(" -> ") })
-      : isSacrifice
-        ? t("cardChoice.effectZone.labelConfirm", { selected: selected.size, count: data.count })
-        : isTopdeck
-          ? t("cardChoice.effectZone.labelTop", { selected: selected.size, count: data.count })
-          : t("cardChoice.effectZone.labelPut", { selected: selected.size, count: data.count });
-  const ringClass = isSacrifice ? "ring-red-400/80" : isTopdeck ? "ring-sky-300/80" : "ring-emerald-400/80";
-  const overlayClass = isSacrifice ? "bg-red-500/20" : isTopdeck ? "bg-sky-500/20" : "bg-emerald-500/20";
-  const badgeClass = isSacrifice ? "bg-red-500/90" : isTopdeck ? "bg-sky-500/90" : "bg-emerald-500/90";
+      : t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], { selected: selected.size, count: data.count });
 
   return (
     <ChoiceOverlay
@@ -1311,17 +1406,15 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
           if (!obj) return null;
           const isSelected = selected.has(id);
           const selectedIndex = selectedOrder.indexOf(id);
-          const badgeLabel = isSacrifice
-            ? t("cardChoice.badges.sacrifice")
-            : isTopdeck && selectedIndex >= 0
+          const badgeLabel = isTopdeck && selectedIndex >= 0
               ? formatTopdeckOrderLabel(selectedIndex, t)
-              : t("cardChoice.badges.put");
+              : t(EFFECT_ZONE_BADGE_KEYS[mode]);
           return (
             <motion.button
               key={id}
               className={`relative rounded-lg transition ${
                 isSelected
-                  ? `z-10 ring-2 ${ringClass}`
+                  ? `z-10 ring-2 ${visualClasses.ring}`
                   : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
               }`}
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
@@ -1337,8 +1430,8 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
               {isSelected && (
-                <div className={`absolute inset-0 flex items-center justify-center rounded-lg ${overlayClass}`}>
-                  <span className={`rounded-full px-3 py-1 text-xs font-bold text-white ${badgeClass}`}>
+                <div className={`absolute inset-0 flex items-center justify-center rounded-lg ${visualClasses.overlay}`}>
+                  <span className={`rounded-full px-3 py-1 text-xs font-bold text-white ${visualClasses.badge}`}>
                     {badgeLabel}
                   </span>
                 </div>
@@ -2339,12 +2432,14 @@ function UnlessBounceModal({ data }: { data: UnlessBounceChoice["data"] }) {
 function ExileForCostModal({
   cards,
   count,
+  minCount = count,
   title,
   subtitle,
   confirmLabel = "Exile",
 }: {
   cards: ObjectId[];
   count: number;
+  minCount?: number;
   title: string;
   subtitle: string;
   confirmLabel?: string;
@@ -2383,7 +2478,7 @@ function ExileForCostModal({
 
   if (!objects) return null;
 
-  const isReady = selected.size === count;
+  const isReady = selected.size >= minCount && selected.size <= count;
 
   return (
     <ChoiceOverlay
@@ -2524,9 +2619,34 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
       return <BeholdModal data={data} action={data.kind.action} />;
     case "ExileFromZone":
       return <ExileForCostDispatch data={data} zone={data.kind.zone} />;
+    case "ExileMaterials":
+      return <CraftMaterialsModal data={data} />;
     case "ExileFromManaZone":
       return <ExileForManaAbilityModal data={data} zone={data.kind.zone} />;
   }
+}
+
+// CR 702.167a/b: Craft materials exile. Reuses the generic `ExileForCostModal`
+// primitive (same as Behold / ExileFromZone). Exact costs surface
+// `min_count == count`; "one or more" costs surface a lower `min_count` and use
+// every engine-supplied eligible object as the maximum.
+function CraftMaterialsModal({ data }: { data: PayCost["data"] }) {
+  const { t } = useTranslation("game");
+  const exact = data.min_count === data.count;
+  return (
+    <ExileForCostModal
+      cards={data.choices}
+      count={data.count}
+      minCount={data.min_count}
+      title={t("cardChoice.craft.title")}
+      subtitle={
+        exact
+          ? t("cardChoice.craft.subtitle", { count: data.count })
+          : t("cardChoice.craft.subtitleRange", { min: data.min_count, count: data.count })
+      }
+      confirmLabel={t("cardChoice.badges.exile")}
+    />
+  );
 }
 
 function manaValueOfShard(shard: string): number {

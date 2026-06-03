@@ -532,6 +532,47 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
             after_sup.trim_start(),
         ));
     }
+    // CR 107.1b + CR 107.3a: "N plus/minus <inner>" — a leading integer offset
+    // over a nested count expression ("three minus X" → Slumbering Trudge,
+    // "two plus X", etc.). CR 107.1b governs the arithmetic (a negative result
+    // is clamped to zero by the counter resolver); CR 107.3a covers the `X`
+    // operand. The operand recurses through the full count grammar
+    // (bare X, "twice X", fractions, "equal to <ref>"), so this composes over
+    // the existing `Offset`/`Multiply` variants rather than enumerating forms.
+    // The negative branch is modeled as `Multiply { factor: -1, inner }` inside
+    // the `Offset`, mirroring `parse_cda_quantity`'s offset arm. The "plus"/
+    // "minus" connectives are always lowercase in Oracle text and `parse_number`
+    // returns a leading-whitespace-trimmed remainder, so the tags carry no
+    // leading space (the trailing space enforces a word boundary). If the
+    // operand does not parse, fall through to the bare `Fixed` below — no
+    // regression for "N plus the number of …" (which `parse_count_expr` rejects).
+    if let Ok((after_op, sign)) = nom::branch::alt((
+        nom::combinator::value(
+            1i32,
+            nom::bytes::complete::tag::<_, _, OracleError<'_>>("plus "),
+        ),
+        nom::combinator::value(-1i32, nom::bytes::complete::tag("minus ")),
+    ))
+    .parse(rest)
+    {
+        if let Some((inner, after_inner)) = parse_count_expr(after_op) {
+            let inner_expr = if sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(inner),
+                }
+            } else {
+                inner
+            };
+            return Some((
+                QuantityExpr::Offset {
+                    inner: Box::new(inner_expr),
+                    offset: base,
+                },
+                after_inner,
+            ));
+        }
+    }
     Some((QuantityExpr::Fixed { value: base }, rest))
 }
 
@@ -1697,6 +1738,11 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                         || is_non_subtype_subject_name(&lower_candidate)
                         || is_supertype_word(&lower_candidate)
                         || super::oracle_nom::primitives::is_keyword_word(&lower_candidate)
+                        // CR 201.5: a sentence-initial imperative verb ("Search
+                        // your library...") is never a self-reference, even when
+                        // it is the first word of a verb-named card ("Search for
+                        // Tomorrow"). Reject it so the verb survives unmangled.
+                        || super::oracle_nom::primitives::is_verb_word(&lower_candidate)
                         || is_subtype_word(&lower_candidate)
                     {
                         continue;
@@ -1847,6 +1893,64 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("When Sharuum enters", "Sharuum the Hegemon"),
             "When ~ enters"
+        );
+    }
+
+    #[test]
+    fn normalize_verb_first_word_name_preserves_instruction_verb() {
+        // CR 201.5: "Search for Tomorrow" begins its Oracle text with the
+        // imperative verb "Search", not a self-reference. The strategy-5
+        // first-word fallback must not rewrite the verb to `~`.
+        assert_eq!(
+            normalize_card_name_refs(
+                "Search your library for a basic land card, put it onto the battlefield, then shuffle.",
+                "Search for Tomorrow"
+            ),
+            "Search your library for a basic land card, put it onto the battlefield, then shuffle."
+        );
+        // Same class: "Destroy the Evidence" / "Return to Battle".
+        assert_eq!(
+            normalize_card_name_refs("Destroy target land.", "Destroy the Evidence"),
+            "Destroy target land."
+        );
+        assert_eq!(
+            normalize_card_name_refs(
+                "Return target creature card from your graveyard to your hand.",
+                "Return to Battle"
+            ),
+            "Return target creature card from your graveyard to your hand."
+        );
+        // Sibling instruction verbs also in the lexicon: "Seek New Knowledge",
+        // "Choose Your Weapon", "Double Trouble" must not mangle their leading
+        // verb either.
+        assert_eq!(
+            normalize_card_name_refs(
+                "Seek two nonland cards, then put a card from your hand on the bottom of your library.",
+                "Seek New Knowledge"
+            ),
+            "Seek two nonland cards, then put a card from your hand on the bottom of your library."
+        );
+        assert_eq!(
+            normalize_card_name_refs("Choose one —", "Choose Your Weapon"),
+            "Choose one —"
+        );
+        assert_eq!(
+            normalize_card_name_refs(
+                "Double the power of each creature you control until end of turn.",
+                "Double Trouble"
+            ),
+            "Double the power of each creature you control until end of turn."
+        );
+    }
+
+    #[test]
+    fn normalize_verb_guard_preserves_split_half_self_ref() {
+        // The verb guard must not over-reach: a split-card half-name that is a
+        // noun ("Fire", "Cut", "Assault") is still a genuine self-reference and
+        // must normalize to `~`.
+        assert_eq!(
+            normalize_card_name_refs("Fire deals 2 damage divided as you choose.", "Fire // Ice"),
+            "~ deals 2 damage divided as you choose."
         );
     }
 
@@ -2262,6 +2366,50 @@ mod tests {
     #[test]
     fn parse_count_expr_none_for_text() {
         assert!(parse_count_expr("target creature").is_none());
+    }
+
+    #[test]
+    fn parse_count_expr_three_minus_x() {
+        // CR 107.1b: "three minus X" → Offset { Multiply { -1, X }, offset: 3 }
+        // (Slumbering Trudge's stun-counter count). At X=0 this resolves to 3.
+        let (qty, rest) = parse_count_expr("three minus X").unwrap();
+        match qty {
+            QuantityExpr::Offset { inner, offset } => {
+                assert_eq!(offset, 3);
+                match *inner {
+                    QuantityExpr::Multiply { factor, inner } => {
+                        assert_eq!(factor, -1);
+                        assert!(matches!(
+                            *inner,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::Variable { .. }
+                            }
+                        ));
+                    }
+                    other => panic!("Expected Multiply{{-1, X}}, got {other:?}"),
+                }
+            }
+            other => panic!("Expected Offset, got {other:?}"),
+        }
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_count_expr_two_plus_x() {
+        // CR 107.1b: "two plus X" → Offset { X, offset: 2 } (no negation wrapper).
+        let (qty, _rest) = parse_count_expr("two plus X").unwrap();
+        match qty {
+            QuantityExpr::Offset { inner, offset } => {
+                assert_eq!(offset, 2);
+                assert!(matches!(
+                    *inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    }
+                ));
+            }
+            other => panic!("Expected Offset, got {other:?}"),
+        }
     }
 
     #[test]

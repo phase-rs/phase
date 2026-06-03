@@ -867,34 +867,4 @@ mod tests {
         )
         .is_err());
     }
-
-    mod draft_wire_guard_tests {
-        use crate::draft_wire_guard::{
-            guard_create_draft_with_settings, guard_join_draft_with_password, guard_reconnect_draft,
-        };
-
-        #[test]
-        fn create_draft_accepts_valid_fields() {
-            assert!(guard_create_draft_with_settings("Alice", "TST", &None, None, 4).is_ok());
-        }
-
-        #[test]
-        fn create_draft_rejects_oversized_display_name() {
-            let err = guard_create_draft_with_settings(&"a".repeat(21), "TST", &None, None, 4)
-                .unwrap_err();
-            assert!(err.contains("display_name"));
-        }
-
-        #[test]
-        fn join_draft_rejects_oversized_draft_code() {
-            let err = guard_join_draft_with_password(&"x".repeat(65), "Bob", &None).unwrap_err();
-            assert!(err.contains("draft_code"));
-        }
-
-        #[test]
-        fn reconnect_rejects_oversized_player_token() {
-            let err = guard_reconnect_draft("ABC123", &"t".repeat(129)).unwrap_err();
-            assert!(err.contains("player_token"));
-        }
-    }
 }

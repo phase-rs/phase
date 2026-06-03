@@ -57,6 +57,7 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
         | CounterType::Lore
         | CounterType::Time
         | CounterType::Age
+        | CounterType::Shield
         | CounterType::Keyword(_)
         | CounterType::Generic(_) => {}
     }
@@ -157,6 +158,11 @@ pub(crate) fn apply_counter_addition(
     // sync with the counter map — the field IS the counter count.
     sync_derived_from_counters(obj, &counter_type);
 
+    // CR 122.1: Drop stale zero-count keys left over from prior removals before
+    // recording the object snapshot so counter history never exposes absent
+    // markers as present entries.
+    crate::types::counter::prune_zero_counters(&mut obj.counters);
+
     if counter_type_affects_layers(&counter_type) {
         state.layers_dirty.mark_full();
     }
@@ -211,6 +217,10 @@ pub(crate) fn apply_counter_removal(
     // CR 306.5c / CR 310.4c: Keep obj.loyalty / obj.defense in
     // sync with the counter map — the field IS the counter count.
     sync_derived_from_counters(obj, &counter_type);
+
+    // CR 122.1: Zero-count entries are absent — prune so proliferate and other
+    // "has a counter" checks cannot resurrect removed counter types.
+    crate::types::counter::prune_zero_counters(&mut obj.counters);
 
     if counter_type_affects_layers(&counter_type) {
         state.layers_dirty.mark_full();
@@ -589,7 +599,7 @@ pub fn resolve_add_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (counter_type, counter_num, target_filter) = match &ability.effect {
+    let (counter_type, count, counter_num_shared, target_filter) = match &ability.effect {
         Effect::PutCounterAll {
             counter_type,
             count,
@@ -598,7 +608,12 @@ pub fn resolve_add_all(
             let resolved =
                 crate::game::quantity::resolve_quantity_with_targets(state, count, ability).max(0)
                     as u32;
-            (counter_type.clone(), resolved, target.clone())
+            (
+                counter_type.clone(),
+                count.clone(),
+                resolved,
+                target.clone(),
+            )
         }
         _ => return Ok(()),
     };
@@ -673,7 +688,26 @@ pub fn resolve_add_all(
                 .collect()
         };
 
+    // CR 122.1 + CR 608.2c: A per-recipient count ("each other creature you
+    // control equal to THAT CREATURE's toughness" — Canopy Gargantuan) is
+    // re-evaluated against each object; a uniform count (the source's power —
+    // Ouroboroid) is resolved once and shared. Detected via the recipient-
+    // binding scope the parser stamps on per-recipient counts.
+    let count_uses_recipient = crate::game::quantity::quantity_expr_uses_recipient(&count);
+
     for obj_id in matching_ids {
+        let counter_num = if count_uses_recipient {
+            crate::game::quantity::resolve_quantity_with_recipient(
+                state,
+                &count,
+                ability.controller,
+                ability.source_id,
+                obj_id,
+            )
+            .max(0) as u32
+        } else {
+            counter_num_shared
+        };
         add_counter_with_replacement(
             state,
             ability.controller,
@@ -1362,6 +1396,115 @@ mod tests {
             .push(CoreType::Creature);
     }
 
+    /// Issue #1675 — Canopy Gargantuan: "put a number of +1/+1 counters on each
+    /// other creature you control equal to THAT CREATURE's toughness." Each
+    /// other creature must receive counters equal to ITS OWN toughness (the
+    /// count is re-evaluated per recipient), the source is excluded ("Another"),
+    /// and an opponent's creature receives none ("you control").
+    #[test]
+    fn put_counter_all_per_recipient_toughness() {
+        use crate::types::ability::{ObjectScope, QuantityRef};
+
+        let mut state = GameState::new_two_player(42);
+
+        // Canopy Gargantuan (the source).
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Canopy Gargantuan".to_string(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, source);
+        {
+            let o = state.objects.get_mut(&source).unwrap();
+            o.toughness = Some(7);
+            o.base_toughness = Some(7);
+        }
+
+        // Three OTHER creatures you control with distinct toughness.
+        let others: Vec<(ObjectId, i32)> = [(2u64, 3i32), (3, 5), (4, 1)]
+            .into_iter()
+            .map(|(cid, tough)| {
+                let id = create_object(
+                    &mut state,
+                    CardId(cid),
+                    PlayerId(0),
+                    format!("Creature {cid}"),
+                    Zone::Battlefield,
+                );
+                mark_creature(&mut state, id);
+                let o = state.objects.get_mut(&id).unwrap();
+                o.toughness = Some(tough);
+                o.base_toughness = Some(tough);
+                (id, tough)
+            })
+            .collect();
+
+        // An opponent's creature — must NOT receive counters ("you control").
+        let opp = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        mark_creature(&mut state, opp);
+        {
+            let o = state.objects.get_mut(&opp).unwrap();
+            o.toughness = Some(4);
+            o.base_toughness = Some(4);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::PutCounterAll {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::Recipient,
+                    },
+                },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::Another]),
+                ),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_add_all(&mut state, &ability, &mut events).unwrap();
+
+        // Each OTHER creature you control gains counters equal to ITS OWN toughness.
+        for (id, tough) in &others {
+            assert_eq!(
+                state.objects[id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0),
+                *tough as u32,
+                "creature with toughness {tough} must receive {tough} +1/+1 counters"
+            );
+        }
+        // Source ("Another") and the opponent's creature ("you control") get none.
+        assert!(
+            !state.objects[&source]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "source must be excluded by Another"
+        );
+        assert!(
+            !state.objects[&opp]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "opponent's creature must be excluded by 'you control'"
+        );
+    }
+
     #[test]
     fn add_counter_increments() {
         let mut state = GameState::new_two_player(42);
@@ -1455,7 +1598,52 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.objects[&obj_id].counters[&CounterType::Plus1Plus1], 0);
+        assert!(
+            !state.objects[&obj_id]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "zero-count +1/+1 entry should be pruned after removal"
+        );
+    }
+
+    #[test]
+    fn apply_counter_removal_prunes_zero_entry() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("charge".to_string()), 1);
+        let mut events = Vec::new();
+
+        apply_counter_removal(
+            &mut state,
+            obj_id,
+            CounterType::Generic("charge".to_string()),
+            1,
+            &mut events,
+        );
+
+        assert!(
+            state.objects[&obj_id].counters.is_empty(),
+            "last charge counter removed should leave an empty map"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::CounterRemoved {
+                counter_type: CounterType::Generic(_),
+                count: 1,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -2475,7 +2663,10 @@ mod tests {
         remove_counter_with_replacement(&mut state, pw_id, CounterType::Loyalty, 5, &mut events);
 
         let obj = &state.objects[&pw_id];
-        assert_eq!(obj.counters.get(&CounterType::Loyalty).copied(), Some(0));
+        assert!(
+            !obj.counters.contains_key(&CounterType::Loyalty),
+            "zero-count loyalty entry should be pruned after removal"
+        );
         assert_eq!(obj.loyalty, Some(0));
     }
 

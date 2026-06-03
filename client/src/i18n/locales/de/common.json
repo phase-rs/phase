@@ -49,6 +49,8 @@
     "volume": "Lautstärke"
   },
   "hostControl": {
+    "collapse": "Einklappen",
+    "expand": "Host-Panel ausklappen",
     "seatHost": "Host",
     "seatPlayer": "Spieler",
     "seatOpen": "Frei",
@@ -201,6 +203,7 @@
   },
   "diceRoll": {
     "rollingForFirst": "Auswürfeln, wer beginnt",
+    "tieReroll": "Gleichstand — neu würfeln!",
     "versus": "VS",
     "skip": "Zum Überspringen tippen",
     "continue": "Zum Fortfahren tippen",

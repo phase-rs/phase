@@ -28,6 +28,8 @@ interface CommanderPanelProps {
   onSetCommander: (cardName: string) => void;
   onRemoveCommander: (cardName: string) => void;
   onCardHover?: (cardName: string | null) => void;
+  /** CR 100.2a / CR 903.5b: engine-backed per-card copy cap resolver. */
+  getEffectiveCap: (name: string) => number;
 }
 
 
@@ -40,11 +42,12 @@ export function CommanderPanel({
   onSetCommander,
   onRemoveCommander,
   onCardHover,
+  getEffectiveCap,
 }: CommanderPanelProps) {
   const { t } = useTranslation("deck-builder");
   const identity = getCombinedColorIdentity(commanders, cardDataCache);
   const colorViolations = getColorIdentityViolations(deck, commanders, cardDataCache);
-  const singletonViolations = getSingletonViolations(deck, cardDataCache);
+  const singletonViolations = getSingletonViolations(deck, cardDataCache, getEffectiveCap);
   const totalCards = deck.reduce((sum, e) => sum + e.count, 0) + commanders.length;
 
   // Cards in deck that could become a commander. The handler decides whether

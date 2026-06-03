@@ -142,7 +142,6 @@ export function GameListItem({ game, onJoin, compatible = true, hostGameCode }: 
           SANDBOX
         </span>
       )}
-
       {/* Room title and metadata. When the host set an explicit room name
           we show it as the primary title and demote the host's player name
           to the secondary line; otherwise fall back to showing the player

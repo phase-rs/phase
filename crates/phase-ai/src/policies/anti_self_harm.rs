@@ -2689,6 +2689,7 @@ mod tests {
             defending_player: PlayerId(1),
             attack_target: engine::game::combat::AttackTarget::Player(PlayerId(1)),
             blocked: false,
+            band_id: None,
         });
         state.combat = Some(combat);
 
@@ -2781,6 +2782,7 @@ mod tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         });
 
         let config = AiConfig::default();
@@ -2888,6 +2890,7 @@ mod tests {
             description: None,
             may_trigger_origin: None,
             subject_match_count: None,
+            die_result: None,
         });
 
         let config = AiConfig::default();

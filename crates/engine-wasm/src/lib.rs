@@ -10,11 +10,12 @@ use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracke
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::apply;
 use engine::game::{
-    can_pair_commanders, estimate_bracket, evaluate_deck_compatibility, filter_state_for_viewer,
-    finalize_public_state, is_brawl_commander_eligible, is_commander_eligible,
-    is_tiny_leader_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db,
-    resolve_deck_list, start_game, start_game_with_starting_player, validate_name_deck_for_format,
-    BracketEstimate, DeckCompatibilityRequest, DeckList, PlayerDeckList,
+    can_pair_commanders, deck_copy_limit_for, estimate_bracket, evaluate_deck_compatibility,
+    filter_state_for_viewer, finalize_public_state, is_brawl_commander_eligible,
+    is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks,
+    rehydrate_game_from_card_db, resolve_deck_list, start_game, start_game_with_starting_player,
+    validate_name_deck_for_format, BracketEstimate, DeckCompatibilityRequest, DeckList,
+    PlayerDeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::identifiers::ObjectId;
@@ -284,6 +285,22 @@ pub fn is_card_commander_eligible(name: &str) -> bool {
     })
 }
 
+/// CR 100.2a / CR 903.5b: The named card's per-card deck-construction copy-limit
+/// override, or `null` when the default four-of / singleton limit applies.
+/// Serialized as the `DeckCopyLimit` tagged union (`{"type":"Unlimited"}` or
+/// `{"type":"UpTo","data":N}`); the frontend must switch on `.type`. The engine
+/// is the single authority — the frontend never re-parses Oracle text.
+#[wasm_bindgen(js_name = deckCopyLimit)]
+pub fn deck_copy_limit(name: &str) -> JsValue {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return JsValue::NULL;
+        };
+        to_js(&deck_copy_limit_for(db, name))
+    })
+}
+
 /// Whether the named card can serve as this format's command-zone leader.
 /// Reads the engine's MTGJSON-derived `CardFace` leadership fields and
 /// format-specific deck-validation predicates.
@@ -304,6 +321,7 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
             GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
             GameFormat::PauperCommander => is_commander_eligible(face),
             GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
+            GameFormat::Oathbreaker => face.is_oathbreaker,
             GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
             _ => false,
         }
@@ -379,7 +397,7 @@ pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
             main_deck: names,
             sideboard: Vec::new(),
             commander: Vec::new(),
-            bracket_tier: Default::default(),
+            ..Default::default()
         };
         let payload = resolve_player_deck_list(db, &list);
         let profile = DeckProfile::analyze(&payload.main_deck);
@@ -1390,6 +1408,8 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                 main_deck: deck_data.main_deck,
                 sideboard: deck_data.sideboard,
                 commander: deck_data.commander,
+                attraction_deck: deck_data.attraction_deck,
+                signature_spell: deck_data.signature_spell,
                 bracket_tier: deck_data.bracket_tier,
             })
         }
@@ -1460,7 +1480,7 @@ mod bracket_estimate_tests {
             commander: vec!["Atraxa, Praetors' Voice".into()],
             main_deck: vec!["Smothering Tithe".into(), "Forest".into()],
             sideboard: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         };
         let result = estimate_bracket_inner(&deck);
         let est = result.expect("estimate present");
@@ -1477,7 +1497,7 @@ mod bracket_estimate_tests {
             commander: vec!["Cmdr".into()],
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
-            bracket_tier: Default::default(),
+            ..Default::default()
         };
         assert!(estimate_bracket_inner(&deck).is_none());
     }
@@ -1540,6 +1560,7 @@ mod tests {
             strive_cost: None,
             brawl_commander: false,
             is_commander: false,
+            deck_copy_limit: None,
             metadata: Default::default(),
         }
     }

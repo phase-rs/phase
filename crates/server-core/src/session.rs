@@ -113,11 +113,13 @@ pub struct GameSession {
     /// Host preference: start automatically when every configured seat is
     /// occupied by a joined human or AI.
     pub start_when_full: bool,
+    /// Ranked rooms apply rating updates when a match completes.
+    pub ranked: bool,
     /// Engine events produced by `start_game` (the d20 first-player contest's
-    /// `DieRolled` batch). Captured here so the INITIAL post-start broadcast can
-    /// surface them to clients; cleared after that broadcast so late joiners and
-    /// reconnects do not re-receive the contest dice. Empty when the game has
-    /// not started or the events have already been broadcast.
+    /// `StartingPlayerContest` event). Captured here so the INITIAL post-start
+    /// broadcast can surface them to clients; cleared after that broadcast so
+    /// late joiners and reconnects do not re-receive the contest. Empty when the
+    /// game has not started or the events have already been broadcast.
     pub start_events: Vec<GameEvent>,
 }
 
@@ -372,6 +374,8 @@ impl GameSession {
                 main_deck: deck.main_deck.clone(),
                 sideboard: deck.sideboard.clone(),
                 commander: deck.commander.clone(),
+                attraction_deck: deck.attraction_deck.clone(),
+                signature_spell: deck.signature_spell.clone(),
                 bracket_tier: deck.bracket_tier,
             };
             // The resolver (`ServerDeckResolver::resolve` in phase-server)
@@ -526,6 +530,7 @@ impl GameSession {
             ai_difficulties,
             game_started: self.game_started,
             start_when_full: self.start_when_full,
+            ranked: self.ranked,
             lobby_meta: self.lobby_meta.clone(),
         }
     }
@@ -585,6 +590,7 @@ impl GameSession {
             lobby_meta: ps.lobby_meta,
             game_started: ps.game_started,
             start_when_full: ps.start_when_full,
+            ranked: ps.ranked,
             start_events: Vec::new(),
         }
     }
@@ -692,6 +698,7 @@ impl SessionManager {
             lobby_meta: None,
             game_started: false,
             start_when_full: true,
+            ranked: false,
             start_events: Vec::new(),
         };
 
@@ -1298,8 +1305,11 @@ mod tests {
                     parse_warnings: vec![],
                     brawl_commander: false,
                     is_commander: false,
+                    is_oathbreaker: false,
+                    deck_copy_limit: None,
                     metadata: Default::default(),
                     rarities: Default::default(),
+                    attraction_lights: vec![],
                 },
                 count: 10,
             }],
@@ -1949,6 +1959,7 @@ mod tests {
             lobby_meta: None,
             game_started: false,
             start_when_full: true,
+            ranked: false,
             start_events: Vec::new(),
         };
 

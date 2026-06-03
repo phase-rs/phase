@@ -333,6 +333,7 @@ fn do_eliminate(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEv
                     description: Some("Take the initiative — venture into Undercity".to_string()),
                     may_trigger_origin: None,
                     subject_match_count: None,
+                    die_result: None,
                 },
                 events,
             );

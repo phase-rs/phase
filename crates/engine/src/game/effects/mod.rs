@@ -4,11 +4,10 @@ use std::collections::HashMap;
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, ChosenAttribute, ControllerRef,
-    CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
-    EffectOutcomeSignal, FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    RepeatContinuation, ResolvedAbility, SharedQuality, SharedQualityRelation, SubAbilityLink,
-    TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, AbilityKind, ControllerRef, CopyRetargetPermission,
+    CostPaidObjectSnapshot, Effect, EffectError, EffectKind, EffectOutcomeSignal, FilterProp,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
+    SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -26,6 +25,7 @@ pub mod additional_phase;
 pub mod amass;
 pub mod animate;
 pub mod attach;
+pub mod attractions;
 pub mod awaken;
 pub mod become_copy;
 pub mod become_monarch;
@@ -67,6 +67,9 @@ pub mod double;
 pub mod draw;
 pub mod drawn_this_turn_choice;
 pub mod effect;
+pub mod end_combat_phase;
+pub(super) mod end_phase;
+pub mod end_the_turn;
 pub mod endure;
 pub mod energy;
 pub mod exchange_control;
@@ -78,6 +81,7 @@ pub mod explore;
 pub mod extra_turn;
 pub mod fight;
 pub mod flip_coin;
+pub mod force_attack;
 pub mod force_block;
 pub mod gain_control;
 pub mod gift_delivery;
@@ -108,6 +112,7 @@ pub mod pump;
 pub mod put_on_top;
 pub mod put_on_top_or_bottom;
 pub mod rad_counters;
+pub mod rebound;
 pub mod regenerate;
 pub mod register_bending;
 pub mod remove_from_combat;
@@ -131,6 +136,7 @@ pub mod shuffle;
 pub mod skip_next_step;
 pub mod skip_next_turn;
 pub mod solve_case;
+pub mod specialize;
 pub mod speed_effects;
 pub mod surveil;
 pub mod suspect;
@@ -614,14 +620,15 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // landed us back at Priority (no further replacement choice), B1-drain the
         // deferred observer triggers parked during earlier pause segments plus the
         // ones this resume produced; otherwise leave them parked for the next drain.
+        let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+            .iter()
+            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .cloned()
+            .collect();
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
             crate::game::triggers::drain_deferred_trigger_queue(state, events);
         } else {
-            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
-                .iter()
-                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-                .cloned()
-                .collect();
             crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
         }
     }
@@ -915,6 +922,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
         WaitingFor::ScryChoice { .. }
+            | WaitingFor::CoinFlipKeepChoice { .. }
             | WaitingFor::DigChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
@@ -1675,6 +1683,8 @@ pub fn resolve_effect(
         Effect::TimeTravel => Ok(()),
         Effect::BecomeMonarch => become_monarch::resolve(state, ability, events),
         Effect::Proliferate => proliferate::resolve(state, ability, events),
+        Effect::EndTheTurn => end_the_turn::resolve(state, ability, events),
+        Effect::EndCombatPhase => end_combat_phase::resolve(state, ability, events),
         Effect::Populate => populate::resolve(state, ability, events),
         Effect::Clash => clash::resolve(state, ability, events),
         // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
@@ -1722,6 +1732,7 @@ pub fn resolve_effect(
         Effect::PhaseOut { .. } => phase_out::resolve(state, ability, events),
         Effect::PhaseIn { .. } => phase_out::resolve_phase_in(state, ability, events),
         Effect::ForceBlock { .. } => force_block::resolve(state, ability, events),
+        Effect::ForceAttack { .. } => force_attack::resolve(state, ability, events),
         Effect::SolveCase => solve_case::resolve(state, ability, events),
         Effect::BecomePrepared { .. } => prepare::resolve_become_prepared(state, ability, events),
         Effect::BecomeUnprepared { .. } => {
@@ -1809,6 +1820,7 @@ pub fn resolve_effect(
         Effect::Incubate { .. } => incubate::resolve(state, ability, events),
         Effect::Amass { .. } => amass::resolve(state, ability, events),
         Effect::Monstrosity { .. } => monstrosity::resolve(state, ability, events),
+        Effect::Specialize => specialize::resolve(state, ability, events),
         Effect::Renown { .. } => renown::resolve(state, ability, events),
         Effect::Adapt { .. } => adapt::resolve(state, ability, events),
         Effect::Bolster { .. } => bolster::resolve(state, ability, events),
@@ -1844,6 +1856,9 @@ pub fn resolve_effect(
             venture::resolve_venture_into(state, ability, *dungeon, events)
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
+        Effect::OpenAttractions { .. } | Effect::RollToVisitAttractions => {
+            attractions::resolve(state, ability, events)
+        }
         Effect::ProcessRadCounters => rad_counters::resolve(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
         Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),
@@ -2467,7 +2482,9 @@ pub(crate) fn resolve_player_for_context_ref(
     if matches!(target_filter, TargetFilter::SourceChosenPlayer) {
         // CR 607.2d + CR 608.2c: Resolve "the chosen player" from the
         // source's linked persisted choice.
-        if let Some(player) = source_chosen_player(state, ability.source_id) {
+        if let Some(player) =
+            crate::game::game_object::source_chosen_player(state, ability.source_id)
+        {
             return player;
         }
     }
@@ -2508,30 +2525,6 @@ pub(crate) fn resolve_player_for_context_ref(
         }
     }
     ability.controller
-}
-
-/// CR 607.2d + CR 608.2c: Resolve "the chosen player" from the source's
-/// linked persisted choice. Triggered abilities may resolve after the source
-/// left the battlefield; in that case the LKI cache carries the source choices
-/// as they last existed in the public zone.
-pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
-    state
-        .objects
-        .get(&source_id)
-        .and_then(|obj| {
-            obj.chosen_attributes.iter().find_map(|attr| match attr {
-                ChosenAttribute::Player(player) => Some(*player),
-                _ => None,
-            })
-        })
-        .or_else(|| {
-            state.lki_cache.get(&source_id).and_then(|lki| {
-                lki.chosen_attributes.iter().find_map(|attr| match attr {
-                    ChosenAttribute::Player(player) => Some(*player),
-                    _ => None,
-                })
-            })
-        })
 }
 
 /// CR 117.3a: Determine which player receives the "may" prompt for an optional
@@ -2659,6 +2652,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target, .. }
         | Effect::ForceBlock { target, .. }
+        | Effect::ForceAttack { target, .. }
         | Effect::PutAtLibraryPosition { target, .. }
         | Effect::PutOnTopOrBottom { target, .. }
         | Effect::ChangeTargets { target, .. }
@@ -2864,10 +2858,14 @@ pub fn resolve_ability_chain(
         // impossible.
         state.last_vote_ballots = crate::im::Vector::new();
         state.last_effect_amount = None;
-        // CR 706.4: Clear the per-resolution die-roll result at depth-0 chain
-        // entry so a roll consumed by an inline sub_ability cannot leak into a
-        // later, unrelated resolution's EventContextAmount.
-        state.die_result_this_resolution = None;
+        // NOTE: `state.die_result_this_resolution` is intentionally NOT cleared
+        // here. `roll_die::resolve` stamps it AFTER this depth-0 prelude runs
+        // (the prelude runs once at chain top, before `RollDie` executes), so
+        // the inline class still reads a live value. Clearing it here would wipe
+        // the value carried onto a reflexive "When you do … the result"
+        // sub-ability entry before that entry resolves (CR 603.12). Cross-
+        // resolution isolation comes from the four `stack.rs` reset sites and
+        // the `engine.rs` apply() clear. (CR 706.2 + CR 706.4 + CR 603.12)
         state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
         // CR 608.2e: The clause-local equalization snapshot is resolution-
@@ -4174,7 +4172,7 @@ fn resolve_chain_body(
                         let chosen = crate::game::ability_utils::random_select_targets_for_ability(
                             state,
                             &target_slots,
-                            &[],
+                            &sub.target_constraints,
                         )
                         .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
                         let mut reflexive = sub.as_ref().clone();
@@ -4200,7 +4198,7 @@ fn resolve_chain_body(
                         state,
                         sub,
                         &target_slots,
-                        &[],
+                        &sub.target_constraints,
                     )
                     .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
 
@@ -4229,7 +4227,7 @@ fn resolve_chain_body(
                         condition: None,
                         ability: reflexive,
                         timestamp: state.turn_number,
-                        target_constraints: vec![],
+                        target_constraints: sub.target_constraints.clone(),
                         distribute: None,
                         trigger_event: state.current_trigger_event.clone(),
                         modal: None,
@@ -4237,6 +4235,13 @@ fn resolve_chain_body(
                         description: trigger_description.clone(),
                         may_trigger_origin: None,
                         subject_match_count: None,
+                        // CR 706.2 + CR 603.12: capture the live die-roll result
+                        // (still stamped by the inline `roll_die::resolve` of the
+                        // creating ability) onto the reflexive entry so the
+                        // "When you do … the result" sub-ability — which resolves
+                        // on its own stack entry in a later apply() — can re-stamp
+                        // it into resolution scope.
+                        die_result: state.die_result_this_resolution,
                     };
                     let trigger_events =
                         crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
@@ -4254,7 +4259,7 @@ fn resolve_chain_body(
                         player: ability.controller,
                         target_slots,
                         mode_labels: Vec::new(),
-                        target_constraints: vec![],
+                        target_constraints: sub.target_constraints.clone(),
                         selection,
                         source_id: Some(ability.source_id),
                         description: trigger_description,
@@ -4301,20 +4306,45 @@ fn resolve_chain_body(
             return Ok(());
         }
 
-        // Apply forward_result: moved object becomes sub's source, original source becomes target.
-        // This wires "put onto the battlefield attached to [source]" so Attach sees the
-        // moved card as source_id (the attachment) and the original source as target (the host).
+        // Apply forward_result: moved object becomes sub's source.
+        //
+        // CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
+        // CR 301.5b: Equipment entering attached via "put onto the battlefield attached to" wiring.
+        // For the Attach shape (Armored Skyhunter, Quest for the Holy Relic),
+        // the moved card is the attachment and the original source is the
+        // host, so we additionally push the original source into the sub's
+        // targets.
+        //
+        // CR 608.2c: For non-Attach shapes (Emperor of Bones' "It gains
+        // haste. Sacrifice it." after a `ChangeZone` to Battlefield),
+        // pushing the original source as a target would mis-bind any
+        // downstream `ParentTarget` consumer — the delayed Sacrifice
+        // would target Emperor itself instead of the just-returned
+        // creature. Instead, when the sub has no targets of its own and
+        // the parent ability has no targets to inherit (and the sub
+        // isn't an implicit tracked-set consumer), prepend the moved
+        // card as a target so `ParentTarget` consumers downstream
+        // resolve to it.
         if !forwarded_objects.is_empty() {
             let mut sub_with_context = sub.as_ref().clone();
             sub_with_context.source_id = forwarded_objects[0];
-            if !sub_with_context
-                .targets
-                .iter()
-                .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+            if matches!(sub.effect, Effect::Attach { .. }) {
+                if !sub_with_context
+                    .targets
+                    .iter()
+                    .any(|t| matches!(t, TargetRef::Object(id) if *id == ability.source_id))
+                {
+                    sub_with_context
+                        .targets
+                        .push(TargetRef::Object(ability.source_id));
+                }
+            } else if sub_with_context.targets.is_empty()
+                && ability.targets.is_empty()
+                && !effect_uses_implicit_tracked_set_targets(&sub.effect)
             {
                 sub_with_context
                     .targets
-                    .push(TargetRef::Object(ability.source_id));
+                    .insert(0, TargetRef::Object(forwarded_objects[0]));
             }
             apply_parent_chain_context(
                 &mut sub_with_context,
@@ -4462,25 +4492,32 @@ pub(crate) fn evaluate_condition(
         // CR 608.2c: "If it's a [type] card" — check the revealed card's type.
         // CR 205.3m: Optional additional_filter checks extra properties like
         // "of the chosen type" (IsChosenCreatureType).
+        // CR 700.1 + CR 406.6: When no reveal occurred but the parent effect
+        // moved a card between zones (e.g. Currency Converter's
+        // "Put a card exiled with ~ into its owner's graveyard. If it's a
+        // land card, ..." — issue #1545), fall back to the just-moved card in
+        // `last_zone_changed_ids`. The reveal-driven path still wins when both
+        // trackers are populated, so existing reveal+rider cards keep their
+        // pre-fix behavior.
         AbilityCondition::RevealedHasCardType {
             card_type,
             additional_filter,
         } => {
-            let type_matches = state
+            let subject_id = state
                 .last_revealed_ids
                 .first()
-                .map(|id| super::printed_cards::object_has_core_type(state, *id, *card_type))
+                .or_else(|| state.last_zone_changed_ids.first())
+                .copied();
+            let type_matches = subject_id
+                .map(|id| super::printed_cards::object_has_core_type(state, id, *card_type))
                 .unwrap_or(false);
             let filter_matches = match additional_filter {
                 // CR 205.3m: "of the chosen type" — check the revealed card's subtype
                 // against the source permanent's chosen creature type.
                 Some(FilterProp::IsChosenCreatureType) => {
                     let source = state.objects.get(&ability.source_id);
-                    let revealed = state
-                        .last_revealed_ids
-                        .first()
-                        .and_then(|id| state.objects.get(id));
-                    match (source, revealed) {
+                    let subject = subject_id.and_then(|id| state.objects.get(&id));
+                    match (source, subject) {
                         (Some(src), Some(obj)) => {
                             src.chosen_creature_type().is_some_and(|chosen_type| {
                                 obj.card_types
@@ -5289,7 +5326,7 @@ mod tests {
         );
 
         assert_eq!(
-            source_chosen_player(&state, ability.source_id),
+            crate::game::game_object::source_chosen_player(&state, ability.source_id),
             Some(PlayerId(1))
         );
 
@@ -5316,7 +5353,7 @@ mod tests {
         );
 
         assert_eq!(
-            source_chosen_player(&state, ability.source_id),
+            crate::game::game_object::source_chosen_player(&state, ability.source_id),
             Some(PlayerId(1))
         );
     }
@@ -6806,6 +6843,94 @@ mod tests {
         assert_eq!(state.players[0].life, 12);
     }
 
+    #[test]
+    fn forward_result_non_attach_parent_target_binds_moved_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Returned Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let sacrifice_moved = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut reanimate = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    }],
+                }),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(sacrifice_moved);
+        reanimate.forward_result = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &reanimate, &mut events, 0).unwrap();
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } if *object_id == creature)),
+            "parent ChangeZone must move the creature before forwarding it"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::PermanentSacrificed { object_id, .. } if *object_id == creature
+            )),
+            "forward_result must bind ParentTarget to the moved creature"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                GameEvent::PermanentSacrificed { object_id, .. } if *object_id == source
+            )),
+            "ParentTarget must not fall back to the source permanent"
+        );
+    }
+
     /// CR 608.2c + CR 400.7j + CR 608.2k: a non-targeted `ChangeZone` with 2+
     /// eligible objects raises `WaitingFor::EffectZoneChoice`. After the player
     /// picks a card, the `EffectZoneChoice` handler stamps parent-referent
@@ -8013,6 +8138,7 @@ mod tests {
                         constraint: None,
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -8102,6 +8228,7 @@ mod tests {
                         constraint: None,
                         granted_to: None,
                         resolution_cleanup: None,
+                        duration: None,
                     },
                     target: TargetFilter::TrackedSet {
                         id: TrackedSetId(0),
@@ -8165,6 +8292,7 @@ mod tests {
                     constraint: None,
                     granted_to: None,
                     resolution_cleanup: None,
+                    duration: None,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -11880,6 +12008,198 @@ mod tests {
             &state,
             &opponent_ability,
         ));
+    }
+
+    /// CR 608.2c + CR 700.1: Currency Converter — "Put a card exiled with this
+    /// artifact into its owner's graveyard. If it's a land card, create a
+    /// Treasure token. If it's a nonland card, create a 2/2 black Rogue
+    /// creature token." (issue #1545)
+    ///
+    /// The parser lowers "If it's a [type] card" to `RevealedHasCardType`, but
+    /// the parent effect here is a `ChangeZone` (Exile -> Graveyard), not a
+    /// reveal. With no preceding reveal, `last_revealed_ids` is empty and the
+    /// pre-fix evaluator returns `false` for both branches, so neither the
+    /// Treasure nor the Rogue token is ever created.
+    ///
+    /// CR 406.6: This shape (linked-exile consumer + conditional rider on the
+    /// moved card's type) is a class: Splinter Twin-style "if it's a creature
+    /// card", reanimate-conditional riders, and any future
+    /// "Put a card exiled with ~ into [zone]. If it's a [type] card, ..."
+    /// printing all benefit from the fallback to `last_zone_changed_ids`.
+    #[test]
+    fn revealed_has_card_type_falls_back_to_last_zone_changed_when_no_reveal() {
+        let mut state = GameState::new_two_player(42);
+        let land_card = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&land_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let nonland_card = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Goblin Guide".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&nonland_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Currency Converter style sub-ability: parent ChangeZone moved a card,
+        // sub clause reads "If it's a land card, ...". No reveal happened.
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let land_cond = AbilityCondition::RevealedHasCardType {
+            card_type: CoreType::Land,
+            additional_filter: None,
+        };
+
+        // Empty trackers — no reveal, no zone change: condition is false.
+        assert!(state.last_revealed_ids.is_empty());
+        assert!(state.last_zone_changed_ids.is_empty());
+        assert!(!evaluate_condition(&land_cond, &state, &ability));
+
+        // Parent ChangeZone moved the land card. The land branch of the
+        // "If it's a [type] card" rider must fire.
+        state.last_zone_changed_ids.push(land_card);
+        assert!(
+            evaluate_condition(&land_cond, &state, &ability),
+            "land-card branch must fire when parent ChangeZone moved a land",
+        );
+
+        // Nonland branch must NOT fire on the same moved land card. Equivalent
+        // to the parsed `Not { RevealedHasCardType { Land } }` rider that gates
+        // Currency Converter's Rogue token.
+        let nonland_cond = AbilityCondition::Not {
+            condition: Box::new(land_cond.clone()),
+        };
+        assert!(!evaluate_condition(&nonland_cond, &state, &ability));
+
+        // Swap: parent ChangeZone moved a nonland card instead.
+        state.last_zone_changed_ids.clear();
+        state.last_zone_changed_ids.push(nonland_card);
+        assert!(
+            !evaluate_condition(&land_cond, &state, &ability),
+            "land-card branch must NOT fire when parent ChangeZone moved a nonland",
+        );
+        assert!(
+            evaluate_condition(&nonland_cond, &state, &ability),
+            "nonland-card branch must fire when parent ChangeZone moved a nonland",
+        );
+
+        // CR 700.1 + CR 701.20: A real reveal still wins over the zone-change
+        // fallback so existing reveal-driven cards (Goblin Guide, dig effects)
+        // are not regressed by the fallback path.
+        state.last_zone_changed_ids.clear();
+        state.last_zone_changed_ids.push(nonland_card);
+        state.last_revealed_ids.push(land_card);
+        assert!(
+            evaluate_condition(&land_cond, &state, &ability),
+            "reveal must take precedence over the zone-change fallback",
+        );
+    }
+
+    #[test]
+    fn revealed_has_card_type_chain_uses_card_moved_by_parent_change_zone() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Currency Converter".to_string(),
+            Zone::Battlefield,
+        );
+        let land_card = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&land_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        state.exile_links.push(ExileLink {
+            source_id: source,
+            exiled_id: land_card,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let token_rider = ResolvedAbility::new(
+            Effect::Token {
+                name: "Treasure".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec!["Artifact".to_string(), "Treasure".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::RevealedHasCardType {
+            card_type: CoreType::Land,
+            additional_filter: None,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Graveyard,
+                target: TargetFilter::ExiledBySource,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(token_rider);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.objects[&land_card].zone, Zone::Graveyard);
+        assert_eq!(
+            state
+                .objects
+                .values()
+                .filter(|obj| obj.name == "Treasure" && obj.zone == Zone::Battlefield)
+                .count(),
+            1,
+            "land-card rider must create a Treasure after the parent ChangeZone moved a land",
+        );
     }
 
     #[test]

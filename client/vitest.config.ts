@@ -51,11 +51,6 @@ export default defineConfig({
     exclude: ["src/**/*.integration.test.{ts,tsx}"],
     setupFiles: ["src/test-setup.ts"],
     pool: "threads",
-    poolOptions: {
-      threads: {
-        singleThread: false,
-      },
-    },
     coverage: {
       provider: "v8",
       reporter: ["text", "lcov"],

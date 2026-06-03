@@ -7,6 +7,24 @@ use crate::types::game_state::GameState;
 
 use super::resolve_ability_chain;
 
+/// CR 706.2: Roll a die using the game's seeded RNG and emit the authoritative
+/// die-roll event consumed by die-roll triggers and "the result" effects.
+pub(crate) fn roll_die(
+    state: &mut GameState,
+    player_id: crate::types::player::PlayerId,
+    sides: u8,
+    events: &mut Vec<GameEvent>,
+) -> u8 {
+    let result = state.rng.random_range(1..=sides);
+    events.push(GameEvent::DieRolled {
+        player_id,
+        sides,
+        result,
+    });
+    state.die_result_this_resolution = Some(result);
+    result
+}
+
 /// CR 706: Roll a die and execute the matching result branch.
 ///
 /// CR 706.2: The natural roll is taken from a uniform 1..=sides distribution
@@ -30,7 +48,7 @@ pub fn resolve(
 
     // CR 706.2: Roll the die using the game's seeded RNG. This is the
     // "natural result" before any modifiers.
-    let natural = state.rng.random_range(1..=sides);
+    let natural = roll_die(state, ability.controller, sides, events);
 
     // CR 706.2: Apply the (optional) modifier to produce the actual result.
     // The result is clamped to a u8-representable non-negative integer so a
@@ -54,11 +72,11 @@ pub fn resolve(
         natural
     };
 
-    events.push(GameEvent::DieRolled {
-        player_id: ability.controller,
-        sides,
-        result: actual,
-    });
+    if actual != natural {
+        if let Some(GameEvent::DieRolled { result, .. }) = events.last_mut() {
+            *result = actual;
+        }
+    }
 
     // CR 706.2: The stored value is the actual die-roll result.
     // CR 706.4: Record the actual result so an inline "equal to the

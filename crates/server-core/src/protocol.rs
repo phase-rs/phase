@@ -91,6 +91,15 @@ pub struct PlayerSlotInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankedPlayerResult {
+    pub player_id: u8,
+    pub rating_before: i32,
+    pub rating_after: i32,
+    pub rating_delta: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
     /// First frame the client must send after receiving `ServerHello`. Carries
@@ -150,6 +159,9 @@ pub enum ClientMessage {
         /// without requiring a protocol-version bump.
         #[serde(default = "default_true")]
         start_when_full: bool,
+        /// Enable ranked rating updates for this room.
+        #[serde(default)]
+        ranked: bool,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -286,11 +298,11 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         player_token: Option<String>,
         /// Engine events produced by `start_game` — currently the d20
-        /// first-player contest (`DieRolled`) batch. Populated ONLY on the
-        /// initial post-start broadcast; empty for late joiners and reconnects
-        /// (a reconnecting player must not re-see the contest dice). Rolls are
-        /// public (no `visibility.rs` redaction), so the full batch goes to
-        /// every seat. `serde(default)` keeps this back-compat for older clients.
+        /// first-player contest (`StartingPlayerContest`) event. Populated ONLY
+        /// on the initial post-start broadcast; empty for late joiners and
+        /// reconnects (a reconnecting player must not re-see the contest). The
+        /// contest is public (no `visibility.rs` redaction), so it goes to every
+        /// seat. `serde(default)` keeps this back-compat for older clients.
         #[serde(default)]
         events: Vec<GameEvent>,
     },
@@ -334,6 +346,10 @@ pub enum ServerMessage {
     GameOver {
         winner: Option<PlayerId>,
         reason: String,
+        /// Present for ranked games where a two-player result produced
+        /// rating changes for both seats.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ranked_result: Option<Vec<RankedPlayerResult>>,
     },
     Error {
         message: String,
@@ -462,7 +478,7 @@ mod tests {
                 main_deck: vec!["Lightning Bolt".to_string(); 4],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -483,7 +499,7 @@ mod tests {
                 main_deck: vec!["Forest".to_string()],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -536,13 +552,19 @@ mod tests {
         let msg = ServerMessage::GameOver {
             winner: Some(PlayerId(1)),
             reason: "opponent conceded".to_string(),
+            ranked_result: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ServerMessage::GameOver { winner, reason } => {
+            ServerMessage::GameOver {
+                winner,
+                reason,
+                ranked_result,
+            } => {
                 assert_eq!(winner, Some(PlayerId(1)));
                 assert_eq!(reason, "opponent conceded");
+                assert!(ranked_result.is_none());
             }
             _ => panic!("wrong variant"),
         }
@@ -578,7 +600,7 @@ mod tests {
                 main_deck: vec!["Forest".to_string()],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             display_name: "Alice".to_string(),
             public: true,
@@ -592,6 +614,7 @@ mod tests {
             host_peer_id: None,
             draft_metadata: None,
             start_when_full: true,
+            ranked: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -648,7 +671,7 @@ mod tests {
                 main_deck: vec!["Forest".to_string()],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             display_name: "Bob".to_string(),
             password: None,
@@ -718,6 +741,21 @@ mod tests {
         match parsed {
             ClientMessage::Emote { emote } => assert_eq!(emote, "GG"),
             _ => panic!("wrong variant"),
+        }
+    }
+
+    mod emote_guard_tests {
+        use crate::emote_guard::{guard_emote, MAX_EMOTE_LEN};
+
+        #[test]
+        fn emote_accepts_valid_text() {
+            assert!(guard_emote("GG").is_ok());
+        }
+
+        #[test]
+        fn emote_rejects_oversized_text() {
+            let err = guard_emote(&"a".repeat(MAX_EMOTE_LEN + 1)).unwrap_err();
+            assert!(err.contains("emote"));
         }
     }
 
@@ -805,6 +843,7 @@ mod tests {
                 room_name: None,
                 is_p2p: false,
                 is_sandbox: false,
+                is_ranked: false,
                 draft_metadata: None,
             }],
         };
@@ -837,6 +876,7 @@ mod tests {
                 room_name: None,
                 is_p2p: true,
                 is_sandbox: false,
+                is_ranked: false,
                 draft_metadata: None,
             },
         };
@@ -867,6 +907,7 @@ mod tests {
                 room_name: Some("Board-wipe special".to_string()),
                 is_p2p: false,
                 is_sandbox: false,
+                is_ranked: false,
                 draft_metadata: None,
             },
         };
@@ -1013,7 +1054,7 @@ mod tests {
                 main_deck: vec!["Forest".to_string()],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             display_name: "Host".to_string(),
             public: false,
@@ -1032,6 +1073,7 @@ mod tests {
             host_peer_id: None,
             draft_metadata: None,
             start_when_full: true,
+            ranked: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -1054,9 +1096,7 @@ mod tests {
                     difficulty: AiDifficulty::Medium,
                     deck: DeckChoice::DeckList(Box::new(DeckData {
                         main_deck: vec!["Forest".to_string(); 60],
-                        sideboard: Vec::new(),
-                        commander: Vec::new(),
-                        bracket_tier: Default::default(),
+                        ..Default::default()
                     })),
                 },
             },
@@ -1195,6 +1235,7 @@ mod tests {
             room_name: Some("Spellslingers".to_string()),
             is_p2p: true,
             is_sandbox: false,
+            is_ranked: false,
             draft_metadata: None,
         };
         let json = serde_json::to_string(&game).unwrap();
@@ -1321,7 +1362,7 @@ mod tests {
                 main_deck: vec!["Forest".to_string()],
                 sideboard: Vec::new(),
                 commander: Vec::new(),
-                bracket_tier: Default::default(),
+                ..Default::default()
             },
             display_name: "Alice".to_string(),
             public: true,
@@ -1335,6 +1376,7 @@ mod tests {
             host_peer_id: Some("peer-host-abc".to_string()),
             draft_metadata: None,
             start_when_full: true,
+            ranked: false,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();

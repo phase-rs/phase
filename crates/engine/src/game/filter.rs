@@ -652,6 +652,11 @@ fn controller_ref_player(
         ControllerRef::ChosenPlayer { index } => {
             ability.and_then(|a| a.chosen_players.get(*index as usize).copied())
         }
+        // CR 613.1: The player persisted on the source via an "as ~ enters,
+        // choose a player" replacement — read durably from the source object.
+        ControllerRef::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, source_id)
+        }
         // CR 603.2 + CR 109.4: The player identified by the triggering event.
         ControllerRef::TriggeringPlayer => crate::game::quantity::triggering_event_player(state),
     }
@@ -675,6 +680,34 @@ pub fn matches_target_filter(
         ctx.source_controller,
         ctx.ability,
         ctx.recipient_id,
+    )
+}
+
+/// CR 702.26b exception: evaluate `filter` against `object_id` **without** the
+/// phased-out exclusion that [`matches_target_filter`] applies at its choke
+/// point. Phasing-in is one of the rare "rules and effects that specifically
+/// mention phased-out permanents," so a mass phase-in must be able to match the
+/// very permanents the choke point normally hides. Every other aspect of the
+/// filter (controller scope, type, etc.) is evaluated exactly as usual.
+pub fn matches_target_filter_including_phased_out(
+    state: &GameState,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    filter_inner_for_object(
+        state,
+        obj,
+        object_id,
+        filter,
+        ctx.source_id,
+        ctx.source_controller,
+        ctx.ability,
+        ctx.recipient_id,
+        ControllerLookup::LiveOnly,
     )
 }
 
@@ -1078,6 +1111,14 @@ fn filter_inner_for_object(
                     }
                     ControllerRef::DefendingPlayer => {
                         match crate::game::combat::defending_player_for_attacker(state, source_id) {
+                            Some(pid) if pid == obj_ctrl => {}
+                            _ => return false,
+                        }
+                    }
+                    // CR 613.1: "the chosen player controls" — match against the
+                    // player persisted on the source.
+                    ControllerRef::SourceChosenPlayer => {
+                        match crate::game::game_object::source_chosen_player(state, source_id) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
@@ -1646,6 +1687,9 @@ pub fn spell_record_matches_filter(
                     ControllerRef::TargetPlayer => return false,
                     ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
+                    // CR 613.1: "the chosen player" has no meaning for a
+                    // spell-history record. Fail closed.
+                    ControllerRef::SourceChosenPlayer => return false,
                     // CR 109.4: A chosen-player scope has no meaning for a
                     // spell-history record (no resolution context). Fail closed.
                     ControllerRef::ChosenPlayer { .. } => return false,
@@ -2553,6 +2597,7 @@ fn matches_filter_prop(
                         perm.controller == pid
                     }
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
+                    (Some(ControllerRef::SourceChosenPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::ChosenPlayer { .. }), Some(pid)) => perm.controller == pid,
                     // CR 603.2 + CR 109.4: triggering-player-scoped name match.
                     (Some(ControllerRef::TriggeringPlayer), Some(pid)) => perm.controller == pid,
@@ -2589,6 +2634,11 @@ fn matches_filter_prop(
             }
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
+                    .is_some_and(|pid| pid == obj.owner)
+            }
+            // CR 613.1: Ownership relative to the source's persisted chosen player.
+            ControllerRef::SourceChosenPlayer => {
+                crate::game::game_object::source_chosen_player(state, source.id)
                     .is_some_and(|pid| pid == obj.owner)
             }
             // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
@@ -3096,6 +3146,11 @@ fn zone_change_record_matches_property(
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == record.owner)
             }
+            // CR 613.1: Ownership relative to the source's persisted chosen player.
+            ControllerRef::SourceChosenPlayer => {
+                crate::game::game_object::source_chosen_player(state, source.id)
+                    .is_some_and(|pid| pid == record.owner)
+            }
             // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
             ControllerRef::ChosenPlayer { index } => source
                 .ability
@@ -3286,6 +3341,11 @@ fn attachment_controller_matches(
         }
         Some(ControllerRef::DefendingPlayer) => {
             combat::defending_player_for_attacker(state, source.id)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
+        // CR 613.1: Attachment controller relative to the source's chosen player.
+        Some(ControllerRef::SourceChosenPlayer) => {
+            crate::game::game_object::source_chosen_player(state, source.id)
                 .is_some_and(|pid| pid == attachment_controller)
         }
         // CR 608.2c + CR 109.4: Attachment controller relative to a chosen player.
@@ -3760,6 +3820,9 @@ pub fn player_matches_target_filter(
             Some(ControllerRef::TargetPlayer) => false,
             Some(ControllerRef::ParentTargetController) => false,
             Some(ControllerRef::DefendingPlayer) => false,
+            // CR 613.1: "the chosen player" has no meaning in this name-filter
+            // context. Fail closed (mirrors `TargetPlayer`).
+            Some(ControllerRef::SourceChosenPlayer) => false,
             // CR 109.4: Chosen-player scope has no meaning without resolution
             // context. Fail closed (mirrors `TargetPlayer`).
             Some(ControllerRef::ChosenPlayer { .. }) => false,
@@ -3873,6 +3936,39 @@ mod tests {
         let mut state = setup();
         let id = add_creature(&mut state, PlayerId(0), "Bear");
         assert!(!matches_target_filter(&state, id, &TargetFilter::None, id));
+    }
+
+    /// CR 702.26b: `matches_target_filter_including_phased_out` evaluates the
+    /// filter against phased-out permanents (which the normal choke point hides)
+    /// while still honoring controller scope — the basis for filtered mass
+    /// phase-in.
+    #[test]
+    fn including_phased_out_matches_controller_scoped_phased_out_object() {
+        use crate::types::ability::TypedFilter;
+
+        let mut state = setup();
+        let mine = add_creature(&mut state, PlayerId(0), "Mine");
+        let theirs = add_creature(&mut state, PlayerId(1), "Theirs");
+        for id in [mine, theirs] {
+            state.objects.get_mut(&id).unwrap().phase_status =
+                crate::game::game_object::PhaseStatus::PhasedOut {
+                    cause: crate::game::game_object::PhaseOutCause::Directly,
+                };
+        }
+
+        let you = TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+        let ctx = FilterContext::from_source_with_controller(mine, PlayerId(0));
+
+        // The regular choke point excludes phased-out objects entirely.
+        assert!(!super::matches_target_filter(&state, mine, &you, &ctx));
+        // The phased-out-aware matcher matches the controller's phased-out
+        // object, but still respects controller scope (opponent's is excluded).
+        assert!(super::matches_target_filter_including_phased_out(
+            &state, mine, &you, &ctx
+        ));
+        assert!(!super::matches_target_filter_including_phased_out(
+            &state, theirs, &you, &ctx
+        ));
     }
 
     /// Issue #1747 (perf): `matches_target_filter_in_owner_zone` skips the

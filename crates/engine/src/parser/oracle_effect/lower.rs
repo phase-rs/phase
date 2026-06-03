@@ -17,7 +17,7 @@ use super::super::oracle_quantity::{
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_that_clause_suffix, parse_type_phrase_with_ctx,
 };
-use super::super::oracle_util::{parse_count_expr, strip_after, TextPair};
+use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -43,13 +43,24 @@ use super::{
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
     attach_repeat_process_keywords, attach_same_is_true_keywords,
     collapse_ephemeral_color_choice_mana, contains_explicit_tracked_set_pronoun,
-    contains_implicit_tracked_set_pronoun, fold_cast_copy_of_card_defs, mark_uses_tracked_set,
-    parse_effect_clause, parse_event_context_ref_with_ctx, parse_for_each_object_copy_parts,
-    publishes_tracked_set_from_resolution, refine_damage_target_remainder,
+    contains_implicit_tracked_set_pronoun, fold_cast_copy_of_card_defs, has_explicit_player_target,
+    mark_uses_tracked_set, parse_effect_clause, parse_event_context_ref_with_ctx,
+    parse_for_each_object_copy_parts, publishes_tracked_set_from_resolution,
+    refine_damage_target_remainder, replace_player_anaphor_with_parent_target,
     rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
     scan_contains_phrase, stamp_delayed_returns, target_filter_controller_ref,
     try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
+
+fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
+    replace_player_anaphor_with_parent_target(def.effect.as_mut());
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        rewrite_player_anaphor_targets_in_definition(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_deref_mut() {
+        rewrite_player_anaphor_targets_in_definition(else_ability);
+    }
+}
 
 pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
@@ -158,6 +169,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                                 &root.effect,
                             ) {
                                 instead.target_choice_timing = root.target_choice_timing;
+                            }
+                            if has_explicit_player_target(root.effect.as_ref()) {
+                                rewrite_player_anaphor_targets_in_definition(&mut instead);
                             }
                             instead.else_ability = root.sub_ability.take();
                             root.sub_ability = Some(Box::new(instead));
@@ -469,6 +483,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         if parse_controlled_by_different_players_target_constraint(&clause_ir.source_text) {
             def = def.target_constraint(TargetSelectionConstraint::DifferentObjectControllers);
         }
+        if let Some(constraint) = parse_total_mana_value_target_constraint(&clause_ir.source_text) {
+            def = def.target_constraint(constraint);
+        }
         // CR 601.2d: Propagate distribute flag.
         if let Some(ref unit) = clause_ir.parsed.distribute {
             def = def.distribute(unit.clone());
@@ -759,11 +776,20 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     // Party (a Saga is not Equipment), wrong for Quest for the Holy Relic and
     // Stonehewer Giant (the searcher is not the moved Equipment).
     //
+    // CR 608.2c: The same flag also wires sub-chains whose own clauses
+    // anchor on the just-moved card via the bare-"it" anaphor
+    // (`TargetFilter::SelfRef`) — Emperor of Bones' "[…] put a creature
+    // card exiled with this creature onto the battlefield […]. It gains
+    // haste. Sacrifice it at the beginning of the next end step." The
+    // trailing GenericEffect/Pump and CreateDelayedTrigger subs target
+    // `SelfRef` so the runtime's `source_id` rewrite resolves them to the
+    // moved card instead of Emperor itself.
+    //
     // The `forward_result` flag makes the runtime forward the just-moved
     // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
     // forward_result branch), so `Attach::resolve` operates on the correct
     // attaching object.
-    rewire_attach_forward_result(&mut result);
+    rewire_result_anchored_subchain(&mut result);
     wire_optional_cast_decline_fallback(&mut result);
     if matches!(&*result.effect, Effect::SearchOutsideGame { .. }) {
         result.optional = false;
@@ -825,17 +851,31 @@ fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetChoiceTiming {
     }
 }
 
-/// CR 303.4f / CR 301.5b / CR 603.7d: Walk the chain and set
-/// `forward_result: true` on every `Dig`/`ChangeZone` whose `destination`
-/// is `Battlefield` and whose chained sub-ability is an `Attach` carrying
-/// the `ZoneChangedThisWay` condition. The condition is the parser-side
-/// signal that the Oracle text said "If a[n] [type] is/was put onto the
-/// battlefield this way, [attach it]" — i.e. the just-moved card must
-/// become the attaching object.
+/// CR 303.4f: Aura entering by non-spell means — controller chooses the enchanted object.
+/// CR 301.5b: Equipment entering attached via "put onto the battlefield attached to" wiring.
+/// CR 603.7d: A delayed trigger's source/controller is the parent ability's at creation time.
+/// CR 608.2c: Bare "it" anaphor in a later clause binds to the typed referent of an earlier clause.
+///
+/// Walk the chain and set `forward_result: true` on every `Dig`/`ChangeZone`
+/// whose `destination` is `Battlefield` and whose chained sub-ability anchors
+/// on the just-moved card. Two anchor shapes are recognized:
+///
+/// 1. `Attach` sub with a `ZoneChangedThisWay` condition — the Oracle text
+///    said "If a[n] [type] is/was put onto the battlefield this way,
+///    [attach it]" (Armored Skyhunter, Stonehewer Giant). The just-moved
+///    card becomes the attaching object.
+/// 2. A non-Attach sub whose own target slot (or a nested
+///    GenericEffect/CreateDelayedTrigger inside it) is `SelfRef` — the
+///    Oracle text used a bare-"it" anaphor for the just-moved card
+///    (Emperor of Bones: "put a creature card exiled with this creature
+///    onto the battlefield […]. It gains haste. Sacrifice it at the
+///    beginning of the next end step."). The runtime forward_result branch
+///    rewrites `sub.source_id` to the moved object, so `SelfRef` in the
+///    sub naturally resolves to it.
 ///
 /// Recurses through nested sub-abilities so chains of arbitrary depth
 /// (e.g. Skyhunter's Dig → Attach → PutAtLibraryPosition) are covered.
-fn rewire_attach_forward_result(def: &mut AbilityDefinition) {
+fn rewire_result_anchored_subchain(def: &mut AbilityDefinition) {
     if let Some(sub) = def.sub_ability.as_ref() {
         let sub_is_attach_with_zone_changed_cond = matches!(*sub.effect, Effect::Attach { .. })
             && matches!(
@@ -852,16 +892,77 @@ fn rewire_attach_forward_result(def: &mut AbilityDefinition) {
                 ..
             }
         );
-        if sub_is_attach_with_zone_changed_cond && parent_moves_to_battlefield {
+        if parent_moves_to_battlefield
+            && (sub_is_attach_with_zone_changed_cond || sub_targets_moved_card(sub))
+        {
             def.forward_result = true;
         }
     }
     if let Some(sub) = def.sub_ability.as_mut() {
-        rewire_attach_forward_result(sub);
+        rewire_result_anchored_subchain(sub);
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
-        rewire_attach_forward_result(else_branch);
+        rewire_result_anchored_subchain(else_branch);
     }
+}
+
+/// CR 608.2c: True when a sub-ability anchors on the just-moved card via
+/// the bare-"it" anaphor. Two encodings are recognized:
+///
+/// - `TargetFilter::SelfRef` — encoded when the anaphor's antecedent is
+///   the source itself; the runtime `forward_result` branch rewrites
+///   `sub.source_id` to the moved object before resolution, so `SelfRef`
+///   resolves to it.
+/// - `TargetFilter::ParentTarget` — encoded when the upstream chunk-loop
+///   anaphor rewrite (`chain_has_prior_typed_referent` →
+///   `replace_target_with_parent`) already redirected the "it" to the
+///   parent's chosen-object slot. The parent for this pattern is a
+///   `ChangeZone` whose typed target is a compound filter
+///   (`And[Typed(<type>), ExiledBySource]`) — a description, not a
+///   targeting "target" keyword — so `ability.targets` is empty at
+///   resolution time. The runtime `forward_result` branch inserts the
+///   moved object into the sub's targets so `ParentTarget` resolves to
+///   it.
+///
+/// Walks the sub's leaf target slot, `GenericEffect`'s grant list
+/// (each `StaticDefinition.affected`), `CreateDelayedTrigger`'s inner
+/// `AbilityDefinition`, and nested `sub_ability` / `else_ability`.
+fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
+    if matches!(
+        sub.effect.target_filter(),
+        Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
+    ) {
+        return true;
+    }
+    if let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*sub.effect
+    {
+        if static_abilities.iter().any(|s| {
+            matches!(
+                s.affected.as_ref(),
+                Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
+            )
+        }) {
+            return true;
+        }
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*sub.effect {
+        if sub_targets_moved_card(effect) {
+            return true;
+        }
+    }
+    if let Some(nested) = sub.sub_ability.as_ref() {
+        if sub_targets_moved_card(nested) {
+            return true;
+        }
+    }
+    if let Some(else_branch) = sub.else_ability.as_ref() {
+        if sub_targets_moved_card(else_branch) {
+            return true;
+        }
+    }
+    false
 }
 
 /// CR 702.33d + CR 608.2e: Resolve "create [N] of those tokens [instead]"
@@ -2490,6 +2591,39 @@ fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
     parser.parse(lower.as_str()).is_ok()
 }
 
+/// CR 202.3 + CR 115.1: Detect a "with total mana value <N|X> or less" target-set
+/// constraint anywhere in the clause and build the typed
+/// `TargetSelectionConstraint::TotalManaValue`. Literal numbers stay fixed;
+/// X remains a variable placeholder for the where-X form (Ancient Brass Dragon)
+/// so `apply_where_x_*` later rebinds it to the die-result `EventContextAmount`.
+///
+/// Target side accepts only the "or less" (LE) comparator — see
+/// `validate_target_constraints` / the parser strip in `oracle_effect/mod.rs`
+/// for why GE is never emitted for targeting.
+fn parse_total_mana_value_target_constraint(text: &str) -> Option<TargetSelectionConstraint> {
+    let lower = text.to_lowercase();
+    let (_, (value, comparator), _) = nom_primitives::scan_preceded(lower.as_str(), |input| {
+        preceded(
+            tag::<_, _, OracleError<'_>>("with total mana value "),
+            (
+                nom_quantity::parse_quantity_expr_number,
+                alt((
+                    value(Comparator::LE, tag(" or less")),
+                    value(Comparator::GE, tag(" or greater")),
+                )),
+            ),
+        )
+        .parse(input)
+    })?;
+    if comparator != Comparator::LE {
+        return None;
+    }
+    Some(TargetSelectionConstraint::TotalManaValue {
+        comparator: Comparator::LE,
+        value,
+    })
+}
+
 pub(super) fn extract_deal_damage_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
     let after_each_of = strip_after(&lower, "damage to each of ")?;
@@ -4062,7 +4196,7 @@ fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) ->
 pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
     let expression = where_x_expression.trim().trim_end_matches('.');
     let expression_lower = expression.to_ascii_lowercase();
-    // CR 107.3i + CR 117.1: Within a single resolution, X has one value used
+    // CR 107.3i + CR 608.2g: Within a single resolution, X has one value used
     // everywhere it appears. Join Forces ("Each player draws X cards, where
     // X is the total amount of mana paid this way") binds X to the total
     // payments accumulated by the upstream `PayCost { Mana { X } }` loop:
@@ -4076,6 +4210,21 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     if tag::<_, _, OracleError<'_>>("the total amount of mana paid this way")
         .parse(expression_lower.as_str())
         .is_ok_and(|(rest, _)| rest.is_empty())
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+    }
+    // CR 107.3i + CR 608.2g: "where X is less than or equal to <bound>" is a
+    // constraint on the player's chosen X (not a definition of X's exact
+    // value). Well of Lost Dreams pays {X} mana and draws X cards; the bound
+    // only limits what the player may choose — the actual drawn count is the
+    // amount paid (resolved via `chosen_x`). Preserving Variable("X") lets the
+    // existing PayAmountChoice → chosen_x → draw machinery work correctly.
+    if parse_comparator_prefix(expression_lower.as_str())
+        .is_some_and(|(_, bound)| !bound.trim().is_empty())
     {
         return Some(QuantityExpr::Ref {
             qty: QuantityRef::Variable {
@@ -4121,7 +4270,21 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     {
         return None;
     }
-    parse_cda_quantity(where_x_expression)
+    // CDA-quantity classification takes precedence: it is the more specific
+    // where-X interpreter (object counts, "that spell's mana value",
+    // "the number of age counters on this enchantment", etc.).
+    if let Some(expr) = parse_cda_quantity(where_x_expression) {
+        return Some(expr);
+    }
+    // CR 706.2 + CR 706.4: "where X is the result" of a die roll / coin flip
+    // binds X to the rolled value via the shared `EventContextAmount` channel
+    // (the same one inline "you gain life equal to the result" cards use). This
+    // is a FALLBACK below `parse_cda_quantity` — `parse_event_context_quantity`
+    // has a broad `parse_quantity_ref` fallback that would otherwise mis-classify
+    // CDA-handled phrases, so CDA must win first. `parse_cda_quantity` returns
+    // `None` for the bare die-result phrase (see `cda_quantity_returns_none_for_the_result`),
+    // so this fallback is what binds Ancient Bronze Dragon's "where X is the result".
+    crate::parser::oracle_quantity::parse_event_context_quantity(where_x_expression)
 }
 
 fn parse_where_x_cards_named_in_all_graveyards(where_x_expression: &str) -> Option<QuantityExpr> {
@@ -4356,6 +4519,21 @@ pub(crate) fn apply_where_x_to_filter(
     }
 }
 
+/// CR 107.3i + CR 202.3: Substitute the X binding into a target-set constraint's
+/// dynamic bound. Mirrors `apply_where_x_to_filter_prop`: maps the
+/// `TotalManaValue.value` `QuantityExpr` through `apply_where_x_quantity_expression`
+/// so `Variable("X")` + where-X `"the result"` becomes `EventContextAmount`.
+/// Constraints without a quantity bound (`DifferentTargetPlayers`,
+/// `DifferentObjectControllers`) are left unchanged.
+fn apply_where_x_to_target_constraint(
+    constraint: &mut TargetSelectionConstraint,
+    where_x_expression: Option<&str>,
+) {
+    if let TargetSelectionConstraint::TotalManaValue { value, .. } = constraint {
+        *value = apply_where_x_quantity_expression(value.clone(), where_x_expression);
+    }
+}
+
 fn apply_where_x_to_filter_prop(prop: FilterProp, where_x_expression: Option<&str>) -> FilterProp {
     match prop {
         FilterProp::Cmc { comparator, value } => FilterProp::Cmc {
@@ -4391,6 +4569,14 @@ pub(super) fn apply_where_x_ability_expression(
     }
     if let Some(spec) = def.multi_target.as_mut() {
         spec.map_quantities(|expr| apply_where_x_quantity_expression(expr, where_x_expression));
+    }
+    // CR 107.3i + CR 202.3: Rebind X in the target-set constraints (e.g. the
+    // `TotalManaValue` cap on Ancient Brass Dragon, whose bound is the
+    // `where X is the result` die value). Without this, the reflexive sub
+    // inherits `Variable("X")` with no defining expression and the cap is
+    // effectively unbounded.
+    for constraint in def.target_constraints.iter_mut() {
+        apply_where_x_to_target_constraint(constraint, where_x_expression);
     }
     apply_where_x_effect_expression(def.effect.as_mut(), where_x_expression);
     if let Some(sub) = def.sub_ability.as_mut() {
@@ -4566,4 +4752,141 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
         nom::Err::Error(OracleError::new(rest, nom::error::ErrorKind::Verify)),
     )?;
     Ok(("", (counter_type, QuantityExpr::Ref { qty })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_where_x_quantity_expression;
+    use crate::types::ability::{QuantityExpr, QuantityRef};
+
+    fn variable_x() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn where_x_comparator_bounds_preserve_variable_x() {
+        for expression in [
+            "less than or equal to the amount of life you gained",
+            "less than the amount of life you gained",
+            "greater than the number of creatures you control",
+            "greater than or equal to the number of cards in your hand",
+            "equal to the number of opponents",
+        ] {
+            assert_eq!(
+                parse_where_x_quantity_expression(expression),
+                Some(variable_x()),
+                "{expression}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod where_x_tests {
+    use super::parse_where_x_quantity_expression;
+    use crate::types::ability::{QuantityExpr, QuantityRef};
+
+    /// CR 706.2 + CR 706.4: "where X is the result" (of a die roll / coin flip)
+    /// binds X to the rolled value via `EventContextAmount` — the same channel
+    /// the inline "equal to the result" class uses. Building-block guard for
+    /// Ancient Bronze Dragon's reflexive "put X +1/+1 counters … where X is the
+    /// result" (issue #1602, Deliverable 1).
+    #[test]
+    fn where_x_is_the_result_binds_event_context_amount() {
+        assert_eq!(
+            parse_where_x_quantity_expression("the result"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            })
+        );
+    }
+
+    /// The new delegation must NOT shadow `parse_cda_quantity`: "the number of
+    /// …" expressions still route through the CDA-quantity path (the event-
+    /// context combinator returns `None` for them).
+    #[test]
+    fn cda_quantity_returns_none_for_the_result() {
+        // Precondition for the "CDA first, event-context fallback" ordering:
+        // `parse_cda_quantity` does not classify the bare die-result phrase, so
+        // the event-context delegation can safely catch it without shadowing any
+        // CDA-handled where-X binding.
+        assert_eq!(
+            crate::parser::oracle_quantity::parse_cda_quantity("the result"),
+            None
+        );
+    }
+
+    #[test]
+    fn where_x_number_of_phrase_not_shadowed_by_event_context() {
+        // "the number of creatures you control" is a CDA-quantity object count,
+        // not an event-context amount — must not resolve to EventContextAmount.
+        let parsed = parse_where_x_quantity_expression("the number of creatures you control");
+        assert_ne!(
+            parsed,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+            "the number-of phrase must route through parse_cda_quantity, not the \
+             event-context delegation"
+        );
+    }
+
+    /// CR 107.3i + CR 202.3: the where-X traversal rebinds a `TotalManaValue`
+    /// target constraint's `Variable("X")` cap to the die-result
+    /// `EventContextAmount` (Ancient Brass Dragon's "where X is the result").
+    #[test]
+    fn apply_where_x_to_target_constraint_binds_total_mana_value_cap() {
+        use crate::types::ability::Comparator;
+        use crate::types::game_state::TargetSelectionConstraint;
+
+        let mut constraint = TargetSelectionConstraint::TotalManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+        };
+        super::apply_where_x_to_target_constraint(&mut constraint, Some("the result"));
+        assert_eq!(
+            constraint,
+            TargetSelectionConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_total_mana_value_target_constraint_preserves_fixed_cap() {
+        use crate::types::ability::Comparator;
+        use crate::types::game_state::TargetSelectionConstraint;
+
+        assert_eq!(
+            super::parse_total_mana_value_target_constraint(
+                "target creature cards with total mana value 6 or less from graveyards"
+            ),
+            Some(TargetSelectionConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 6 },
+            })
+        );
+    }
+
+    /// Constraints without a quantity bound are left untouched.
+    #[test]
+    fn apply_where_x_to_target_constraint_leaves_non_quantity_unchanged() {
+        use crate::types::game_state::TargetSelectionConstraint;
+
+        let mut constraint = TargetSelectionConstraint::DifferentObjectControllers;
+        super::apply_where_x_to_target_constraint(&mut constraint, Some("the result"));
+        assert_eq!(
+            constraint,
+            TargetSelectionConstraint::DifferentObjectControllers
+        );
+    }
 }

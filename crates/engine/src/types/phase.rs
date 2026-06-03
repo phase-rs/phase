@@ -43,6 +43,21 @@ pub enum Phase {
     Cleanup,
 }
 
+impl Phase {
+    /// CR 506.1: The combat phase has five steps: beginning of combat, declare
+    /// attackers, declare blockers, combat damage, and end of combat.
+    pub fn is_combat(self) -> bool {
+        matches!(
+            self,
+            Phase::BeginCombat
+                | Phase::DeclareAttackers
+                | Phase::DeclareBlockers
+                | Phase::CombatDamage
+                | Phase::EndCombat
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

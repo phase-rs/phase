@@ -1,6 +1,6 @@
 import type { ScryfallCard } from "../../services/scryfall";
 import type { DeckEntry } from "../../services/deckParser";
-import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
+import { BASIC_LAND_NAMES } from "../../constants/game";
 
 const WUBRG_COLORS = ["W", "U", "B", "R", "G"] as const;
 
@@ -47,11 +47,18 @@ export function getColorIdentityViolations(
   return violations;
 }
 
+/**
+ * CR 903.5b: Names appearing above their effective copy cap in a singleton
+ * (Commander) deck, excluding basic lands. The cap comes from the engine-backed
+ * `getEffectiveCap` resolver (1 by default; raised for "up to N" override cards
+ * like Nazgûl → 9) — never inferred from Oracle text client-side.
+ */
 export function getSingletonViolations(
   deck: DeckEntry[],
-  cardDataCache: Map<string, ScryfallCard>,
+  _cardDataCache: Map<string, ScryfallCard>,
+  getEffectiveCap: (name: string) => number,
 ): string[] {
   return deck
-    .filter((e) => e.count > 1 && !BASIC_LAND_NAMES.has(e.name) && !hasUnlimitedCopies(cardDataCache.get(e.name)?.oracle_text))
+    .filter((e) => e.count > getEffectiveCap(e.name) && !BASIC_LAND_NAMES.has(e.name))
     .map((e) => e.name);
 }

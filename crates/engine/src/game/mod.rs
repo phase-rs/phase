@@ -1,5 +1,6 @@
 pub mod ability_utils;
 pub mod arithmetic;
+pub mod attractions;
 pub mod bending;
 pub mod bracket_estimate;
 pub mod casting;
@@ -61,6 +62,7 @@ pub(crate) mod sacrifice;
 pub mod sba;
 pub mod scenario;
 pub mod scenario_db;
+pub mod specialize;
 pub mod speed;
 pub mod stack;
 pub mod static_abilities;
@@ -88,10 +90,10 @@ pub use deck_loading::{
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
 };
 pub use deck_validation::{
-    can_pair_commanders, evaluate_deck_compatibility, is_brawl_commander_eligible,
-    is_commander_eligible, is_tiny_leader_eligible, validate_deck_for_format,
-    validate_name_deck_for_format, CompatibilityCheck, DeckCompatibilityRequest,
-    DeckCompatibilityResult, DeckCoverage, UnsupportedCard,
+    can_pair_commanders, deck_copy_limit_for, evaluate_deck_compatibility,
+    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
+    validate_deck_for_format, validate_name_deck_for_format, CompatibilityCheck,
+    DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage, UnsupportedCard,
 };
 pub use engine::{
     apply, apply_as_current, new_game, start_game, start_game_skip_mulligan,

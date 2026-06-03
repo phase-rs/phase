@@ -315,6 +315,17 @@ pub(super) fn handle_replacement_choice(
                     );
                     state.pending_step_end_mana_handlers.clear();
                 }
+                // CR 705.1 + CR 614.1a: Coin-flip replacements (Krark's Thumb)
+                // are always Mandatory and applied inline by
+                // `flip_coin::flip_through_replacement`; they never reach the
+                // optional replacement-choice resume path. Unreachable in
+                // practice — present only for match exhaustiveness.
+                ProposedEvent::CoinFlip { .. } => {
+                    debug_assert!(
+                        false,
+                        "CoinFlip replacement reached the optional-choice resume path"
+                    );
+                }
             }
 
             let mut waiting_for = WaitingFor::Priority {
@@ -397,6 +408,14 @@ pub(super) fn handle_replacement_choice(
                 {
                     waiting_for = state.waiting_for.clone();
                 }
+            }
+
+            // CR 601.2h + CR 602.2b + CR 616.1: Resume cast/activation cost payment paused for a
+            // replacement choice during discard or sacrifice cost payment.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
+            {
+                waiting_for = super::casting_costs::resume_interrupted_cost_payment(state, events)?;
             }
 
             Ok(waiting_for)

@@ -14,6 +14,17 @@ pub struct GameDb {
     conn: Mutex<Connection>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RatingDelta {
+    pub player_key: String,
+    pub game_code: String,
+    pub opponent_key: String,
+    pub won: bool,
+    pub rating_before: i32,
+    pub rating_after: i32,
+    pub rating_delta: i32,
+}
+
 impl GameDb {
     /// Open (or create) the game database at the given path.
     /// Enables WAL mode and creates the schema if needed.
@@ -36,7 +47,25 @@ impl GameDb {
                 host_peer_id TEXT NOT NULL,
                 snapshot_json TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS player_ratings (
+                player_key TEXT PRIMARY KEY,
+                rating INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ranked_match_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_key TEXT NOT NULL,
+                game_code TEXT NOT NULL,
+                opponent_key TEXT NOT NULL,
+                won INTEGER NOT NULL,
+                rating_before INTEGER NOT NULL,
+                rating_after INTEGER NOT NULL,
+                rating_delta INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ranked_match_history_player_key
+                ON ranked_match_history (player_key);",
         )?;
         info!("Game database opened at {}", path.display());
         Ok(Self {
@@ -206,6 +235,52 @@ impl GameDb {
         )?;
         Ok(())
     }
+
+    pub fn load_rating(&self, player_key: &str) -> rusqlite::Result<Option<i32>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT rating FROM player_ratings WHERE player_key = ?1 LIMIT 1")?;
+        let result = stmt.query_row(params![player_key], |row| row.get::<_, i32>(0));
+        match result {
+            Ok(rating) => Ok(Some(rating)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn save_ranked_result(&self, deltas: &[RatingDelta]) -> rusqlite::Result<()> {
+        if deltas.is_empty() {
+            return Ok(());
+        }
+        let now = now_epoch();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for delta in deltas {
+            tx.execute(
+                "INSERT INTO player_ratings (player_key, rating, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(player_key) DO UPDATE SET rating = ?2, updated_at = ?3",
+                params![delta.player_key, delta.rating_after, now],
+            )?;
+            tx.execute(
+                "INSERT INTO ranked_match_history
+                 (player_key, game_code, opponent_key, won, rating_before, rating_after, rating_delta, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    delta.player_key,
+                    delta.game_code,
+                    delta.opponent_key,
+                    if delta.won { 1 } else { 0 },
+                    delta.rating_before,
+                    delta.rating_after,
+                    delta.rating_delta,
+                    now
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 fn now_epoch() -> u64 {
@@ -313,6 +388,24 @@ mod tests {
         db.save_p2p_backup("BACK01", "peer-1", "data").unwrap();
         db.delete_p2p_backup("BACK01").unwrap();
         assert!(db.load_p2p_backup("BACK01").unwrap().is_none());
+    }
+
+    #[test]
+    fn ranked_match_history_has_player_key_index() {
+        let db = test_db();
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("PRAGMA index_list('ranked_match_history')")
+            .unwrap();
+        let indexes = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(indexes
+            .iter()
+            .any(|name| name == "idx_ranked_match_history_player_key"));
     }
 
     #[test]

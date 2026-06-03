@@ -176,7 +176,10 @@ export const useGameStore = create<GameStore>()(
       // play/draw choice. `current_starting_player` is the engine's pick — never
       // recomputed from the rolls on the frontend.
       const initEvents = initResult.events ?? [];
-      const rolledStart = initEvents[0]?.type === "DieRolled";
+      // The engine emits a single StartingPlayerContest event (round structure +
+      // winner) at the head of the game-start batch when it ran a roll-off
+      // (random starter); absent for an explicit play/draw choice.
+      const rolledStart = initEvents[0]?.type === "StartingPlayerContest";
       const startingContest = rolledStart
         ? {
             events: initEvents,

@@ -7,9 +7,11 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     AbilityCost, CardPlayMode, CostCategory, QuantityExpr, QuantityRef, TargetFilter,
 };
+use super::identifiers::ObjectId;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost, StepEndManaAction};
 use super::phase::Phase;
+use super::player::PlayerId;
 use super::zones::Zone;
 
 /// CR 109.5 + CR 102.1: The "who" axis of a continuous prohibition static.
@@ -591,7 +593,27 @@ pub enum StaticMode {
     /// runtime-implemented; other arms are inert.
     PlayerProtection(super::keywords::ProtectionTarget),
     MustAttack,
+    /// CR 508.1d: This creature must attack a *specific* player if able ("target
+    /// creature attacks you this combat if able"; Alluring Siren, Dulcet Sirens).
+    /// Unlike the generic
+    /// [`MustAttack`] (attack any defender), this carries the `PlayerId` that must
+    /// be attacked. Data-carrying variant — not registry-registered (see
+    /// `coverage::is_data_carrying_static`); enforced by direct pattern-match in
+    /// `combat.rs` declare-attackers validation. Mirrors [`MustBlockAttacker`].
+    MustAttackPlayer {
+        player: PlayerId,
+    },
     MustBlock,
+    /// CR 702.39a / CR 509.1c: This creature must block a *specific* attacker if
+    /// able (Provoke; "target creature blocks ~ this turn if able"). Unlike the
+    /// generic [`MustBlock`] (block *any* attacker), this carries the `ObjectId`
+    /// of the attacker that must be blocked. Data-carrying variant — not
+    /// registry-registered (see `coverage::is_data_carrying_static`); enforced by
+    /// direct pattern-match in `combat.rs` declare-blockers validation. The
+    /// `ObjectId` is stable for the end-of-turn lifetime of the granting effect.
+    MustBlockAttacker {
+        attacker: ObjectId,
+    },
     CantDraw {
         who: ProhibitionScope,
     },
@@ -808,12 +830,32 @@ pub enum StaticMode {
     CantBeBlockedBy {
         filter: TargetFilter,
     },
+    /// CR 509.1b: This creature can't be blocked by more than `max` creatures
+    /// (Stalking Tiger, Outland Colossus). A per-creature blocker *maximum* — the
+    /// inverse of menace (`CantBeBlockedExceptBy { MinBlockers }`, a minimum) and
+    /// distinct from `MaxBlockersEachCombat` (a global per-combat cap). Enforced
+    /// in `combat.rs` declare-blockers validation.
+    CantBeBlockedByMoreThan {
+        max: u32,
+    },
     /// CR 702.16: Protection prevents targeting, blocking, damage, and attachment.
     Protection,
     /// CR 702.12: Indestructible — prevents destruction by lethal damage and destroy effects.
     Indestructible,
     /// Permanent cannot be destroyed (distinct from Indestructible).
     CantBeDestroyed,
+    /// CR 701.19c: "[Permanent] can't be regenerated [this turn]." This does not
+    /// stop regeneration abilities from being activated or shields from being
+    /// created; rather, it causes regeneration shields to not be applied the
+    /// next time the affected permanent would be destroyed. The per-target
+    /// `StaticDefinition::affected` filter carries which permanent is marked;
+    /// runtime enforcement bypasses the regen shield in
+    /// `replacement.rs::destroy_applier` (CR 701.19). Distinct from
+    /// `CantBeDestroyed` (which prevents destruction outright) and the inline
+    /// `Effect::Destroy { cant_regenerate }` (the "Destroy X. It can't be
+    /// regenerated." one-shot) — this is the standalone, until-end-of-turn form
+    /// (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort).
+    CantBeRegenerated,
     /// CR 702.34: Flashback — allows casting from graveyard, exiled after resolution.
     FlashBack,
     /// CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
@@ -856,6 +898,8 @@ pub enum StaticMode {
     Goaded,
     CantAttackAlone,
     CantBlockAlone,
+    /// CR 702.122c: This creature can't crew Vehicles.
+    CantCrew,
     MayLookAtTopOfLibrary,
 
     // -- Tier 3: Parser-produced statics --
@@ -987,6 +1031,29 @@ pub enum StaticMode {
     /// player's normal untap, scanning the battlefield for this variant on
     /// permanents whose controller != active_player.
     UntapsDuringEachOtherPlayersUntapStep,
+    /// CR 614.1c + CR 122.1: Continuous "enters with an additional counter"
+    /// replacement static. A permanent matching `StaticDefinition::affected`
+    /// (e.g. "Other creatures you control", "Legendary creatures you control",
+    /// "Nontoken creatures you control") that would enter the battlefield does
+    /// so with `count` additional counters of `counter_type` on it.
+    ///
+    /// Per CR 614.1c these "enters with …" effects are replacement effects, not
+    /// triggered abilities; the affected-permanent scope rides on
+    /// `StaticDefinition::affected` (the controller-scoped "you control" plus any
+    /// Other/Legendary/Nontoken qualifier), exactly like the anthem statics.
+    /// Runtime integration lives in the battlefield-entry counter hook in
+    /// `effects/change_zone.rs`, which scans active statics whose `affected`
+    /// filter matches the entering object and folds `count` `counter_type`
+    /// counters into the entry's counter list.
+    ///
+    /// Class members (fixed-count form): Kalain, Reclusive Painter; Bard Class;
+    /// Gorma the Gullet; Master Chef. The dynamic-count form (Gev, "for each
+    /// opponent who lost life") is intentionally NOT matched by the parser and
+    /// remains Unimplemented until a dynamic-count axis is added.
+    EntersWithAdditionalCounters {
+        counter_type: super::counter::CounterType,
+        count: u32,
+    },
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -1017,6 +1084,8 @@ impl Hash for StaticMode {
                 cost_category.hash(state);
             }
             StaticMode::ExtraBlockers { count } => count.hash(state),
+            StaticMode::MustBlockAttacker { attacker } => attacker.hash(state),
+            StaticMode::MustAttackPlayer { player } => player.hash(state),
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
@@ -1026,6 +1095,7 @@ impl Hash for StaticMode {
                 BlockExceptionKind::MinBlockers { min } => min.hash(state),
             },
             StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
+            StaticMode::CantBeBlockedByMoreThan { max } => max.hash(state),
             StaticMode::AdditionalLandDrop { count } => count.hash(state),
             StaticMode::StepEndUnspentMana { filter, action } => {
                 filter.hash(state);
@@ -1077,6 +1147,9 @@ impl Hash for StaticMode {
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
+            // CR 614.1c: data-carrying (CounterType + count); consumed by direct
+            // match in change_zone.rs, never used as a HashMap key.
+            | StaticMode::EntersWithAdditionalCounters { .. }
             | StaticMode::SuppressTriggers { .. } => {}
             // All other variants are unit variants — discriminant suffices.
             _ => {}
@@ -1143,7 +1216,13 @@ impl fmt::Display for StaticMode {
                 write!(f, "PlayerProtection({target:?})")
             }
             StaticMode::MustAttack => write!(f, "MustAttack"),
+            StaticMode::MustAttackPlayer { player } => {
+                write!(f, "MustAttackPlayer({player:?})")
+            }
             StaticMode::MustBlock => write!(f, "MustBlock"),
+            StaticMode::MustBlockAttacker { attacker } => {
+                write!(f, "MustBlockAttacker({attacker:?})")
+            }
             StaticMode::CantDraw { who } => write!(f, "CantDraw({who})"),
             StaticMode::DoubleTriggers { cause } => write!(f, "DoubleTriggers({cause})"),
             StaticMode::IgnoreHexproof => write!(f, "IgnoreHexproof"),
@@ -1231,9 +1310,13 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeBlockedBy { filter } => {
                 write!(f, "CantBeBlockedBy({filter:?})")
             }
+            StaticMode::CantBeBlockedByMoreThan { max } => {
+                write!(f, "CantBeBlockedByMoreThan({max})")
+            }
             StaticMode::Protection => write!(f, "Protection"),
             StaticMode::Indestructible => write!(f, "Indestructible"),
             StaticMode::CantBeDestroyed => write!(f, "CantBeDestroyed"),
+            StaticMode::CantBeRegenerated => write!(f, "CantBeRegenerated"),
             StaticMode::FlashBack => write!(f, "FlashBack"),
             StaticMode::Shroud => write!(f, "Shroud"),
             StaticMode::Hexproof => write!(f, "Hexproof"),
@@ -1252,6 +1335,7 @@ impl fmt::Display for StaticMode {
             StaticMode::Goaded => write!(f, "Goaded"),
             StaticMode::CantAttackAlone => write!(f, "CantAttackAlone"),
             StaticMode::CantBlockAlone => write!(f, "CantBlockAlone"),
+            StaticMode::CantCrew => write!(f, "CantCrew"),
             StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
             // Tier 3
             StaticMode::MayChooseNotToUntap => write!(f, "MayChooseNotToUntap"),
@@ -1298,6 +1382,14 @@ impl fmt::Display for StaticMode {
             StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
                 write!(f, "UntapsDuringEachOtherPlayersUntapStep")
             }
+            // CR 614.1c + CR 122.1: "enters with an additional [counter] counter"
+            // — Display carries both the counter type and the fixed count.
+            StaticMode::EntersWithAdditionalCounters {
+                counter_type,
+                count,
+            } => {
+                write!(f, "EntersWithAdditionalCounters({counter_type:?},{count})")
+            }
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
         }
@@ -1321,6 +1413,11 @@ impl FromStr for StaticMode {
             s if parse_static_mode_u32_arg(s, "MaxBlockersEachCombat").is_some() => {
                 StaticMode::MaxBlockersEachCombat {
                     max: parse_static_mode_u32_arg(s, "MaxBlockersEachCombat").unwrap(),
+                }
+            }
+            s if parse_static_mode_u32_arg(s, "CantBeBlockedByMoreThan").is_some() => {
+                StaticMode::CantBeBlockedByMoreThan {
+                    max: parse_static_mode_u32_arg(s, "CantBeBlockedByMoreThan").unwrap(),
                 }
             }
             "CantBeTargeted" => StaticMode::CantBeTargeted,
@@ -1530,6 +1627,8 @@ impl FromStr for StaticMode {
             "Protection" => StaticMode::Protection,
             "Indestructible" => StaticMode::Indestructible,
             "CantBeDestroyed" => StaticMode::CantBeDestroyed,
+            // CR 701.19c: "[Permanent] can't be regenerated."
+            "CantBeRegenerated" => StaticMode::CantBeRegenerated,
             "FlashBack" => StaticMode::FlashBack,
             "Shroud" => StaticMode::Shroud,
             "Hexproof" => StaticMode::Hexproof,
@@ -1548,6 +1647,7 @@ impl FromStr for StaticMode {
             "Goaded" => StaticMode::Goaded,
             "CantAttackAlone" => StaticMode::CantAttackAlone,
             "CantBlockAlone" => StaticMode::CantBlockAlone,
+            "CantCrew" => StaticMode::CantCrew,
             "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
             // Tier 3
             "MayChooseNotToUntap" => StaticMode::MayChooseNotToUntap,
@@ -1622,6 +1722,12 @@ impl FromStr for StaticMode {
                 } else if other.starts_with("SuppressTriggers(") {
                     // CR 603.2g: Data-carrying — round-trip preserves discriminant only.
                     // Callers that need the full filter/events read from the typed field.
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if other.starts_with("EntersWithAdditionalCounters(") {
+                    // CR 614.1c: Data-carrying (CounterType + count). The Display
+                    // form uses the Debug rendering of `CounterType`, which has no
+                    // FromStr inverse; round-trip is diagnostic-only and callers
+                    // read the typed field. Mirrors MaximumHandSize / SuppressTriggers.
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
                     .strip_prefix("CantCastDuring(")
@@ -1778,15 +1884,17 @@ pub fn deserialize_static_mode_fwd<'de, D>(d: D) -> Result<StaticMode, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::Deserialize as _;
     let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
     match raw {
         serde_json::Value::String(ref s) => {
-            // Unit variant path. Try the derived deserializer first so all
-            // known unit variants (e.g. "SpendManaAsAnyColor", "Flying", …)
-            // round-trip correctly. If the derived impl rejects the string
-            // (unknown variant from a newer engine build), fall back to
-            // Other(s) so the card still loads without a hard error.
+            // Unit variant path. Handle legacy cost-modify unit variants first.
+            if let Some(mode) = deserialize_legacy_cost_modify_string(s) {
+                return Ok(mode);
+            }
+            // Try the derived deserializer so all known unit variants
+            // (e.g. "SpendManaAsAnyColor", "Flying", …) round-trip correctly.
+            // If the derived impl rejects the string (unknown variant from a newer
+            // engine build), fall back to Other(s) so the card still loads.
             match serde_json::from_value::<StaticMode>(serde_json::Value::String(s.clone())) {
                 Ok(mode) => Ok(mode),
                 Err(_) => Ok(StaticMode::Other(s.clone())),
@@ -1801,6 +1909,21 @@ where
             serde_json::from_value::<StaticMode>(other).map_err(serde::de::Error::custom)
         }
     }
+}
+
+fn deserialize_legacy_cost_modify_string(s: &str) -> Option<StaticMode> {
+    let mode = match s {
+        "ReduceCost" => CostModifyMode::Reduce,
+        "RaiseCost" => CostModifyMode::Raise,
+        "MinimumCost" => CostModifyMode::Minimum,
+        _ => return None,
+    };
+    Some(StaticMode::ModifyCost {
+        mode,
+        amount: ManaCost::zero(),
+        spell_filter: None,
+        dynamic_count: None,
+    })
 }
 
 #[derive(Deserialize)]
@@ -1907,6 +2030,7 @@ mod tests {
             StaticMode::ExtraBlockers { count: Some(1) },
             StaticMode::MaxAttackersEachCombat { max: 2 },
             StaticMode::MaxBlockersEachCombat { max: 3 },
+            StaticMode::CantBeBlockedByMoreThan { max: 2 },
             StaticMode::RevealTopOfLibrary { all_players: false },
             StaticMode::RevealTopOfLibrary { all_players: true },
             // Tier 1: keyword/evasion statics
@@ -1933,6 +2057,7 @@ mod tests {
             StaticMode::MustBeBlocked,
             StaticMode::CantAttackAlone,
             StaticMode::CantBlockAlone,
+            StaticMode::CantCrew,
             StaticMode::MayLookAtTopOfLibrary,
             // Tier 3: parser-produced statics
             StaticMode::MayChooseNotToUntap,
@@ -2099,6 +2224,35 @@ mod tests {
                 StaticMode::ModifyCost {
                     mode: expected_mode,
                     amount: ManaCost::generic(2),
+                    spell_filter: None,
+                    dynamic_count: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn fwd_compat_legacy_cost_modify_strings_map_to_modify_cost() {
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_static_mode_fwd")]
+            mode: StaticMode,
+        }
+
+        let cases = [
+            ("ReduceCost", CostModifyMode::Reduce),
+            ("RaiseCost", CostModifyMode::Raise),
+            ("MinimumCost", CostModifyMode::Minimum),
+        ];
+
+        for (legacy_name, expected_mode) in cases {
+            let json = format!(r#"{{"mode":"{legacy_name}"}}"#);
+            let wrapper: Wrapper = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                wrapper.mode,
+                StaticMode::ModifyCost {
+                    mode: expected_mode,
+                    amount: ManaCost::zero(),
                     spell_filter: None,
                     dynamic_count: None,
                 }

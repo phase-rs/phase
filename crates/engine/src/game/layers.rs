@@ -18,7 +18,7 @@ use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
-use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::counter::{has_positive_counters, CounterMatch, CounterType};
 use crate::types::game_state::{DayNight, GameState, LayersDirty, StaticGateKey};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -38,7 +38,11 @@ struct ActiveCombatAssignmentRuleEffect {
 }
 
 // CR 205.3c: Each subtype is correlated to its appropriate card type.
-fn subtype_matches_core_types(
+/// CR 205.1a: Whether a subtype correlates to at least one of the given core
+/// types — i.e. whether it survives a card-type replacement. Shared with the
+/// token-copy "stamp at creation" path so both the layered and baked
+/// applications of `SetCardTypes` drop the same uncorrelated subtypes.
+pub(crate) fn subtype_matches_core_types(
     subtype: &str,
     core_types: &[CoreType],
     all_creature_types: &[String],
@@ -111,13 +115,18 @@ pub fn prune_until_next_end_step_effects(state: &mut GameState, active_player: P
     }
 }
 
-/// CR 514.2 + CR 611.2a: Remove `PlayFromExile` casting permissions whose
+/// CR 514.2: Remove durational casting permissions whose
 /// `Duration::UntilEndOfTurn` expires at cleanup. Called from the cleanup step
 /// alongside `prune_end_of_turn_effects`.
+// CR 611.2a: Consumers of the `duration`-bearing variants — `PlayFromExile`
+// (impulse-draw, Light Up the Stage class) and `ExileWithAltCost`
+// (Rebound, CR 702.88a).
 ///
-/// Only `PlayFromExile` is durational. Other casting-permission variants
-/// (`AdventureCreature`, `ExileWithAltCost`, `ExileWithEnergyCost`, `WarpExile`)
-/// persist until the object leaves exile (handled by `zones::apply_zone_exit_cleanup`).
+/// Variants without a `duration` field (`AdventureCreature`,
+/// `ExileWithEnergyCost`, `WarpExile`, `Plotted`, `Foretold`) and
+/// `ExileWithAltCost { duration: None }` (Airbending, Suspend, Discover,
+/// Cascade) persist until the object leaves exile (handled by
+/// `zones::apply_zone_exit_cleanup`).
 pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.casting_permissions.retain(|p| match p {
@@ -149,6 +158,33 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
             // these are pruned by their own systems (zone-exit cleanup, condition
             // re-evaluation, untap step). Retain here — they are not end-of-turn.
             CastingPermission::PlayFromExile { .. } => true,
+            // CR 702.88a: Rebound's upkeep recast offer carries
+            // `duration: Some(UntilEndOfTurn)` so the granted "cast this
+            // card without paying its mana cost" permission expires at the
+            // end of the same turn if the controller declines or fails to
+            // cast it. Mirrors the PlayFromExile arms above so all
+            // durational casting permissions share the same pruning
+            // semantics.
+            CastingPermission::ExileWithAltCost {
+                duration: Some(Duration::UntilEndOfTurn),
+                ..
+            } => false,
+            // CR 514.2: defensive — same handling as PlayFromExile.
+            CastingPermission::ExileWithAltCost {
+                duration: Some(Duration::UntilEndOfCombat),
+                ..
+            } => false,
+            // CR 513.1: end-step duration handled by
+            // `prune_end_step_casting_permissions`; retain here.
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextStepOf {
+                        step: Phase::End, ..
+                    }),
+                ..
+            } => true,
+            // Other durational shapes (UntilNextTurnOf, Permanent, etc.)
+            // and the standing `duration: None` form persist here.
             CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
             | CastingPermission::ExileWithAltAbilityCost { .. }
@@ -164,10 +200,13 @@ pub fn prune_end_of_turn_casting_permissions(state: &mut GameState) {
     }
 }
 
-/// CR 514.2 + CR 611.2a/b: Remove `PlayFromExile` permissions granted to
+/// CR 514.2: Remove durational casting permissions granted to
 /// `active_player` whose `Duration::UntilNextTurnOf { Controller }` expires
 /// at that player's untap step. Called from the untap step alongside
 /// `prune_until_next_turn_effects`.
+// CR 611.2a: Consumers of the `duration`-bearing variants — `PlayFromExile`
+// (impulse-draw, Light Up the Stage class) and `ExileWithAltCost`
+// (Rebound, CR 702.88a).
 pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_player: PlayerId) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         // CR 514.2: arm "until the end of your next turn" play-permissions when
@@ -193,6 +232,26 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
                     *duration = Duration::UntilEndOfTurn;
                 }
             }
+            // CR 514.2: same arming for durational `ExileWithAltCost`
+            // (Rebound-class). `granted_to` is `Option<PlayerId>`; only
+            // arm when set and matching the active player.
+            if let CastingPermission::ExileWithAltCost {
+                duration: Some(d),
+                granted_to: Some(g),
+                ..
+            } = p
+            {
+                if *g == active_player
+                    && matches!(
+                        d,
+                        Duration::UntilEndOfNextTurnOf {
+                            player: PlayerScope::Controller
+                        }
+                    )
+                {
+                    *d = Duration::UntilEndOfTurn;
+                }
+            }
         }
 
         obj.casting_permissions.retain(|p| match p {
@@ -214,6 +273,26 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
                     },
                 ..
             } => true,
+            // CR 514.2: durational `ExileWithAltCost` with
+            // `UntilNextTurnOf { Controller }` granted to the active
+            // player expires at their untap step (mirrors PlayFromExile).
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextTurnOf {
+                        player: PlayerScope::Controller,
+                    }),
+                granted_to: Some(g),
+                ..
+            } => *g != active_player,
+            // CR 513.1: end-step duration is handled by
+            // `prune_end_step_casting_permissions`; retain here.
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextStepOf {
+                        step: Phase::End, ..
+                    }),
+                ..
+            } => true,
             CastingPermission::PlayFromExile { .. }
             | CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
@@ -228,10 +307,12 @@ pub fn prune_until_next_turn_casting_permissions(state: &mut GameState, active_p
     }
 }
 
-/// CR 513.1 + CR 611.2a/b: Remove `PlayFromExile` permissions granted to
+/// CR 513.1: Remove durational casting permissions granted to
 /// `active_player` whose `Duration::UntilNextStepOf { step: End, player: Controller }`
 /// expires at that player's next end step. Called at the start of the
 /// End phase in `turns.rs::auto_advance`.
+// CR 611.2a: Consumers of the `duration`-bearing variants — `PlayFromExile`
+// (Rocco, Street Chef class) and `ExileWithAltCost` (Rebound, CR 702.88a).
 ///
 /// CR 513.2 ordering: this prune runs BEFORE end-step triggers fire, so a
 /// new grant created by an end-step trigger (e.g., Rocco, Street Chef) is
@@ -255,6 +336,18 @@ pub fn prune_end_step_casting_permissions(state: &mut GameState, active_player: 
                 exiled_by_ability_controller,
                 ..
             } => exiled_by_ability_controller.unwrap_or(*granted_to) != active_player,
+            // CR 513.1: durational `ExileWithAltCost` with
+            // `UntilNextStepOf { End, Controller }` granted to the active
+            // player expires at their end step (mirrors PlayFromExile).
+            CastingPermission::ExileWithAltCost {
+                duration:
+                    Some(Duration::UntilNextStepOf {
+                        step: Phase::End,
+                        player: PlayerScope::Controller,
+                    }),
+                granted_to: Some(g),
+                ..
+            } => *g != active_player,
             CastingPermission::PlayFromExile { .. }
             | CastingPermission::AdventureCreature
             | CastingPermission::ExileWithAltCost { .. }
@@ -485,6 +578,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::DayNightIs { .. }
         | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::SourceAttackingAlone
@@ -598,6 +692,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::DayNightIs { .. }
         | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::SourceAttackingAlone
@@ -751,6 +846,12 @@ fn evaluate_condition_with_context(
             .get(&source_id)
             .map(|obj| counter_condition_matches(obj, counters, *minimum, *maximum))
             .unwrap_or(false),
+        // CR 702.176a + CR 611.3a: Persistent alternative-cost marker on the
+        // source permanent. This is intentionally not turn-scoped.
+        StaticCondition::CastVariantPaid { variant } => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.cast_variant_paid.is_some_and(|(v, _)| v == *variant)),
         StaticCondition::RecipientHasCounters {
             counters,
             minimum,
@@ -1183,6 +1284,7 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
 
         if *layer == Layer::Type {
+            apply_prototype_characteristics(state, bf_ids.iter().copied());
             apply_intrinsic_basic_land_mana_abilities(state, &bf_ids);
         }
         if matches!(*layer, Layer::Control | Layer::Type) {
@@ -1625,7 +1727,7 @@ fn entered_object_blocks_incremental(
     //     genuine new entry are sourced by statics already covered by (1)/(2).
     //     A controller differing from the base controller indicates a Layer-2
     //     override the incremental path does not reset for the rest of the board.
-    if !obj.counters.is_empty() {
+    if has_positive_counters(&obj.counters) {
         return true;
     }
     if obj.attached_to.is_some() || !obj.attachments.is_empty() {
@@ -1725,6 +1827,7 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
             apply_pt_counter_modifications(state, entered_ids.iter().copied());
         }
         if *layer == Layer::Type {
+            apply_prototype_characteristics(state, entered_ids.iter().copied());
             let entered_vec: Vec<ObjectId> = entered_ids.iter().copied().collect();
             apply_intrinsic_basic_land_mana_abilities(state, &entered_vec);
         }
@@ -1797,6 +1900,25 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
         .collect()
 }
 
+/// CR 718.3b: A prototyped spell and the permanent it becomes have only their
+/// alternative mana cost and P/T characteristics. If that mana cost contains
+/// colored mana symbols, the spell/permanent is those colors. Reapply this after
+/// layer reset so the prototype marker survives normal layer recomputation.
+fn apply_prototype_characteristics(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
+    for id in ids {
+        let Some(obj) = state.objects.get_mut(&id) else {
+            continue;
+        };
+        let Some(form) = obj.prototype_form.clone() else {
+            continue;
+        };
+        obj.mana_cost = form.mana_cost;
+        obj.power = Some(form.power);
+        obj.toughness = Some(form.toughness);
+        obj.color = form.colors;
+    }
+}
+
 /// CR 613.4c: Fold each permanent's power/toughness counters into its P/T in
 /// layer 7c. Counters are object state rather than continuous effects, so this
 /// runs at the `Layer::CounterPT` step of the layer loop — after the 7c `+N/+N`
@@ -1806,7 +1928,7 @@ fn gather_active_effects_for_layer(state: &GameState, layer: Layer) -> Vec<Activ
 fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
     for id in ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            if obj.counters.is_empty() {
+            if !has_positive_counters(&obj.counters) {
                 continue;
             }
 
@@ -3715,13 +3837,14 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, CommanderOwnership,
-        Comparator, ContinuousModification, ControllerRef, CountScope, Duration, Effect,
-        FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-        StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter,
-        ZoneRef,
+        AbilityDefinition, AbilityKind, BasicLandType, CastVariantPaid, ChosenSubtypeKind,
+        CommanderOwnership, Comparator, ContinuousModification, ControllerRef, CountScope,
+        Duration, Effect, FilterProp, ObjectScope, PlayerScope, PtStat, PtValueScope, QuantityExpr,
+        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::{CoreType, Supertype};
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::game_state::{StaticSourceIndex, TransientContinuousEffect};
     use crate::types::identifiers::CardId;
     use crate::types::keywords::Keyword;
@@ -3793,6 +3916,71 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    #[test]
+    fn prototyped_permanent_keeps_secondary_characteristics_after_type_change() {
+        let mut state = setup();
+        let prototype = make_creature(&mut state, "Combat Thresher", 3, 3, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&prototype).unwrap();
+            obj.card_types.core_types.insert(0, CoreType::Artifact);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 7,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.base_color.clear();
+            obj.color.clear();
+            obj.prototype_form = Some(crate::game::game_object::PrototypeFormState {
+                mana_cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 2,
+                },
+                power: 1,
+                toughness: 1,
+                colors: vec![ManaColor::White],
+            });
+        }
+
+        evaluate_layers(&mut state);
+        let as_creature = state.objects.get(&prototype).unwrap();
+        assert_eq!(as_creature.mana_cost.mana_value(), 3);
+        assert_eq!(as_creature.power, Some(1));
+        assert_eq!(as_creature.toughness, Some(1));
+        assert_eq!(as_creature.color, vec![ManaColor::White]);
+
+        let type_changer = create_object(
+            &mut state,
+            CardId(161),
+            PlayerId(0),
+            "Prototype Shell".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&type_changer).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: prototype })
+                    .modifications(vec![ContinuousModification::SetCardTypes {
+                        core_types: vec![CoreType::Artifact],
+                    }]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+        let noncreature = state.objects.get(&prototype).unwrap();
+        assert_eq!(noncreature.mana_cost.mana_value(), 3);
+        assert_eq!(noncreature.power, Some(1));
+        assert_eq!(noncreature.toughness, Some(1));
+        assert_eq!(noncreature.color, vec![ManaColor::White]);
+        assert!(!noncreature
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
     }
 
     /// Places a battlefield commander object with the given owner/controller.
@@ -5704,6 +5892,60 @@ mod tests {
         assert_eq!(obj.trigger_definitions.len(), 1);
         assert_eq!(obj.replacement_definitions.len(), 1);
         assert_eq!(obj.static_definitions.len(), 1);
+    }
+
+    #[test]
+    fn impending_not_creature_participates_in_layer_timestamp_ordering() {
+        let mut state = setup();
+        let impending = make_creature(&mut state, "Impending Permanent", 3, 3, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&impending).unwrap();
+            obj.timestamp = 5;
+            obj.cast_variant_paid = Some((CastVariantPaid::Impending, 1));
+            obj.counters.insert(CounterType::Time, 1);
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SelfRef)
+                    .condition(StaticCondition::And {
+                        conditions: vec![
+                            StaticCondition::CastVariantPaid {
+                                variant: CastVariantPaid::Impending,
+                            },
+                            StaticCondition::HasCounters {
+                                counters: CounterMatch::OfType(CounterType::Time),
+                                minimum: 1,
+                                maximum: None,
+                            },
+                        ],
+                    })
+                    .modifications(vec![ContinuousModification::RemoveType {
+                        core_type: CoreType::Creature,
+                    }]),
+            );
+        }
+
+        let animator = make_creature(&mut state, "Later Animator", 1, 1, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&animator).unwrap();
+            obj.timestamp = 10;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: impending })
+                    .modifications(vec![ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    }]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&impending]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "CR 613.1d + CR 613.7: a later Layer 4 AddType must apply after Impending's RemoveType"
+        );
     }
 
     #[test]

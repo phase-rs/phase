@@ -188,6 +188,11 @@ pub enum GameAction {
     SelectCards {
         cards: Vec<ObjectId>,
     },
+    /// CR 705.1: Krark's Thumb keep-choice — indices into `results` the player
+    /// keeps (ignoring the rest, CR 614.1a). Length must equal `keep_count`.
+    SelectCoinFlips {
+        keep_indices: Vec<usize>,
+    },
     /// CR 400.11 + CR 406.3: Player commits one or more selections from the
     /// offered outside-game pool. Each selection is a discriminated source —
     /// a sideboard slot (wishboard) or a face-up exile object (Karn / Coax).
@@ -600,6 +605,10 @@ pub enum GameAction {
     CastPreparedCopy {
         source: ObjectId,
     },
+    /// Digital-only Specialize: pick the color specialization to apply.
+    ChooseSpecializeColor {
+        color: super::mana::ManaColor,
+    },
     /// CR 702.xxx: Paradigm (Strixhaven) — accept the turn-based offer during
     /// `WaitingFor::CastOffer` (Paradigm), casting a token copy of the exiled
     /// source spell without paying its mana cost. The exiled source stays in
@@ -714,6 +723,12 @@ pub enum DebugAction {
     },
     /// Tap or untap an object.
     SetTapped { object_id: ObjectId, tapped: bool },
+    /// CR 722.3a: Give or remove the "prepared" designation on an object so a
+    /// preparation card's prepare spell can be cast for testing. Routes through
+    /// the `game::effects::prepare` single authority, so setting `prepared`
+    /// no-ops on objects without a prepare-spell face and emits the
+    /// `BecamePrepared` / `BecameUnprepared` events.
+    SetPrepared { object_id: ObjectId, prepared: bool },
     /// Change an object's controller. Marks layers dirty.
     SetController {
         object_id: ObjectId,
@@ -952,6 +967,14 @@ impl DebugAction {
                 obj(*object_id),
                 if *tapped { "tapped" } else { "untapped" }
             ),
+            DebugAction::SetPrepared {
+                object_id,
+                prepared,
+            } => format!(
+                "SetPrepared ({} → {})",
+                obj(*object_id),
+                if *prepared { "prepared" } else { "unprepared" }
+            ),
             DebugAction::SetController {
                 object_id,
                 controller,
@@ -1127,6 +1150,7 @@ impl GameAction {
             | GameAction::MulliganDecision { .. }
             | GameAction::ReorderHand { .. }
             | GameAction::SelectCards { .. }
+            | GameAction::SelectCoinFlips { .. }
             | GameAction::ChooseOutsideGameCards { .. }
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }
@@ -1154,6 +1178,7 @@ impl GameAction {
             | GameAction::PayCombatTax { .. }
             | GameAction::ChooseDungeon { .. }
             | GameAction::ChooseDungeonRoom { .. }
+            | GameAction::ChooseSpecializeColor { .. }
             | GameAction::HarmonizeTap { .. }
             | GameAction::DeclareCompanion { .. }
             | GameAction::CompanionToHand

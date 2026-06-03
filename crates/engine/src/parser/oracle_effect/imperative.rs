@@ -1,6 +1,7 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::space1;
 use nom::combinator::{all_consuming, eof, map, not, opt, rest, value};
 use nom::error::ParseError;
 use nom::sequence::{preceded, terminated};
@@ -17,7 +18,7 @@ use super::{
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-use crate::parser::oracle_nom::bridge::nom_on_lower;
+use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
@@ -1582,6 +1583,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 // `grant_permission::resolve`.
                 granted_to: None,
                 resolution_cleanup: None,
+                duration: None,
             },
             target,
             grantee: Default::default(),
@@ -4978,12 +4980,80 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
     }
 }
 
+/// CR 500.8 + CR 510.2: Quantity for "<N> additional <step/phase>s". The
+/// scanner advances along word boundaries and tries a single composed
+/// combinator at each position:
+///   `quantifier ~ " additional"` where `quantifier` =
+///     `tag("that many")` → event-bound (`QuantityRef::EventContextAmount`)
+///   | `parse_number`        → literal N (e.g. "two additional combat phases")
+///
+/// Anything else — including the article forms "an"/"a"/"the" already parsed
+/// elsewhere as 1 — falls through to the singular default
+/// `QuantityExpr::Fixed { value: 1 }`. Anchoring on `" additional"` keeps the
+/// helper agnostic to surrounding sentence shapes ("you get that many
+/// additional upkeep steps after this phase", "after this phase, there is an
+/// additional combat phase").
+fn parse_additional_phase_count(lower: &str) -> QuantityExpr {
+    fn count_combinator(input: &str) -> OracleResult<'_, QuantityExpr> {
+        let event_bound = value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            tag("that many"),
+        );
+        let literal = map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
+            value: n as i32,
+        });
+        terminated(alt((event_bound, literal)), tag(" additional")).parse(input)
+    }
+
+    let mut remaining = lower;
+    while !remaining.is_empty() {
+        if let Ok((_rest, qty)) = count_combinator(remaining) {
+            return qty;
+        }
+        // Advance to the next word boundary so the combinator stays anchored
+        // to candidate quantifier positions.
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    QuantityExpr::Fixed { value: 1 }
+}
+
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ImperativeFamilyAst> {
     let first_word = lower.split_whitespace().next().unwrap_or("");
+
+    // CR 724.1: "end the turn" (Time Stop, Sundial of the Infinite, Obeka,
+    // Glorious End, Discontinuity, Day's Undoing). Whole-phrase imperative
+    // with no target; parse it as an anchored nom production rather than a
+    // substring scan so unrelated clauses cannot accidentally match it.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("end the turn"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn));
+    }
+
+    // CR 724.2: "end the combat phase" (Mandate of Peace). Whole-phrase
+    // imperative with no target; anchored nom production mirroring the
+    // "end the turn" parse so unrelated clauses cannot accidentally match it.
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("end the combat phase"),
+        opt(tag(".")),
+    ))
+    .parse(lower.trim())
+    .is_ok()
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase));
+    }
 
     // CR 500.8: Additional step/phase effects can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
@@ -5000,6 +5070,7 @@ pub(super) fn parse_imperative_family_ast(
             } else {
                 vec![]
             },
+            count: parse_additional_phase_count(lower),
         }));
     }
     if nom_primitives::scan_contains(lower, "additional upkeep step") {
@@ -5008,6 +5079,7 @@ pub(super) fn parse_imperative_family_ast(
             phase: Phase::Upkeep,
             after: Phase::Upkeep,
             followed_by: vec![],
+            count: parse_additional_phase_count(lower),
         }));
     }
 
@@ -5385,10 +5457,29 @@ pub(super) fn parse_imperative_family_ast(
             .ok()
             .map(|(_, ast)| ast)
         }
-        // CR 706 + CR 706.2: "roll a d20" with an optional "and add/subtract X"
-        // modifier suffix attached as a typed `DieRollModifier`.
-        "roll" | "rolls" => try_parse_roll_die_with_modifier(lower)
-            .map(|(sides, modifier)| ImperativeFamilyAst::RollDie { sides, modifier }),
+        // CR 701.52: "roll to visit your Attractions" (not a generic d20/d6 roll).
+        "roll" | "rolls" => {
+            if nom_parse_lower(lower, |input| {
+                value(
+                    ImperativeFamilyAst::RollToVisitAttractions,
+                    (
+                        alt((tag("roll"), tag("rolls"))),
+                        tag(" to visit your attractions"),
+                        eof,
+                    ),
+                )
+                .parse(input)
+            })
+            .is_some()
+            {
+                Some(ImperativeFamilyAst::RollToVisitAttractions)
+            } else {
+                try_parse_roll_die_with_modifier(lower)
+                    .map(|(sides, modifier)| ImperativeFamilyAst::RollDie { sides, modifier })
+            }
+        }
+        // CR 701.51b: "open an Attraction" / "open two Attractions"
+        "open" | "opens" => parse_open_attraction_imperative(lower),
         // CR 725.1: "become the monarch"
         "become" | "becomes" => {
             if lower == "become the monarch" || lower == "becomes the monarch" {
@@ -5593,16 +5684,24 @@ pub(super) fn parse_imperative_family_ast(
             if nom_primitives::scan_contains(lower, "control of") {
                 parse_targeted_action_ast(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
+            } else if let Some(effect) =
+                try_parse_gain_keyword(text).or_else(|| try_parse_gain_quoted_ability(text))
+            {
+                // CR 113.3 + CR 604.1: grant a keyword ability (or, via
+                // try_parse_gain_quoted_ability, a quoted ability) to an object.
+                // Checked BEFORE the life-gain branch because the bare
+                // `scan_contains(lower, "life")` guard below also matches
+                // keywords whose name contains "life" — e.g. "gain lifelink",
+                // which otherwise misrouted to the numeric life-gain parser and
+                // fell through to Unimplemented. `try_parse_gain_keyword`
+                // returns `None` unless it actually finds a keyword, so genuine
+                // life-gain clauses ("gain 3 life") still fall through below.
+                Some(ImperativeFamilyAst::GainKeyword(effect))
             } else if nom_primitives::scan_contains(lower, "life") {
                 parse_numeric_imperative_ast(text, lower)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
             } else {
-                // CR 702: bare keyword grant first; CR 113.3 + CR 604.1: fall
-                // back to quoted-ability grant when the gain clause carries an
-                // inline ability ('gain "When this creature dies, draw a card."').
-                try_parse_gain_keyword(text)
-                    .or_else(|| try_parse_gain_quoted_ability(text))
-                    .map(ImperativeFamilyAst::GainKeyword)
+                None
             }
         }
 
@@ -6036,6 +6135,42 @@ fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
     Some((sides, after_word))
 }
 
+/// CR 701.51b: "open N attraction(s)" after the open/opens prefix.
+fn parse_open_attractions_count_imperative(input: &str) -> OracleResult<'_, ImperativeFamilyAst> {
+    let (rest, count) = nom_primitives::parse_number(input)?;
+    let (rest, _) = space1(rest)?;
+    let (rest, _) = alt((tag("attractions"), tag("attraction"))).parse(rest)?;
+    Ok((rest, ImperativeFamilyAst::OpenAttractions { count }))
+}
+
+/// CR 701.51b: "open an Attraction" / "open two Attractions".
+fn parse_open_attraction_imperative(lower: &str) -> Option<ImperativeFamilyAst> {
+    nom_parse_lower(lower, |input| {
+        map(
+            (
+                alt((tag("open "), tag("opens "))),
+                alt((
+                    value(
+                        ImperativeFamilyAst::OpenAttractions { count: 1 },
+                        tag("an attraction"),
+                    ),
+                    value(
+                        ImperativeFamilyAst::OpenAttractions { count: 1 },
+                        tag("a attraction"),
+                    ),
+                    parse_open_attractions_count_imperative,
+                )),
+                opt(nom::bytes::complete::take_while(|c: char| {
+                    c == '.' || c == ','
+                })),
+                eof,
+            ),
+            |(_, ast, _, _)| ast,
+        )
+        .parse(input)
+    })
+}
+
 /// CR 706 + CR 706.2: Try to parse a full `"roll a d{N}"` clause, including
 /// an optional trailing `" and (add|subtract) {quantity}"` modifier that the
 /// resolver applies to the natural roll before result-table lookup.
@@ -6342,6 +6477,11 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
             target: TargetFilter::Any,
         },
+        ImperativeFamilyAst::ForceAttack { duration } => Effect::ForceAttack {
+            target: TargetFilter::Any,
+            required_player: TargetFilter::Controller,
+            duration,
+        },
         // CR 701.15a: Goad target creature. Subject injection fills target from parsed text.
         ImperativeFamilyAst::Goad => Effect::Goad {
             target: TargetFilter::Any,
@@ -6382,6 +6522,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             dungeon: crate::game::dungeon::DungeonId::Undercity,
         },
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
+        ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
+        ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
         ImperativeFamilyAst::Proliferate => Effect::Proliferate,
         // CR 701.56a: Time travel.
         ImperativeFamilyAst::TimeTravel => Effect::TimeTravel,
@@ -6447,6 +6589,87 @@ pub(super) fn counter_placement_is_mass(clause_lower: &str) -> bool {
         || nom_primitives::scan_contains(clause_lower, "counters on all")
         || nom_primitives::scan_contains(clause_lower, "on each ")
         || nom_primitives::scan_contains(clause_lower, "on all ")
+}
+
+/// CR 122.1 + CR 608.2c: In a distributive "put a number of +1/+1 counters on
+/// EACH ... equal to THAT CREATURE's <stat>" (Canopy Gargantuan), "that
+/// creature" is the per-iteration recipient — each object receives counters
+/// equal to its OWN stat. The shared `parse_event_context_refs` lowers "that
+/// creature's <stat>" to `ObjectScope::CostPaidObject` (correct in trigger
+/// bodies, where it refers to the triggering object), so for a mass placement
+/// we rebind it to `ObjectScope::Recipient`; `resolve_add_all` then re-evaluates
+/// the count per object. A genuine cost referent ("the SACRIFICED creature's
+/// power") carries a cost/zone-change participle and is left as
+/// `CostPaidObject` — `resolve_add_all` resolves that once and applies it
+/// uniformly per CR 608.2k.
+fn rebind_distributive_recipient_count(count: QuantityExpr, lower: &str) -> QuantityExpr {
+    let is_cost_referent = nom_primitives::scan_contains(lower, "sacrificed")
+        || nom_primitives::scan_contains(lower, "exiled")
+        || nom_primitives::scan_contains(lower, "discarded")
+        || nom_primitives::scan_contains(lower, "milled");
+    if is_cost_referent {
+        return count;
+    }
+    rebind_costpaid_scope_to_recipient(count)
+}
+
+/// Walk a `QuantityExpr` and rebind `ObjectScope::CostPaidObject` on the object
+/// P/T/mana-value leaves to `ObjectScope::Recipient`. Recurses through the
+/// arithmetic wrappers ("that creature's toughness plus 1", "twice that
+/// creature's power") so the whole class composes.
+fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
+    use crate::types::ability::ObjectScope::{CostPaidObject, Recipient};
+    match expr {
+        QuantityExpr::Ref { qty } => QuantityExpr::Ref {
+            qty: match qty {
+                QuantityRef::Power {
+                    scope: CostPaidObject,
+                } => QuantityRef::Power { scope: Recipient },
+                QuantityRef::Toughness {
+                    scope: CostPaidObject,
+                } => QuantityRef::Toughness { scope: Recipient },
+                QuantityRef::ObjectManaValue {
+                    scope: CostPaidObject,
+                } => QuantityRef::ObjectManaValue { scope: Recipient },
+                other => other,
+            },
+        },
+        QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
+            inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
+            offset,
+        },
+        QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
+            factor,
+            inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
+        },
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => QuantityExpr::DivideRounded {
+            inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
+            divisor,
+            rounding,
+        },
+        QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
+            exprs: exprs
+                .into_iter()
+                .map(rebind_costpaid_scope_to_recipient)
+                .collect(),
+        },
+        QuantityExpr::UpTo { max } => QuantityExpr::UpTo {
+            max: Box::new(rebind_costpaid_scope_to_recipient(*max)),
+        },
+        QuantityExpr::Power { base, exponent } => QuantityExpr::Power {
+            base,
+            exponent: Box::new(rebind_costpaid_scope_to_recipient(*exponent)),
+        },
+        QuantityExpr::Difference { left, right } => QuantityExpr::Difference {
+            left: Box::new(rebind_costpaid_scope_to_recipient(*left)),
+            right: Box::new(rebind_costpaid_scope_to_recipient(*right)),
+        },
+        QuantityExpr::Fixed { value } => QuantityExpr::Fixed { value },
+    }
 }
 
 pub(super) fn parse_zone_counter_ast(
@@ -6524,7 +6747,7 @@ pub(super) fn parse_zone_counter_ast(
                 if is_all && multi_target.is_none() {
                     Some(ZoneCounterImperativeAst::PutCounterAll {
                         counter_type,
-                        count,
+                        count: rebind_distributive_recipient_count(count, lower),
                         target,
                     })
                 } else {
@@ -6802,15 +7025,11 @@ fn try_parse_adapt(lower: &str) -> Option<Effect> {
     Some(Effect::Adapt { count })
 }
 
-/// CR 508.1d: Parse "attacks/attack [player] this turn/combat if able" as a temporary MustAttack.
+/// CR 508.1d: Parse "attacks/attack [player] this turn/combat if able" requirements.
 ///
-/// Handles bare forms ("attacks this turn if able") and player-targeted forms
-/// ("attacks you this turn if able", "attacks that opponent this combat if able",
-/// "attacks target opponent this turn if able"). The player target is currently
-/// not enforced at runtime — MustAttack forces the creature to attack if able,
-/// but the specific-player constraint requires additional engine support.
-///
-/// Emits a `GenericEffect` with `StaticMode::MustAttack` and the appropriate duration.
+/// Bare forms ("attacks this turn if able") emit a temporary `MustAttack`.
+/// Player-bound "attacks you ..." forms emit `ForceAttack`, whose resolver binds
+/// "you" to the resolving ability controller and grants `MustAttackPlayer`.
 fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let trimmed = lower.trim_end_matches('.');
 
@@ -6841,51 +7060,34 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
         }));
     }
 
-    // Second try: player-targeted forms — "attacks [player] this turn/combat if able".
-    // Strip verb prefix, skip over the player phrase, then match the duration suffix.
-    let rest = if let Ok((r, _)) =
-        alt((tag::<_, _, OracleError<'_>>("attacks "), tag("attack "))).parse(trimmed)
-    {
-        r
-    } else {
-        return None;
-    };
+    let targeted: Result<(&str, Duration), nom::Err<OracleError<'_>>> = (
+        alt((tag("attacks"), tag("attack"))),
+        preceded(tag(" "), tag("you")),
+        preceded(
+            tag(" "),
+            alt((
+                value(Duration::UntilEndOfTurn, tag("this turn if able")),
+                value(
+                    Duration::UntilEndOfCombat,
+                    alt((
+                        tag("this combat if able"),
+                        tag("that combat if able"),
+                        tag("each combat if able"),
+                    )),
+                ),
+            )),
+        ),
+    )
+        .map(|(_, _, duration)| duration)
+        .parse(trimmed);
 
-    // Match duration suffix: "this turn if able" or "this combat if able"
-    let duration_suffix: Result<(&str, Duration), nom::Err<OracleError<'_>>> = alt((
-        value(Duration::UntilEndOfTurn, tag(" this turn if able")),
-        value(Duration::UntilEndOfCombat, tag(" this combat if able")),
-        value(Duration::UntilEndOfCombat, tag(" each combat if able")),
-    ))
-    .parse(rest);
-
-    // If a duration suffix is found somewhere in the remaining text,
-    // the player phrase is whatever sits between the verb and the suffix.
-    if duration_suffix.is_err() {
-        // Try scanning for the suffix by finding it anywhere after the verb
-        for (suffix_tag, dur) in [
-            (" this turn if able", Duration::UntilEndOfTurn),
-            (" this combat if able", Duration::UntilEndOfCombat),
-            (" each combat if able", Duration::UntilEndOfCombat),
-        ] {
-            if rest.ends_with(suffix_tag) {
-                return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-                    static_abilities: vec![must_attack_static_definition()],
-                    duration: Some(dur),
-                    target: None,
-                }));
-            }
+    if let Ok((rest, duration)) = targeted {
+        if rest.is_empty() {
+            return Some(ImperativeFamilyAst::ForceAttack { duration });
         }
-        return None;
     }
 
-    let (_, duration) = duration_suffix.ok()?;
-
-    Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
-        static_abilities: vec![must_attack_static_definition()],
-        duration: Some(duration),
-        target: None,
-    }))
+    None
 }
 
 /// CR 508.1d: Build the `StaticDefinition` for a transient "attacks if able"
@@ -8861,6 +9063,71 @@ mod tests {
         assert!(result.is_some(), "Should parse 'after this phase' variant");
     }
 
+    /// CR 500.8 + CR 510.2: Obeka, Splitter of Seconds — "you get that many
+    /// additional upkeep steps after this phase" must thread the triggering
+    /// combat damage amount through `EventContextAmount`, not collapse it to
+    /// the singular default.
+    #[test]
+    fn parse_obeka_that_many_additional_upkeep_steps_binds_event_amount() {
+        let text = "you get that many additional upkeep steps after this phase";
+        let lower = text.to_lowercase();
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        let effect = lower_imperative_family_effect(
+            result.expect("Obeka consequent should parse as AdditionalPhase"),
+        );
+        match effect {
+            Effect::AdditionalPhase {
+                phase: Phase::Upkeep,
+                after: Phase::Upkeep,
+                count:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                ..
+            } => {}
+            other => {
+                panic!("expected AdditionalPhase with EventContextAmount count, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn parse_fixed_count_additional_upkeep_steps_binds_literal_count() {
+        let text = "you get two additional upkeep steps after this phase";
+        let lower = text.to_lowercase();
+        let effect = lower_imperative_family_effect(
+            parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("fixed-count additional upkeep should parse"),
+        );
+        match effect {
+            Effect::AdditionalPhase {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            } => {}
+            other => panic!("expected count=Fixed(2) for fixed-count form, got {other:?}"),
+        }
+    }
+
+    /// Singular "an additional upkeep step" must keep the legacy Fixed(1)
+    /// semantics so Paradox Haze and similar cards still push exactly one
+    /// extra step.
+    #[test]
+    fn parse_additional_upkeep_step_defaults_to_count_one() {
+        let text = "get an additional upkeep step after this step";
+        let lower = text.to_lowercase();
+        let effect = lower_imperative_family_effect(
+            parse_imperative_family_ast(text, &lower, &mut ParseContext::default())
+                .expect("should parse singular additional upkeep"),
+        );
+        match effect {
+            Effect::AdditionalPhase {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            } => {}
+            other => panic!("expected count=Fixed(1) for singular form, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_discard_your_hand() {
         let text = "discard your hand";
@@ -9656,6 +9923,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parse_attack_you_this_combat_if_able() {
+        let result = try_parse_attack_if_able("attacks you this combat if able");
+        assert!(
+            result.is_some(),
+            "Should parse 'attacks you this combat if able'"
+        );
+        match result.unwrap() {
+            ImperativeFamilyAst::ForceAttack { duration } => {
+                assert_eq!(duration, Duration::UntilEndOfCombat);
+            }
+            other => panic!("Expected ForceAttack, got {other:?}"),
+        }
+    }
+
     /// CR 508.1d / CR 509.1c: the standalone-combat-requirement recognizer
     /// used to gate the conjunction split. Recognizes both attack and
     /// must-be-blocked forms, and rejects non-requirements.
@@ -10025,7 +10307,7 @@ mod tests {
         else {
             panic!("expected GenericEffect, got something else");
         };
-        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(duration.as_ref(), Some(&Duration::UntilEndOfTurn));
         let static_def = static_abilities
             .first()
             .expect("static_abilities must contain the granted modification");
@@ -10136,6 +10418,115 @@ mod tests {
         }
     }
 
+    /// "lifelink" contains the substring "life", so the `gain` dispatch must
+    /// route "gain lifelink" to the keyword-grant parser, not the numeric
+    /// life-gain branch (which would fail and fall through to Unimplemented).
+    /// Reaches cards like Blessing of Belzenlok ("…it also gains lifelink…").
+    #[test]
+    fn gain_lifelink_dispatches_to_keyword_grant_not_life() {
+        let ast = parse_imperative_family_ast(
+            "gain lifelink",
+            "gain lifelink",
+            &mut ParseContext::default(),
+        )
+        .expect("'gain lifelink' should parse");
+        match ast {
+            ImperativeFamilyAst::GainKeyword(effect) => assert!(
+                generic_has_keyword(&effect, crate::types::keywords::Keyword::Lifelink),
+                "expected a Lifelink keyword grant"
+            ),
+            _ => panic!("expected GainKeyword(Lifelink)"),
+        }
+    }
+
+    /// CR 724.1: "end the turn" parses to the no-target `Effect::EndTheTurn`
+    /// (Time Stop, Sundial of the Infinite, Obeka, Glorious End).
+    #[test]
+    fn end_the_turn_parses_to_end_the_turn_effect() {
+        let ast = parse_imperative_family_ast(
+            "end the turn",
+            "end the turn",
+            &mut ParseContext::default(),
+        )
+        .expect("'end the turn' should parse");
+        assert!(
+            matches!(ast, ImperativeFamilyAst::GainKeyword(Effect::EndTheTurn)),
+            "expected Effect::EndTheTurn"
+        );
+    }
+
+    /// CR 724.2: "end the combat phase" parses to the no-target
+    /// `Effect::EndCombatPhase` (Mandate of Peace).
+    #[test]
+    fn end_the_combat_phase_parses_to_end_combat_phase_effect() {
+        let ast = parse_imperative_family_ast(
+            "end the combat phase",
+            "end the combat phase",
+            &mut ParseContext::default(),
+        )
+        .expect("'end the combat phase' should parse");
+        assert!(
+            matches!(
+                ast,
+                ImperativeFamilyAst::GainKeyword(Effect::EndCombatPhase)
+            ),
+            "expected Effect::EndCombatPhase"
+        );
+    }
+
+    /// Regression: a genuine life-gain clause must still reach the numeric
+    /// life-gain parser, not be captured by the keyword-grant branch.
+    #[test]
+    fn gain_life_still_dispatches_to_numeric_life_gain() {
+        let ast =
+            parse_imperative_family_ast("gain 3 life", "gain 3 life", &mut ParseContext::default())
+                .expect("'gain 3 life' should parse");
+        assert!(
+            matches!(
+                ast,
+                ImperativeFamilyAst::Structured(ImperativeAst::Numeric(_))
+            ),
+            "expected numeric life-gain dispatch"
+        );
+    }
+
+    /// Production-path regression for the same lifelink/life substring
+    /// ambiguity, including default duration and SelfRef scope.
+    #[test]
+    fn effect_gain_lifelink_dispatches_to_keyword_grant() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "gain lifelink until end of turn",
+            AbilityKind::Spell,
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*def.effect
+        else {
+            panic!(
+                "expected GenericEffect for lifelink grant, got {:?}",
+                def.effect
+            );
+        };
+        assert_eq!(duration.as_ref(), Some(&Duration::UntilEndOfTurn));
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::SelfRef),
+            "bare creature-scoped keyword grant must remain SelfRef"
+        );
+        assert!(
+            static_abilities[0].modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Lifelink
+                }
+            )),
+            "expected AddKeyword(Lifelink), got {:?}",
+            static_abilities[0].modifications
+        );
+    }
+
     /// Pure pump body → None (falls through to the bare numeric Pump arm).
     #[test]
     fn coalesce_pure_pump_is_none() {
@@ -10209,6 +10600,128 @@ mod tests {
     }
 
     /// CR 706 + CR 706.2: "Roll a d20" with no modifier parses to a bare RollDie.
+    /// Issue #1675 — Canopy Gargantuan. "Put a number of +1/+1 counters on each
+    /// other creature you control equal to that creature's toughness." rebinds
+    /// the per-recipient "that creature's toughness" count to `Recipient` so the
+    /// resolver re-evaluates it per object.
+    #[test]
+    fn put_counter_all_each_equal_to_that_creatures_toughness_rebinds_to_recipient() {
+        use crate::types::ability::ObjectScope;
+        let def = super::super::parse_effect_chain(
+            "Put a number of +1/+1 counters on each other creature you control equal to that creature's toughness.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::PutCounterAll { count, .. } => assert!(
+                matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Toughness {
+                            scope: ObjectScope::Recipient
+                        }
+                    }
+                ),
+                "count must rebind to Recipient, got {count:?}"
+            ),
+            other => panic!("expected PutCounterAll, got {other:?}"),
+        }
+    }
+
+    /// The rebind is gated: a genuine cost referent ("the sacrificed creature's
+    /// power") stays `CostPaidObject` (resolved once, applied uniformly), so the
+    /// rebind does not hijack cost-paid `*All` counts.
+    #[test]
+    fn rebind_distributive_recipient_count_leaves_cost_referent_alone() {
+        use crate::types::ability::ObjectScope;
+        let cost_paid = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+        };
+        let out = super::rebind_distributive_recipient_count(
+            cost_paid.clone(),
+            "put a +1/+1 counter on each creature you control equal to the sacrificed creature's power",
+        );
+        assert_eq!(
+            out, cost_paid,
+            "cost-referent count must NOT rebind to Recipient"
+        );
+
+        // And "that creature's power" (no cost participle) DOES rebind.
+        let anaphor = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            },
+        };
+        let rebound = super::rebind_distributive_recipient_count(
+            anaphor,
+            "put a +1/+1 counter on each creature you control equal to that creature's power",
+        );
+        assert!(matches!(
+            rebound,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Recipient
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn rebind_distributive_recipient_count_walks_all_quantity_wrappers() {
+        use crate::types::ability::ObjectScope;
+
+        let expr = QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            }),
+            right: Box::new(QuantityExpr::Power {
+                base: 2,
+                exponent: Box::new(QuantityExpr::UpTo {
+                    max: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject,
+                        },
+                    }),
+                }),
+            }),
+        };
+
+        let rebound = super::rebind_distributive_recipient_count(
+            expr,
+            "put a number of +1/+1 counters on each creature you control equal to that creature's power",
+        );
+
+        let QuantityExpr::Difference { left, right } = rebound else {
+            panic!("expected Difference, got {rebound:?}");
+        };
+        assert!(matches!(
+            *left,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Recipient
+                }
+            }
+        ));
+
+        let QuantityExpr::Power { exponent, .. } = *right else {
+            panic!("expected Power, got {right:?}");
+        };
+        let QuantityExpr::UpTo { max } = *exponent else {
+            panic!("expected UpTo, got {exponent:?}");
+        };
+        assert!(matches!(
+            *max,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Recipient
+                }
+            }
+        ));
+    }
+
     #[test]
     fn roll_a_d20_no_modifier_parses_to_roll_die() {
         let def = super::super::parse_effect_chain("Roll a d20.", AbilityKind::Spell);

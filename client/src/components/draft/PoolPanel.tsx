@@ -197,6 +197,19 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
     [pool, poolSortMode],
   );
 
+  // WUBRG pool tally — a multicolor card counts toward each of its colors
+  // (standard draft-tracker convention), so the strip reads as "how deep am I
+  // in each color" rather than a mono-only count.
+  const colorCounts = useMemo(() => {
+    const counts: Record<string, number> = { W: 0, U: 0, B: 0, R: 0, G: 0 };
+    for (const card of pool) {
+      for (const color of card.colors) {
+        if (color in counts) counts[color]++;
+      }
+    }
+    return counts;
+  }, [pool]);
+
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
@@ -216,6 +229,19 @@ export function PoolPanel({ onCardHover, view: viewOverride }: PoolPanelProps = 
 
       {poolPanelOpen && (
         <>
+          {/* WUBRG color-count strip (design mockup): how deep the pool is in
+              each color. */}
+          <div className="grid grid-cols-5 gap-1.5 border-b border-white/8 px-3 py-2">
+            {(["W", "U", "B", "R", "G"] as const).map((c) => (
+              <div key={c} className="flex flex-col items-center gap-1 rounded-[8px] bg-black/24 py-1.5">
+                <span className={`h-3 w-3 rounded-full ${COLOR_PIP[c]} shadow-[inset_0_0_0_1px_rgba(0,0,0,0.3)]`} />
+                <span className={`font-mono text-[11px] tabular-nums ${colorCounts[c] ? "text-slate-300" : "text-slate-600"}`}>
+                  {colorCounts[c]}
+                </span>
+              </div>
+            ))}
+          </div>
+
           {/* Sort tabs */}
           <div className="flex gap-1 border-b border-white/8 px-3 py-2">
             {SORT_MODES.map(({ mode, labelKey }) => (

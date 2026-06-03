@@ -177,7 +177,15 @@
     "setAsCommander": "Establecer como comandante:",
     "cardCount": "{{count}}/{{expected}} cartas",
     "singletonViolations": "Infracciones de singleton: {{cards}}",
-    "colorViolations": "Infracciones de identidad de color: {{cards}}"
+    "colorViolations": "Infracciones de identidad de color: {{cards}}",
+    "signatureSpell": {
+      "heading": "Hechizo de firma",
+      "noSignatureSpell": "No hay hechizo de firma seleccionado",
+      "setAsSignatureSpell": "Establecer como hechizo de firma:",
+      "remove": "Eliminar hechizo de firma",
+      "mustBeInstantOrSorcery": "El hechizo de firma debe ser un instantáneo o conjuro",
+      "outsideColorIdentity": "{{name}}: fuera de la identidad de color del Rompejuramentos"
+    }
   },
   "manaCurve": {
     "title": "Curva de maná",
