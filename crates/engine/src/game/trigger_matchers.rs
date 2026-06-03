@@ -238,6 +238,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::LifeGained, match_life_gained);
     r.insert(TriggerMode::LifeLost, match_life_lost);
     r.insert(TriggerMode::LifeLostAll, match_life_lost);
+    r.insert(TriggerMode::LifeChanged, match_life_changed);
     r.insert(TriggerMode::Drawn, match_drawn);
     r.insert(TriggerMode::Discarded, match_discarded);
     r.insert(TriggerMode::DiscardedAll, match_discarded);
@@ -1705,6 +1706,8 @@ pub(super) fn match_life_lost(
     }
 }
 
+/// CR 119.3 + CR 118.4: Match life changed events (gain or loss) for the
+/// trigger controller. Fires when `amount != 0`.
 pub(super) fn match_life_changed(
     event: &GameEvent,
     trigger: &TriggerDefinition,

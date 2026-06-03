@@ -7801,12 +7801,18 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 119.3 + CR 118.4: "Whenever you gain or lose life" — combined life-change
     // trigger (Moonstone Harbinger, Wax-Wane Witness). Must precede the narrower
     // "you gain life" check to avoid a false match on the substring.
+    // CR 603.4 + CR 102.1: "during your turn" is expressed as a
+    // DuringPlayersTurn intervening-if condition rather than a constraint so
+    // it composes correctly with the separate "only once each turn" rate-limit
+    // constraint extracted by `parse_trigger_constraint`.
     if scan_contains(lower, "you gain or lose life") {
         let mut def = make_base();
         def.mode = TriggerMode::LifeChanged;
         def.valid_target = Some(TargetFilter::Controller);
         if scan_contains(lower, "during your turn") {
-            def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+            def.condition = Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            });
         }
         return Some((TriggerMode::LifeChanged, def));
     }
@@ -15291,7 +15297,34 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::LifeChanged);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
-        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+        // CR 603.4 + CR 102.1: "during your turn" becomes an intervening-if
+        // condition so it composes with a separate rate-limit constraint.
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            })
+        );
+    }
+
+    /// CR 603.4: Moonstone Harbinger — "during your turn" + "only once each turn"
+    /// must both survive lowering. The turn restriction is a condition; the rate
+    /// limit is a constraint.
+    #[test]
+    fn trigger_you_gain_or_lose_life_during_your_turn_once_each_turn() {
+        let def = parse_trigger_line(
+            "Whenever you gain or lose life during your turn, Bats you control get +1/+0 and gain deathtouch until end of turn. This ability triggers only once each turn.",
+            "Moonstone Harbinger",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeChanged);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            })
+        );
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
     }
 
     #[test]
@@ -15302,6 +15335,7 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::LifeChanged);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.condition, None);
         assert_eq!(def.constraint, None);
     }
 
