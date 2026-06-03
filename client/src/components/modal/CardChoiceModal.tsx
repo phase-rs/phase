@@ -2432,12 +2432,14 @@ function UnlessBounceModal({ data }: { data: UnlessBounceChoice["data"] }) {
 function ExileForCostModal({
   cards,
   count,
+  minCount = count,
   title,
   subtitle,
   confirmLabel = "Exile",
 }: {
   cards: ObjectId[];
   count: number;
+  minCount?: number;
   title: string;
   subtitle: string;
   confirmLabel?: string;
@@ -2476,7 +2478,7 @@ function ExileForCostModal({
 
   if (!objects) return null;
 
-  const isReady = selected.size === count;
+  const isReady = selected.size >= minCount && selected.size <= count;
 
   return (
     <ChoiceOverlay
@@ -2617,9 +2619,34 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
       return <BeholdModal data={data} action={data.kind.action} />;
     case "ExileFromZone":
       return <ExileForCostDispatch data={data} zone={data.kind.zone} />;
+    case "ExileMaterials":
+      return <CraftMaterialsModal data={data} />;
     case "ExileFromManaZone":
       return <ExileForManaAbilityModal data={data} zone={data.kind.zone} />;
   }
+}
+
+// CR 702.167a/b: Craft materials exile. Reuses the generic `ExileForCostModal`
+// primitive (same as Behold / ExileFromZone). Exact costs surface
+// `min_count == count`; "one or more" costs surface a lower `min_count` and use
+// every engine-supplied eligible object as the maximum.
+function CraftMaterialsModal({ data }: { data: PayCost["data"] }) {
+  const { t } = useTranslation("game");
+  const exact = data.min_count === data.count;
+  return (
+    <ExileForCostModal
+      cards={data.choices}
+      count={data.count}
+      minCount={data.min_count}
+      title={t("cardChoice.craft.title")}
+      subtitle={
+        exact
+          ? t("cardChoice.craft.subtitle", { count: data.count })
+          : t("cardChoice.craft.subtitleRange", { min: data.min_count, count: data.count })
+      }
+      confirmLabel={t("cardChoice.badges.exile")}
+    />
+  );
 }
 
 function manaValueOfShard(shard: string): number {

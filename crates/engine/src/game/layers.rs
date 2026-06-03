@@ -18,7 +18,7 @@ use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
     is_land_subtype, noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
 };
-use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::counter::{has_positive_counters, CounterMatch, CounterType};
 use crate::types::game_state::{DayNight, GameState, LayersDirty, StaticGateKey};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -1727,7 +1727,7 @@ fn entered_object_blocks_incremental(
     //     genuine new entry are sourced by statics already covered by (1)/(2).
     //     A controller differing from the base controller indicates a Layer-2
     //     override the incremental path does not reset for the rest of the board.
-    if !obj.counters.is_empty() {
+    if has_positive_counters(&obj.counters) {
         return true;
     }
     if obj.attached_to.is_some() || !obj.attachments.is_empty() {
@@ -1928,7 +1928,7 @@ fn apply_prototype_characteristics(state: &mut GameState, ids: impl IntoIterator
 fn apply_pt_counter_modifications(state: &mut GameState, ids: impl IntoIterator<Item = ObjectId>) {
     for id in ids {
         if let Some(obj) = state.objects.get_mut(&id) {
-            if obj.counters.is_empty() {
+            if !has_positive_counters(&obj.counters) {
                 continue;
             }
 

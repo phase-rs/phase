@@ -294,6 +294,10 @@ export type PayCostKind =
   | { type: "Sacrifice" }
   | { type: "ReturnToHand" }
   | { type: "ExileFromZone"; zone: ExileCostSourceZone }
+  // CR 702.167a/b: Craft materials exile across the battlefield/graveyard union.
+  // `materials` is the engine-side `TargetFilter` the choices were drawn from;
+  // the modal only renders `choices`, so it is opaque pass-through here.
+  | { type: "ExileMaterials"; materials: unknown }
   | { type: "ExileFromManaZone"; zone: Zone }
   | { type: "RemoveCounter"; counter_type: CounterMatch }
   | { type: "TapCreatures" }

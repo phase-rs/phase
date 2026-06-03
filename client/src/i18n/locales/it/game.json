@@ -1019,6 +1019,12 @@
       "subtitle_one": "Esilia {{count}} carta da {{source}}",
       "subtitle_other": "Esilia {{count}} carte da {{source}}"
     },
+    "craft": {
+      "title": "Fabbricare",
+      "subtitle_one": "Esilia {{count}} materiale per fabbricare",
+      "subtitle_other": "Esilia {{count}} materiali per fabbricare",
+      "subtitleRange": "Esilia da {{min}} a {{count}} materiali per fabbricare"
+    },
     "behold": {
       "title": "Contemplare",
       "subtitleExile": "Esilia un permanente o una carta corrispondente",
