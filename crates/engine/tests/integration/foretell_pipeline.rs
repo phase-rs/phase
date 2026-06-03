@@ -26,7 +26,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::CastingPermission;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastingVariant, StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastingVariant, StackEntryKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -303,61 +303,35 @@ fn tergrids_shadow_foretell_cast_resolves_each_player_sacrifices() {
             ManaType::Black,
         ],
     );
-    runner
-        .act(GameAction::CastSpell {
-            object_id: shadow,
-            card_id,
-            targets: vec![],
-        })
-        .expect("foretell-cost cast on later turn must succeed");
-
-    // Ensure the spell finished announcing (no pending mana payment) before
-    // we resolve. The foretell cost is fully concrete (no X), so the engine
-    // should be sitting at Priority right after `CastSpell`.
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "expected Priority after cast, got {:?}",
-        runner.state().waiting_for
-    );
-
-    // Resolve the spell. Both players must be prompted to sacrifice two
-    // creatures (covered architecturally by dd91a9b91's player_scope sweep;
-    // here we just confirm the resolved spell triggers the prompt path).
-    runner.advance_until_stack_empty();
+    // Cast from foretell exile (pool-funded foretell cost {2}{B}{B}) and
+    // resolve through the canonical pipeline. Both players must sacrifice two
+    // creatures (covered architecturally by dd91a9b91's player_scope sweep).
+    let outcome = runner.cast(shadow).resolve();
 
     // After resolution each player has zero creatures (they had two each).
-    let p0_creatures = runner
-        .state()
-        .battlefield
-        .iter()
-        .filter(|id| {
-            runner.state().objects.get(id).is_some_and(|o| {
-                o.controller == P0
-                    && o.card_types
-                        .core_types
-                        .contains(&engine::types::card_type::CoreType::Creature)
+    let count_creatures = |player: engine::types::player::PlayerId| {
+        outcome
+            .state()
+            .battlefield
+            .iter()
+            .filter(|id| {
+                outcome.state().objects.get(id).is_some_and(|o| {
+                    o.controller == player
+                        && o.card_types
+                            .core_types
+                            .contains(&engine::types::card_type::CoreType::Creature)
+                })
             })
-        })
-        .count();
-    let p1_creatures = runner
-        .state()
-        .battlefield
-        .iter()
-        .filter(|id| {
-            runner.state().objects.get(id).is_some_and(|o| {
-                o.controller == P1
-                    && o.card_types
-                        .core_types
-                        .contains(&engine::types::card_type::CoreType::Creature)
-            })
-        })
-        .count();
+            .count()
+    };
     assert_eq!(
-        p0_creatures, 0,
+        count_creatures(P0),
+        0,
         "P0 should have sacrificed both creatures (Tergrid's Shadow resolution)"
     );
     assert_eq!(
-        p1_creatures, 0,
+        count_creatures(P1),
+        0,
         "P1 should have sacrificed both creatures (Tergrid's Shadow resolution)"
     );
 }

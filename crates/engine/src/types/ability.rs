@@ -495,10 +495,14 @@ pub enum ShieldKind {
     /// a continuous static `damage_modification` (Furnace of Rath), which keeps
     /// `ShieldKind::None` and re-applies to every damage event.
     DamageReplacementOneShot,
-    /// CR 614.9: One-shot redirection shield — replaces the recipient of a
-    /// damage event with `recipient`. Consumed on use, expires at cleanup
-    /// (Soltari Guerrillas, Beacon of Destiny, Jade Monolith, Goblin Psychopath).
-    Redirection { recipient: DamageRedirectTarget },
+    /// CR 614.9: One-shot redirection shield — replaces all or part of a damage
+    /// event's recipient with `recipient`. `All` covers "the next time ... would
+    /// deal damage"; `Next(n)` covers "the next N damage ... is dealt to ..."
+    /// redirections. Consumed on use, expires at cleanup.
+    Redirection {
+        recipient: DamageRedirectTarget,
+        amount: PreventionAmount,
+    },
 }
 
 impl ShieldKind {
@@ -751,6 +755,10 @@ pub enum CountScope {
     /// from "your library" (always caster). Falls back to `Controller`
     /// outside iteration.
     ScopedPlayer,
+    /// CR 607.2d + CR 608.2c: The source's linked persisted chosen player —
+    /// "the chosen player's <zone>" on cards whose source stored
+    /// `ChosenAttribute::Player`.
+    SourceChosenPlayer,
     All,
     Opponents,
 }
@@ -1882,6 +1890,16 @@ pub enum ControllerRef {
     ChosenPlayer {
         index: u8,
     },
+    /// CR 613.1 + CR 109.4: Filter controller is the player PERSISTED on the
+    /// source via `ChosenAttribute::Player` — the player chosen by an
+    /// "as ~ enters the battlefield, choose a player" replacement. Read at
+    /// filter / layer-evaluation time from the source's `chosen_attributes`
+    /// (mirrors `GameObject::protector`). Distinct from `ChosenPlayer { index }`,
+    /// which is resolution-scoped (valid only mid-resolution); this is a durable
+    /// characteristic readable continuously, as a CDA requires. Powers
+    /// "~'s power and toughness are each equal to the number of <X> the chosen
+    /// player controls" (Skyshroud War Beast, Lost Order of Jarkeld).
+    SourceChosenPlayer,
     /// CR 603.2 + CR 109.4: Filter controller is the player identified by the
     /// triggering event (the drawer, life-gainer, attacker, etc.). Resolved
     /// against `state.current_trigger_event` via `extract_player_from_event`.
@@ -2748,6 +2766,13 @@ pub enum PlayerScope {
     /// `ControllerRef::ParentTargetController`. Resolved via
     /// `ability_utils::parent_target_controller`.
     ParentObjectTargetController,
+    /// CR 613.1 + CR 109.4: The player PERSISTED on the source via
+    /// `ChosenAttribute::Player` (an "as ~ enters the battlefield, choose a
+    /// player" replacement). The player-scalar-axis analogue of
+    /// `ControllerRef::SourceChosenPlayer`, read continuously from the source's
+    /// `chosen_attributes` so a CDA P/T can track e.g. the chosen player's hand
+    /// or graveyard size (Entropic Specter, Sewer Nemesis).
+    SourceChosenPlayer,
 }
 
 /// Scope selector for object-axis quantities (Round Π-5). Picks WHICH object
@@ -6310,6 +6335,15 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 508.1d: Target creature must attack the required player this turn/combat if able.
+    ForceAttack {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        #[serde(default = "default_target_filter_controller")]
+        required_player: TargetFilter,
+        #[serde(default = "default_duration_until_end_of_turn")]
+        duration: Duration,
+    },
     /// CR 719.2: Solve the source Case — it becomes solved.
     SolveCase,
     /// CR 702.xxx: Prepare (Strixhaven) — mark the target creature as prepared.
@@ -6490,7 +6524,7 @@ pub enum Effect {
     /// activated/triggered ability at resolution, builds a one-shot
     /// `ReplacementDefinition` tagged with `ShieldKind::DamageReplacementOneShot`
     /// (amount form) or `ShieldKind::Redirection` (redirect form), consumed on
-    /// its single use (CR 614.5) and dropped at cleanup.
+    /// its use (CR 614.5) and dropped at cleanup.
     ///
     /// Exactly one of `modification` / `redirect_to` is `Some`. When
     /// `redirect_to == Some(ChosenObjectTarget)` ("to target creature" —
@@ -6510,6 +6544,12 @@ pub enum Effect {
         modification: Option<DamageModification>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redirect_to: Option<DamageRedirectTarget>,
+        /// CR 614.9: Optional amount cap for redirection shields. `None` means
+        /// the whole damage event is redirected ("the next time ... would deal
+        /// damage"). `Some(Next(n))` redirects only the next N damage from the
+        /// matching event, leaving the remainder on the original recipient.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirect_amount: Option<PreventionAmount>,
         /// CR 115.1: The redirect recipient's target filter for the
         /// `ChosenObjectTarget` form ("...deals that damage to target creature
         /// instead" — Soltari Guerrillas). `None` for the `Controller` /
@@ -6972,6 +7012,9 @@ pub enum Effect {
         /// Number of +1/+1 counters to place.
         count: QuantityExpr,
     },
+    /// Digital-only Specialize: permanently become a color-specific face after
+    /// paying the synthesized activation cost (mana + discard). Not in CR text.
+    Specialize,
     /// CR 702.112a: Renown N — if not renowned, put N +1/+1 counters on this
     /// permanent and it becomes renowned.
     Renown {
@@ -7126,6 +7169,10 @@ fn default_player_filter_controller() -> PlayerFilter {
 
 fn default_quantity_one() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
+}
+
+fn default_duration_until_end_of_turn() -> Duration {
+    Duration::UntilEndOfTurn
 }
 
 fn default_comparator_ge() -> Comparator {
@@ -7740,6 +7787,7 @@ impl Effect {
             | Effect::PhaseOut { target, .. }
             | Effect::PhaseIn { target, .. }
             | Effect::ForceBlock { target, .. }
+            | Effect::ForceAttack { target, .. }
             | Effect::BecomePrepared { target, .. }
             | Effect::BecomeUnprepared { target, .. }
             | Effect::CastFromZone { target, .. }
@@ -7921,6 +7969,7 @@ impl Effect {
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
             | Effect::Monstrosity { .. }
+            | Effect::Specialize
             | Effect::Renown { .. }
             | Effect::Bolster { .. }
             | Effect::Adapt { .. }
@@ -8058,6 +8107,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PhaseOut { .. } => "PhaseOut",
         Effect::PhaseIn { .. } => "PhaseIn",
         Effect::ForceBlock { .. } => "ForceBlock",
+        Effect::ForceAttack { .. } => "ForceAttack",
         Effect::SolveCase => "SolveCase",
         Effect::BecomePrepared { .. } => "BecomePrepared",
         Effect::BecomeUnprepared { .. } => "BecomeUnprepared",
@@ -8112,6 +8162,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Incubate { .. } => "Incubate",
         Effect::Amass { .. } => "Amass",
         Effect::Monstrosity { .. } => "Monstrosity",
+        Effect::Specialize => "Specialize",
         Effect::Renown { .. } => "Renown",
         Effect::Bolster { .. } => "Bolster",
         Effect::Adapt { .. } => "Adapt",
@@ -8239,6 +8290,7 @@ pub enum EffectKind {
     PhaseOut,
     PhaseIn,
     ForceBlock,
+    ForceAttack,
     SolveCase,
     /// CR 702.xxx: Prepare (Strixhaven) — mark target creature as prepared.
     BecomePrepared,
@@ -8296,6 +8348,7 @@ pub enum EffectKind {
     Incubate,
     Amass,
     Monstrosity,
+    Specialize,
     Renown,
     Bolster,
     Adapt,
@@ -8431,6 +8484,7 @@ impl From<&Effect> for EffectKind {
             Effect::PhaseOut { .. } => EffectKind::PhaseOut,
             Effect::PhaseIn { .. } => EffectKind::PhaseIn,
             Effect::ForceBlock { .. } => EffectKind::ForceBlock,
+            Effect::ForceAttack { .. } => EffectKind::ForceAttack,
             Effect::SolveCase => EffectKind::SolveCase,
             Effect::BecomePrepared { .. } => EffectKind::BecomePrepared,
             Effect::BecomeUnprepared { .. } => EffectKind::BecomeUnprepared,
@@ -8487,6 +8541,7 @@ impl From<&Effect> for EffectKind {
             Effect::Incubate { .. } => EffectKind::Incubate,
             Effect::Amass { .. } => EffectKind::Amass,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
+            Effect::Specialize => EffectKind::Specialize,
             Effect::Renown { .. } => EffectKind::Renown,
             Effect::Bolster { .. } => EffectKind::Bolster,
             Effect::Adapt { .. } => EffectKind::Adapt,
@@ -11303,8 +11358,12 @@ impl ReplacementDefinition {
 
     /// CR 614.9: Mark this replacement as a one-shot redirection shield that
     /// re-targets the damage recipient. Consumed on use, expires at cleanup.
-    pub fn redirection_shield(mut self, recipient: DamageRedirectTarget) -> Self {
-        self.shield_kind = ShieldKind::Redirection { recipient };
+    pub fn redirection_shield(
+        mut self,
+        recipient: DamageRedirectTarget,
+        amount: PreventionAmount,
+    ) -> Self {
+        self.shield_kind = ShieldKind::Redirection { recipient, amount };
         self
     }
 

@@ -57,6 +57,7 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
         | CounterType::Lore
         | CounterType::Time
         | CounterType::Age
+        | CounterType::Shield
         | CounterType::Keyword(_)
         | CounterType::Generic(_) => {}
     }

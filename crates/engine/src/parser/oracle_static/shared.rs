@@ -2063,6 +2063,10 @@ pub(crate) fn parse_combat_rule_static_predicate_nom(
         parse_cant_attack_rule_static_predicate_nom,
         value(RuleStaticPredicate::CantBlock, tag("can't block")),
         value(
+            RuleStaticPredicate::CantCrew,
+            (tag("can't crew"), opt(preceded(space1, tag("vehicles")))),
+        ),
+        value(
             RuleStaticPredicate::MustAttack,
             alt((
                 tag("attacks each combat if able"),
@@ -2099,6 +2103,27 @@ pub(crate) fn parse_combat_rule_static_predicate_nom(
     .parse(input)
 }
 
+pub(crate) fn parse_rule_static_tail_predicate_nom(
+    input: &str,
+) -> OracleResult<'_, RuleStaticPredicate> {
+    alt((
+        parse_rule_static_predicate_nom,
+        value(RuleStaticPredicate::CantBlock, tag("block")),
+        value(
+            RuleStaticPredicate::CantCrew,
+            (tag("crew"), opt(preceded(space1, tag("vehicles")))),
+        ),
+        value(
+            RuleStaticPredicate::CantBeActivated,
+            alt((
+                tag("have its activated abilities activated"),
+                tag("have their activated abilities activated"),
+            )),
+        ),
+    ))
+    .parse(input)
+}
+
 pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleStaticPredicate>> {
     let mut remaining = rest;
     let mut predicates = Vec::new();
@@ -2109,7 +2134,8 @@ pub(crate) fn parse_rule_static_tail_predicates(rest: &str) -> Option<Vec<RuleSt
             return Some(predicates);
         }
         let (after_separator, _) = parse_rule_static_separator_nom(trimmed).ok()?;
-        let (after_predicate, predicate) = parse_rule_static_predicate_nom(after_separator).ok()?;
+        let (after_predicate, predicate) =
+            parse_rule_static_tail_predicate_nom(after_separator).ok()?;
         predicates.push(predicate);
         remaining = after_predicate;
     }

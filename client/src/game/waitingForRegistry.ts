@@ -130,6 +130,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "ChooseRingBearer",
     "ChooseDungeon",
     "ChooseDungeonRoom",
+    "SpecializeColor",
     "ChooseLegend",
     "CommanderZoneChoice",
     "BattleProtectorChoice",

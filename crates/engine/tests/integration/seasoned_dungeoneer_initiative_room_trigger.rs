@@ -34,32 +34,13 @@
 
 use engine::game::dungeon::{dungeon_sentinel_id, DungeonId};
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
-use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 
 /// The ETB-only slice of Seasoned Dungeoneer's Oracle text. We intentionally
 /// drop the combat / Explore lines so the cast/resolve path under test stays
 /// scoped to "you take the initiative".
 const SEASONED_ETB: &str = "When this creature enters, you take the initiative.";
-
-fn cast_creature_from_hand(runner: &mut engine::game::scenario::GameRunner, hand_card: ObjectId) {
-    let card_id = runner
-        .state()
-        .objects
-        .get(&hand_card)
-        .expect("hand card exists")
-        .card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: hand_card,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting a 0-cost creature should succeed");
-    runner.advance_until_stack_empty();
-}
 
 /// (a) Fresh game: P0 has no initiative and no active dungeon. Casting
 /// Seasoned Dungeoneer resolves its ETB, sets initiative, auto-ventures
@@ -81,9 +62,12 @@ fn seasoned_dungeoneer_initiative_dispatches_room_trigger() {
         .id();
 
     let mut runner = scenario.build();
-    cast_creature_from_hand(&mut runner, seasoned);
+    // The harness casts the 0-cost creature (auto-paid), resolves its ETB, and
+    // drives resolution; its default SearchPolicy::Stop leaves the Undercity
+    // Secret Entrance search prompt for inspection below.
+    let outcome = runner.cast(seasoned).resolve();
 
-    let state = runner.state();
+    let state = outcome.state();
 
     // CR 726.3: initiative is set on the controller.
     assert_eq!(
@@ -155,9 +139,12 @@ fn seasoned_dungeoneer_initiative_retake_lands_on_room_choice() {
         progress.current_room = 0;
     }
 
-    cast_creature_from_hand(&mut runner, seasoned);
+    // The harness casts + resolves; drive_resolution breaks at the
+    // ChooseDungeonRoom branch-point prompt (a prompt it does not answer),
+    // leaving it for inspection.
+    let outcome = runner.cast(seasoned).resolve();
 
-    let state = runner.state();
+    let state = outcome.state();
 
     // CR 726.5: re-taking initiative still ventures. Undercity room 0
     // branches to rooms 1 and 2, so we land on ChooseDungeonRoom.

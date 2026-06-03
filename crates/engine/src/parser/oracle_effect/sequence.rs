@@ -2894,6 +2894,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::PhaseOut { .. }
         | Effect::PhaseIn { .. }
         | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
         | Effect::SolveCase
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }
@@ -2976,6 +2977,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // following a `ChangeZone`; it is not a lookback-transparent clause
         // for the Dig-from-among continuation search.
         | Effect::ReturnAsAura { .. }
+        | Effect::Specialize
         | Effect::Unimplemented { .. } => false,
     }
 }
