@@ -32,11 +32,12 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind, CastVariantPaid,
-    CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
-    DestinationConstraint, Effect, FilterProp, OriginConstraint, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind, CastManaObjectScope,
+    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef,
+    CounterTriggerFilter, DamageKindFilter, DestinationConstraint, Effect, FilterProp, ObjectScope,
+    OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::parse_counter_type;
@@ -3017,9 +3018,7 @@ fn try_extract_mana_spent_comparison_condition(
     lower: &str,
     text: &str,
 ) -> Option<(String, Option<TriggerCondition>)> {
-    use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric, ObjectScope};
-
-    let (before, clause_text, rest) = scan_preceded(lower, |i| {
+    let (before, comparator, rest) = scan_preceded(lower, |i| {
         preceded(tag("if "), parse_mana_spent_comparison_clause).parse(i)
     })?;
 
@@ -3031,17 +3030,13 @@ fn try_extract_mana_spent_comparison_condition(
     let clause_start = before.len();
     let clause_len = lower.len() - before.len() - rest.len();
 
-    // Parse the clause into a QuantityComparison
-    let (_lhs_text, comparator, _rhs_text) = parse_mana_spent_comparison_structure(clause_text)?;
-
-    // Construct the QuantityRefs directly based on the canonical forms
-    // LHS: "that spell" -> ManaSpentToCast { TriggeringSpell, Total }
-    // RHS: "that spell's mana value" -> ObjectManaValue { EventSource }
-    let lhs_qty = crate::types::ability::QuantityRef::ManaSpentToCast {
+    // In a spell-cast trigger's intervening-if clause, "it"/"that spell"/
+    // "this spell" all refer to the spell object carried by the trigger event.
+    let lhs_qty = QuantityRef::ManaSpentToCast {
         scope: CastManaObjectScope::TriggeringSpell,
         metric: CastManaSpentMetric::Total,
     };
-    let rhs_qty = crate::types::ability::QuantityRef::ObjectManaValue {
+    let rhs_qty = QuantityRef::ObjectManaValue {
         scope: ObjectScope::EventSource,
     };
 
@@ -3049,56 +3044,27 @@ fn try_extract_mana_spent_comparison_condition(
     Some((
         cleaned,
         Some(TriggerCondition::QuantityComparison {
-            lhs: crate::types::ability::QuantityExpr::Ref { qty: lhs_qty },
+            lhs: QuantityExpr::Ref { qty: lhs_qty },
             comparator,
-            rhs: crate::types::ability::QuantityExpr::Ref { qty: rhs_qty },
+            rhs: QuantityExpr::Ref { qty: rhs_qty },
         }),
     ))
 }
 
-fn parse_mana_spent_comparison_clause(i: &str) -> OracleResult<'_, &str> {
-    recognize((
+fn parse_mana_spent_comparison_clause(i: &str) -> OracleResult<'_, Comparator> {
+    let (i, _) = (
         tag("the amount of mana spent to cast "),
         alt((tag("it"), tag("that spell"), tag("this spell"))),
         alt((tag(" was "), tag(" is "))),
-        alt((tag("less than"), tag("greater than"))),
-        tag(" its mana value"),
+    )
+        .parse(i)?;
+    let (i, comparator) = alt((
+        value(Comparator::LT, tag("less than")),
+        value(Comparator::GT, tag("greater than")),
     ))
-    .parse(i)
-}
-
-fn parse_mana_spent_comparison_structure(clause: &str) -> Option<(&str, Comparator, &str)> {
-    let lower = clause.to_lowercase();
-
-    // allow-noncombinator: input already validated by parse_mana_spent_comparison_clause nom combinator
-    let mana_spent_end = lower.find(" was ").or_else(|| lower.find(" is "))?;
-    let comparator_start = mana_spent_end + 5; // " was " or " is " both have length 5 (including trailing space)
-
-    // allow-noncombinator: input already validated by parse_mana_spent_comparison_clause nom combinator
-    let comparator_end = if lower[comparator_start..].starts_with("less than") {
-        comparator_start + "less than".len()
-    } else {
-        // allow-noncombinator: input already validated by parse_mana_spent_comparison_clause nom combinator
-        if lower[comparator_start..].starts_with("greater than") {
-            comparator_start + "greater than".len()
-        } else {
-            return None;
-        }
-    };
-
-    let comparator = if &lower[comparator_start..comparator_end] == "less than" {
-        Comparator::LT
-    } else {
-        Comparator::GT
-    };
-
-    // Map to canonical forms that parse_quantity_ref can parse
-    // LHS: "the amount of mana spent to cast it/that spell" -> "that spell" (for TriggeringSpell scope)
-    // RHS: "its mana value" -> "that spell's mana value" (for EventSource scope)
-    let lhs_canonical = "that spell";
-    let rhs_canonical = "that spell's mana value";
-
-    Some((lhs_canonical, comparator, rhs_canonical))
+    .parse(i)?;
+    let (i, _) = tag(" its mana value").parse(i)?;
+    Ok((i, comparator))
 }
 
 /// CR 603.4 + CR 102.1: Extract "if it's / it is / it isn't /
@@ -21706,13 +21672,24 @@ mod tests {
         let (cleaned, cond) = extract_if_condition(
             "if the amount of mana spent to cast it was less than its mana value, ~ deal 3 damage to that player",
         );
-        eprintln!("cleaned: {:?}", cleaned);
-        eprintln!("cond: {:?}", cond);
         assert_eq!(cleaned, "~ deal 3 damage to that player");
-        assert!(matches!(
+        assert_eq!(
             cond,
-            Some(TriggerCondition::QuantityComparison { .. })
-        ));
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                        metric: crate::types::ability::CastManaSpentMetric::Total,
+                    },
+                },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+            })
+        );
     }
 
     #[test]
@@ -21721,10 +21698,23 @@ mod tests {
             "if the amount of mana spent to cast that spell was greater than its mana value, put a +1/+1 counter on ~",
         );
         assert_eq!(cleaned, "put a +1/+1 counter on ~");
-        assert!(matches!(
+        assert_eq!(
             cond,
-            Some(TriggerCondition::QuantityComparison { .. })
-        ));
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                        metric: crate::types::ability::CastManaSpentMetric::Total,
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource,
+                    },
+                },
+            })
+        );
     }
 
     // The extractor uses `scan_split_at_phrase`, so the clause doesn't have to
