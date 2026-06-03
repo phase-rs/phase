@@ -286,6 +286,8 @@ pub(super) fn try_parse_die_roll_table(
     let mut def = AbilityDefinition::new(
         kind,
         Effect::RollDie {
+            // CR 706.1: result-table rolls are single-die ("roll a d20 ...").
+            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             sides,
             results: branches,
             modifier,

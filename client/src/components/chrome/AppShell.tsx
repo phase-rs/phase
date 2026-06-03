@@ -5,9 +5,9 @@ import { SceneParticles } from "../menu/MenuParticles";
 import { BuildBadge } from "./BuildBadge";
 import { CardDataLoadingBar } from "./CardDataLoadingBar";
 import { ChromeControls } from "./ChromeControls";
-import { MobileSocialBar } from "./MobileSocialBar";
 import { Rail } from "./Rail";
 import { ShellProvider } from "./ShellContext";
+import { SocialBar } from "./SocialBar";
 import { TabBar } from "./TabBar";
 
 /**
@@ -41,9 +41,13 @@ export function AppShell() {
 
         <CardDataLoadingBar />
         <Rail onSettings={() => setSettingsOpen(true)} />
-        <MobileSocialBar />
+        <SocialBar />
 
-        <main className="shell-content relative z-10 min-h-screen min-[820px]:ml-[92px] max-[820px]:pt-[44px] max-[820px]:pb-[76px]">
+        {/* Reserve the top-left SocialBar's zone on every breakpoint so page
+            titles (which sit at the top-left of each pane) clear the badge row:
+            44px below the mobile strip, 56px below the desktop strip that aligns
+            with ChromeControls at top:1rem. */}
+        <main className="shell-content relative z-10 min-h-screen min-[820px]:ml-[92px] min-[820px]:pt-[calc(env(safe-area-inset-top)+56px)] max-[820px]:pt-[calc(env(safe-area-inset-top)+44px)] max-[820px]:pb-[76px]">
           {/* Inner Suspense so a lazy route's load swaps ONLY the content area —
               the rail/scene persist (true SPA feel). Without this, the App-level
               Suspense fallback would replace the whole shell, flashing like a
