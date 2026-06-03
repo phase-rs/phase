@@ -1235,6 +1235,72 @@ fn copy_probe_spec(
     }
 }
 
+/// CR 614.1a + CR 707.2: Run a copy-token's creation through the
+/// `ProposedEvent::CreateToken` replacement pipeline to compute the final
+/// number of copies to create, after any token-count-modifying replacement
+/// (Doubling Season, Adrix and Nev, Parallel Lives, Anointed Procession,
+/// Mondrak) has applied.
+///
+/// This is the single shared count-modification application point that the
+/// predefined `Effect::Token` path uses (`resolve` → `replace_event` →
+/// `create_token_applier`). `Effect::CopyTokenOf` delegates here so the
+/// doubling sees copy-token creation uniformly — the CR is explicit on this
+/// (CR 614.1a example: "create a token that's a copy of Voice of All" +
+/// Doubling Season creates two copies, each entering with its own ETB).
+///
+/// The probe spec is built from the copy source's resolved copiable values so
+/// subtype-scoped doublers (Chatterfang-class) and owner-scoped doublers
+/// (`token_owner_scope`) match against the copy's true characteristics. Any
+/// `additional_token_spec` / `ensure_token_specs` riders carried by a matching
+/// replacement materialize their own generic tokens inside `replace_event`
+/// (the same as for `Effect::Token`); this helper returns only the
+/// count-of-copies for the primary copy batch.
+///
+/// `NeedsChoice` (an optional / order-material replacement, CR 616.1) cannot be
+/// honored mid-`CopyTokenOf` resolution — the copy path has no continuation
+/// hook — so the pending pause is cleared and the un-modified `requested_count`
+/// is used. No printed token-count doubler is optional (all are mandatory
+/// `Double`), so this conservative fallback is unreachable for the real card
+/// class; it exists only so a future optional replacement degrades safely
+/// rather than panicking.
+pub(crate) fn copy_token_count_after_replacement(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    values: &crate::types::ability::CopiableValues,
+    token_owner: PlayerId,
+    requested_count: u32,
+    events: &mut Vec<GameEvent>,
+) -> u32 {
+    if requested_count == 0 {
+        return 0;
+    }
+    let spec = copy_probe_spec(ability, values);
+    let proposed = ProposedEvent::CreateToken {
+        owner: token_owner,
+        spec: Box::new(spec),
+        enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+        count: requested_count,
+        applied: HashSet::new(),
+    };
+    match replacement::replace_event(state, proposed, events) {
+        ReplacementResult::Execute(ProposedEvent::CreateToken { count, .. }) => count,
+        // CR 614.6: a Prevent-style replacement fully suppresses the creation.
+        ReplacementResult::Prevented => 0,
+        // CR 616.1: an interactive (optional / order-material) replacement —
+        // not reachable for the mandatory token-count doubler class. Clear the
+        // pending pause so it never leaks out of `CopyTokenOf` and fall back to
+        // the requested count (no double-application).
+        ReplacementResult::NeedsChoice(_) => {
+            state.pending_replacement = None;
+            requested_count
+        }
+        // `replace_event` on a `CreateToken` proposal can only return a
+        // `CreateToken` survivor; any other survivor is a pipeline invariant
+        // violation — fall back to the requested count.
+        ReplacementResult::Execute(_) => requested_count,
+    }
+}
+
 /// CR 111.10: Enumerate the trigger definitions a BASE `Token` spec injects on
 /// the produced token, WITHOUT creating an object — the §2.3a non-observer gate
 /// input. Predefined subtype abilities (`predefined_token_abilities`) are

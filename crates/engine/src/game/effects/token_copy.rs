@@ -18,8 +18,12 @@ use std::sync::Arc;
 /// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
 /// Copies copiable characteristics from the target to a newly created token.
 ///
-/// CR 707.10: When `count` resolves to N > 1, N independent copy-tokens are
-/// created (e.g., Rite of Replication kicked = 5, Adrix and Nev doubling).
+/// CR 707.2 + CR 614.1a: When `count` resolves to N > 1 (e.g. Rite of
+/// Replication kicked = 5), N independent copy-tokens are created. The
+/// per-source count is additionally routed through the `CreateToken`
+/// replacement pipeline so token-count-doubling replacements (Doubling Season,
+/// Adrix and Nev, Parallel Lives, Anointed Procession, Mondrak) apply uniformly
+/// to copy-token creation, exactly as they do to predefined `Effect::Token`.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -181,7 +185,7 @@ pub fn resolve(
         return Ok(());
     }
 
-    // CR 707.10 + CR 115.1d: Create `count` independent copy-tokens per copy
+    // CR 707.2 + CR 115.1d: Create `count` independent copy-tokens per copy
     // source. Each is snapshotted from the source values so that subsequent
     // SBAs (e.g., legendary rule) see identical copies.
     let mut created_ids: Vec<ObjectId> = Vec::with_capacity(count as usize * copy_source_ids.len());
@@ -190,6 +194,25 @@ pub fn resolve(
         let values = compute_current_copiable_values(state, copy_source_id)
             .ok_or(EffectError::ObjectNotFound(copy_source_id))?;
         let name = values.name.clone();
+        // CR 614.1a: Route this copy source's creation count through the SAME
+        // `ProposedEvent::CreateToken` replacement pipeline the predefined
+        // `Effect::Token` path uses, so every token-count-doubling replacement
+        // (Doubling Season, Adrix and Nev, Parallel Lives, Anointed Procession,
+        // Mondrak) applies to copy-token creation. The probe spec is built from
+        // this source's resolved copiable values so subtype-/owner-scoped
+        // doublers match the copy's true characteristics. Computed per source
+        // (not once for the whole batch) because distinct sources may have
+        // distinct characteristics that scoped doublers gate on. (CR 614.1a
+        // example: "create a token that's a copy of Voice of All" + Doubling
+        // Season → two copies, each with its own ETB.)
+        let effective_count = super::token::copy_token_count_after_replacement(
+            state,
+            ability,
+            &values,
+            token_owner,
+            count as u32,
+            events,
+        );
         // Image-lookup hint propagates from the copy source: a CopyTokenOf
         // of a real-card permanent (Twinflame, Helm of the Host) keeps the
         // default `Card`, while a populate-copy of a true creature token
@@ -207,7 +230,7 @@ pub fn resolve(
         // canonical oracle-id lookup; a copy of a true generic token has
         // `None` here, leaving the token-art path untouched.
         let copy_source_printed_ref = state.objects[&copy_source_id].printed_ref.clone();
-        for _ in 0..count {
+        for _ in 0..effective_count {
             // Step 3: Create a new token object on the battlefield.
             let token_id = zones::create_object(
                 state,
@@ -937,6 +960,168 @@ mod tests {
                 .contains(&PlayerId(0)),
             "should record token creation"
         );
+    }
+
+    /// CR 614.1a + CR 707.2: A token-count-doubling replacement (Doubling
+    /// Season / Adrix and Nev / Parallel Lives / Anointed Procession / Mondrak)
+    /// applies to a token that's a *copy* of a permanent, exactly as it applies
+    /// to a predefined `Effect::Token`. The CR is explicit (CR 614.1a example,
+    /// "create a token that's a copy of Voice of All" + Doubling Season): the
+    /// doubling is applied first, then each of the two copies enters with its
+    /// own ETB. Issue #1511 regression: `CopyTokenOf` previously created exactly
+    /// `count` copies, bypassing the `ProposedEvent::CreateToken` replacement
+    /// pipeline, so the doubler never saw the copy.
+    #[test]
+    fn copy_token_count_doubling_replacement_applies() {
+        use crate::types::ability::{QuantityModification, ReplacementDefinition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Doubling-Season-style mandatory token-count doubler, controller-scoped.
+        let doubler_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let doubler = state.objects.get_mut(&doubler_id).unwrap();
+            let def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .token_owner_scope(ControllerRef::You)
+                .quantity_modification(QuantityModification::Double);
+            doubler.base_replacement_definitions = Arc::new(vec![def.clone()]);
+            doubler.replacement_definitions = vec![def].into();
+        }
+
+        // The copy source — a 3/1 Snake.
+        let source_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mist-Syndicate Naga".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_power = Some(3);
+            source.base_toughness = Some(1);
+            source.power = Some(3);
+            source.toughness = Some(1);
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Snake".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 614.1a: count 1 doubled to 2 — two independent copy tokens.
+        let copies: Vec<_> = state
+            .objects
+            .values()
+            .filter(|o| o.is_token && o.name == "Mist-Syndicate Naga")
+            .collect();
+        assert_eq!(
+            copies.len(),
+            2,
+            "token-count doubler must double a copy-token's count (issue #1511)"
+        );
+        // Each doubled copy enters with its own faithful characteristics + ETB.
+        assert!(copies
+            .iter()
+            .all(|t| t.power == Some(3) && t.toughness == Some(1)));
+        assert!(copies.iter().all(|t| t.zone == Zone::Battlefield));
+        assert_eq!(
+            state.last_created_token_ids.len(),
+            2,
+            "both doubled copy-token ids are recorded for downstream anaphora"
+        );
+        // CR 603.6a: each copy emits its own TokenCreated/ETB event.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::TokenCreated { name, .. } if name == "Mist-Syndicate Naga"
+                ))
+                .count(),
+            2,
+            "each doubled copy emits its own ETB/TokenCreated event"
+        );
+    }
+
+    /// Non-regression: without any token-count replacement active,
+    /// `CopyTokenOf { count: N }` creates exactly N copies.
+    #[test]
+    fn copy_token_count_without_doubler_is_exact() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_power = Some(2);
+            source.base_toughness = Some(2);
+            source.power = Some(2);
+            source.toughness = Some(2);
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Bear".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 3 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let copies = state
+            .objects
+            .values()
+            .filter(|o| o.is_token && o.name == "Bear")
+            .count();
+        assert_eq!(copies, 3, "no doubler: exactly the requested count");
     }
 
     #[test]
