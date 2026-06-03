@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Effect, PostReplacementContinuation,
-    PreventionAmount, QuantityExpr, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ShieldKind, TargetFilter, TargetRef,
+    PreventionAmount, QuantityExpr, QuantityModification, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, ShieldKind, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1713,15 +1713,11 @@ fn create_token_applier(
                 .unwrap_or(owner);
             extra.source_id = rid.source;
             extra.controller = source_controller;
-            // CR 614.1a: Mark this replacement as already-applied on the
-            // appended batch so the same Chatterfang-class replacement does
-            // not re-fire on its own output (which would be an infinite loop
-            // since the appended batch matches the same owner scope). Other
-            // replacements (Doubling Season, Parallel Lives) still see the
-            // appended batch as a fresh CreateToken event.
             // CR 614.5: Inherit the primary event's applied set to prevent
             // replacements that already applied to the primary event from
-            // re-applying to the recursive extra event.
+            // re-applying to the recursive extra event. Insert this
+            // Chatterfang-class replacement too so it cannot re-fire on its own
+            // appended batch.
             let mut applied_on_extra = applied.clone();
             applied_on_extra.insert(rid);
             // CR 614.1c: The appended batch is a separate event — it does not
@@ -4014,34 +4010,6 @@ fn apply_single_replacement(
 /// without changing the result. The auto-resolve path still iterates per the
 /// CR 616.1f repeat semantics — it only suppresses a player choice that cannot
 /// affect anything.
-///
-/// CR 616.1: Check if multiple quantity modifications commute.
-/// All `Double` modifications commute with each other.
-/// All `Plus` modifications commute with each other.
-/// All `Minus` modifications commute with each other.
-/// A mix of different types (e.g., `Double` and `Plus`) does NOT commute.
-fn quantity_modifications_commute(state: &GameState, candidates: &[ReplacementId]) -> bool {
-    let mut doubles = 0;
-    let mut pluses = 0;
-    let mut minuses = 0;
-    for &rid in candidates {
-        let qmod = state
-            .objects
-            .get(&rid.source)
-            .and_then(|obj| obj.replacement_definitions.get(rid.index))
-            .and_then(|def| def.quantity_modification.as_ref());
-        match qmod {
-            Some(crate::types::ability::QuantityModification::Double) => doubles += 1,
-            Some(crate::types::ability::QuantityModification::Plus { .. }) => pluses += 1,
-            Some(crate::types::ability::QuantityModification::Minus { .. }) => minuses += 1,
-            Some(crate::types::ability::QuantityModification::Prevent) => return false,
-            None => {}
-        }
-    }
-    let active_categories = (doubles > 0) as usize + (pluses > 0) as usize + (minuses > 0) as usize;
-    active_categories <= 1
-}
-
 /// A candidate set is *material* (the prompt must be shown) iff *either*:
 /// - *any* candidate is an unconditionally order-sensitive shape — a
 ///   destination-redirecting `Effect::ChangeZone` (CR 614.6 — Rest in Peace
@@ -4080,23 +4048,17 @@ pub(crate) fn replacement_ordering_is_material(
     //    + Spelunking both write `enter_tapped`; Doubling Season + Hardened
     //    Scales both modify an `AddCounter` count). A single modifier of a field
     //    has no conflict.
-    let mut seen_fields: Vec<EventField> = Vec::new();
+    let mut seen_writes: Vec<(EventField, CommuteClass)> = Vec::new();
     for rid in candidates {
         match candidate_materiality(state, *rid, proposed_to) {
             CandidateMateriality::Unconditional => return true,
-            CandidateMateriality::Writes(field) => {
-                if seen_fields.contains(&field) {
-                    // CR 616.1: For EventField::Count, check if the quantity
-                    // modifications commute. Pure doublers commute and can be
-                    // auto-resolved without a prompt.
-                    if !(field == EventField::Count
-                        && quantity_modifications_commute(state, candidates))
-                    {
+            CandidateMateriality::Writes { field, commute } => {
+                for (seen_field, seen_commute) in &seen_writes {
+                    if *seen_field == field && !commute.commutes_with(*seen_commute) {
                         return true;
                     }
-                } else {
-                    seen_fields.push(field);
                 }
+                seen_writes.push((field, commute));
             }
             CandidateMateriality::Disjoint => {}
         }
@@ -4114,17 +4076,52 @@ enum EventField {
     /// `ZoneChange::enter_tapped` — overwritten by `Effect::Tap` / `Effect::Untap`.
     EnterTapped,
     /// The count of a count-bearing event (`AddCounter`, `CreateToken`, `Draw`,
-    /// `Mill`, …) — modified by a `quantity_modification` side field
-    /// (`Double` / `Plus` / `Minus`, which do not pairwise commute).
+    /// `Mill`, ...) — modified by a `quantity_modification` side field. Same-class
+    /// arithmetic modifiers commute; mixed classes do not.
     Count,
     /// The produced mana type/amount of a `ProduceMana` event — modified by a
     /// `mana_modification` side field (`ReplaceWith` / `Multiply`).
     ManaType,
     /// The `amount` of a `ProposedEvent::Damage`, modified by a
     /// `damage_modification` side field (`Double` / `Triple` / `Plus` /
-    /// `Minus` / `SetToSourcePower` / `SetTo` — these do not pairwise
-    /// commute, e.g. Furnace of Rath `Double` + Torbran `Plus{2}`).
+    /// `Minus` / `SetToSourcePower` / `SetTo`). Same-class arithmetic modifiers
+    /// commute; mixed classes do not, e.g. Furnace of Rath `Double` + Torbran
+    /// `Plus{2}`.
     Damage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommuteClass {
+    NonCommuting,
+    Multiplicative,
+    Additive,
+    Subtractive,
+}
+
+impl CommuteClass {
+    fn commutes_with(self, other: Self) -> bool {
+        self != Self::NonCommuting && self == other
+    }
+}
+
+fn quantity_commute_class(modification: &QuantityModification) -> CommuteClass {
+    match modification {
+        QuantityModification::Double => CommuteClass::Multiplicative,
+        QuantityModification::Plus { .. } => CommuteClass::Additive,
+        QuantityModification::Minus { .. } => CommuteClass::Subtractive,
+        QuantityModification::Prevent => CommuteClass::NonCommuting,
+    }
+}
+
+fn damage_commute_class(modification: &DamageModification) -> CommuteClass {
+    match modification {
+        DamageModification::Double | DamageModification::Triple => CommuteClass::Multiplicative,
+        DamageModification::Plus { .. } => CommuteClass::Additive,
+        DamageModification::Minus { .. } => CommuteClass::Subtractive,
+        DamageModification::SetToSourcePower
+        | DamageModification::SetTo { .. }
+        | DamageModification::LifeFloor { .. } => CommuteClass::NonCommuting,
+    }
 }
 
 /// CR 616.1 classification of a single replacement candidate.
@@ -4134,7 +4131,10 @@ enum CandidateMateriality {
     Unconditional,
     /// A pure event-field modifier. Immaterial alone; material iff another
     /// candidate modifies the same field with a non-commuting modification.
-    Writes(EventField),
+    Writes {
+        field: EventField,
+        commute: CommuteClass,
+    },
     /// Touches no event field that another candidate could also touch
     /// (`Effect::Choose` post-effect, null/no-op pass-through with no side field).
     Disjoint,
@@ -4167,7 +4167,10 @@ fn candidate_materiality(
     match shield_counter_replacement_kind(rid) {
         Some(ShieldCounterReplacementKind::Destroy) => return CandidateMateriality::Unconditional,
         Some(ShieldCounterReplacementKind::Damage) => {
-            return CandidateMateriality::Writes(EventField::Damage)
+            return CandidateMateriality::Writes {
+                field: EventField::Damage,
+                commute: CommuteClass::NonCommuting,
+            }
         }
         None => {}
     }
@@ -4189,7 +4192,10 @@ fn candidate_materiality(
     // this it fell through to `Disjoint` and the CR 616.1 order choice was
     // silently skipped.
     if matches!(repl_def.shield_kind, ShieldKind::Prevention { .. }) {
-        return CandidateMateriality::Writes(EventField::Damage);
+        return CandidateMateriality::Writes {
+            field: EventField::Damage,
+            commute: CommuteClass::NonCommuting,
+        };
     }
     let Some(execute) = repl_def.execute.as_deref() else {
         // CR 616.1: a `null` `execute` is not a guaranteed no-op. A count-event
@@ -4201,14 +4207,23 @@ fn candidate_materiality(
         // one event are order-material — `Double` and `Plus` do not commute
         // ((x*2)+2 vs (x+2)*2). A `null` `execute` with no side field is a
         // genuine pass-through (test fixtures, structural placeholders).
-        if repl_def.quantity_modification.is_some() {
-            return CandidateMateriality::Writes(EventField::Count);
+        if let Some(modification) = repl_def.quantity_modification.as_ref() {
+            return CandidateMateriality::Writes {
+                field: EventField::Count,
+                commute: quantity_commute_class(modification),
+            };
         }
         if repl_def.mana_modification.is_some() {
-            return CandidateMateriality::Writes(EventField::ManaType);
+            return CandidateMateriality::Writes {
+                field: EventField::ManaType,
+                commute: CommuteClass::NonCommuting,
+            };
         }
-        if repl_def.damage_modification.is_some() {
-            return CandidateMateriality::Writes(EventField::Damage);
+        if let Some(modification) = repl_def.damage_modification.as_ref() {
+            return CandidateMateriality::Writes {
+                field: EventField::Damage,
+                commute: damage_commute_class(modification),
+            };
         }
         return CandidateMateriality::Disjoint;
     };
@@ -4250,7 +4265,10 @@ fn candidate_materiality(
         current = def.sub_ability.as_deref();
     }
     match field {
-        Some(field) => CandidateMateriality::Writes(field),
+        Some(field) => CandidateMateriality::Writes {
+            field,
+            commute: CommuteClass::NonCommuting,
+        },
         None => CandidateMateriality::Disjoint,
     }
 }
@@ -7296,20 +7314,19 @@ mod tests {
 
     #[test]
     fn damage_double_chaining_two_doublers() {
-        // Two Double replacements → 3 * 2 * 2 = 12
+        // CR 616.1: Two pure damage doublers commute just like two pure token
+        // doublers, so the replacement pipeline can auto-resolve without a
+        // player ordering prompt.
         let repl1 = damage_repl(DamageModification::Double);
         let repl2 = damage_repl(DamageModification::Double);
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl1, repl2]);
         let mut events = Vec::new();
         let proposed = damage_event(3);
-        let initial_result = replace_event(&mut state, proposed, &mut events);
-        let result = resolve_first_replacement_choice(&mut state, initial_result, &mut events);
-        match result {
-            ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) => {
-                assert_eq!(amount, 12, "Two doublers should quadruple: 3 * 2 * 2 = 12");
-            }
-            other => panic!("Expected Execute with Damage, got {other:?}"),
-        }
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) = result else {
+            panic!("expected auto-resolved Damage with no CR 616.1 prompt, got {result:?}");
+        };
+        assert_eq!(amount, 12, "Two doublers should quadruple: 3 * 2 * 2 = 12");
     }
 
     // ── Damage pipeline filter tests ──
