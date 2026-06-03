@@ -1047,6 +1047,30 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
     }
 }
 
+/// CR 608.2c: Whether a parent effect computes its own "if you do" outcome
+/// signal (`optional_effect_performed`) rather than that signal meaning "the
+/// mandatory action occurred."
+///
+/// For most effects, "[Action]. If you do, [rider]." means the rider fires iff
+/// the action was performed. An *optional* ("you may") parent sets the flag when
+/// the controller accepts. A handful of effects instead compute the flag from a
+/// random/choice OUTCOME — a coin flip's win/loss, a clash's win/tie, a dig's
+/// kept selection — and resolve their gated branch against that computed flag
+/// (see `flip_coin.rs`, `clash.rs`, `engine_resolution_choices.rs`). For those,
+/// a mandatory parent does NOT imply "performed" (a lost flip is mandatory but
+/// did not "win"), so the default-true rule below must exclude them.
+fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::FlipCoin { .. }
+            | Effect::FlipCoins { .. }
+            | Effect::FlipCoinUntilLose { .. }
+            | Effect::Clash
+            | Effect::RollDie { .. }
+            | Effect::Dig { .. }
+    )
+}
+
 fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> bool {
     match ability.condition {
         Some(AbilityCondition::Not { ref condition })
@@ -3997,6 +4021,46 @@ fn resolve_chain_body(
     };
     let effect_context_object =
         parent_referent_context_from_events(state, &events[events_before..]);
+
+    // CR 608.2c: "[Mandatory action]. If you do, [rider]." — seed the
+    // performed-flag for a mandatory parent whose action just occurred.
+    //
+    // The "if you do" gate (`EffectOutcome { OptionalEffectPerformed }`) means
+    // "if the preceding instruction's event happened." For an *optional* parent
+    // ("you may …") the flag is set when the controller accepts; for effects
+    // that compute their own win/loss/selection outcome (coin flip, clash, dig —
+    // see `effect_manages_own_outcome_flag`) the branch handlers set it; for an
+    // unless-pay / "if a player does" alternative the payment flow sets it. But a
+    // plain *mandatory* action (Sacrifice, Mill, Destroy, …) whose rider is a
+    // SEPARATE SENTENCE ("Sacrifice it. If you do, create Marit Lage.") has no
+    // such hook — and per CR 608.2c that sentence is the next printed
+    // instruction, gating on whether the prior action happened. We restrict to
+    // `SubAbilityLink::SequentialSibling` precisely so the within-clause
+    // `ContinuationStep` alternatives that ride on a payment / opponent choice
+    // (unless-pay, `IfAPlayerDoes`) are NOT affected. When the action was not
+    // signalled as failed (`cost_payment_failed_flag`, e.g. nothing eligible to
+    // sacrifice), set the flag on the parent's context so it propagates to the
+    // sub via `apply_parent_chain_context` and survives the sub's own chain-body
+    // condition re-check. Covers the whole mandatory-rider class, not one card.
+    let mandatory_rider_owned;
+    let ability = if !ability.optional
+        && !ability.context.optional_effect_performed
+        && !state.cost_payment_failed_flag
+        && !effect_manages_own_outcome_flag(&ability.effect)
+        && ability.sub_ability.as_ref().is_some_and(|sub| {
+            sub.sub_link == SubAbilityLink::SequentialSibling
+                && sub
+                    .condition
+                    .as_ref()
+                    .is_some_and(condition_depends_on_effect_performed)
+        }) {
+        let mut owned = ability.clone();
+        owned.context.optional_effect_performed = true;
+        mandatory_rider_owned = owned;
+        &mandatory_rider_owned
+    } else {
+        ability
+    };
 
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
     // This allows sub-abilities like "its controller gains life" to access the object
