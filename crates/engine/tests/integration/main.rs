@@ -20,7 +20,6 @@ mod belbe_thornbow_life_loss;
 mod betor_lifelink_counters_repro;
 mod bolas_citadel_regression;
 mod boon_reflection_gain_life_drain;
-mod bracket_signals;
 mod braids_arisen_nightmare_decline;
 mod brigid_mana_ability;
 mod cascade_intervening_if_pipeline;
