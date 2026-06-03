@@ -14736,7 +14736,7 @@ mod sunburst_runtime_tests {
             ..CardFace::default()
         };
         for ct in core_types {
-            face.card_type.core_types.push(ct.clone());
+            face.card_type.core_types.push(*ct);
         }
         synthesize_all(&mut face);
         face
