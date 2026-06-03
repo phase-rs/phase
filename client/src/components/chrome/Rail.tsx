@@ -46,14 +46,14 @@ export function Rail({ onSettings }: RailProps) {
               aria-current={on ? "page" : undefined}
               className={`relative flex flex-col items-center gap-1.5 rounded-[14px] px-1 py-[11px] transition-colors duration-150 ${
                 on
-                  ? "bg-ember/10 text-ember-text"
+                  ? "bg-white/[0.07] text-white"
                   : "text-fg-meta hover:bg-white/[0.04] hover:text-slate-300"
               }`}
             >
               {on && (
                 <span
                   aria-hidden
-                  className="absolute left-0 top-3.5 bottom-3.5 w-[3px] rounded-r-[3px] bg-ember"
+                  className="absolute left-0 top-3.5 bottom-3.5 w-[3px] rounded-r-[3px] bg-white/70"
                 />
               )}
               <Icon

@@ -5,6 +5,7 @@ import { useNavigate } from "react-router";
 import { ACTIVE_DECK_KEY } from "../../../constants/storage";
 import { MenuShell } from "../MenuShell";
 import { MenuActionTile, type MenuTileTone } from "../MenuActionTile";
+import type { TileMotif } from "../TileMotif";
 import { ManaSymbol } from "../../mana/ManaSymbol";
 import { useCardImage } from "../../../hooks/useCardImage";
 import { useResumables } from "../../../hooks/useResumables";
@@ -22,14 +23,15 @@ interface ActionDef {
   to: string;
   tone: MenuTileTone;
   icon: string;
+  motif: TileMotif;
   titleKey: string;
   descKey: string;
   gated: boolean;
 }
 const ACTIONS: ActionDef[] = [
-  { key: "setup", to: "/setup", tone: "arcane", icon: "play", titleKey: "home.setup.title", descKey: "home.setup.description", gated: true },
-  { key: "online", to: "/multiplayer", tone: "jade", icon: "online", titleKey: "home.online.title", descKey: "home.online.description", gated: true },
-  { key: "draft", to: "/draft", tone: "ember", icon: "draft", titleKey: "home.draft.title", descKey: "home.draft.description", gated: false },
+  { key: "setup", to: "/setup", tone: "arcane", icon: "play", motif: "swords", titleKey: "home.setup.title", descKey: "home.setup.description", gated: true },
+  { key: "online", to: "/multiplayer", tone: "jade", icon: "online", motif: "network", titleKey: "home.online.title", descKey: "home.online.description", gated: true },
+  { key: "draft", to: "/draft", tone: "ember", icon: "draft", motif: "pack", titleKey: "home.draft.title", descKey: "home.draft.description", gated: false },
 ];
 
 /** Home action tile: adapts an ActionDef (section-icon PNG + route) onto the
@@ -45,6 +47,7 @@ function CardActionButton({ action, disabled }: { action: ActionDef; disabled: b
       description={t(action.descKey)}
       enterLabel={t("home.dashboard.enter")}
       disabled={disabled}
+      motif={action.motif}
       onClick={() => navigate(action.to)}
       renderIcon={(className) => (
         <img src={src} alt="" aria-hidden="true" draggable={false} className={className} />

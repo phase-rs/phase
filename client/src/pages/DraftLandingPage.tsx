@@ -96,6 +96,7 @@ export function DraftLandingPage() {
             <div className="grid grid-cols-1 gap-4 min-[640px]:grid-cols-3">
               <MenuActionTile
                 tone="arcane"
+                motif="pack"
                 title={t("landing.quickDraft.title")}
                 description={t("landing.quickDraft.description")}
                 enterLabel={tMenu("home.dashboard.enter")}
@@ -104,6 +105,7 @@ export function DraftLandingPage() {
               />
               <MenuActionTile
                 tone="ember"
+                motif="pack"
                 title={t("landing.cubeDraft.title")}
                 description={t("landing.cubeDraft.description")}
                 enterLabel={tMenu("home.dashboard.enter")}
@@ -112,6 +114,7 @@ export function DraftLandingPage() {
               />
               <MenuActionTile
                 tone="jade"
+                motif="network"
                 title={t("landing.podDraft.title")}
                 description={t("landing.podDraft.description")}
                 enterLabel={tMenu("home.dashboard.enter")}

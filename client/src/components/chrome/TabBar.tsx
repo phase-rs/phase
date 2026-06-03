@@ -24,7 +24,7 @@ export function TabBar() {
             to={path}
             aria-current={on ? "page" : undefined}
             className={`flex flex-1 flex-col items-center gap-1 rounded-xl px-0.5 py-1.5 text-[10.5px] font-semibold transition-colors ${
-              on ? "text-ember-text" : "text-fg-meta"
+              on ? "text-white" : "text-fg-meta"
             }`}
           >
             <Icon
