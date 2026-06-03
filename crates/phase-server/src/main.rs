@@ -611,6 +611,16 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
     }
 }
 
+fn guard_full_create_game_settings_inbound(
+    fields: lobby_broker::CreateGameSettingsInbound<'_>,
+    ai_seats: &[server_core::protocol::AiSeatRequest],
+) -> Result<u8, String> {
+    let pc = fields.player_count.clamp(2, MAX_FULL_GAME_PLAYER_COUNT);
+    lobby_broker::guard_create_game_settings_inbound(fields)?;
+    guard_create_ai_seats(ai_seats, pc)?;
+    Ok(pc)
+}
+
 /// Returns `Some(reason)` if `action` cannot legitimately come from a client
 /// over the WebSocket draft protocol, or `None` if it is a valid client action.
 ///
@@ -3066,7 +3076,7 @@ async fn handle_client_message(
                 return;
             }
 
-            if let Err(reason) = lobby_broker::guard_create_game_settings_inbound(
+            let pc = match guard_full_create_game_settings_inbound(
                 lobby_broker::CreateGameSettingsInbound {
                     deck: &deck,
                     display_name: &display_name,
@@ -3074,25 +3084,20 @@ async fn handle_client_message(
                     timer_seconds,
                     player_count: requested_player_count,
                     room_name: room_name.as_deref(),
-                    host_peer_id: None,
-                    draft_metadata: None,
+                    host_peer_id: host_peer_id.as_deref(),
+                    draft_metadata: draft_metadata.as_ref(),
                 },
+                &ai_seats,
             ) {
-                let msg = ServerMessage::Error { message: reason };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
+                Ok(pc) => pc,
+                Err(reason) => {
+                    let msg = ServerMessage::Error { message: reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
                 }
-                return;
-            }
-
-            let pc = requested_player_count.clamp(2, MAX_FULL_GAME_PLAYER_COUNT);
-            if let Err(reason) = guard_create_ai_seats(&ai_seats, pc) {
-                let msg = ServerMessage::Error { message: reason };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
-                return;
-            }
+            };
 
             {
                 let mgr = state.lock().await;
@@ -5220,6 +5225,82 @@ mod live_spectator_tests {
             .unwrap();
 
         assert_eq!(spectators.lock().await.get("SAME").map(Vec::len), Some(1));
+    }
+}
+
+#[cfg(test)]
+mod full_create_guard_tests {
+    use super::*;
+    use lobby_broker::validation::{MAX_DRAFT_SET_CODE_LEN, MAX_TOKEN_LEN};
+    use server_core::protocol::{DeckData, DraftLobbyMetadata};
+
+    fn deck() -> DeckData {
+        DeckData {
+            main_deck: vec!["Forest".into()],
+            ..Default::default()
+        }
+    }
+
+    fn fields<'a>(
+        deck: &'a DeckData,
+        host_peer_id: Option<&'a str>,
+        draft_metadata: Option<&'a DraftLobbyMetadata>,
+    ) -> lobby_broker::CreateGameSettingsInbound<'a> {
+        lobby_broker::CreateGameSettingsInbound {
+            deck,
+            display_name: "Host",
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            room_name: None,
+            host_peer_id,
+            draft_metadata,
+        }
+    }
+
+    #[test]
+    fn full_create_guard_accepts_valid_peer_and_draft_metadata() {
+        let deck = deck();
+        let draft = DraftLobbyMetadata {
+            set_code: "TST".to_string(),
+            draft_kind: "Premier".to_string(),
+            cube_name: Some("Cube".to_string()),
+        };
+
+        let player_count = guard_full_create_game_settings_inbound(
+            fields(&deck, Some("peer-host"), Some(&draft)),
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(player_count, 2);
+    }
+
+    #[test]
+    fn full_create_guard_rejects_oversized_host_peer_id() {
+        let deck = deck();
+        let host_peer_id = "p".repeat(MAX_TOKEN_LEN + 1);
+
+        let err =
+            guard_full_create_game_settings_inbound(fields(&deck, Some(&host_peer_id), None), &[])
+                .unwrap_err();
+
+        assert!(err.contains("host_peer_id"));
+    }
+
+    #[test]
+    fn full_create_guard_rejects_oversized_draft_metadata() {
+        let deck = deck();
+        let draft = DraftLobbyMetadata {
+            set_code: "s".repeat(MAX_DRAFT_SET_CODE_LEN + 1),
+            draft_kind: "Premier".to_string(),
+            cube_name: None,
+        };
+
+        let err = guard_full_create_game_settings_inbound(fields(&deck, None, Some(&draft)), &[])
+            .unwrap_err();
+
+        assert!(err.contains("draft_metadata.set_code"));
     }
 }
 
