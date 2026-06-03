@@ -3674,6 +3674,31 @@ impl QuantityExpr {
         }
     }
 
+    /// Returns true if this expression resolves through a
+    /// `QuantityRef::Variable { name: "X" }` anywhere in its tree — i.e. its
+    /// value depends on the spell or ability's chosen X. Single authority for
+    /// "does this quantity use X": the engine cost machinery (X-affordability,
+    /// pay-life-X) and the AI X-value policy all rely on it. The match is
+    /// exhaustive so a new `QuantityExpr` variant forces every consumer to
+    /// reconsider X-dependence rather than silently defaulting to false.
+    pub fn contains_x(&self) -> bool {
+        match self {
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name },
+            } => name == "X",
+            QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::UpTo { max: inner }
+            | QuantityExpr::Power {
+                exponent: inner, ..
+            } => inner.contains_x(),
+            QuantityExpr::Sum { exprs } => exprs.iter().any(QuantityExpr::contains_x),
+            QuantityExpr::Difference { left, right } => left.contains_x() || right.contains_x(),
+            QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
+        }
+    }
+
     /// Construct an `UpTo { max }` expression, debug-asserting the
     /// non-nesting invariant. Always use this rather than the raw struct
     /// literal.
