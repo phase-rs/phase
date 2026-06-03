@@ -249,11 +249,17 @@ export interface ResolveGuestOptions {
    */
   timeoutMs?: number;
   reservationToken?: string | null;
+  /**
+   * Visible name for the joining guest. The broker rejects a blank
+   * `display_name` on `JoinGameWithPassword` (it uses the required-label
+   * validator, unlike the lenient `LookupJoinTarget` path), so this must be
+   * non-blank or the frame is silently dropped and the resolve times out.
+   */
+  displayName?: string | null;
 }
 
 export interface LookupJoinTargetOptions extends ResolveGuestOptions {
   reserve?: boolean;
-  displayName?: string | null;
   releaseReservationToken?: string | null;
 }
 
@@ -372,9 +378,11 @@ export function resolveGuestOver(
           game_code: code,
           // Guest-path resolve is deck-less: the broker does not need a
           // deck to hand back PeerInfo. Deck submission happens over the
-          // P2P channel once the guest has dialed the host.
+          // P2P channel once the guest has dialed the host. The display
+          // name, however, must be non-blank — the broker validates it with
+          // the required-label rule and silently drops the frame otherwise.
           deck: { main_deck: [], sideboard: [], commander: [] },
-          display_name: "",
+          display_name: opts.displayName ?? "",
           password: password ?? null,
           reservation_token: opts.reservationToken ?? null,
         },

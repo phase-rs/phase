@@ -27,6 +27,7 @@ import { flashStartingPlayerContest } from "../game/diceContest.ts";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
 import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
 import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
+import { DebugLibraryViewer } from "../components/chrome/DebugLibraryViewer.tsx";
 import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
 import { BlockRequirementBadges } from "../components/combat/BlockRequirementBadges.tsx";
@@ -1347,6 +1348,7 @@ function GamePageContent({
       )}
 
       <DebugCardContextMenu />
+      <DebugLibraryViewer />
 
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay containerRef={containerRef} />
@@ -1852,8 +1854,8 @@ function MulliganDecisionPrompt({
         className="modal-card-area flex min-h-0 flex-1 items-center justify-center"
         style={
           {
-            "--card-w": "clamp(100px, 14vw, 180px)",
-            "--card-h": "clamp(140px, 19.6vw, 252px)",
+            "--card-w": "clamp(140px, 18vw, 257px)",
+            "--card-h": "clamp(196px, 25.2vw, 360px)",
           } as React.CSSProperties
         }
       >
@@ -1882,7 +1884,7 @@ function MulliganDecisionPrompt({
                 <CardImage
                   cardName={obj.name}
                   size="normal"
-                  className="h-[clamp(160px,28vh,252px)] w-[clamp(114px,20vh,180px)]"
+                  className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                 />
               </motion.div>
             ))}
@@ -1945,8 +1947,8 @@ function CompanionRevealPrompt({
         className="modal-card-area flex min-h-0 flex-1 items-center justify-center"
         style={
           {
-            "--card-w": "clamp(100px, 14vw, 180px)",
-            "--card-h": "clamp(140px, 19.6vw, 252px)",
+            "--card-w": "clamp(140px, 18vw, 257px)",
+            "--card-h": "clamp(196px, 25.2vw, 360px)",
           } as React.CSSProperties
         }
       >
@@ -1975,7 +1977,7 @@ function CompanionRevealPrompt({
                 <CardImage
                   cardName={name}
                   size="normal"
-                  className="h-[clamp(160px,28vh,252px)] w-[clamp(114px,20vh,180px)]"
+                  className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                 />
               </motion.div>
             ))}
@@ -2064,8 +2066,8 @@ function MulliganBottomCardsPrompt({
         className="modal-card-area flex min-h-0 flex-1 items-center justify-center"
         style={
           {
-            "--card-w": "clamp(100px, 14vw, 180px)",
-            "--card-h": "clamp(140px, 19.6vw, 252px)",
+            "--card-w": "clamp(140px, 18vw, 257px)",
+            "--card-h": "clamp(196px, 25.2vw, 360px)",
           } as React.CSSProperties
         }
       >
@@ -2098,7 +2100,7 @@ function MulliganBottomCardsPrompt({
                   <CardImage
                     cardName={obj.name}
                     size="normal"
-                    className="h-[clamp(160px,28vh,252px)] w-[clamp(114px,20vh,180px)]"
+                    className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                   />
                 </motion.button>
               );

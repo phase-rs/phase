@@ -1,7 +1,7 @@
 use engine::game::combat;
-use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;
 use engine::game::mana_abilities;
+use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
 use engine::types::ability::{
     AbilityCost, Effect, QuantityExpr, ReplacementMode, TargetFilter, TargetRef,
@@ -163,17 +163,24 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
             o.controller == ctx.ai_player && o.card_types.core_types.contains(&CoreType::Creature)
         })
     });
-    // CR 702.11b: Hexproof prevents targeting by opponents' spells/abilities.
-    // CR 702.18a: Shroud prevents targeting by any spell/ability.
-    // TODO: HexproofFrom — requires source color check for accurate filtering
-    let has_targetable_opponent_creature = ctx.state.battlefield.iter().any(|&id| {
-        ctx.state.objects.get(&id).is_some_and(|o| {
-            o.controller != ctx.ai_player
-                && o.card_types.core_types.contains(&CoreType::Creature)
-                && !o.has_keyword(&Keyword::Hexproof)
-                && !o.has_keyword(&Keyword::Shroud)
-        })
-    });
+    // Targeting legality (CR 702.11/702.16/702.18) is owned by the engine.
+    // Ask `find_legal_targets` with the spell's own creature-only harmful
+    // filter so Shroud, Hexproof-vs-opponents, "Hexproof from [quality]",
+    // Protection, and ignore-hexproof effects are all honored — a hand-rolled
+    // `!Hexproof && !Shroud` check would whiff on Protection / HexproofFrom and
+    // mis-score a fizzling removal spell as castable.
+    let has_targetable_opponent_creature = if effects.is_empty() {
+        harmful_aura_has_opponent_creature_target(ctx)
+    } else {
+        effects
+            .iter()
+            .filter(|effect| {
+                !matches!(effect, Effect::Bounce { .. })
+                    && matches!(effect_polarity(effect), EffectPolarity::Harmful)
+                    && targets_creatures_only(effect)
+            })
+            .any(|effect| harmful_effect_has_opponent_creature_target(ctx, effect))
+    };
 
     let mut penalty = 0.0;
 
@@ -277,15 +284,16 @@ fn etb_trigger_has_valid_targets(
         let Some(execute) = &trigger.execute else {
             continue;
         };
-        // Walk the trigger's effect chain looking for targeted effects
+        // Walk the trigger's effect chain looking for targeted effects.
+        // CR 702.11/702.16/702.18 + CR 608.2b: targeting legality (and the
+        // correct zone enumeration for the filter) is owned by the engine, so
+        // ask `find_legal_targets` rather than re-deriving candidate zones and
+        // applying a property-only `matches_target_filter` that ignores
+        // Shroud/Hexproof/Protection.
         let mut node = Some(execute.as_ref());
         while let Some(def) = node {
             if let Some(filter) = extract_target_filter(&def.effect) {
-                let filter_ctx = FilterContext::from_source(ctx.state, source_id);
-                let has_match = target_candidate_ids(ctx.state, &def.effect, filter)
-                    .into_iter()
-                    .any(|obj_id| matches_target_filter(ctx.state, obj_id, filter, &filter_ctx));
-                if has_match {
+                if !find_legal_targets(ctx.state, filter, ctx.ai_player, source_id).is_empty() {
                     return true;
                 }
             }
@@ -294,54 +302,6 @@ fn etb_trigger_has_valid_targets(
     }
 
     false
-}
-
-fn target_candidate_ids(
-    state: &GameState,
-    effect: &Effect,
-    filter: &TargetFilter,
-) -> Vec<ObjectId> {
-    let mut zones = filter.extract_zones();
-    if zones.is_empty() {
-        if let Effect::ChangeZone {
-            origin: Some(origin),
-            ..
-        } = effect
-        {
-            zones.push(*origin);
-        } else {
-            zones.push(Zone::Battlefield);
-        }
-    }
-
-    let mut ids = Vec::new();
-    for zone in zones {
-        match zone {
-            Zone::Battlefield => ids.extend(state.battlefield.iter().copied()),
-            Zone::Exile => ids.extend(state.exile.iter().copied()),
-            Zone::Command => ids.extend(state.command_zone.iter().copied()),
-            Zone::Graveyard => ids.extend(
-                state
-                    .players
-                    .iter()
-                    .flat_map(|player| player.graveyard.iter().copied()),
-            ),
-            Zone::Hand => ids.extend(
-                state
-                    .players
-                    .iter()
-                    .flat_map(|player| player.hand.iter().copied()),
-            ),
-            Zone::Library => ids.extend(
-                state
-                    .players
-                    .iter()
-                    .flat_map(|player| player.library.iter().copied()),
-            ),
-            Zone::Stack => ids.extend(state.stack.iter().map(|entry| entry.source_id)),
-        }
-    }
-    ids
 }
 
 fn has_opponent_bounce_target(ctx: &PolicyContext<'_>, effects: &[&Effect]) -> bool {
@@ -356,15 +316,39 @@ fn has_opponent_bounce_target(ctx: &PolicyContext<'_>, effects: &[&Effect]) -> b
             Effect::Bounce { target, .. } => Some(target),
             _ => None,
         })
-        .any(|target| {
-            let filter_ctx = FilterContext::from_source(ctx.state, source.id);
-            ctx.state.battlefield.iter().any(|&object_id| {
-                ctx.state.objects.get(&object_id).is_some_and(|object| {
-                    object.controller != ctx.ai_player
-                        && matches_target_filter(ctx.state, object_id, target, &filter_ctx)
-                })
-            })
+        // CR 702.11/702.16/702.18: defer targeting legality to the engine.
+        // `matches_target_filter` is a property filter only and would not
+        // reject Shroud/Hexproof/Protection targets, letting a bounce that can
+        // only legally hit our own creatures look like a clean opponent line.
+        .any(|target| ctx.has_legal_opponent_creature_target(target, source.id, |_| true))
+}
+
+fn harmful_aura_has_opponent_creature_target(ctx: &PolicyContext<'_>) -> bool {
+    let Some(source) = ctx.source_object() else {
+        return true;
+    };
+    source
+        .keywords
+        .iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Enchant(filter) => Some(filter),
+            _ => None,
         })
+        .is_none_or(|filter| ctx.has_legal_opponent_creature_target(filter, source.id, |_| true))
+}
+
+/// Resolve the harmful creature-only effect's target filter and check, via the
+/// engine, whether a legal opponent-creature target exists. Returns `true` when
+/// the effect carries no usable filter (fail-open: don't over-penalize an
+/// effect we can't analyze).
+fn harmful_effect_has_opponent_creature_target(ctx: &PolicyContext<'_>, effect: &Effect) -> bool {
+    let Some(filter) = extract_target_filter(effect) else {
+        return true;
+    };
+    let Some(source) = ctx.source_object() else {
+        return true;
+    };
+    ctx.has_legal_opponent_creature_target(filter, source.id, |_| true)
 }
 
 fn is_hostile_or_neutral_bounce(effect: &&Effect) -> bool {
@@ -2384,6 +2368,22 @@ mod tests {
         );
     }
 
+    /// Regression: harmful Auras have no active effects, so pre-cast targetability
+    /// must come from the Enchant filter rather than the empty effect list.
+    #[test]
+    fn pre_cast_allows_harmful_aura_with_legal_opponent_creature() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let aura_id = add_harmful_aura(&mut state, PlayerId(0), "Pacifism");
+
+        let score = pre_cast_score_for_spell(&state, aura_id);
+        assert!(
+            score > -5.0,
+            "Casting harmful aura with a legal opponent target should not get the no-target \
+             penalty, got {score}"
+        );
+    }
+
     /// Helper to create a target selection context for an aura (no active effects).
     fn make_aura_target_selection_ctx(
         state: &GameState,
@@ -2689,6 +2689,7 @@ mod tests {
             defending_player: PlayerId(1),
             attack_target: engine::game::combat::AttackTarget::Player(PlayerId(1)),
             blocked: false,
+            band_id: None,
         });
         state.combat = Some(combat);
 
@@ -3352,6 +3353,118 @@ mod tests {
         assert!(
             lowest_score > other_score,
             "Reflected damage should prefer the lowest-life opponent: lowest={lowest_score}, other={other_score}"
+        );
+    }
+
+    /// Build a white creature-only Destroy spell ("Murder"-style) in the AI's
+    /// hand so `score_pre_cast` analyzes a harmful, creature-targeting cast.
+    fn white_creature_destroy_spell(state: &mut GameState) -> ObjectId {
+        use engine::types::mana::ManaColor;
+
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Murder".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Instant);
+        // CR 105.2 + CR 702.16b: the spell's color is the quality a target's
+        // "protection from white" checks against.
+        obj.color = vec![ManaColor::White];
+        obj.abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        )]);
+        id
+    }
+
+    fn pre_cast_score_for_spell(state: &GameState, spell_id: ObjectId) -> f64 {
+        let config = AiConfig::default();
+        let (decision, candidate) = make_cast_spell_decision(state, spell_id);
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+        AntiSelfHarmPolicy.score(&ctx)
+    }
+
+    /// CR 702.16b: An opponent creature with protection from white is not a
+    /// legal target for a white removal spell, so casting it would fizzle.
+    /// The engine-backed legality check must surface the no-target penalty —
+    /// the old hand-rolled `!Hexproof && !Shroud` check ignored Protection.
+    #[test]
+    fn pre_cast_penalizes_white_removal_into_protection_from_white() {
+        use engine::types::keywords::{Keyword, ProtectionTarget};
+        use engine::types::mana::ManaColor;
+
+        let mut state = make_state();
+        let opp = add_creature(&mut state, PlayerId(1), "Guardian", 2, 2);
+        state
+            .objects
+            .get_mut(&opp)
+            .unwrap()
+            .keywords
+            .push(Keyword::Protection(ProtectionTarget::Color(
+                ManaColor::White,
+            )));
+        let spell_id = white_creature_destroy_spell(&mut state);
+
+        let score = pre_cast_score_for_spell(&state, spell_id);
+        assert!(
+            score <= -8.0,
+            "White removal with only a protection-from-white target should be penalized, got {score}"
+        );
+    }
+
+    /// CR 702.11d: An opponent creature with "hexproof from white" can't be
+    /// targeted by the white removal spell either.
+    #[test]
+    fn pre_cast_penalizes_white_removal_into_hexproof_from_white() {
+        use engine::types::keywords::{HexproofFilter, Keyword};
+        use engine::types::mana::ManaColor;
+
+        let mut state = make_state();
+        let opp = add_creature(&mut state, PlayerId(1), "Warden", 2, 2);
+        state
+            .objects
+            .get_mut(&opp)
+            .unwrap()
+            .keywords
+            .push(Keyword::HexproofFrom(HexproofFilter::Color(
+                ManaColor::White,
+            )));
+        let spell_id = white_creature_destroy_spell(&mut state);
+
+        let score = pre_cast_score_for_spell(&state, spell_id);
+        assert!(
+            score <= -8.0,
+            "White removal with only a hexproof-from-white target should be penalized, got {score}"
+        );
+    }
+
+    /// Control: the same opponent creature with no protection IS a legal
+    /// target, so no no-target penalty applies.
+    #[test]
+    fn pre_cast_allows_white_removal_into_unprotected_creature() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let spell_id = white_creature_destroy_spell(&mut state);
+
+        let score = pre_cast_score_for_spell(&state, spell_id);
+        assert!(
+            score > -8.0,
+            "White removal with a legal unprotected target should not be penalized, got {score}"
         );
     }
 }

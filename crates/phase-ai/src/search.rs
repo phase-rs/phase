@@ -624,6 +624,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::ChooseDungeonRoom { options, .. } => options
             .first()
             .map(|&room_index| GameAction::ChooseDungeonRoom { room_index }),
+        WaitingFor::SpecializeColor { options, .. } => options
+            .first()
+            .copied()
+            .map(|color| GameAction::ChooseSpecializeColor { color }),
 
         // Paradigm: pass.
         WaitingFor::CastOffer {
@@ -2441,6 +2445,7 @@ mod tests {
                 defending_player: PlayerId(0),
                 attack_target: AttackTarget::Player(PlayerId(0)),
                 blocked: false,
+                band_id: None,
             }],
             blocker_assignments: HashMap::new(),
             blocker_to_attacker: HashMap::new(),

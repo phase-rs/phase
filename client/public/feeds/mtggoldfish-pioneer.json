@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-06-02T00:00:00Z",
+  "updated": "2026-06-03T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -410,6 +410,140 @@
       ]
     },
     {
+      "name": "Mono-Red Prowess",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 3,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 1,
+          "name": "Den of the Bugbear"
+        },
+        {
+          "count": 4,
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 4,
+          "name": "Kumano Faces Kakkazan"
+        },
+        {
+          "count": 3,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Monstrous Rage"
+        },
+        {
+          "count": 5,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 2,
+          "name": "Ramunap Ruins"
+        },
+        {
+          "count": 4,
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 2,
+          "name": "Robber of the Rich"
+        },
+        {
+          "count": 1,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 1,
+          "name": "Sokenzan, Crucible of Defiance"
+        },
+        {
+          "count": 3,
+          "name": "Soul-Scar Mage"
+        },
+        {
+          "count": 1,
+          "name": "Sunspine Lynx"
+        },
+        {
+          "count": 1,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 3,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Mutavault"
+        },
+        {
+          "count": 4,
+          "name": "Screaming Nemesis"
+        },
+        {
+          "count": 2,
+          "name": "Sunspine Lynx"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Flowstone Infusion"
+        },
+        {
+          "count": 1,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 4,
+          "name": "Magebane Lizard"
+        },
+        {
+          "count": 3,
+          "name": "Scorching Shot"
+        },
+        {
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 1,
+          "name": "The Legend of Roku"
+        },
+        {
+          "count": 1,
+          "name": "Sunspine Lynx"
+        }
+      ]
+    },
+    {
       "name": "Azorius Control",
       "author": "MTGGoldfish",
       "colors": [
@@ -565,147 +699,13 @@
       ]
     },
     {
-      "name": "Mono-Red Prowess",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 3,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 1,
-          "name": "Den of the Bugbear"
-        },
-        {
-          "count": 4,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 4,
-          "name": "Kumano Faces Kakkazan"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Monstrous Rage"
-        },
-        {
-          "count": 5,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 2,
-          "name": "Ramunap Ruins"
-        },
-        {
-          "count": 4,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 2,
-          "name": "Robber of the Rich"
-        },
-        {
-          "count": 1,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 1,
-          "name": "Sokenzan, Crucible of Defiance"
-        },
-        {
-          "count": 3,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 1,
-          "name": "Sunspine Lynx"
-        },
-        {
-          "count": 1,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 2,
-          "name": "Mountain"
-        },
-        {
-          "count": 2,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Mutavault"
-        },
-        {
-          "count": 4,
-          "name": "Screaming Nemesis"
-        },
-        {
-          "count": 2,
-          "name": "Sunspine Lynx"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 3,
-          "name": "Flowstone Infusion"
-        },
-        {
-          "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 4,
-          "name": "Magebane Lizard"
-        },
-        {
-          "count": 3,
-          "name": "Scorching Shot"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 1,
-          "name": "The Legend of Roku"
-        },
-        {
-          "count": 1,
-          "name": "Sunspine Lynx"
-        }
-      ]
-    },
-    {
       "name": "Niv to Light",
       "author": "MTGGoldfish",
       "colors": [
         "B",
+        "R",
         "U",
         "G",
-        "R",
         "W"
       ],
       "tags": [
@@ -1394,6 +1394,7 @@
       "name": "Dimir Aggro",
       "author": "MTGGoldfish",
       "colors": [
+        "B",
         "U"
       ],
       "tags": [
@@ -1409,7 +1410,7 @@
           "name": "Floodpits Drowner"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Multiversal Passage"
         },
         {
@@ -1418,7 +1419,7 @@
         },
         {
           "count": 4,
-          "name": "Gloomlake Verge"
+          "name": "Thoughtseize"
         },
         {
           "count": 1,
@@ -1429,32 +1430,20 @@
           "name": "Otawara, Soaring City"
         },
         {
-          "count": 1,
+          "count": 4,
           "name": "Mutavault"
         },
         {
           "count": 1,
-          "name": "Urborg, Tomb of Yawgmoth"
+          "name": "Swamp"
         },
         {
           "count": 4,
           "name": "Darkslick Shores"
         },
         {
-          "count": 4,
-          "name": "Watery Grave"
-        },
-        {
-          "count": 4,
-          "name": "Kaito, Bane of Nightmares"
-        },
-        {
-          "count": 4,
-          "name": "Fatal Push"
-        },
-        {
-          "count": 3,
-          "name": "Mutavault"
+          "count": 2,
+          "name": "Go for the Throat"
         },
         {
           "count": 2,
@@ -1462,7 +1451,11 @@
         },
         {
           "count": 4,
-          "name": "Thoughtseize"
+          "name": "Gloomlake Verge"
+        },
+        {
+          "count": 4,
+          "name": "Kaito, Bane of Nightmares"
         },
         {
           "count": 2,
@@ -1473,34 +1466,8 @@
           "name": "Brazen Borrower"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Mockingbird"
-        },
-        {
-          "count": 2,
-          "name": "Go for the Throat"
-        },
-        {
-          "count": 2,
-          "name": "Cecil, Dark Knight"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Ray of Enfeeblement"
-        },
-        {
-          "count": 2,
-          "name": "Anoint with Affliction"
-        },
-        {
-          "count": 1,
-          "name": "Qarsi Revenant"
-        },
-        {
-          "count": 2,
-          "name": "Tishana's Tidebinder"
         },
         {
           "count": 2,
@@ -1508,7 +1475,33 @@
         },
         {
           "count": 4,
-          "name": "Leyline of the Void"
+          "name": "Watery Grave"
+        },
+        {
+          "count": 4,
+          "name": "Fatal Push"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Anoint with Affliction"
+        },
+        {
+          "count": 2,
+          "name": "Graveyard Trespasser"
+        },
+        {
+          "count": 1,
+          "name": "Languish"
+        },
+        {
+          "count": 2,
+          "name": "Duress"
+        },
+        {
+          "count": 1,
+          "name": "Gix's Command"
         },
         {
           "count": 2,
@@ -1517,6 +1510,14 @@
         {
           "count": 1,
           "name": "Spell Pierce"
+        },
+        {
+          "count": 3,
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 1,
+          "name": "Path of Peril"
         }
       ]
     }

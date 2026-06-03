@@ -31,7 +31,6 @@ use std::sync::OnceLock;
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::actions::GameAction;
 use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -78,25 +77,19 @@ fn urzas_tower_with_mine_and_power_plant_produces_three_colorless() {
 
     let mut runner = scenario.build();
 
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: tower_id,
-            ability_index: 0,
-        })
-        .expect("activating Urza's Tower mana ability must succeed");
+    // CR 605.3b: a mana ability resolves immediately on activation (no stack),
+    // so the outcome reads the resulting pool directly.
+    let outcome = runner.activate(tower_id, 0).resolve();
 
-    let pool = &runner.state().players[P0.0 as usize].mana_pool;
     assert_eq!(
-        pool.count_color(ManaType::Colorless),
+        outcome.mana_pool_color(P0, ManaType::Colorless),
         3,
         "Urza's Tower with Urza's Mine + Urza's Power Plant must produce 3 colorless \
-         (1 base + 2 delta from satisfied sub-ability); pool = {:?}",
-        pool.mana,
+         (1 base + 2 delta from satisfied sub-ability)",
     );
     assert_eq!(
-        pool.total(),
+        outcome.mana_pool_total(P0),
         3,
-        "no other mana types must be produced; pool = {:?}",
-        pool.mana,
+        "no other mana types must be produced",
     );
 }

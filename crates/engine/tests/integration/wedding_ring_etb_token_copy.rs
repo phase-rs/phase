@@ -26,11 +26,8 @@
 //!   - CR 603.4: an intervening-if condition is re-checked when the triggered
 //!     ability resolves.
 
-use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
-use engine::types::actions::GameAction;
+use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
 use engine::types::card_type::CoreType;
-use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -54,50 +51,14 @@ fn artifact_in_hand(scenario: &mut GameScenario, name: &str, oracle: &str) -> Ob
 }
 
 /// Cast the artifact (P0's hand) through the real pipeline: the spell resolves,
-/// the ETB trigger fires, the opponent is chosen (auto-selected — P1 is the
-/// only opponent), and the trigger resolves. Returns the runner.
-fn cast_and_resolve(
-    scenario: GameScenario,
-    artifact: ObjectId,
-) -> engine::game::scenario::GameRunner {
+/// the ETB trigger fires, the opponent (P1) is chosen as the token creator, and
+/// the trigger resolves. Returns the cast outcome.
+fn cast_and_resolve(scenario: GameScenario, artifact: ObjectId) -> CastOutcome {
     let mut runner = scenario.build();
-    let card_id = runner.state().objects[&artifact].card_id;
-
-    runner
-        .act(GameAction::CastSpell {
-            object_id: artifact,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting a 0-cost artifact should succeed");
-
-    for _ in 0..40 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                runner
-                    .act(GameAction::SelectTargets {
-                        targets: vec![TargetRef::Player(P1)],
-                    })
-                    .expect("select the opponent (P1) as the token creator");
-            }
-            WaitingFor::Priority { .. } => {
-                if runner.state().stack.is_empty() {
-                    if runner.act(GameAction::PassPriority).is_err() {
-                        break;
-                    }
-                    if runner.state().stack.is_empty()
-                        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
-                    {
-                        break;
-                    }
-                } else if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
-    runner
+    // The "target opponent creates a token" ETB surfaces a
+    // TriggerTargetSelection slot during resolution; declaring P1 routes the
+    // copy token under the opponent (CR 109.4).
+    runner.cast(artifact).target_player(P1).resolve()
 }
 
 /// Core defect-1 fix: casting Wedding Ring fires the ETB trigger and the copy
@@ -109,10 +70,10 @@ fn wedding_ring_etb_token_copy_is_opponent_controlled() {
     scenario.at_phase(Phase::PreCombatMain);
     let wedding_ring = artifact_in_hand(&mut scenario, "Wedding Ring", WEDDING_RING_ETB);
 
-    let runner = cast_and_resolve(scenario, wedding_ring);
+    let outcome = cast_and_resolve(scenario, wedding_ring);
 
     // (a) Wedding Ring itself resolved onto the battlefield under P0.
-    let ring = runner
+    let ring = outcome
         .state()
         .objects
         .get(&wedding_ring)
@@ -121,7 +82,7 @@ fn wedding_ring_etb_token_copy_is_opponent_controlled() {
     assert_eq!(ring.controller, P0);
 
     // (b)+(c) Exactly one copy token, a copy of Wedding Ring, opponent-controlled.
-    let copy_tokens: Vec<_> = runner
+    let copy_tokens: Vec<_> = outcome
         .state()
         .objects
         .values()
@@ -152,10 +113,7 @@ fn wedding_ring_etb_token_copy_is_opponent_controlled() {
     // (d) The stack is empty afterward — regression guard for the reported
     //     "stack kept looping repeatedly" symptom. The copy token is not cast,
     //     so its own `WasCast`-gated ETB trigger does not fire.
-    assert!(
-        runner.state().stack.is_empty(),
-        "the ETB trigger must resolve once and leave the stack empty"
-    );
+    outcome.assert_stack_size(0);
 }
 
 /// Generalization guard for defect 1: any "target opponent creates a token
@@ -171,9 +129,9 @@ fn target_opponent_copy_token_generalizes_beyond_wedding_ring() {
          token that's a copy of it.";
     let synth = artifact_in_hand(&mut scenario, "Synthetic Copier", SYNTH_ETB);
 
-    let runner = cast_and_resolve(scenario, synth);
+    let outcome = cast_and_resolve(scenario, synth);
 
-    let copy_tokens: Vec<_> = runner
+    let copy_tokens: Vec<_> = outcome
         .state()
         .objects
         .values()
@@ -186,5 +144,5 @@ fn target_opponent_copy_token_generalizes_beyond_wedding_ring() {
         "the synthetic card's copy token must also be opponent-controlled — \
          the fix is a class fix, not a Wedding-Ring special case"
     );
-    assert!(runner.state().stack.is_empty());
+    outcome.assert_stack_size(0);
 }

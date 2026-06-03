@@ -438,6 +438,11 @@ pub enum GameEvent {
     Transformed {
         object_id: ObjectId,
     },
+    /// Digital-only Specialize: a permanent became a color-specific specialized face.
+    Specialized {
+        object_id: ObjectId,
+        color: crate::types::mana::ManaColor,
+    },
     DayNightChanged {
         new_state: String,
     },

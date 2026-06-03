@@ -12,7 +12,8 @@ Review for gaps: things that are missing or wrong. Do not spend findings on styl
 1. Identify the changed surface from the diff, commit, or named files.
 2. Classify the surface area: engine logic, parser, frontend/UI, multiplayer/transport, AI heuristics, deck/format/feeds, build/CI/release, or docs.
 3. Apply only the relevant lenses below.
-4. Report findings only. Silence means LGTM.
+4. If the scope is a PR, fetch existing bot/human review comments (Gemini, CodeRabbit, reviewers) and confirm-or-refute each against the current head with code evidence. Fold confirmed findings into your own. Never review in a vacuum — silently omitting a finding another reviewer already raised, or returning a verdict less severe than an open, unrefuted finding from another reviewer, is itself a defect.
+5. Report findings only. Silence means LGTM.
 
 Skip checks CI already enforces:
 
@@ -23,12 +24,17 @@ Skip checks CI already enforces:
 
 ## Universal Lenses
 
+Two gates lead every review; apply them before the rest.
+
+1. **Correct seam / location:** Is the change at the architecturally correct location — the layer/module/function the codebase's design says owns this responsibility — or a symptom-patch at the wrong seam that merely makes a test pass? A wrong-location fix is technical debt even when it works: it ossifies a dead or duplicate path and leaves the real seam (and the rest of the card class) untouched. This is the highest-priority check; a wrong seam is disqualifying no matter how clean the code looks. Name the correct seam in the finding.
+2. **Most idiomatic change at the seam:** Given the right seam, is this the implementation a principal engineer steeped in this repository would write — the established building block reused rather than re-implemented, an existing typed enum parameterized rather than a new `bool` or sibling variant, `nom` combinators composed rather than string dispatch? "Works and is in the right place" is not enough when a cleaner house idiom exists; a correct-but-unidiomatic change is a finding, not a style nit. Three structural checks make this concrete: a *reference* enum (`HandSize`, `LifeTotal`) must not carry a `Fixed`/constant payload that belongs one level up in an expression wrapper (mixed abstraction layers); a new sibling on an `X`/`OpponentX`/`TargetX` cluster should be one parameterized variant — but only when the axis stays within a single CR rule section (don't unify across sections, e.g. life CR 119 vs power/toughness CR 208/209); and before flagging or accepting any new enum variant, grep `data/engine-inventory.json` to confirm it doesn't already exist and to surface the cluster smell.
+
 - **Class vs single case:** Does the change cover a reusable class? Name at least three examples in that class. If there is only one, flag a special-case smell.
 - **Sibling coverage:** If one site in a class changed, name siblings that needed the same treatment and verify they were handled or intentionally unaffected.
 - **Test adequacy:** Ensure tests exercise the failure path and the building block, not only one card or a constructor shortcut that bypasses production wiring.
 - **Fixture path-divergence:** A test can drive the *real* production entry point and still miss the bug if its fixtures are shaped so simply that they take a *different internal branch* than production inputs. Technique: trace the fix's entry through its first input-shape dispatches — `is_none()`/`is_some()`, `is_empty()`/`len()`, variant `match`, and "has-X" guards (e.g. `if ability_def.is_none() { return fast_path() }`). For each such branch the fix can reach, map every test fixture to the arm it triggers, and flag any production-reachable arm with **no** fixture. Smell: every fixture is degenerate in the same way (no ability/effect, no targets, empty or single-element collection, default/`None` field), so only the trivial shortcut arm runs while the arm real data takes ships untested. Name the unexercised arm and the minimal fixture change that would reach it.
 - **Edge cases:** Check empty inputs, multi-target/modal/repeat interactions, simultaneous events, eliminated players, `im::Vector::truncate(n)` bounds, and async races when relevant.
-- **Idiomatic code:** Flag new bools that should be typed enums, wildcard match arms that should be exhaustive, verbatim Oracle strings in parser logic, `as any`, fresh `@ts-expect-error`, and unchecked casts.
+- **Idiomatic code:** Flag new bools that should be typed enums, wildcard match arms that should be exhaustive, verbatim Oracle strings in parser logic, hand-rolled `starts_with` + index slicing that should be `strip_prefix`/`strip_suffix`/`TextPair`, `as any`, fresh `@ts-expect-error`, and unchecked casts.
 
 ## Surface-Specific Lenses
 
@@ -43,7 +49,8 @@ Skip checks CI already enforces:
 ### Parser
 
 - Reject verbatim full-string Oracle matches and ad hoc dispatch.
-- Verify plural, possessive, opponent, non-X, another, and sibling phrase variants for new parser arms.
+- Verify plural, possessive, opponent, non-X, another, and sibling phrase variants for new parser arms — including article/quantity word-forms (`a`/`an`/`one`/`two`/`N`/`X`/`each`) when dispatch splits on a count or article boundary.
+- When one parser arm rejects a value to defer to another (e.g. a multi-count arm returns `None` for count==1 so the single-count arm handles it), trace the receiving arm and prove it actually accepts that form — do not trust the comment. A deferral to a path that doesn't handle the form silently drops the card to Unimplemented (precedent: "roll one d6" — the multi-die arm rejected count==1 and the single-die arm only matched `"a "`/`"an "`, so the word "one" parsed nowhere despite a comment claiming otherwise).
 - Prefer composable `nom` axes over cartesian lists of full `tag()` strings.
 
 ### Frontend / UI
@@ -78,5 +85,7 @@ Use this exact finding shape:
 ```text
 **[HIGH/MED/LOW]** <short summary>. Evidence: <path:line>. Why it matters: <one sentence>. Suggested fix: <one line>.
 ```
+
+Severity calibration: a latent bug — one not reachable today because a guard or parser blocks it — is still a finding. Rate it by what happens when the form is reached or the guard removed, not by today's reachability: if it then produces a wrong result for a card-class the feature appears to cover, it is at least MED, and "unreachable today" belongs in the evidence, not as a reason to downgrade to LOW. A feature that ships silently incorrect for a sub-class it looks like it handles (e.g. a multi-die roll that overwrites the stored result each iteration instead of supporting the aggregate) is a MED the maintainer must see — never a NIT.
 
 Findings first. No praise, no diff recap.
