@@ -3006,10 +3006,32 @@ pub(crate) fn parse_mana_value_suffix(
     // ("that damage"), and game-state counts ("the number of lands you
     // control") share the same quantity grammar as CDA/static parsing.
     if let Ok((after_equal_to, _)) = tag::<_, _, OracleError<'_>>("equal to ").parse(rest) {
-        let (after, phrase) = take_till::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.')
-            .parse(after_equal_to)
-            .ok()?;
-        let phrase = phrase.trim();
+        let (after_punct, raw_phrase) =
+            take_till::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.')
+                .parse(after_equal_to)
+                .ok()?;
+        // CR 400.1 + CR 108.3: A trailing zone clause ("from your hand",
+        // "in your graveyard", …) must NOT be swallowed into the dynamic
+        // quantity phrase. Hands/graveyards/libraries are per-player zones
+        // (CR 400.1) keyed by owner (CR 108.3), so the clause carries the
+        // owner/controller scope the caller's `parse_zone_suffix` pass (see
+        // `parse_type_phrase_with_ctx`) attaches as
+        // `FilterProp::Owned`/`controller`. Aether Vial's "with
+        // mana value equal to the number of charge counters on this artifact
+        // from your hand" otherwise parsed the whole tail as one quantity,
+        // which failed and dropped the "from your hand" zone scope entirely —
+        // letting the resolver collect cards from every player's hand
+        // (issue #1980). Mirror the `try_dynamic` branch above: cut the phrase
+        // at the first word-boundary zone clause recognized by the
+        // `parse_zone_suffix` building block, leaving the clause for the caller.
+        let zone_split = (0..=raw_phrase.len()).find(|&offset| {
+            (offset == 0 || raw_phrase.as_bytes().get(offset - 1) == Some(&b' '))
+                && parse_zone_suffix(&raw_phrase[offset..]).is_some()
+        });
+        let (phrase, after) = match zone_split {
+            Some(offset) => (raw_phrase[..offset].trim(), &after_equal_to[offset..]),
+            None => (raw_phrase.trim(), after_punct),
+        };
         let value = crate::parser::oracle_quantity::parse_cda_quantity(phrase).or_else(|| {
             parse_mana_value_reference_expr(phrase)
                 .and_then(|(value, after)| after.trim().is_empty().then_some(value))
@@ -5924,6 +5946,49 @@ mod tests {
                     },
                 },
             }]))
+        );
+    }
+
+    /// CR 400.1 + CR 108.3 — Aether Vial class: a dynamic
+    /// "with mana value equal to <quantity>" suffix must NOT swallow a trailing
+    /// "from your hand" zone clause into the quantity phrase. The zone clause
+    /// carries the controller scope; dropping it lets the resolver collect
+    /// hand cards from every player (issue #1980). `parse_mana_value_suffix`
+    /// must cut the quantity at the zone-clause boundary so the caller's
+    /// `parse_zone_suffix` pass attaches `InZone { Hand }` + `controller: You`.
+    #[test]
+    fn dynamic_mana_value_suffix_leaves_trailing_zone_clause() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to the number of charge counters on ~ from your hand",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(typed) = f else {
+            panic!("expected typed filter, got {f:?}");
+        };
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::You),
+            "\"from your hand\" must scope to the controller's hand, got {:?}",
+            typed.controller
+        );
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone: Zone::Hand })),
+            "filter must carry an InZone{{Hand}} property, got {:?}",
+            typed.properties
+        );
+        assert!(
+            typed.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    ..
+                }
+            )),
+            "the dynamic mana-value bound must still be parsed, got {:?}",
+            typed.properties
         );
     }
 
