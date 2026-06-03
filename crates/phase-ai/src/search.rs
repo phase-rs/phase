@@ -692,18 +692,27 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             targets: Vec::new(),
         }),
 
-        // Copy retarget: keep current targets when present; freshly cast
-        // prepare/paradigm copies start empty, so choose the first legal target.
-        WaitingFor::CopyRetarget { target_slots, .. } => {
-            let targets: Option<Vec<_>> = target_slots
-                .iter()
-                .map(|slot| {
-                    slot.current
-                        .clone()
-                        .or_else(|| slot.legal_alternatives.first().cloned())
-                })
-                .collect();
-            targets.map(|new_targets| GameAction::RetargetSpell { new_targets })
+        // Copy retarget: keep copied targets when all slots already have a
+        // current value; freshly cast prepare/paradigm copies start empty, so
+        // choose the first legal target for the current slot.
+        WaitingFor::CopyRetarget {
+            target_slots,
+            current_slot,
+            ..
+        } => {
+            let slot = target_slots.get(*current_slot)?;
+            if target_slots.iter().all(|slot| slot.current.is_some()) {
+                Some(GameAction::KeepAllCopyTargets)
+            } else if slot.current.is_some() {
+                Some(GameAction::ChooseTarget { target: None })
+            } else {
+                slot.legal_alternatives
+                    .first()
+                    .cloned()
+                    .map(|target| GameAction::ChooseTarget {
+                        target: Some(target),
+                    })
+            }
         }
 
         // Assign combat damage: greedy lethal-to-each, mirroring the engine's
@@ -2686,6 +2695,47 @@ mod tests {
         assert!(
             matches!(action, GameAction::ChooseOption { ref choice } if choice == "foe"),
             "AI labeling opponent must pick foe, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn copy_retarget_fallback_keeps_existing_targets_with_legal_action() {
+        let mut state = make_state();
+        let original_target = TargetRef::Object(ObjectId(10));
+        state.waiting_for = WaitingFor::CopyRetarget {
+            player: PlayerId(0),
+            copy_id: ObjectId(20),
+            target_slots: vec![engine::types::game_state::CopyTargetSlot {
+                current: Some(original_target),
+                legal_alternatives: vec![TargetRef::Object(ObjectId(11))],
+            }],
+            current_slot: 0,
+        };
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(action, GameAction::KeepAllCopyTargets);
+    }
+
+    #[test]
+    fn copy_retarget_fallback_selects_first_target_for_fresh_copy_cast() {
+        let mut state = make_state();
+        let first_target = TargetRef::Object(ObjectId(10));
+        state.waiting_for = WaitingFor::CopyRetarget {
+            player: PlayerId(0),
+            copy_id: ObjectId(20),
+            target_slots: vec![engine::types::game_state::CopyTargetSlot {
+                current: None,
+                legal_alternatives: vec![first_target.clone(), TargetRef::Object(ObjectId(11))],
+            }],
+            current_slot: 0,
+        };
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(
+            action,
+            GameAction::ChooseTarget {
+                target: Some(first_target),
+            }
         );
     }
 
