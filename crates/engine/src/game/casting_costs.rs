@@ -3531,6 +3531,10 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // CR 601.2f: Consume any one-shot pending cost reductions now that the spell is finalized.
     super::casting::consume_pending_spell_cost_reduction(state, player);
 
+    // CR 601.2f: Stamp and consume one-shot "the next spell …" modifiers.
+    super::casting::apply_pending_next_spell_stack_grants(state, player, object_id);
+    super::casting::consume_pending_next_spell_modifiers(state, player, object_id);
+
     // CR 700.14: Track cumulative mana spent on spells this turn for Expend triggers.
     // Uses actual mana deducted from pool (accounts for cost reduction, convoke, etc.).
     if actual_mana_spent > 0 {

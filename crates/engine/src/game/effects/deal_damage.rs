@@ -1264,6 +1264,47 @@ mod tests {
         )
     }
 
+    /// CR 122.1c: damage to a permanent with a shield counter is prevented and
+    /// one shield counter is removed (non-combat / single-source path).
+    #[test]
+    fn shield_counter_prevents_noncombat_damage_and_is_consumed() {
+        use crate::types::counter::CounterType;
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Shielded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+
+        let ability = make_ability(3, vec![TargetRef::Object(obj_id)]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&obj_id].damage_marked, 0,
+            "shield counter prevents the damage"
+        );
+        assert_eq!(
+            state.objects[&obj_id].counters.get(&CounterType::Shield),
+            None,
+            "the shield counter is consumed"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DamagePrevented { .. })),
+            "a DamagePrevented event is emitted"
+        );
+    }
+
     #[test]
     fn deal_damage_to_creature() {
         let mut state = GameState::new_two_player(42);
