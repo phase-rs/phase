@@ -23,6 +23,87 @@ use crate::types::proposed_event::{CounterMoveStage, EtbTapState, ProposedEvent,
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
+// CR 122.1c shield-counter effects are intrinsic to counters, not stored
+// `ReplacementDefinition`s: ordinary `ShieldKind` definitions expire at cleanup,
+// while shield counters persist. Use reserved per-object candidate IDs so the
+// existing CR 616 replacement-ordering pipeline can still own choice/application.
+const SHIELD_COUNTER_DESTROY_INDEX: usize = usize::MAX;
+const SHIELD_COUNTER_DAMAGE_INDEX: usize = usize::MAX - 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShieldCounterReplacementKind {
+    Destroy,
+    Damage,
+}
+
+fn shield_counter_replacement_id(
+    object_id: ObjectId,
+    kind: ShieldCounterReplacementKind,
+) -> ReplacementId {
+    ReplacementId {
+        source: object_id,
+        index: match kind {
+            ShieldCounterReplacementKind::Destroy => SHIELD_COUNTER_DESTROY_INDEX,
+            ShieldCounterReplacementKind::Damage => SHIELD_COUNTER_DAMAGE_INDEX,
+        },
+    }
+}
+
+fn shield_counter_replacement_kind(rid: ReplacementId) -> Option<ShieldCounterReplacementKind> {
+    match rid.index {
+        SHIELD_COUNTER_DESTROY_INDEX => Some(ShieldCounterReplacementKind::Destroy),
+        SHIELD_COUNTER_DAMAGE_INDEX => Some(ShieldCounterReplacementKind::Damage),
+        _ => None,
+    }
+}
+
+pub(crate) fn is_shield_counter_damage_replacement(rid: ReplacementId) -> bool {
+    matches!(
+        shield_counter_replacement_kind(rid),
+        Some(ShieldCounterReplacementKind::Damage)
+    )
+}
+
+fn object_has_shield_counter(state: &GameState, object_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.counters.get(&CounterType::Shield))
+        .is_some_and(|count| *count > 0)
+}
+
+/// CR 122.1c: Remove one shield counter from the permanent, emitting
+/// `CounterRemoved`. Returns `true` if a shield counter was present and removed
+/// (so the caller should treat the destruction/damage as replaced/prevented),
+/// `false` otherwise. Mirrors the CR 122.1d stun-counter removal model in
+/// `turns.rs`: decrement, drop the map entry at zero, and emit one
+/// `CounterRemoved { count: 1 }` event so counter-removal triggers observe it.
+pub(crate) fn consume_shield_counter(
+    state: &mut GameState,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let Some(obj) = state.objects.get_mut(&object_id) else {
+        return false;
+    };
+    let Some(entry) = obj.counters.get_mut(&CounterType::Shield) else {
+        return false;
+    };
+    if *entry == 0 {
+        return false;
+    }
+    *entry -= 1;
+    if *entry == 0 {
+        obj.counters.remove(&CounterType::Shield);
+    }
+    events.push(GameEvent::CounterRemoved {
+        object_id,
+        counter_type: CounterType::Shield,
+        count: 1,
+    });
+    true
+}
+
 /// CR 614.1: Replacement effects modify events as they would occur.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReplacementResult {
@@ -97,8 +178,12 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                     let accept_desc = p
                         .candidates
                         .first()
-                        .and_then(|rid| state.objects.get(&rid.source))
-                        .and_then(|obj| obj.replacement_definitions.get(p.candidates[0].index))
+                        .and_then(|rid| {
+                            state
+                                .objects
+                                .get(&rid.source)
+                                .and_then(|obj| obj.replacement_definitions.get(rid.index))
+                        })
                         .map(|repl| match &repl.mode {
                             ReplacementMode::MayCost { cost, .. } => {
                                 replacement_cost_description(cost)
@@ -113,19 +198,13 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                 } else {
                     // CR 616.1 / CR 614.1c / CR 614.1d: each candidate gets an
                     // outcome-descriptive label derived from its `execute`
-                    // effect. `map` (not `filter_map`) guarantees the vec is
-                    // never shorter than `candidate_count`, so the frontend
-                    // index lookup stays aligned.
+                    // effect, or from its synthetic shield-counter kind.
+                    // `map` (not `filter_map`) guarantees the vec is never
+                    // shorter than `candidate_count`, so the frontend index
+                    // lookup stays aligned.
                     p.candidates
                         .iter()
-                        .map(|rid| {
-                            state
-                                .objects
-                                .get(&rid.source)
-                                .and_then(|obj| obj.replacement_definitions.get(rid.index))
-                                .map(replacement_choice_label)
-                                .unwrap_or_else(|| "Replacement effect".to_string())
-                        })
+                        .map(|rid| replacement_choice_label_for_rid(state, *rid))
                         .collect()
                 };
                 (count, descs)
@@ -225,6 +304,21 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
             _ => fallback(),
         },
         None => fallback(),
+    }
+}
+
+fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> String {
+    match shield_counter_replacement_kind(rid) {
+        Some(ShieldCounterReplacementKind::Destroy) => "Remove a shield counter".to_string(),
+        Some(ShieldCounterReplacementKind::Damage) => {
+            "Prevent damage with shield counter".to_string()
+        }
+        None => state
+            .objects
+            .get(&rid.source)
+            .and_then(|obj| obj.replacement_definitions.get(rid.index))
+            .map(replacement_choice_label)
+            .unwrap_or_else(|| "Replacement effect".to_string()),
     }
 }
 
@@ -905,6 +999,83 @@ fn destroy_applier(
 
     events.push(GameEvent::Regenerated { object_id: oid });
     ApplyResult::Prevented
+}
+
+fn apply_shield_counter_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    rid: ReplacementId,
+    kind: ShieldCounterReplacementKind,
+    events: &mut Vec<GameEvent>,
+) -> Result<ProposedEvent, ApplyResult> {
+    match (kind, event) {
+        (
+            ShieldCounterReplacementKind::Destroy,
+            ProposedEvent::Destroy {
+                object_id,
+                source,
+                cant_regenerate,
+                applied,
+            },
+        ) if object_id == rid.source => {
+            if consume_shield_counter(state, rid.source, events) {
+                Err(ApplyResult::Prevented)
+            } else {
+                Ok(ProposedEvent::Destroy {
+                    object_id,
+                    source,
+                    cant_regenerate,
+                    applied,
+                })
+            }
+        }
+        (
+            ShieldCounterReplacementKind::Damage,
+            ProposedEvent::Damage {
+                source_id,
+                target,
+                amount,
+                is_combat,
+                applied,
+            },
+        ) if matches!(target, TargetRef::Object(object_id) if object_id == rid.source) => {
+            let event = ProposedEvent::Damage {
+                source_id,
+                target: target.clone(),
+                amount,
+                is_combat,
+                applied,
+            };
+
+            // CR 615.12: Damage that can't be prevented is still subject to the
+            // prevention effect, but no damage is prevented. The shield counter's
+            // additional "remove a counter" effect still happens.
+            if is_prevention_disabled(state, &event) {
+                consume_shield_counter(state, rid.source, events);
+                return Ok(event);
+            }
+
+            // CR 510.2 + CR 122.1c: one shield counter prevents all simultaneous
+            // combat damage dealt to the permanent in the batch. Defer counter
+            // removal until the post-batch aggregation fires exactly once.
+            if let Some(tally) = state.combat_prevention_tally.as_mut() {
+                *tally.entry(rid).or_insert(0) += amount as i32;
+                return Err(ApplyResult::Prevented);
+            }
+
+            if consume_shield_counter(state, rid.source, events) {
+                events.push(GameEvent::DamagePrevented {
+                    source_id,
+                    target,
+                    amount,
+                });
+                Err(ApplyResult::Prevented)
+            } else {
+                Ok(event)
+            }
+        }
+        (_, other) => Ok(other),
+    }
 }
 
 // --- 4. Draw ---
@@ -2283,7 +2454,7 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
 
 // --- Prevention gating ---
 
-/// CR 614.16: Check if damage prevention is disabled by a GameRestriction.
+/// CR 615.12: Check if damage prevention is disabled by a GameRestriction.
 /// When active, prevention-type replacement effects are skipped in the pipeline.
 fn is_prevention_disabled(state: &GameState, proposed: &ProposedEvent) -> bool {
     use crate::types::ability::{GameRestriction, RestrictionScope};
@@ -2391,7 +2562,7 @@ fn matches_damage_target_filter(
                 // CR 607.2d + CR 614.1a: A damage replacement can scope
                 // "the chosen player" through the replacement source's linked
                 // persisted choice.
-                crate::game::effects::source_chosen_player(state, repl_source)
+                crate::game::game_object::source_chosen_player(state, repl_source)
                     .is_some_and(|chosen| player == chosen)
             }
             DamageTargetPlayerScope::Specific(specific) => player == *specific,
@@ -2540,6 +2711,9 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
+                // CR 613.1: "the chosen player" is undefined at replacement-check
+                // time here. Fail closed.
+                Some(ControllerRef::SourceChosenPlayer) => false,
                 // CR 109.4: Chosen-player scope is undefined at replacement-check
                 // time (no resolution context). Fail closed.
                 Some(ControllerRef::ChosenPlayer { .. }) => false,
@@ -2572,6 +2746,9 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::ParentTargetController) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
+                // CR 613.1: "the chosen player" is undefined at replacement-check
+                // time here. Fail closed.
+                Some(ControllerRef::SourceChosenPlayer) => false,
                 // CR 109.4: Chosen-player scope is undefined at replacement-check
                 // time (no resolution context). Fail closed.
                 Some(ControllerRef::ChosenPlayer { .. }) => false,
@@ -2700,6 +2877,7 @@ fn evaluate_replacement_condition(
                 | ControllerRef::TargetPlayer
                 | ControllerRef::ParentTargetController
                 | ControllerRef::DefendingPlayer
+                | ControllerRef::SourceChosenPlayer
                 | ControllerRef::ChosenPlayer { .. }
                 | ControllerRef::TriggeringPlayer => false,
             }
@@ -2790,6 +2968,30 @@ pub fn find_applicable_replacements(
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> Vec<ReplacementId> {
     let mut candidates = Vec::new();
+
+    match event {
+        ProposedEvent::Destroy { object_id, .. }
+            if object_has_shield_counter(state, *object_id) =>
+        {
+            let rid =
+                shield_counter_replacement_id(*object_id, ShieldCounterReplacementKind::Destroy);
+            if !event.already_applied(&rid) {
+                candidates.push(rid);
+            }
+        }
+        ProposedEvent::Damage {
+            target: TargetRef::Object(object_id),
+            amount,
+            ..
+        } if *amount > 0 && object_has_shield_counter(state, *object_id) => {
+            let rid =
+                shield_counter_replacement_id(*object_id, ShieldCounterReplacementKind::Damage);
+            if !event.already_applied(&rid) {
+                candidates.push(rid);
+            }
+        }
+        _ => {}
+    }
 
     // CR 614.12: Self-replacement effects on a card entering the battlefield.
     // apply even though the card isn't on the battlefield yet. We must scan the
@@ -2947,7 +3149,7 @@ pub fn find_applicable_replacements(
                             _ => {}
                         }
                     }
-                    // CR 614.16: Skip damage prevention replacements when prevention is disabled
+                    // CR 615.12: Skip damage prevention replacements when prevention is disabled.
                     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
                         && is_prevention_disabled(state, event)
                     {
@@ -2972,6 +3174,9 @@ pub fn find_applicable_replacements(
                                     false
                                 }
                                 crate::types::ability::ControllerRef::DefendingPlayer => false,
+                                // CR 613.1: chosen-player scope has no meaning
+                                // for static token-creation replacements.
+                                crate::types::ability::ControllerRef::SourceChosenPlayer => false,
                                 // CR 109.4: Chosen-player scope has no meaning
                                 // for static token-creation replacements.
                                 crate::types::ability::ControllerRef::ChosenPlayer { .. } => false,
@@ -3561,6 +3766,10 @@ fn apply_single_replacement(
         return apply_empty_mana_pool_replacement(state, proposed, rid, events);
     }
 
+    if let Some(kind) = shield_counter_replacement_kind(rid) {
+        return apply_shield_counter_replacement(state, proposed, rid, kind, events);
+    }
+
     // CR 615.3: Pending damage prevention shields use sentinel ObjectId(0).
     // Look up from game-state-level registry instead of object replacement_definitions.
     let repl_def_ref = if rid.source == ObjectId(0) {
@@ -3914,6 +4123,14 @@ fn candidate_materiality(
     rid: ReplacementId,
     proposed_to: Option<Zone>,
 ) -> CandidateMateriality {
+    match shield_counter_replacement_kind(rid) {
+        Some(ShieldCounterReplacementKind::Destroy) => return CandidateMateriality::Unconditional,
+        Some(ShieldCounterReplacementKind::Damage) => {
+            return CandidateMateriality::Writes(EventField::Damage)
+        }
+        None => {}
+    }
+
     let repl_def = state
         .objects
         .get(&rid.source)
@@ -4888,6 +5105,153 @@ mod tests {
         assert!(
             matches!(result, ReplacementResult::NeedsChoice(_)),
             "prevention shield + doubler must prompt for order per CR 616.1e, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn shield_counter_and_damage_doubler_prompt_for_order() {
+        // CR 122.1c + CR 616.1e: A shield counter's prevention effect and a
+        // damage doubler both modify the damage event. The shield counter must be
+        // a pipeline candidate so the affected object's controller chooses the
+        // order instead of the counter always preempting the doubler.
+        use crate::types::ability::DamageModification;
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let mut doubler = GameObject::new(
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Furnace of Rath".to_string(),
+            Zone::Battlefield,
+        );
+        doubler.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .damage_modification(DamageModification::Double)]
+            .into();
+        state.objects.insert(ObjectId(10), doubler);
+        state.battlefield.push_back(ObjectId(10));
+
+        let mut target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(1),
+            "Shielded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        target.counters.insert(CounterType::Shield, 1);
+        state.objects.insert(ObjectId(30), target);
+        state.battlefield.push_back(ObjectId(30));
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(30)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for shield counter + doubler, got {result:?}");
+        };
+        assert_eq!(player, PlayerId(1));
+    }
+
+    #[test]
+    fn shield_counter_and_regeneration_prompt_for_destroy_order() {
+        // CR 122.1c + CR 614.8 + CR 616.1e: Shield counters and regeneration
+        // shields are both destruction replacements with different observable
+        // outcomes (remove a counter vs. consume regeneration/tap/remove from
+        // combat). The affected object's controller must choose.
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let mut target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(1),
+            "Shielded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        target.counters.insert(CounterType::Shield, 1);
+        target.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::Destroy)
+                .valid_card(TargetFilter::SelfRef)
+                .regeneration_shield()]
+            .into();
+        state.objects.insert(ObjectId(30), target);
+        state.battlefield.push_back(ObjectId(30));
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::Destroy {
+            object_id: ObjectId(30),
+            source: Some(ObjectId(50)),
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice for shield counter + regeneration, got {result:?}");
+        };
+        assert_eq!(player, PlayerId(1));
+    }
+
+    #[test]
+    fn shield_counter_on_unpreventable_damage_removes_counter_without_preventing() {
+        // CR 615.12: A prevention effect is still applied to unpreventable damage,
+        // but it prevents no damage. For CR 122.1c shield counters, the additional
+        // "remove a shield counter" effect still happens.
+        use crate::types::ability::{GameRestriction, RestrictionExpiry};
+        use crate::types::counter::CounterType;
+
+        let mut state = GameState::new_two_player(42);
+        let mut target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(1),
+            "Shielded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        target.counters.insert(CounterType::Shield, 1);
+        state.objects.insert(ObjectId(30), target);
+        state.battlefield.push_back(ObjectId(30));
+        state
+            .restrictions
+            .push(GameRestriction::DamagePreventionDisabled {
+                source: ObjectId(99),
+                expiry: RestrictionExpiry::EndOfTurn,
+                scope: None,
+            });
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(50),
+            target: TargetRef::Object(ObjectId(30)),
+            amount: 3,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        assert!(
+            matches!(
+                result,
+                ReplacementResult::Execute(ProposedEvent::Damage { amount: 3, .. })
+            ),
+            "unpreventable damage must survive shield-counter replacement, got {result:?}"
+        );
+        assert_eq!(
+            state.objects[&ObjectId(30)]
+                .counters
+                .get(&CounterType::Shield),
+            None
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::DamagePrevented { .. })),
+            "unpreventable damage must not emit DamagePrevented"
         );
     }
 

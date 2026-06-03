@@ -1209,7 +1209,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Outlast(_) => "outlast".to_string(),
         Keyword::Scavenge(_) => "scavenge".to_string(),
         Keyword::Fortify(_) => "fortify".to_string(),
-        Keyword::Prototype(_) => "prototype".to_string(),
+        Keyword::Prototype { .. } => "prototype".to_string(),
         Keyword::Plot(_) => "plot".to_string(),
         Keyword::Craft(_) => "craft".to_string(),
         Keyword::Offspring(_) => "offspring".to_string(),
