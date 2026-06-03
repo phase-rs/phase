@@ -700,7 +700,13 @@ export function MultiplayerPage() {
       <div className="menu-scene__sigil menu-scene__sigil--right" />
       <div className="menu-scene__haze" />
 
-      <MenuShell eyebrow={t("page.eyebrow")} title={title} description={description} layout="stacked" contentWidthClass="max-w-3xl">
+      <MenuShell
+        eyebrow={t("page.eyebrow")}
+        title={title}
+        description={description}
+        layout="stacked"
+        contentWidthClass={view === "host-setup" ? "max-w-4xl" : "max-w-3xl"}
+      >
         <div className="flex w-full flex-col items-start">
         {/* Player identity — always available on lobby/host-setup so users
             can edit their name without hunting in Preferences. */}

@@ -9,10 +9,8 @@ import type { TileMotif } from "../TileMotif";
 import { ManaSymbol } from "../../mana/ManaSymbol";
 import { useCardImage } from "../../../hooks/useCardImage";
 import { useResumables } from "../../../hooks/useResumables";
-import { useFeedDeckList } from "../../../hooks/useFeedDeckList";
 import { useCardDataStore } from "../../../stores/cardDataStore";
 import {
-  COLOR_DOT_CLASS,
   getDeckCardCount,
   getDeckColorIdentity,
   getRepresentativeCard,
@@ -267,38 +265,6 @@ function CoverageCard() {
   );
 }
 
-function FeedsCard() {
-  const { t } = useTranslation("menu");
-  const navigate = useNavigate();
-  const { decks } = useFeedDeckList();
-  const top = decks.slice(0, 4);
-  return (
-    <button type="button" onClick={() => navigate("/my-decks")} className={`${INFO_CARD} cursor-pointer text-left transition-colors hover:border-hairline-hover`}>
-      <div className={`${SECTION_LABEL} mb-3 flex items-center gap-2`}>
-        <img src="/icons/sections/metagame.png" alt="" aria-hidden="true" className="h-3.5 w-3.5 opacity-70" />
-        {t("home.dashboard.fromFeeds")}
-      </div>
-      {top.length === 0 ? (
-        <p className="text-sm text-fg-muted">{t("home.dashboard.feedsEmpty")}</p>
-      ) : (
-        <div className="flex flex-col gap-0.5">
-          {top.map((d, i) => (
-            <div key={d.name} className="flex items-center gap-3 rounded-[10px] px-1.5 py-1.5">
-              <span className="w-4 font-mono text-xs text-fg-meta tabular-nums">{i + 1}</span>
-              <span className="min-w-0 flex-1 truncate text-sm text-slate-200">{d.name}</span>
-              {d.colors && d.colors.length > 0 && (
-                <span className="flex gap-1">
-                  {d.colors.map((c) => <span key={c} className={`h-2.5 w-2.5 rounded-full ${COLOR_DOT_CLASS[c] ?? "bg-slate-500"}`} />)}
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </button>
-  );
-}
-
 /* ------------------------------------------------------------- dashboard --- */
 export function HomeDashboard() {
   const { t } = useTranslation("menu");
@@ -338,7 +304,6 @@ export function HomeDashboard() {
           <ActiveDeckCard />
           <CoverageCard />
         </div>
-        <FeedsCard />
       </div>
     </MenuShell>
   );
