@@ -4576,6 +4576,70 @@ pub fn synthesize_plot(face: &mut CardFace) {
     }
 }
 
+/// CR 702.135a: Afterlife N — "When this permanent is put into a graveyard from
+/// the battlefield, create N 1/1 white and black Spirit creature tokens with
+/// flying." Synthesized as a self-dies (battlefield → graveyard) ChangesZone
+/// trigger that creates the Spirit tokens. MTGJSON sends only the `Afterlife N`
+/// keyword; the triggered ability itself is never written in the card's rules
+/// text, so without this synthesis the dies trigger never fires.
+pub fn synthesize_afterlife(face: &mut CardFace) {
+    let Some(n) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Afterlife(n) => Some(*n),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    // Idempotency: re-running the synthesis pipeline must not duplicate the
+    // dies trigger (re-loaded card data would otherwise create the tokens
+    // multiple times per death).
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.origin == Some(Zone::Battlefield)
+            && t.destination == Some(Zone::Graveyard)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::Token { name, .. }) if name == "Spirit"
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    // CR 702.135a: 1/1 white and black Spirit creature token with flying.
+    // CR 205.3: the Token effect's `types` field carries core type + subtypes.
+    let token_effect = Effect::Token {
+        name: "Spirit".to_string(),
+        power: PtValue::Fixed(1),
+        toughness: PtValue::Fixed(1),
+        types: vec!["Creature".to_string(), "Spirit".to_string()],
+        colors: vec![ManaColor::White, ManaColor::Black],
+        keywords: vec![Keyword::Flying],
+        tapped: false,
+        count: QuantityExpr::Fixed { value: n as i32 },
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: false,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    };
+
+    // CR 700.4 + CR 603.6a: "put into a graveyard from the battlefield" = a
+    // battlefield → graveyard zone change of this permanent. The source must be
+    // watched while on the battlefield, so `trigger_zones` includes Battlefield.
+    face.triggers.push(
+        TriggerDefinition::new(TriggerMode::ChangesZone)
+            .origin(Zone::Battlefield)
+            .destination(Zone::Graveyard)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Battlefield])
+            .execute(AbilityDefinition::new(AbilityKind::Spell, token_effect))
+            .description("Afterlife — create Spirit tokens on death".to_string()),
+    );
+}
+
 /// Run all synthesis functions in canonical order on a card face.
 /// Both `oracle_loader.rs` and `oracle_gen.rs` call this to ensure the same
 /// complete set of synthesizers is applied.
@@ -4609,6 +4673,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.163a: For Mirrodin! — same ETB-token-attach shape as living weapon
     // and job select; creates a 2/2 red Rebel creature token.
     synthesize_for_mirrodin(face);
+    // CR 702.135a: Afterlife N — self-dies trigger creating N 1/1 white and
+    // black Spirit creature tokens with flying.
+    synthesize_afterlife(face);
     synthesize_level_up(face);
     synthesize_cycling(face);
     synthesize_scavenge(face);
@@ -14173,6 +14240,87 @@ mod for_mirrodin_synthesis_tests {
         synthesize_for_mirrodin(&mut face);
         let trigger = &face.triggers[0];
         assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
+    }
+
+    fn face_with_afterlife(n: u32) -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Afterlife(n));
+        face.card_type.core_types.push(CoreType::Creature);
+        face
+    }
+
+    /// CR 702.135a: Afterlife N synthesizes a self-dies (battlefield → graveyard)
+    /// trigger creating N 1/1 white and black Spirit creature tokens with flying.
+    #[test]
+    fn synthesize_afterlife_builds_dies_trigger_with_spirit_tokens() {
+        let mut face = face_with_afterlife(2);
+        synthesize_afterlife(&mut face);
+
+        assert_eq!(face.triggers.len(), 1, "exactly one Afterlife dies trigger");
+        let trigger = &face.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert!(trigger.trigger_zones.contains(&Zone::Battlefield));
+        let execute = trigger.execute.as_deref().expect("must have execute");
+        match execute.effect.as_ref() {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                keywords,
+                count,
+                owner,
+                ..
+            } => {
+                assert_eq!(name, "Spirit");
+                assert_eq!(*power, PtValue::Fixed(1));
+                assert_eq!(*toughness, PtValue::Fixed(1));
+                assert!(types.contains(&"Creature".to_string()));
+                assert!(types.contains(&"Spirit".to_string()));
+                assert!(colors.contains(&ManaColor::White));
+                assert!(colors.contains(&ManaColor::Black));
+                assert!(keywords.contains(&Keyword::Flying));
+                assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+                assert_eq!(*owner, TargetFilter::Controller);
+            }
+            other => panic!("expected Token(Spirit), got {other:?}"),
+        }
+
+        // Idempotency: re-running must not add a second trigger.
+        synthesize_afterlife(&mut face);
+        assert_eq!(
+            face.triggers.len(),
+            1,
+            "idempotent: no duplicate dies trigger"
+        );
+    }
+
+    #[test]
+    fn synthesize_afterlife_count_scales_with_n() {
+        let mut face = face_with_afterlife(3);
+        synthesize_afterlife(&mut face);
+        let execute = face.triggers[0].execute.as_deref().unwrap();
+        match execute.effect.as_ref() {
+            Effect::Token { count, .. } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+            }
+            other => panic!("expected Token, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn synthesize_afterlife_skips_without_keyword() {
+        let mut face = CardFace::default();
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_afterlife(&mut face);
+        assert!(
+            face.triggers.is_empty(),
+            "no Afterlife keyword -> no synthesized trigger"
+        );
     }
 }
 
