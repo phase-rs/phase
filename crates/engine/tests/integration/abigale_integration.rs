@@ -48,45 +48,13 @@ fn abigale_enters_puts_counters_on_target_creature_not_self() {
     let bear_id = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
 
     let mut runner = scenario.build();
-    let abigale_card_id = runner.state().objects[&abigale_id].card_id;
 
-    runner
-        .act(GameAction::CastSpell {
-            object_id: abigale_id,
-            card_id: abigale_card_id,
-            targets: vec![],
-        })
-        .expect("cast Abigale");
+    // Cast Abigale; the ETB trigger's "up to one other target creature" slot is
+    // satisfied by the declared bear target (CR 603.3d — the driver answers the
+    // TriggerTargetSelection slot from declared intent).
+    let outcome = runner.cast(abigale_id).target_object(bear_id).resolve();
 
-    for _ in 0..30 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                runner
-                    .act(GameAction::SelectTargets {
-                        targets: vec![TargetRef::Object(bear_id)],
-                    })
-                    .expect("select bear as target");
-            }
-            WaitingFor::Priority { .. } => {
-                if runner.state().stack.is_empty() {
-                    // Pass once more to drain pending triggers into stack, then exit if truly idle.
-                    if runner.act(GameAction::PassPriority).is_err() {
-                        break;
-                    }
-                    if runner.state().stack.is_empty()
-                        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
-                    {
-                        break;
-                    }
-                } else if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
-
-    let bear = runner.state().objects.get(&bear_id).expect("bear present");
+    let bear = outcome.state().objects.get(&bear_id).expect("bear present");
     assert!(
         bear.counters.get(&flying()).copied().unwrap_or(0) >= 1,
         "Bear should have a flying counter; counters = {:?}",
@@ -121,29 +89,11 @@ fn abigale_enters_puts_counters_on_target_creature_not_self() {
         bear.keywords,
     );
 
-    let abigale = runner
-        .state()
-        .objects
-        .get(&abigale_id)
-        .expect("abigale present");
-    assert_eq!(
-        abigale.counters.get(&flying()).copied().unwrap_or(0),
-        0,
-        "Abigale must not have a flying counter; counters = {:?}",
-        abigale.counters,
-    );
-    assert_eq!(
-        abigale.counters.get(&first_strike()).copied().unwrap_or(0),
-        0,
-        "Abigale must not have a first strike counter; counters = {:?}",
-        abigale.counters,
-    );
-    assert_eq!(
-        abigale.counters.get(&lifelink()).copied().unwrap_or(0),
-        0,
-        "Abigale must not have a lifelink counter; counters = {:?}",
-        abigale.counters,
-    );
+    // CR 122.1: the anaphor "that creature" must place the counters on the
+    // targeted creature, never on Abigale herself.
+    outcome.assert_counters(abigale_id, flying(), 0);
+    outcome.assert_counters(abigale_id, first_strike(), 0);
+    outcome.assert_counters(abigale_id, lifelink(), 0);
 }
 
 #[test]
@@ -162,44 +112,13 @@ fn abigale_enters_with_no_target_skipped_puts_no_counters_on_self() {
         scenario.add_creature_to_hand_from_oracle(P0, "Abigale", 1, 1, abigale_oracle);
     let abigale_id = abigale_builder.id();
 
-    // No other creatures: "up to one" can only be zero targets.
+    // No other creatures: "up to one" can only be zero targets. The driver
+    // declares no target, so the optional TriggerTargetSelection slot resolves
+    // to None (CR 603.3d) and the anaphor "that creature" has no referent.
     let mut runner = scenario.build();
-    let abigale_card_id = runner.state().objects[&abigale_id].card_id;
+    let outcome = runner.cast(abigale_id).resolve();
 
-    runner
-        .act(GameAction::CastSpell {
-            object_id: abigale_id,
-            card_id: abigale_card_id,
-            targets: vec![],
-        })
-        .expect("cast Abigale");
-
-    for _ in 0..30 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                runner
-                    .act(GameAction::SelectTargets { targets: vec![] })
-                    .expect("skip optional target");
-            }
-            WaitingFor::Priority { .. } => {
-                if runner.state().stack.is_empty() {
-                    if runner.act(GameAction::PassPriority).is_err() {
-                        break;
-                    }
-                    if runner.state().stack.is_empty()
-                        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
-                    {
-                        break;
-                    }
-                } else if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
-
-    let abigale = runner
+    let abigale = outcome
         .state()
         .objects
         .get(&abigale_id)
@@ -255,50 +174,18 @@ fn abigale_loses_all_abilities_scopes_to_chosen_target_only() {
     let ally_id = ally_builder.id();
 
     let mut runner = scenario.build();
-    let abigale_card_id = runner.state().objects[&abigale_id].card_id;
 
-    runner
-        .act(GameAction::CastSpell {
-            object_id: abigale_id,
-            card_id: abigale_card_id,
-            targets: vec![],
-        })
-        .expect("cast Abigale");
+    // Cast Abigale targeting the Trample Beast; the lose-all-abilities effect
+    // must scope to exactly this chosen target (CR 113.3 + CR 611.2).
+    let outcome = runner.cast(abigale_id).target_object(target_id).resolve();
 
-    for _ in 0..30 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                runner
-                    .act(GameAction::SelectTargets {
-                        targets: vec![TargetRef::Object(target_id)],
-                    })
-                    .expect("select target storm crow");
-            }
-            WaitingFor::Priority { .. } => {
-                if runner.state().stack.is_empty() {
-                    if runner.act(GameAction::PassPriority).is_err() {
-                        break;
-                    }
-                    if runner.state().stack.is_empty()
-                        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
-                    {
-                        break;
-                    }
-                } else if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
-
-    let target = runner.state().objects.get(&target_id).expect("target");
-    let bystander = runner
+    let target = outcome.state().objects.get(&target_id).expect("target");
+    let bystander = outcome
         .state()
         .objects
         .get(&bystander_id)
         .expect("bystander");
-    let ally = runner.state().objects.get(&ally_id).expect("ally");
+    let ally = outcome.state().objects.get(&ally_id).expect("ally");
 
     // Targeted creature: lost its printed Trample, gained the keyword counters.
     assert!(
@@ -417,43 +304,11 @@ fn abigale_strips_non_keyword_abilities_from_target() {
         );
     }
 
-    let abigale_card_id = runner.state().objects[&abigale_id].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: abigale_id,
-            card_id: abigale_card_id,
-            targets: vec![],
-        })
-        .expect("cast Abigale");
+    // Cast Abigale targeting the Llanowar Wall; its full ability set (keyword,
+    // activated, etc.) must be stripped (CR 113.3 + CR 613.1f layer 6).
+    let outcome = runner.cast(abigale_id).target_object(target_id).resolve();
 
-    for _ in 0..30 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                runner
-                    .act(GameAction::SelectTargets {
-                        targets: vec![TargetRef::Object(target_id)],
-                    })
-                    .expect("select target");
-            }
-            WaitingFor::Priority { .. } => {
-                if runner.state().stack.is_empty() {
-                    if runner.act(GameAction::PassPriority).is_err() {
-                        break;
-                    }
-                    if runner.state().stack.is_empty()
-                        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
-                    {
-                        break;
-                    }
-                } else if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
-
-    let target = runner.state().objects.get(&target_id).expect("target");
+    let target = outcome.state().objects.get(&target_id).expect("target");
 
     // All printed abilities are stripped. CR 113.3 + CR 613.1f layer 6.
     assert!(

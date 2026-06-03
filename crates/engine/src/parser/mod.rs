@@ -25,6 +25,8 @@ pub(crate) mod oracle_trigger;
 pub mod oracle_util;
 pub(crate) mod oracle_vote;
 pub(crate) mod swallow_check;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use oracle::parse_oracle_text;
 
