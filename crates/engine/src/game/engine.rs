@@ -15905,6 +15905,214 @@ When this creature enters or dies, create a 1/1 red Goblin creature token.";
         assert_eq!(state.players[0].life, starting_life + 2);
     }
 
+    /// CR 603.2 + CR 118.12a: the paid IfAPlayerDoes branch resolves on the
+    /// unless-payment resume path, so events produced by that branch must be
+    /// scanned for normal triggers before priority resumes.
+    #[test]
+    fn unless_pay_success_sub_ability_fires_triggers_from_events() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(914),
+            PlayerId(0),
+            "Divert Disaster Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        let doomed = create_object(
+            &mut state,
+            CardId(915),
+            PlayerId(0),
+            "Doomed Witness Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&doomed).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .valid_card(TargetFilter::SelfRef)
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard)
+                    .trigger_zones(vec![Zone::Battlefield])
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 3 },
+                            player: TargetFilter::Controller,
+                        },
+                    )),
+            );
+            obj.base_trigger_definitions =
+                Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        }
+
+        let mut primary = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut alternative = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![TargetRef::Object(doomed)],
+            source_id,
+            PlayerId(0),
+        );
+        alternative.condition = Some(AbilityCondition::effect_performed());
+        primary.sub_ability = Some(Box::new(alternative));
+
+        state.players[1].energy = 2;
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            pending_effect: Box::new(primary),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let starting_life = state.players[0].life;
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects[&doomed].zone, Zone::Graveyard);
+        assert!(
+            !state.stack.is_empty(),
+            "the paid IfAPlayerDoes sacrifice must put the dies trigger on the stack"
+        );
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert_eq!(
+            state.players[0].life,
+            starting_life + 3,
+            "the dies trigger from the paid sub-ability should resolve"
+        );
+    }
+
+    /// CR 603.3b + CR 701.22a: if an unless-payment branch pauses on a
+    /// resolution choice, triggers produced by that branch wait until the choice
+    /// finishes instead of clobbering the choice prompt.
+    #[test]
+    fn unless_pay_resolution_choice_defers_branch_triggers() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(916),
+            PlayerId(0),
+            "Unless Scry Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        for (card_id, name, effect) in [
+            (
+                CardId(917),
+                "Scry Watcher Draw",
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ),
+            (
+                CardId(918),
+                "Scry Watcher Life",
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ),
+        ] {
+            let watcher = create_object(
+                &mut state,
+                card_id,
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&watcher).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Scry)
+                    .execute(AbilityDefinition::new(AbilityKind::Database, effect)),
+            );
+            obj.base_trigger_definitions =
+                Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        }
+        for (card_id, name) in [
+            (CardId(919), "Library One"),
+            (CardId(920), "Library Two"),
+            (CardId(921), "Library Three"),
+        ] {
+            create_object(
+                &mut state,
+                card_id,
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            );
+        }
+
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let result =
+            apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
+        let WaitingFor::ScryChoice { player, cards } = result.waiting_for.clone() else {
+            panic!(
+                "unless branch must preserve ScryChoice before watcher triggers, got {:?}",
+                result.waiting_for
+            );
+        };
+        assert_eq!(player, PlayerId(0));
+        assert_eq!(cards.len(), 2);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            2,
+            "the two scry watcher triggers should be parked until ScryChoice resolves"
+        );
+
+        let hand_after_scry_prompt = state.players[0].hand.len();
+        let life_after_scry_prompt = state.players[0].life;
+        apply_as_current(&mut state, GameAction::SelectCards { cards }).unwrap();
+        for _ in 0..8 {
+            if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+                crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+            }
+            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        assert_eq!(state.players[0].hand.len(), hand_after_scry_prompt + 1);
+        assert_eq!(state.players[0].life, life_after_scry_prompt + 1);
+    }
+
     /// CR 118.12: When the unless cost is declined, the primary effect runs
     /// and the IfAPlayerDoes sub_ability does NOT run (its condition reads
     /// `optional_effect_performed` which stays false on the decline path).

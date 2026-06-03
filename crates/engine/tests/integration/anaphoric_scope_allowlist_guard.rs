@@ -12,7 +12,7 @@
 //!
 //! After the #495 fix and the bare-anaphoric-possessive classifier fix (Yuriko,
 //! the Tiger's Shadow / Dark Confidant class — `classify_possessive_referent`
-//! in `parser/oracle_quantity.rs`), exactly **253** cards in the exported card
+//! in `parser/oracle_quantity.rs`), exactly **252** cards in the exported card
 //! data retain a runtime `ObjectScope::Anaphoric` in a `DealDamage` /
 //! `GainLife` / `LoseLife` (or similar) amount. This test holds that set as a
 //! sorted constant and fails if a card leaks in or out of it — a tripwire,
@@ -119,7 +119,7 @@
 //! or a count change) fails this test; a human then decides whether it is a
 //! legitimate new category-1/2/3/4 case (add it here) or a real regression
 //! (fix the parser). The curation lives at the *category* level — the
-//! correct granularity — not as 253 per-card annotations.
+//! correct granularity — not as 252 per-card annotations.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -334,7 +334,6 @@ const ANAPHORIC_SCOPE_CARDS: &[&str] = &[
     "sin prodder",
     "singe-mind ogre",
     "sister hospitaller",
-    "sly spy",
     "solitude",
     "sorin the mirthless",
     "sorin, grim nemesis",
@@ -447,8 +446,8 @@ fn anaphoric_scope_set_is_frozen() {
     // both this and ANAPHORIC_SCOPE_CARDS shrink together.
     assert_eq!(
         observed.len(),
-        253,
-        "Expected exactly 253 cards retaining ObjectScope::Anaphoric. PR #1451 \
+        252,
+        "Expected exactly 252 cards retaining ObjectScope::Anaphoric. PR #1451 \
          re-scoped 8 dynamic-quantity 'its power' anaphora off the Anaphoric \
          arm onto typed quantity refs; PR #1522 re-scoped Dead Before Sunrise \
          through the recipient/subject rewrite. The category-2 'it deals damage \
@@ -458,15 +457,14 @@ fn anaphoric_scope_set_is_frozen() {
          'where X is that <type>'s mana value' tail for five more cards in the \
          existing category-3 (target-destroy anaphora: Artifact Mutation, Aura \
          Mutation, Hoard-Smelter Dragon) and category-4 (counter-then-act: \
-         Dovescape, Induce Paranoia) classes, moving the count 247 -> 252. \
-         Sly Spy remains a legitimate reveal-referent case, moving 252 -> 253. \
-         Count moved to {}.",
+         Dovescape, Induce Paranoia) classes, moving the count 247 -> 252. Count \
+         moved to {}.",
         observed.len()
     );
     assert_eq!(
         ANAPHORIC_SCOPE_CARDS.len(),
-        253,
-        "ANAPHORIC_SCOPE_CARDS must list exactly 253 cards."
+        252,
+        "ANAPHORIC_SCOPE_CARDS must list exactly 252 cards."
     );
 }
 
