@@ -482,7 +482,18 @@ impl DraftSessionManager {
                     deck_payload_from_submission(db, submission)
                 })
                 .collect();
-            let decks = deck_payloads?;
+            let decks = match deck_payloads {
+                Ok(decks) => decks,
+                Err(error) => {
+                    warn!(
+                        draft = %draft_code,
+                        match_id = %pairing.match_id,
+                        error = %error,
+                        "draft match spawn skipped for pairing"
+                    );
+                    continue;
+                }
+            };
 
             let seat0 = pairing.players[0].0 as usize;
             let seat1 = pairing.players[1].0 as usize;
@@ -502,7 +513,7 @@ impl DraftSessionManager {
                 name0,
                 None,
                 2,
-                match_config.clone(),
+                match_config,
                 Some(format_config.clone()),
             );
             let (token1, _) = game_mgr.join_game_with_name(&game_code, decks[1].clone(), name1)?;

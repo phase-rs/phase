@@ -89,8 +89,6 @@ pub enum PlayerActionKind {
     Proliferate,
     /// CR 701.16a: A player investigated (created a Clue token).
     Investigate,
-    /// CR 702.808: A player foraged (exiled cards from graveyard for food).
-    Forage,
 }
 
 /// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.

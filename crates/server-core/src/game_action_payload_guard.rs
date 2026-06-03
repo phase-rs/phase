@@ -122,11 +122,13 @@ fn guard_debug_action_payload(action: &DebugAction) -> Result<(), String> {
         DebugAction::AddMana { mana, .. } => {
             bound_list("Debug.AddMana.mana", mana.len())?;
         }
-        DebugAction::CreateToken { request } => {
+        DebugAction::CreateToken { request, .. } => {
             guard_debug_token_request_payload(request)?;
         }
         DebugAction::MoveToZone { .. }
         | DebugAction::RemoveObject { .. }
+        | DebugAction::Sacrifice { .. }
+        | DebugAction::Reveal { .. }
         | DebugAction::DrawCards { .. }
         | DebugAction::Mill { .. }
         | DebugAction::ShuffleLibrary { .. }

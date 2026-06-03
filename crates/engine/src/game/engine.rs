@@ -1837,7 +1837,21 @@ fn apply_action(
         ) => match resume {
             CostResume::Spell {
                 spell: pending_cast,
-            } => match kind {
+            }
+            | CostResume::SpellCost {
+                spell: pending_cast,
+                ..
+            } => {
+                let paid_cost = match resume {
+                    CostResume::SpellCost { cost, source, .. } => {
+                        Some(casting_costs::SpellCostPayment {
+                            cost: cost.as_ref(),
+                            source: *source,
+                        })
+                    }
+                    _ => None,
+                };
+                match kind {
                 PayCostKind::Discard => engine_casting::handle_discard_for_cost(
                     state,
                     *player,
@@ -1847,15 +1861,19 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
-                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
-                    state,
-                    *player,
-                    *pending_cast.clone(),
-                    (*min_count, *count),
-                    choices,
-                    &chosen,
-                    &mut events,
-                )?,
+	                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
+	                    state,
+	                    *player,
+	                    *pending_cast.clone(),
+	                    paid_cost,
+	                    casting_costs::CostSelection {
+	                        min_count: *min_count,
+	                        count: *count,
+	                        legal_permanents: choices,
+	                        chosen: &chosen,
+	                    },
+	                    &mut events,
+	                )?,
                 PayCostKind::ReturnToHand => engine_casting::handle_return_to_hand_for_cost(
                     state,
                     *player,
@@ -1875,6 +1893,20 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
+                // CR 702.167a/b: Craft materials exile across the
+                // battlefield/graveyard union.
+                PayCostKind::ExileMaterials { materials } => {
+                    engine_casting::handle_exile_materials_for_cost(
+                        state,
+                        *player,
+                        materials.clone(),
+                        *pending_cast.clone(),
+                        (*min_count, *count),
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
                 PayCostKind::RemoveCounter { counter_type } => {
                     casting_costs::handle_remove_counter_for_cost(
                         state,
@@ -1913,7 +1945,8 @@ fn apply_action(
                         "ExileFromManaZone cost cannot resume a spell cast".into(),
                     ));
                 }
-            },
+                }
+            }
             CostResume::ManaAbility {
                 mana_ability: pending_mana_ability,
             } => match kind {
@@ -1958,6 +1991,7 @@ fn apply_action(
                 // through the spell pipeline.
                 PayCostKind::ReturnToHand
                 | PayCostKind::ExileFromZone { .. }
+                | PayCostKind::ExileMaterials { .. }
                 | PayCostKind::RemoveCounter { .. }
                 | PayCostKind::Behold { .. } => {
                     return Err(EngineError::InvalidAction(
@@ -1974,6 +2008,10 @@ fn apply_action(
                 resume:
                     CostResume::Spell {
                         spell: pending_cast,
+                    }
+                    | CostResume::SpellCost {
+                        spell: pending_cast,
+                        ..
                     },
                 ..
             },
@@ -10552,6 +10590,7 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: crate::types::game_state::SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -10933,6 +10972,7 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: crate::types::game_state::SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -14300,15 +14340,18 @@ mod phase_trigger_regression_tests {
     use super::*;
     use crate::game::combat::AttackTarget;
     use crate::game::zones::create_object;
+    use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect,
         FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
         TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
         UnlessPayModifier,
     };
+    use crate::types::card::CardFace;
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::triggers::TriggerMode;
@@ -15097,6 +15140,114 @@ mod phase_trigger_regression_tests {
     }
 
     #[test]
+    fn issue_1981_echo_decline_sacrifice_fires_dies_trigger() {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let mogg = create_object(
+            &mut state,
+            CardId(1981),
+            PlayerId(0),
+            "Mogg War Marshal".to_string(),
+            Zone::Battlefield,
+        );
+
+        let oracle = "Echo {1}{R} (At the beginning of your upkeep, if this came under your control since the beginning of your last upkeep, sacrifice it unless you pay its echo cost.)\n\
+When this creature enters or dies, create a 1/1 red Goblin creature token.";
+        let parsed = parse_oracle_text(
+            oracle,
+            "Mogg War Marshal",
+            &[],
+            &["Creature".to_string()],
+            &["Goblin".to_string(), "Warrior".to_string()],
+        );
+        assert!(
+            parsed
+                .extracted_keywords
+                .iter()
+                .any(|kw| matches!(kw, Keyword::Echo(_))),
+            "Mogg's echo keyword must parse before synthesis"
+        );
+
+        let mut face = CardFace {
+            keywords: parsed.extracted_keywords.clone(),
+            triggers: parsed.triggers.clone(),
+            ..CardFace::default()
+        };
+        crate::database::synthesis::synthesize_echo(&mut face);
+
+        {
+            let obj = state.objects.get_mut(&mogg).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Goblin".to_string());
+            obj.card_types.subtypes.push("Warrior".to_string());
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.keywords = face.keywords.clone();
+            obj.base_keywords = obj.keywords.clone();
+            for trigger in face.triggers.clone() {
+                obj.trigger_definitions.push(trigger);
+            }
+            obj.base_trigger_definitions =
+                Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+            // CR 702.30a: the next controller-upkeep echo payment is due.
+            obj.echo_due = true;
+        }
+
+        let mut events = Vec::new();
+        crate::game::turns::auto_advance(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert!(
+            !state.stack.is_empty(),
+            "echo trigger must be on the stack at the beginning of upkeep"
+        );
+
+        events.clear();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::UnlessPayment {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+
+        apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
+
+        assert_eq!(
+            state.objects[&mogg].zone,
+            Zone::Graveyard,
+            "declining echo must sacrifice Mogg War Marshal"
+        );
+        assert!(
+            !state.stack.is_empty(),
+            "Mogg War Marshal's dies trigger must be put on the stack after the echo sacrifice"
+        );
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        let goblin_tokens = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|obj| obj.is_token && obj.name == "Goblin")
+            .count();
+        assert_eq!(
+            goblin_tokens, 1,
+            "the dies trigger should resolve to one 1/1 red Goblin token"
+        );
+    }
+
+    #[test]
     fn attack_trigger_resolves_before_combat_damage_and_only_once() {
         let mut state = new_game(42);
         state.turn_number = 5;
@@ -15777,6 +15928,214 @@ mod phase_trigger_regression_tests {
         assert_eq!(state.players[1].energy, 0);
         // Primary suppressed (no +4 life), alternative ran (+2 life from sub_ability).
         assert_eq!(state.players[0].life, starting_life + 2);
+    }
+
+    /// CR 603.2 + CR 118.12a: the paid IfAPlayerDoes branch resolves on the
+    /// unless-payment resume path, so events produced by that branch must be
+    /// scanned for normal triggers before priority resumes.
+    #[test]
+    fn unless_pay_success_sub_ability_fires_triggers_from_events() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(914),
+            PlayerId(0),
+            "Divert Disaster Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        let doomed = create_object(
+            &mut state,
+            CardId(915),
+            PlayerId(0),
+            "Doomed Witness Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&doomed).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .valid_card(TargetFilter::SelfRef)
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard)
+                    .trigger_zones(vec![Zone::Battlefield])
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 3 },
+                            player: TargetFilter::Controller,
+                        },
+                    )),
+            );
+            obj.base_trigger_definitions =
+                Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        }
+
+        let mut primary = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut alternative = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![TargetRef::Object(doomed)],
+            source_id,
+            PlayerId(0),
+        );
+        alternative.condition = Some(AbilityCondition::effect_performed());
+        primary.sub_ability = Some(Box::new(alternative));
+
+        state.players[1].energy = 2;
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            pending_effect: Box::new(primary),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let starting_life = state.players[0].life;
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects[&doomed].zone, Zone::Graveyard);
+        assert!(
+            !state.stack.is_empty(),
+            "the paid IfAPlayerDoes sacrifice must put the dies trigger on the stack"
+        );
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert_eq!(
+            state.players[0].life,
+            starting_life + 3,
+            "the dies trigger from the paid sub-ability should resolve"
+        );
+    }
+
+    /// CR 603.3b + CR 701.22a: if an unless-payment branch pauses on a
+    /// resolution choice, triggers produced by that branch wait until the choice
+    /// finishes instead of clobbering the choice prompt.
+    #[test]
+    fn unless_pay_resolution_choice_defers_branch_triggers() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(916),
+            PlayerId(0),
+            "Unless Scry Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        for (card_id, name, effect) in [
+            (
+                CardId(917),
+                "Scry Watcher Draw",
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ),
+            (
+                CardId(918),
+                "Scry Watcher Life",
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ),
+        ] {
+            let watcher = create_object(
+                &mut state,
+                card_id,
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&watcher).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::Scry)
+                    .execute(AbilityDefinition::new(AbilityKind::Database, effect)),
+            );
+            obj.base_trigger_definitions =
+                Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        }
+        for (card_id, name) in [
+            (CardId(919), "Library One"),
+            (CardId(920), "Library Two"),
+            (CardId(921), "Library Three"),
+        ] {
+            create_object(
+                &mut state,
+                card_id,
+                PlayerId(0),
+                name.to_string(),
+                Zone::Library,
+            );
+        }
+
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(1),
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+        };
+
+        let result =
+            apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
+        let WaitingFor::ScryChoice { player, cards } = result.waiting_for.clone() else {
+            panic!(
+                "unless branch must preserve ScryChoice before watcher triggers, got {:?}",
+                result.waiting_for
+            );
+        };
+        assert_eq!(player, PlayerId(0));
+        assert_eq!(cards.len(), 2);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            2,
+            "the two scry watcher triggers should be parked until ScryChoice resolves"
+        );
+
+        let hand_after_scry_prompt = state.players[0].hand.len();
+        let life_after_scry_prompt = state.players[0].life;
+        apply_as_current(&mut state, GameAction::SelectCards { cards }).unwrap();
+        for _ in 0..8 {
+            if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+                crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+            }
+            if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        }
+
+        assert_eq!(state.players[0].hand.len(), hand_after_scry_prompt + 1);
+        assert_eq!(state.players[0].life, life_after_scry_prompt + 1);
     }
 
     /// CR 118.12: When the unless cost is declined, the primary effect runs

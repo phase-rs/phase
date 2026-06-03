@@ -2008,7 +2008,12 @@ async fn maybe_spawn_draft_matches(
     let spawns = {
         let mut draft_mgr = draft_state.lock().await;
         let mut game_mgr = game_state.lock().await;
-        if draft_mgr.ensure_pairings_generated(draft_code).is_err() {
+        if let Err(error) = draft_mgr.ensure_pairings_generated(draft_code) {
+            warn!(
+                draft = %draft_code,
+                error = %error,
+                "failed to generate draft pairings"
+            );
             return;
         }
         let round = draft_mgr

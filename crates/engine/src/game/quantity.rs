@@ -1629,11 +1629,11 @@ fn resolve_ref(
         //      "that many" for Ur-Dragon-style batched triggers; without it
         //      the `extract_amount_from_event` cascade below falls through to
         //      0 on `AttackersDeclared` and similar batched events.
-        //   2. CR 706.4: `die_result_this_resolution` — a die rolled
-        //      earlier in THIS resolution (no results table) outranks the
-        //      triggering event's own amount, so "roll a d20. <effect> equal to
-        //      the result" consumes the roll, not the combat damage / life
-        //      change that triggered it.
+        //   2. CR 706.4: `die_result_this_resolution` — die results recorded
+        //      earlier in THIS resolution (no results table) outrank the
+        //      triggering event's own amount, so "roll one or more dice.
+        //      <effect> equal to the result(s)" consumes the roll total, not
+        //      the combat damage / life change that triggered it.
         //   3. `extract_amount_from_event(current_trigger_event)` — scalar
         //      events with an inherent amount (damage dealt, life changed,
         //      cards drawn, counters added/removed, die rolls).
@@ -1646,10 +1646,11 @@ fn resolve_ref(
         QuantityRef::EventContextAmount => state
             .current_trigger_match_count
             .map(u32_to_i32_saturating)
-            // CR 706.4: A die rolled earlier in THIS resolution outranks the
-            // triggering event's own amount, so "roll a d20. <effect> equal to the result"
-            // consumes the roll, not the combat damage / life change that triggered it.
-            .or_else(|| state.die_result_this_resolution.map(i32::from))
+            // CR 706.4: Die results recorded earlier in THIS resolution
+            // outrank the triggering event's own amount, so "roll one or more
+            // dice. <effect> equal to the result(s)" consumes the roll total,
+            // not the combat damage / life change that triggered it.
+            .or(state.die_result_this_resolution)
             .or_else(|| {
                 state
                     .current_trigger_event

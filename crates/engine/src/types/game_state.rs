@@ -990,6 +990,11 @@ pub struct PendingCast {
     /// kicker costs and multikicker loops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_cost_flow: Option<AdditionalCost>,
+    /// CR 601.2b + CR 702.48c: Source of the currently pending additional-cost
+    /// component. This disambiguates same-shaped costs when a later object
+    /// selection resumes payment.
+    #[serde(default)]
+    pub additional_cost_source: SpellCostSource,
     /// CR 601.2b + CR 700.2a: Modal spells with kicker-dependent mode caps
     /// announce kicker intent before choosing modes, but pay those costs later
     /// in the normal cost-payment step.
@@ -1072,6 +1077,7 @@ impl PendingCast {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -1720,6 +1726,13 @@ pub enum PayCostKind {
     ExileFromZone {
         zone: ExileCostSourceZone,
     },
+    /// CR 702.167a/b: Exile craft materials chosen from the union of the
+    /// battlefield (permanents you control) and your graveyard. `materials` is
+    /// the dual-zone `TargetFilter` the choices were drawn from; the handler
+    /// re-validates eligibility against it before exiling.
+    ExileMaterials {
+        materials: TargetFilter,
+    },
     /// Exile objects from any zone (mana-ability exile costs).
     ExileFromManaZone {
         zone: Zone,
@@ -1743,10 +1756,26 @@ pub enum CostResume {
         #[serde(rename = "Spell")]
         spell: Box<PendingCast>,
     },
+    SpellCost {
+        #[serde(rename = "Spell")]
+        spell: Box<PendingCast>,
+        cost: Box<AbilityCost>,
+        source: SpellCostSource,
+    },
     ManaAbility {
         #[serde(rename = "ManaAbility")]
         mana_ability: Box<PendingManaAbility>,
     },
+}
+
+/// CR 601.2h + CR 702.48c: Identifies which spell-cost component a
+/// `WaitingFor::PayCost` choice is paying when the same `AbilityCost` shape can
+/// come from different rules.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpellCostSource {
+    #[default]
+    Other,
+    Offering,
 }
 
 /// The specific kind of cast offer being presented to the player.
@@ -3363,6 +3392,10 @@ impl WaitingFor {
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
+                }
+                | CostResume::SpellCost {
+                    spell: pending_cast,
+                    ..
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. } => None,
             },
@@ -3389,6 +3422,10 @@ impl WaitingFor {
             WaitingFor::PayCost { resume, .. } => match resume {
                 CostResume::Spell {
                     spell: pending_cast,
+                }
+                | CostResume::SpellCost {
+                    spell: pending_cast,
+                    ..
                 } => Some(pending_cast),
                 CostResume::ManaAbility { .. } => None,
             },
@@ -3904,7 +3941,7 @@ pub enum StackEntryKind {
         /// original resolution scope cleared) can re-stamp
         /// `die_result_this_resolution`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        die_result: Option<u8>,
+        die_result: Option<i32>,
     },
     /// CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     /// enter the stack after cost-payment + target selection and resolve with
@@ -4918,18 +4955,18 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_amount: Option<i32>,
 
-    /// CR 706.2: The actual result (natural + modifiers, clamped at 0) of the
-    /// most recent die roll within the current ability resolution. Set by
-    /// `roll_die::resolve` immediately after emitting `GameEvent::DieRolled`, read by
-    /// `QuantityRef::EventContextAmount` so an inline "equal to the result" sub_ability
-    /// (CR 706.4 — no results table) consumes the rolled value rather than the
-    /// numeric amount of the triggering event (e.g. combat damage). Resolution-scoped:
-    /// cleared at `apply()` entry and at every depth-0 chain entry, so it is `Some`
-    /// only between the roll and the sub_ability that reads it. Follows the
-    /// `last_effect_amount` PartialEq-OMISSION pattern: NOT compared in the
-    /// hand-written `PartialEq` (safe — always cleared at comparison boundaries).
+    /// CR 706.2 + CR 706.4: The actual scalar result available to the current
+    /// ability resolution. During a results-table roll, `roll_die::resolve`
+    /// stamps each individual die result before resolving that die's branch
+    /// (CR 706.3a). After a no-table multi-die roll, it stamps the aggregate
+    /// total so an inline "equal to the result(s)" sub_ability consumes the
+    /// rolled value rather than the numeric amount of the triggering event
+    /// (e.g. combat damage). Resolution-scoped: cleared at `apply()` entry and
+    /// at cross-resolution stack boundaries. Follows the `last_effect_amount`
+    /// PartialEq-OMISSION pattern: NOT compared in the hand-written `PartialEq`
+    /// (safe — always cleared at comparison boundaries).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub die_result_this_resolution: Option<u8>,
+    pub die_result_this_resolution: Option<i32>,
 
     /// Count from the most recent interactive effect resolution (e.g., number of cards
     /// actually discarded in a DiscardChoice). Used as fallback for EventContextAmount
@@ -5078,10 +5115,6 @@ pub struct GameState {
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
-    /// CR 309: Planechase planar deck state (None = not a planechase game).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub planechase: Option<crate::game::planechase::PlanechaseState>,
-
     /// CR 510.2 + CR 615.7: Transient per-shield combat-damage prevention tally.
     /// Set to `Some(empty)` by `apply_combat_damage` for the duration of one
     /// simultaneous combat-damage batch. While `Some`, the `Prevention::All`
@@ -5461,7 +5494,6 @@ impl GameState {
             ring_bearer: HashMap::new(),
             dungeon_progress: HashMap::new(),
             initiative: None,
-            planechase: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
@@ -5946,6 +5978,7 @@ mod tests {
                 distribute: None,
                 origin_zone: Zone::Hand,
                 additional_cost_flow: None,
+                additional_cost_source: SpellCostSource::Other,
                 deferred_modal_choice: None,
                 deferred_target_selection: false,
                 chosen_modes: Vec::new(),
@@ -6271,6 +6304,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),

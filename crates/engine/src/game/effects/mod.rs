@@ -9,7 +9,7 @@ use crate::types::ability::{
     PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
-use crate::types::events::{GameEvent, PlayerActionKind};
+use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
     MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor, ZoneChangeRecord,
@@ -1838,10 +1838,10 @@ pub fn resolve_effect(
         Effect::BlightEffect { .. } => blight::resolve(state, ability, events),
         Effect::Endure { .. } => endure::resolve(state, ability, events),
         Effect::Forage => {
-            events.push(GameEvent::PlayerPerformedAction {
-                player_id: ability.controller,
-                action: PlayerActionKind::Forage,
-            });
+            // CR 701.61a: Forage requires exiling three cards from your graveyard
+            // or sacrificing a Food. The keyword action is recognized by the
+            // parser but not resolved here until that cost choice has a real
+            // runtime path.
             Ok(())
         }
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),
@@ -2725,6 +2725,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
 }
 
 fn previous_effect_amount_from_events(
+    state: &GameState,
     ability: &ResolvedAbility,
     events: &[GameEvent],
 ) -> Option<i32> {
@@ -2785,22 +2786,12 @@ fn previous_effect_amount_from_events(
                 _ => None,
             })
             .sum(),
-        // CR 706.2 + CR 608.2c: A die roll's *actual* result (natural + modifier,
-        // clamped at 0) is the numeric value a follow-up `PreviousEffectAmount`
-        // condition reads. Unlike damage/life amounts, the relevant amount is
-        // always defined — even a clamped-to-zero result is a valid
-        // sub-ability gate (Deck of Many Things' "if the result is 0 or less,
-        // discard your hand"). We short-circuit on the first DieRolled event
-        // (the one this RollDie effect emitted; any nested rolls happen inside
-        // a deeper chain that clears `last_effect_amount` on entry, but their
-        // events still appear later in the slice and must be ignored here so
-        // the OUTER RollDie's actual is what the OUTER sub_ability sees).
-        Effect::RollDie { .. } => {
-            return events.iter().find_map(|event| match event {
-                GameEvent::DieRolled { result, .. } => Some(*result as i32),
-                _ => None,
-            });
-        }
+        // CR 706.2 + CR 706.4 + CR 608.2c: `roll_die::resolve` is the single
+        // authority for the scalar value a follow-up `PreviousEffectAmount` or
+        // `EventContextAmount` consumer reads. That avoids re-deriving from an
+        // event slice that may contain result-table branch effects or nested
+        // rolls interleaved with the outer dice.
+        Effect::RollDie { .. } => return state.die_result_this_resolution,
         _ => 0,
     };
 
@@ -3129,7 +3120,7 @@ fn resolve_chain_body(
             state.last_effect_amount = state.last_effect_count;
             state.last_effect_counts_by_player = counts_by_player;
         } else if let Some(amount) =
-            previous_effect_amount_from_events(&scoped_template, scoped_events)
+            previous_effect_amount_from_events(state, &scoped_template, scoped_events)
         {
             state.last_effect_amount = Some(amount);
         }
@@ -3899,7 +3890,9 @@ fn resolve_chain_body(
     // counters and also deals damage, but "damage dealt this way" must read only
     // `DamageDealt`; Coalition Relic's "counter removed this way" must read only
     // `CounterRemoved`.
-    if let Some(amount) = previous_effect_amount_from_events(ability, &events[events_before..]) {
+    if let Some(amount) =
+        previous_effect_amount_from_events(state, ability, &events[events_before..])
+    {
         state.last_effect_amount = Some(amount);
     }
 

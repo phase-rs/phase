@@ -49,7 +49,6 @@ pub mod mulligan;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
 pub mod phasing;
-pub mod planechase;
 pub mod planeswalker;
 pub mod players;
 pub mod printed_cards;

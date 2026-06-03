@@ -38,11 +38,8 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Exerted => match_exerted,
         TriggerMode::Discover => match_discover,
         TriggerMode::Adapt => match_adapt,
-        TriggerMode::Investigated => match_investigated,
-        TriggerMode::Forage => match_forage,
         TriggerMode::Foretell => match_foretell,
-        TriggerMode::PayLife => match_pay_life,
-        TriggerMode::DamagePreventedOnce => match_damage_prevented_once,
+        TriggerMode::DamagePreventedOnce => match_unimplemented,
         TriggerMode::AttackersDeclared | TriggerMode::AttackersDeclaredOneTarget => {
             match_attackers_declared
         }
@@ -57,6 +54,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Untaps | TriggerMode::UntapAll => match_untaps,
         TriggerMode::LifeGained => match_life_gained,
         TriggerMode::LifeLost | TriggerMode::LifeLostAll => match_life_lost,
+        TriggerMode::LifeChanged => match_life_changed,
         TriggerMode::Drawn => match_drawn,
         TriggerMode::Discarded | TriggerMode::DiscardedAll => match_discarded,
         TriggerMode::Sacrificed | TriggerMode::SacrificedOnce => match_sacrificed,
@@ -66,11 +64,13 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Phase | TriggerMode::PayEcho | TriggerMode::PayCumulativeUpkeep => match_phase,
         TriggerMode::BecomesTarget | TriggerMode::BecomesTargetOnce => match_becomes_target,
         TriggerMode::LandPlayed => match_land_played,
+        TriggerMode::PlayCard => match_play_card,
         TriggerMode::ManaAdded => match_mana_added,
         TriggerMode::SearchedLibrary
         | TriggerMode::Scry
         | TriggerMode::Surveil
         | TriggerMode::CollectEvidence
+        | TriggerMode::Investigated
         | TriggerMode::PlayerPerformedAction => match_player_action,
         TriggerMode::LeavesBattlefield => match_leaves_battlefield,
         TriggerMode::BecomesBlocked => match_becomes_blocked,
@@ -140,6 +140,8 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::LosesGame => match_loses_game,
         // CR 702.26c: Phasing triggers fire when a permanent phases in.
         TriggerMode::PhaseIn => match_phase_in,
+        // CR 702.26b: Phasing triggers fire when a permanent phases out.
+        TriggerMode::PhaseOut => match_phase_out,
         TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
         | TriggerMode::AbilityTriggered
@@ -147,7 +149,8 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::SpellAbilityCopy
         | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll
-        | TriggerMode::PhaseOut
+        | TriggerMode::Forage
+        | TriggerMode::PayLife
         | TriggerMode::PhaseOutAll
         | TriggerMode::NewGame
         | TriggerMode::Championed
@@ -238,6 +241,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::LifeGained, match_life_gained);
     r.insert(TriggerMode::LifeLost, match_life_lost);
     r.insert(TriggerMode::LifeLostAll, match_life_lost);
+    r.insert(TriggerMode::LifeChanged, match_life_changed);
     r.insert(TriggerMode::Drawn, match_drawn);
     r.insert(TriggerMode::Discarded, match_discarded);
     r.insert(TriggerMode::DiscardedAll, match_discarded);
@@ -254,12 +258,14 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::BecomesTarget, match_becomes_target);
     r.insert(TriggerMode::BecomesTargetOnce, match_becomes_target);
     r.insert(TriggerMode::LandPlayed, match_land_played);
+    r.insert(TriggerMode::PlayCard, match_play_card);
     r.insert(TriggerMode::SpellCopy, match_spell_cast);
     r.insert(TriggerMode::ManaAdded, match_mana_added);
     r.insert(TriggerMode::SearchedLibrary, match_player_action);
     r.insert(TriggerMode::Scry, match_player_action);
     r.insert(TriggerMode::Surveil, match_player_action);
     r.insert(TriggerMode::CollectEvidence, match_player_action);
+    r.insert(TriggerMode::Investigated, match_player_action);
     r.insert(TriggerMode::PlayerPerformedAction, match_player_action);
 
     // Zone-based: leaves the battlefield
@@ -384,14 +390,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     r.insert(TriggerMode::Discover, match_discover);
     r.insert(TriggerMode::Adapt, match_adapt);
-    r.insert(TriggerMode::Investigated, match_investigated);
-    r.insert(TriggerMode::Forage, match_forage);
     r.insert(TriggerMode::Foretell, match_foretell);
-    r.insert(TriggerMode::PayLife, match_pay_life);
-    r.insert(
-        TriggerMode::DamagePreventedOnce,
-        match_damage_prevented_once,
-    );
+    // CR 702.26b: Phasing triggers fire when a permanent phases out.
+    r.insert(TriggerMode::PhaseOut, match_phase_out);
 
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
@@ -402,7 +403,10 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::SpellAbilityCopy,
         TriggerMode::CounterPlayerAddedAll,
         TriggerMode::CounterTypeAddedAll,
-        TriggerMode::PhaseOut,
+        TriggerMode::DamagePreventedOnce,
+        TriggerMode::Forage,
+        TriggerMode::PayLife,
+        // TriggerMode::PhaseOut — moved to real matcher above
         TriggerMode::PhaseOutAll,
         TriggerMode::NewGame,
         // TriggerMode::TakesInitiative — moved to real matcher above
@@ -1191,10 +1195,16 @@ pub(super) fn match_spell_cast(
         (TriggerMode::SpellCast, SpellOnStackClass::Cast)
         | (TriggerMode::SpellCopy, SpellOnStackClass::Copy)
         | (TriggerMode::SpellCastOrCopy, _) => true,
+        // CR 601.1a + CR 701.18b: "play a card" includes casting a spell, but
+        // not copying one (a copy is never cast — CR 707.10). `match_play_card`
+        // routes SpellCast events here with a `PlayCard`-mode trigger.
+        (TriggerMode::PlayCard, SpellOnStackClass::Cast) => true,
+        (TriggerMode::PlayCard, SpellOnStackClass::Copy) => false,
         (TriggerMode::SpellCast, SpellOnStackClass::Copy)
         | (TriggerMode::SpellCopy, SpellOnStackClass::Cast) => false,
         // `match_spell_cast` is only registered for the three spell-on-stack
-        // modes; any other mode reaching here is a registry wiring bug.
+        // modes (plus `PlayCard` via `match_play_card`); any other mode
+        // reaching here is a registry wiring bug.
         _ => false,
     };
     if !accepts {
@@ -1709,6 +1719,23 @@ pub(super) fn match_life_lost(
     }
 }
 
+/// CR 119.3: Match life changed events (gain or loss). Fires when `amount != 0`.
+pub(super) fn match_life_changed(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::LifeChanged { player_id, amount } = event {
+        if *amount == 0 {
+            return false;
+        }
+        valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
 pub(super) fn match_drawn(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -1740,6 +1767,7 @@ pub(super) fn match_player_action(
         TriggerMode::Scry => *action == PlayerActionKind::Scry,
         TriggerMode::Surveil => *action == PlayerActionKind::Surveil,
         TriggerMode::CollectEvidence => *action == PlayerActionKind::CollectEvidence,
+        TriggerMode::Investigated => *action == PlayerActionKind::Investigate,
         TriggerMode::PlayerPerformedAction => trigger
             .player_actions
             .as_ref()
@@ -1991,6 +2019,21 @@ pub(super) fn match_land_played(
     } else {
         false
     }
+}
+
+/// CR 601.1a + CR 701.18b: A player "plays a card" by playing a land or casting
+/// a spell. "Whenever you play a card" therefore fires on either a `LandPlayed` or a
+/// `SpellCast` event by the relevant player — the union of the two underlying
+/// matchers. (A spell *copy* is not played — CR 707.10 — and is rejected by
+/// `match_spell_cast`'s class gate for the `PlayCard` mode.)
+pub(super) fn match_play_card(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match_spell_cast(event, trigger, source_id, state)
+        || match_land_played(event, trigger, source_id, state)
 }
 
 pub(super) fn match_mana_added(
@@ -2457,7 +2500,7 @@ pub(super) fn match_discover(
     }
 }
 
-/// CR 702.12a: Adapt — fires when a permanent adapts.
+/// CR 701.46a: Adapt — fires when a permanent adapts.
 pub(super) fn match_adapt(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -2476,40 +2519,6 @@ pub(super) fn match_adapt(
     } else {
         *adapted_id == source_id
     }
-}
-
-/// CR 701.16a: Investigated — fires when a player investigates.
-pub(super) fn match_investigated(
-    event: &GameEvent,
-    trigger: &TriggerDefinition,
-    source_id: ObjectId,
-    state: &GameState,
-) -> bool {
-    let GameEvent::PlayerPerformedAction {
-        player_id,
-        action: PlayerActionKind::Investigate,
-    } = event
-    else {
-        return false;
-    };
-    valid_player_matches(trigger, state, *player_id, source_id)
-}
-
-/// CR 702.808: Forage — fires when a player forages.
-pub(super) fn match_forage(
-    event: &GameEvent,
-    trigger: &TriggerDefinition,
-    source_id: ObjectId,
-    state: &GameState,
-) -> bool {
-    let GameEvent::PlayerPerformedAction {
-        player_id,
-        action: PlayerActionKind::Forage,
-    } = event
-    else {
-        return false;
-    };
-    valid_player_matches(trigger, state, *player_id, source_id)
 }
 
 /// CR 702.143a: Foretell — fires when a player foretells a card.
@@ -2533,43 +2542,6 @@ pub(super) fn match_foretell(
         valid_card_matches(trigger, state, *object_id, source_id)
     } else {
         true
-    }
-}
-
-/// CR 119.3: Pay life as a cost — life lost (not combat damage).
-pub(super) fn match_pay_life(
-    event: &GameEvent,
-    trigger: &TriggerDefinition,
-    source_id: ObjectId,
-    state: &GameState,
-) -> bool {
-    let GameEvent::LifeChanged { player_id, amount } = event else {
-        return false;
-    };
-    if *amount >= 0 {
-        return false;
-    }
-    valid_player_matches(trigger, state, *player_id, source_id)
-}
-
-/// CR 615.13: Damage prevented — batch informational event.
-pub(super) fn match_damage_prevented_once(
-    event: &GameEvent,
-    trigger: &TriggerDefinition,
-    source_id: ObjectId,
-    state: &GameState,
-) -> bool {
-    let GameEvent::DamagePrevented {
-        source_id: preventer,
-        ..
-    } = event
-    else {
-        return false;
-    };
-    if trigger.valid_card.is_some() {
-        valid_card_matches(trigger, state, *preventer, source_id)
-    } else {
-        *preventer == source_id
     }
 }
 
@@ -3315,6 +3287,28 @@ pub(super) fn match_phase_in(
     if let GameEvent::PermanentPhasedIn { object_id } = event {
         if trigger.valid_card.is_some() {
             valid_card_matches(trigger, state, *object_id, source_id)
+        } else {
+            *object_id == source_id
+        }
+    } else {
+        false
+    }
+}
+/// CR 702.26b: Matches when a permanent phases out.
+/// Uses phased-out-aware filter because the object's phase_status is already
+/// set to PhasedOut when this event fires (see `phase_out_object`).
+pub(super) fn match_phase_out(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::PermanentPhasedOut { object_id, .. } = event {
+        if let Some(filter) = &trigger.valid_card {
+            let ctx = super::filter::FilterContext::from_source(state, source_id);
+            super::filter::matches_target_filter_including_phased_out(
+                state, *object_id, filter, &ctx,
+            )
         } else {
             *object_id == source_id
         }
@@ -4303,6 +4297,99 @@ mod tests {
             source,
             &state,
         ));
+    }
+
+    // CR 601.1a + CR 701.18b: "Whenever you play a card" fires on BOTH casting a
+    // spell and playing a land by the controller, and on nothing else. `match_play_card`
+    // is the union of `match_spell_cast` and `match_land_played`.
+    #[test]
+    fn play_card_matches_spell_cast_and_land_played_by_controller() {
+        let mut state = setup();
+        // Source controlled by player 0; "you" → player 0.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Recycle".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::PlayCard);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        // Casting a spell counts as playing a card (CR 601.1a + CR 701.18b).
+        let spell_event = GameEvent::SpellCast {
+            card_id: CardId(10),
+            controller: PlayerId(0),
+            object_id: ObjectId(10),
+        };
+        assert!(match_play_card(&spell_event, &trigger, source, &state));
+
+        // Copying a spell does not count as playing a card (CR 707.10).
+        let copied_spell = GameEvent::SpellCopied {
+            card_id: CardId(11),
+            controller: PlayerId(0),
+            object_id: ObjectId(11),
+            original_id: ObjectId(10),
+        };
+        assert!(!match_play_card(&copied_spell, &trigger, source, &state));
+
+        // Playing a land counts as playing a card (CR 601.1a + CR 701.18b).
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let land_event = GameEvent::LandPlayed {
+            object_id: land,
+            player_id: PlayerId(0),
+            from_zone: Zone::Hand,
+        };
+        assert!(match_play_card(&land_event, &trigger, source, &state));
+
+        // An unrelated event does not fire the trigger.
+        let unrelated = GameEvent::CardsDrawn {
+            player_id: PlayerId(0),
+            count: 1,
+        };
+        assert!(!match_play_card(&unrelated, &trigger, source, &state));
+    }
+
+    // CR 601.1a + CR 603.2: the "you" scope rejects another player's play.
+    #[test]
+    fn play_card_rejects_other_players_actions() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Recycle".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::PlayCard);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let opponent_spell = GameEvent::SpellCast {
+            card_id: CardId(10),
+            controller: PlayerId(1),
+            object_id: ObjectId(10),
+        };
+        assert!(!match_play_card(&opponent_spell, &trigger, source, &state));
+
+        let land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_land = GameEvent::LandPlayed {
+            object_id: land,
+            player_id: PlayerId(1),
+            from_zone: Zone::Hand,
+        };
+        assert!(!match_play_card(&opponent_land, &trigger, source, &state));
     }
 
     #[test]
@@ -6777,6 +6864,57 @@ mod tests {
             },
             &trigger,
             observer,
+            &state
+        ));
+    }
+
+    #[test]
+    fn phase_out_matcher_registered_and_matches_source() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Teferi's Imp Stand-In".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::PhaseOut);
+        let registry = build_trigger_registry();
+
+        assert!(trigger_matcher(TriggerMode::PhaseOut).is_some());
+        assert!(registry.contains_key(&TriggerMode::PhaseOut));
+        assert!(match_phase_out(
+            &GameEvent::PermanentPhasedOut {
+                object_id: source,
+                indirect: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+        assert!(!match_phase_out(
+            &GameEvent::PermanentPhasedOut {
+                object_id: ObjectId(2),
+                indirect: false,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+
+        let self_ref_trigger =
+            make_trigger(TriggerMode::PhaseOut).valid_card(TargetFilter::SelfRef);
+        state.objects.get_mut(&source).unwrap().phase_status =
+            crate::game::game_object::PhaseStatus::PhasedOut {
+                cause: crate::game::game_object::PhaseOutCause::Directly,
+            };
+        assert!(match_phase_out(
+            &GameEvent::PermanentPhasedOut {
+                object_id: source,
+                indirect: false,
+            },
+            &self_ref_trigger,
+            source,
             &state
         ));
     }
