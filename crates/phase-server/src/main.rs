@@ -3066,6 +3066,15 @@ async fn handle_client_message(
                 return;
             }
 
+            let pc = requested_player_count.clamp(2, MAX_FULL_GAME_PLAYER_COUNT);
+            if let Err(reason) = guard_create_ai_seats(&ai_seats, pc) {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
             if let Err(reason) = lobby_broker::guard_create_game_settings_inbound(
                 lobby_broker::CreateGameSettingsInbound {
                     deck: &deck,
@@ -3078,15 +3087,6 @@ async fn handle_client_message(
                     draft_metadata: None,
                 },
             ) {
-                let msg = ServerMessage::Error { message: reason };
-                if let Ok(json) = serde_json::to_string(&msg) {
-                    let _ = socket.send(Message::text(json)).await;
-                }
-                return;
-            }
-
-            let pc = requested_player_count.clamp(2, MAX_FULL_GAME_PLAYER_COUNT);
-            if let Err(reason) = guard_create_ai_seats(&ai_seats, pc) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
