@@ -3948,6 +3948,9 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
         scan_contains(cond_lower, "enters or attacks")
             || scan_contains(cond_lower, "enters the battlefield or attacks")
             || scan_contains(cond_lower, "attacks or blocks")
+            // CR 702.29d: "cycle or discard" is a dedicated compound mode
+            // (CycledOrDiscarded) — do not split.
+            || scan_contains(cond_lower, "cycle or discard")
     }
     if is_existing_compound_mode(cond_lower) {
         return None;
@@ -4055,6 +4058,10 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_word("creates"),
         parse_event_phrase("create "),
         parse_event_word("create"),
+        // CR 702.29c: Cycling as compound event verb (Warped Tusker:
+        // "when you cast or cycle ~").
+        parse_event_phrase("cycle "),
+        parse_event_word("cycle"),
     ));
     let simple_event_verbs = alt((
         // CR 702.100b + CR 701.44b: SimpleEvent verbs that may appear in
@@ -4096,6 +4103,8 @@ fn parse_bare_shared_event_verb(input: &str) -> OracleResult<'_, ()> {
         parse_event_word("play"),
         parse_event_word("casts"),
         parse_event_word("cast"),
+        // CR 702.29c: "cycle" as bare event verb for shared-object propagation.
+        parse_event_word("cycle"),
     ))
     .parse(input)
 }
@@ -4112,6 +4121,8 @@ fn parse_shared_object_verb_head(input: &str) -> OracleResult<'_, ()> {
         parse_event_phrase("play "),
         parse_event_phrase("casts "),
         parse_event_phrase("cast "),
+        // CR 702.29c: "cycle" as shared-object verb head.
+        parse_event_phrase("cycle "),
     ))
     .parse(input)
 }
@@ -22016,6 +22027,23 @@ mod tests {
             extract_subject_text("you created a token"),
             "you created a token"
         );
+    }
+
+    #[test]
+    fn compound_or_cast_or_cycle_self() {
+        // CR 702.29c + CR 601.2: Warped Tusker — "When you cast or cycle ~"
+        // splits into a SpellCast self-trigger and a Cycled self-trigger.
+        let triggers = parse_trigger_lines(
+            "When you cast or cycle Warped Tusker, search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
+            "Warped Tusker",
+        );
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(triggers[0].mode, TriggerMode::SpellCast);
+        assert_eq!(triggers[0].valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(triggers[0].trigger_zones, vec![Zone::Stack]);
+        assert_eq!(triggers[1].mode, TriggerMode::Cycled);
+        assert_eq!(triggers[1].valid_card, Some(TargetFilter::SelfRef));
+        assert!(triggers[1].trigger_zones.contains(&Zone::Graveyard));
     }
 
     #[test]
