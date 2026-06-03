@@ -155,6 +155,9 @@ fn collect_player_targets(
                     Some(ControllerRef::TargetPlayer) => false,
                     Some(ControllerRef::ParentTargetController) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
+                    // CR 613.1: no phase-out card scopes to a persisted chosen
+                    // player; fail closed (mirrors DefendingPlayer).
+                    Some(ControllerRef::SourceChosenPlayer) => false,
                     // CR 608.2c + CR 109.4: Player chosen by an earlier
                     // `Choose(Player)` in this resolution.
                     Some(ControllerRef::ChosenPlayer { index }) => {

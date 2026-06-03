@@ -301,6 +301,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::LearnDecision { .. }
         | GameAction::ChooseX { .. }
         | GameAction::CastPreparedCopy { .. }
+        | GameAction::ChooseSpecializeColor { .. }
         | GameAction::CastParadigmCopy { .. }
         | GameAction::PassParadigmOffer
         | GameAction::GrantDebugPermission { .. }

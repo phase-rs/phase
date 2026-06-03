@@ -53,7 +53,7 @@ export function PlayerIdentityBanner() {
   };
 
   return (
-    <div className="mx-auto mb-4 flex w-full max-w-xl items-center justify-between gap-3 rounded-[16px] border border-white/8 bg-black/16 px-4 py-2.5">
+    <div className="mb-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-[16px] border border-white/8 bg-black/16 px-4 py-2.5">
       <div className="min-w-0 flex-1">
         <div className="text-[0.6rem] uppercase tracking-[0.22em] text-slate-500">
           {t("playerIdentityBanner.playerName")}

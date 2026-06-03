@@ -268,7 +268,12 @@ export function GameSetupPage() {
           );
         })()}
       >
-        <div className="mx-auto grid w-full max-w-5xl gap-6 lg:grid-cols-[1fr_280px]">
+        {/* `grid-cols-1` (= minmax(0,1fr)) is REQUIRED at mobile: without an
+            explicit base template the grid falls back to an auto column that
+            sizes to the deck grid's min-content (~628px) and overflows the
+            viewport (clipped by the scene's overflow-hidden). The lg template
+            takes over for the deck-grid + sidebar split. */}
+        <div className="grid w-full grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
           {/* Deck grid */}
           <MyDecks
             mode="select"
@@ -312,7 +317,7 @@ export function GameSetupPage() {
                     </button>
                   </div>
                   <div className="mt-1 flex items-center gap-2">
-                    <div className="flex gap-1">
+                    <div className="flex items-center gap-1 rounded-full bg-black/35 px-1.5 py-1 ring-1 ring-white/10">
                       {colors.map((c) => (
                         <span
                           key={c}
@@ -509,7 +514,11 @@ export function GameSetupPage() {
                   tone: "emerald",
                   size: "lg",
                   disabled: cannotStartAi,
-                  className: "w-full whitespace-nowrap px-6",
+                  // No `whitespace-nowrap`: the "Start Match (N opponents)" label
+                  // grows with player count and would overflow the fixed 280px
+                  // sidebar track, forcing page-wide horizontal scroll. Allow it
+                  // to wrap within the column instead.
+                  className: "w-full px-6 text-center",
                 })}
               >
                 {playerCount > 2
