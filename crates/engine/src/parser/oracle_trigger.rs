@@ -8655,9 +8655,9 @@ fn try_parse_nth_spell_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefin
 
 /// Timing-clause kind for nth-spell/nth-draw triggers.
 /// CR 601.2 + CR 603.4: The trailing "each turn" / "in a turn" (unrestricted
-/// timing), "during each opponent's turn" (restricted to opponent's turn), or
-/// "during their turn" (restricted to the acting player's own turn — the
-/// triggering player must be the active player; e.g. The Council of Four).
+/// timing), or "during <player's> turn" (restricted to the active player
+/// matching the parsed `PlayerFilter`; e.g. The Council of Four, Rashmi and
+/// Ragavan).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NthEventTimingKind {
     /// "each turn" / "in a turn" — no turn-ownership restriction.
@@ -8705,11 +8705,12 @@ fn attach_event_timing_tail(def: &mut TriggerDefinition, tail: &str) {
     });
 }
 
-/// Nom combinator for a complete timing-tail clause: matches "each turn",
-/// "in a turn", "during each opponent's turn" (apostrophe-normalized), or
-/// "during their turn". Wrapped in `all_consuming` so it succeeds only when
-/// the clause consumes the entire (already-trimmed) input. Shared by the
-/// nth-spell and nth-draw timing classifiers.
+/// Nom combinator for a complete timing-tail clause: matches unrestricted
+/// per-turn tails ("each turn", "in a turn") and player-scoped turn tails
+/// ("during each opponent's turn", "during their turn", "during each of your
+/// turns", "during your turn"). Wrapped in `all_consuming` so it succeeds only
+/// when the clause consumes the entire (already-trimmed) input. Shared by the
+/// nth-spell, nth-draw, and related event timing classifiers.
 fn parse_timing_tail(i: &str) -> OracleResult<'_, NthEventTimingKind> {
     all_consuming(alt((
         value(NthEventTimingKind::Unrestricted, tag("each turn")),
@@ -20138,6 +20139,17 @@ mod tests {
         assert_eq!(
             def.constraint,
             Some(TriggerConstraint::NthSpellThisTurn { n: 1, filter: None })
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            })
+        );
+
+        let def = parse_trigger_line(
+            "Whenever you cast your first spell during your turn, draw a card.",
+            "Timing Tail Fixture",
         );
         assert_eq!(
             def.condition,
