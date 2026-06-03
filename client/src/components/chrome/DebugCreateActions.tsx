@@ -144,6 +144,10 @@ function CreateCardForm({ onDispatch }: Props) {
   const [cardName, setCardName] = useState("");
   const [owner, setOwner] = useState<PlayerId>(0);
   const [zone, setZone] = useState<Zone>("Hand");
+  // Gate the ETB pipeline for battlefield spawns. Checked = run replacements +
+  // ETB triggers + SBAs (engine default); unchecked = raw placement. Only sent
+  // meaningfully for Battlefield — the engine ignores it for other zones.
+  const [runEtb, setRunEtb] = useState(true);
   const [face, setFace] = useState<CardFaceShape | null>(null);
   const [targetKind, setTargetKind] = useState<"Object" | "Player">("Object");
   const [targetObjectId, setTargetObjectId] = useState<ObjectId | null>(null);
@@ -247,11 +251,16 @@ function CreateCardForm({ onDispatch }: Props) {
           )}
         </>
       )}
+      {zone === "Battlefield" && (
+        <FieldRow label="">
+          <CheckboxInput checked={runEtb} onChange={setRunEtb} label="Run ETB effects" />
+        </FieldRow>
+      )}
       <SubmitButton
         onClick={() =>
           onDispatch({
             type: "CreateCard",
-            data: { card_name: cardName, owner, zone, attach_to: buildAttachTo() },
+            data: { card_name: cardName, owner, zone, attach_to: buildAttachTo(), run_etb: runEtb },
           })
         }
         disabled={!cardName.trim() || !hasHost}
@@ -351,6 +360,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [counterType, setCounterType] = useState<CounterType>("P1P1");
   const [counterCount, setCounterCount] = useState(0);
+  const [runEtb, setRunEtb] = useState(true);
 
   useEffect(() => {
     listTokenPresets()
@@ -437,6 +447,7 @@ function CatalogTokenForm({ onDispatch }: Props) {
             enter_with_counters: buildEnterCounters(counterType, counterCount),
           },
         },
+        run_etb: runEtb,
       },
     });
   };
@@ -508,6 +519,9 @@ function CatalogTokenForm({ onDispatch }: Props) {
         setCount={setCounterCount}
         hint={survivalHint}
       />
+      <FieldRow label="">
+        <CheckboxInput checked={runEtb} onChange={setRunEtb} label="Run ETB effects" />
+      </FieldRow>
       <SubmitButton onClick={handleSubmit} disabled={!selectedId}>
         Create Selected Token
       </SubmitButton>
@@ -526,6 +540,7 @@ function CustomTokenForm({ onDispatch }: Props) {
   const [keywordsText, setKeywordsText] = useState("");
   const [counterType, setCounterType] = useState<CounterType>("P1P1");
   const [counterCount, setCounterCount] = useState(0);
+  const [runEtb, setRunEtb] = useState(true);
 
   const toggleCoreType = (ct: CoreType) => {
     setCoreTypes((prev) =>
@@ -569,6 +584,7 @@ function CustomTokenForm({ onDispatch }: Props) {
             enter_with_counters: buildEnterCounters(counterType, counterCount),
           },
         },
+        run_etb: runEtb,
       },
     });
   };
@@ -639,6 +655,9 @@ function CustomTokenForm({ onDispatch }: Props) {
         setCount={setCounterCount}
         hint={survivalHint}
       />
+      <FieldRow label="">
+        <CheckboxInput checked={runEtb} onChange={setRunEtb} label="Run ETB effects" />
+      </FieldRow>
       <SubmitButton onClick={handleSubmit}>Create Custom Token</SubmitButton>
     </>
   );

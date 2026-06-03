@@ -4147,6 +4147,9 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         // CR 702.26c: "phases in" / "phase in" — phasing trigger verb.
         parse_event_phrase("phases in"),
         parse_event_phrase("phase in"),
+        // CR 702.26b: "phases out" / "phase out" — phasing-out trigger verb.
+        parse_event_phrase("phases out"),
+        parse_event_phrase("phase out"),
     ));
     let player_actions = alt((
         passive_player_actions,
@@ -5803,6 +5806,8 @@ fn try_parse_event(
         Saddles,
         /// CR 702.26c: Permanent phases in from phased-out state.
         PhasesIn,
+        /// CR 702.26b: Permanent phases out.
+        PhasesOut,
         /// CR 701.3d: Equipment/Aura becomes unattached from a permanent.
         BecomesUnattached(Option<TargetFilter>),
         // CR 701.3a: Equipment/Aura becomes attached to a permanent.
@@ -5934,6 +5939,9 @@ fn try_parse_event(
             // CR 702.26c: "phases in" / "phase in" — phasing trigger.
             value(SimpleEvent::PhasesIn, tag("phases in")),
             value(SimpleEvent::PhasesIn, tag("phase in")),
+            // CR 702.26b: "phases out" / "phase out" — phasing-out trigger.
+            value(SimpleEvent::PhasesOut, tag("phases out")),
+            value(SimpleEvent::PhasesOut, tag("phase out")),
             // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
             parse_becomes_unattached,
             // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
@@ -6081,6 +6089,11 @@ fn try_parse_event(
                 def.mode = TriggerMode::PhaseIn;
                 def.valid_card = Some(subject.clone());
             }
+            SimpleEvent::PhasesOut => {
+                // CR 702.26b: Permanent phases out.
+                def.mode = TriggerMode::PhaseOut;
+                def.valid_card = Some(subject.clone());
+            }
             SimpleEvent::BecomesUnattached(host_filter) => {
                 // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
                 // `valid_card` records the Equipment/Aura filter (the subject).
@@ -6121,14 +6134,18 @@ fn try_parse_event(
         return Some((def.mode.clone(), def));
     }
 
-    // CR 119.3 + CR 603.2: "Whenever [subject] loses life" — player-scoped life-loss
-    // trigger. Subject filter (`a player`, `an opponent`, etc.) becomes `valid_target`
-    // so the matcher's `valid_player_matches` honors the scoping.
+    // CR 119.3 + CR 603.2: "Whenever [subject] gains/loses/gains or loses life"
+    // — player-scoped life-change triggers. Subject filter (`a player`,
+    // `an opponent`, etc.) becomes `valid_target` so the matcher's
+    // `valid_player_matches` honors the scoping.
     // Covers Exquisite Blood ("Whenever an opponent loses life, ..."),
     // Vito, Thorn of the Dusk Rose ("Whenever you gain life, each opponent loses..."),
-    // Bloodchief Ascension-adjacent cards.
+    // Bloodchief Ascension-adjacent cards, and Moonstone Harbinger-style combined
+    // life-change triggers.
     fn parse_life_verb(input: &str) -> OracleResult<'_, TriggerMode> {
         alt((
+            value(TriggerMode::LifeChanged, tag("gains or loses life")),
+            value(TriggerMode::LifeChanged, tag("gain or lose life")),
             value(TriggerMode::LifeLost, tag("loses life")),
             value(TriggerMode::LifeLost, tag("lose life")),
             value(TriggerMode::LifeGained, tag("gains life")),
@@ -7968,6 +7985,19 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         def.mode = TriggerMode::Cycled;
         def.valid_target = Some(TargetFilter::Controller);
         return Some((TriggerMode::Cycled, def));
+    }
+
+    // CR 601.1a + CR 701.18b: "whenever you play a card" — playing a card means
+    // playing it as a land OR casting it as a spell, so this fires on both
+    // events. A single `PlayCard` trigger mode (Recycle, Null Profusion) covers
+    // both via `match_play_card`. Matched before the land-play arm; the
+    // "a card" object cannot match the land-play helper's "a land"/"another land"
+    // object, so neither shadows the other.
+    if parse_play_card_trigger_subject(lower).is_some() {
+        let mut def = make_base();
+        def.mode = TriggerMode::PlayCard;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::PlayCard, def));
     }
 
     // CR 305.1 + CR 603.2 + CR 701.18a: "whenever [X] plays/play a land
@@ -10339,6 +10369,43 @@ fn is_land_play_filter(tf: &TypedFilter) -> bool {
     })
 }
 
+/// CR 601.1a + CR 701.18b: Parse "whenever/when you play a card" — the
+/// play-a-card trigger subject. A player "plays a card" by playing a land or
+/// casting a spell, so a single `PlayCard` trigger mode covers both events
+/// (Recycle, Null Profusion, Jinxed Ring).
+///
+/// Decomposed into axes (prefix × verb × object) via nom combinators, mirroring
+/// `parse_land_play_trigger_subject`. Returns `Some(())` when the full
+/// "you play a card" subject is present and is followed only by end-of-input or
+/// the effect comma (so "you play a card from your graveyard" does not match).
+/// Restricted to the exact second-person bare-card form. Qualified variants
+/// such as "a player plays a card exiled with ~" need additional linked-card
+/// filtering before they can safely share this parser arm.
+fn parse_play_card_trigger_subject(lower: &str) -> Option<()> {
+    let (after_prefix, _) = alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag::<_, _, OracleError<'_>>("when "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (after_verb, _) = pair(
+        tag::<_, _, OracleError<'_>>("you "),
+        tag::<_, _, OracleError<'_>>("play "),
+    )
+    .parse(after_prefix)
+    .ok()?;
+    let (after_card, _) = tag::<_, _, OracleError<'_>>("a card")
+        .parse(after_verb)
+        .ok()?;
+    // The subject must be the whole condition: either end-of-input, or the
+    // effect comma ("..., draw a card.") follows directly. `eof` / `tag(",")`
+    // reject any further qualifier text.
+    alt((value((), eof), value((), tag::<_, _, OracleError<'_>>(","))))
+        .parse(after_card)
+        .ok()?;
+    Some(())
+}
+
 /// CR 725.1: Parse "whenever/when [subject] become(s) the monarch" trigger.
 ///
 /// Decomposes the phrase into three axes via nom combinators:
@@ -10592,6 +10659,18 @@ mod tests {
         );
 
         assert_eq!(def.mode, TriggerMode::PhaseIn);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn parses_phases_out_trigger_as_phase_out_mode() {
+        // CR 702.26b: "Whenever ~ phases out, discard a card." (Teferi's Imp)
+        let def = parse_trigger_line(
+            "Whenever this creature phases out, discard a card.",
+            "Teferi's Imp",
+        );
+
+        assert_eq!(def.mode, TriggerMode::PhaseOut);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
@@ -14377,6 +14456,31 @@ mod tests {
         assert_eq!(def.spell_cast_origin, OriginConstraint::Any);
     }
 
+    // CR 601.1a + CR 701.18b: "Whenever you play a card" fires on playing a land
+    // or casting a spell. Recycle and Null Profusion both read "Whenever you play
+    // a card, draw a card." — classify as the unified `PlayCard` mode.
+    #[test]
+    fn trigger_you_play_a_card_draw() {
+        let def = parse_trigger_line("Whenever you play a card, draw a card.", "Recycle");
+        assert_eq!(def.mode, TriggerMode::PlayCard);
+        // "you" → controller-scoped.
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        // No card-type restriction — any card played.
+        assert!(def.valid_card.is_none());
+        let execute = def.execute.as_ref().expect("trigger should have an effect");
+        assert!(
+            matches!(*execute.effect, Effect::Draw { .. }),
+            "expected Draw effect, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn trigger_you_plays_a_card_does_not_match_play_card() {
+        let def = parse_trigger_line("Whenever you plays a card, draw a card.", "Malformed");
+        assert_ne!(def.mode, TriggerMode::PlayCard);
+    }
+
     #[test]
     fn trigger_you_cast_target_player_mill_instead_keeps_chosen_player() {
         let def = parse_trigger_line(
@@ -15377,6 +15481,88 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::LifeLost);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    #[test]
+    fn trigger_you_gain_or_lose_life_during_your_turn() {
+        let def = parse_trigger_line(
+            "Whenever you gain or lose life during your turn, this creature gets +1/+0 until end of turn.",
+            "Wax-Wane Witness",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeChanged);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        // CR 603.4 + CR 102.1: "during your turn" becomes an intervening-if
+        // condition so it composes with a separate rate-limit constraint.
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            })
+        );
+    }
+
+    /// CR 603.4: Moonstone Harbinger — "during your turn" + "only once each turn"
+    /// must both survive lowering. The turn restriction is a condition; the rate
+    /// limit is a constraint.
+    #[test]
+    fn trigger_you_gain_or_lose_life_during_your_turn_once_each_turn() {
+        let def = parse_trigger_line(
+            "Whenever you gain or lose life during your turn, Bats you control get +1/+0 and gain deathtouch until end of turn. This ability triggers only once each turn.",
+            "Moonstone Harbinger",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeChanged);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            })
+        );
+        assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    }
+
+    #[test]
+    fn trigger_you_gain_or_lose_life_no_turn_constraint() {
+        let def = parse_trigger_line(
+            "Whenever you gain or lose life, put a +1/+1 counter on this creature.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeChanged);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.condition, None);
+        assert_eq!(def.constraint, None);
+    }
+
+    #[test]
+    fn trigger_opponent_gains_or_loses_life_scopes_to_opponent() {
+        let def = parse_trigger_line(
+            "Whenever an opponent gains or loses life during their turn, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeChanged);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::TriggeringPlayer,
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_a_player_gains_or_loses_life_is_unscoped() {
+        let def = parse_trigger_line(
+            "Whenever a player gains or loses life, each opponent loses 1 life.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeChanged);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+        assert_eq!(def.condition, None);
     }
 
     #[test]

@@ -1019,6 +1019,12 @@
       "subtitle_one": "Exile {{count}} carta de {{source}}",
       "subtitle_other": "Exile {{count}} cartas de {{source}}"
     },
+    "craft": {
+      "title": "Criar",
+      "subtitle_one": "Exile {{count}} material para criar",
+      "subtitle_other": "Exile {{count}} materiais para criar",
+      "subtitleRange": "Exile de {{min}} a {{count}} materiais para criar"
+    },
     "behold": {
       "title": "Contemplar",
       "subtitleExile": "Exile um permanente ou carta correspondente",

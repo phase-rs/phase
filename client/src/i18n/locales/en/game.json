@@ -1019,6 +1019,12 @@
       "subtitle_one": "Exile {{count}} card from {{source}}",
       "subtitle_other": "Exile {{count}} cards from {{source}}"
     },
+    "craft": {
+      "title": "Craft",
+      "subtitle_one": "Exile {{count}} material to craft",
+      "subtitle_other": "Exile {{count}} materials to craft",
+      "subtitleRange": "Exile {{min}} to {{count}} materials to craft"
+    },
     "behold": {
       "title": "Behold",
       "subtitleExile": "Exile a matching permanent or card",

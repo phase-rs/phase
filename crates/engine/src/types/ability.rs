@@ -4534,6 +4534,48 @@ pub enum BeholdCostAction {
     ExileChosen,
 }
 
+/// CR 702.167a: Object-count requirement for costs whose text may ask for an
+/// exact number ("two creatures") or a minimum ("one or more creatures").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CostObjectCount {
+    Exactly { count: u32 },
+    AtLeast { count: u32 },
+}
+
+impl Default for CostObjectCount {
+    fn default() -> Self {
+        Self::exactly(1)
+    }
+}
+
+impl CostObjectCount {
+    pub fn exactly(count: u32) -> Self {
+        Self::Exactly {
+            count: count.max(1),
+        }
+    }
+
+    pub fn at_least(count: u32) -> Self {
+        Self::AtLeast {
+            count: count.max(1),
+        }
+    }
+
+    pub fn min_count(self) -> usize {
+        match self {
+            Self::Exactly { count } | Self::AtLeast { count } => count.max(1) as usize,
+        }
+    }
+
+    pub fn max_count(self, eligible_count: usize) -> usize {
+        match self {
+            Self::Exactly { count } => count.max(1) as usize,
+            Self::AtLeast { .. } => eligible_count,
+        }
+    }
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -4587,6 +4629,18 @@ pub enum AbilityCost {
         zone: Option<Zone>,
         #[serde(default)]
         filter: Option<TargetFilter>,
+    },
+    /// CR 702.167a/b: Craft's "Exile [materials] from among permanents you
+    /// control and/or cards in your graveyard" component. Distinct from
+    /// `Exile` (single zone, optional filter): the materials are chosen across
+    /// the *union* of the battlefield (permanents you control) and your
+    /// graveyard, so `materials` carries the dual-zone `TargetFilter::Or` built
+    /// by `craft_materials_filter`. The interactive `PayCostKind::ExileMaterials`
+    /// detour exiles objects satisfying `count`; this auto-payment arm is a no-op.
+    ExileMaterials {
+        materials: TargetFilter,
+        #[serde(default)]
+        count: CostObjectCount,
     },
     /// CR 701.59a / CR 702.163a: Exile cards from your graveyard with total mana value
     /// at least N as a collect evidence cost.
@@ -4789,6 +4843,8 @@ impl AbilityCost {
             AbilityCost::PayLife { .. } => vec![CostCategory::PaysLife],
             AbilityCost::Discard { .. } => vec![CostCategory::Discards],
             AbilityCost::Exile { .. } => vec![CostCategory::ExilesCards],
+            // CR 702.167a: Craft's materials component exiles other objects.
+            AbilityCost::ExileMaterials { .. } => vec![CostCategory::ExilesCards],
             AbilityCost::CollectEvidence { .. } => vec![CostCategory::ExilesCards],
             AbilityCost::TapCreatures { .. } => vec![CostCategory::TapsOtherCreatures],
             AbilityCost::RemoveCounter { .. } => vec![CostCategory::RemovesCounters],
@@ -4883,6 +4939,9 @@ impl AbilityCost {
             | AbilityCost::Sacrifice { .. }
             | AbilityCost::PayLife { .. }
             | AbilityCost::Exile { .. }
+            // CR 702.167a: Craft's materials exile OTHER objects; the source's
+            // own exile is the separate `Exile { filter: SelfRef }` sub-cost.
+            | AbilityCost::ExileMaterials { .. }
             | AbilityCost::CollectEvidence { .. }
             | AbilityCost::TapCreatures { .. }
             | AbilityCost::RemoveCounter { .. }
@@ -6578,9 +6637,16 @@ pub enum Effect {
     WinTheGame,
     /// CR 706: Roll a die with the given number of sides.
     /// If `results` is non-empty, execute the matching branch.
+    /// CR 706.1: `count` is how many dice of this kind to roll ("roll two
+    /// six-sided dice", "roll X d12"). Each die is rolled independently with
+    /// the same `sides`/`modifier`/`results`. Defaults to one for back-compat
+    /// with cards printed in the single-die JSON shape. Mirrors the
+    /// `FlipCoins.count` precedent (CR 705).
     /// CR 706.2: `modifier` adjusts the natural roll before result-branch lookup.
     /// `None` means the natural result is used unchanged.
     RollDie {
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
         sides: u8,
         #[serde(default)]
         results: Vec<DieResultBranch>,
