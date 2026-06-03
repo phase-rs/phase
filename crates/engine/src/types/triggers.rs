@@ -56,7 +56,7 @@ pub enum TriggerEventKey {
     DamagePrevented,
     /// CR 121.1: One or more cards were drawn.
     CardsDrawn,
-    /// CR 119.3 + CR 118.4 (life gain/loss): A player's life total changed.
+    /// CR 119.3 (life gain/loss): A player's life total changed.
     LifeChanged,
     /// CR 106 (mana) + CR 605 (mana abilities): Mana was added to a player's
     /// mana pool, OR a permanent emitted a `TappedForMana` event. Coarse key —
@@ -291,7 +291,7 @@ pub enum TriggerMode {
     /// CR 119.3: Triggers when a player loses life.
     LifeLost,
     LifeLostAll,
-    /// CR 119.3 + CR 118.4: Triggers when a player gains or loses life.
+    /// CR 119.3: Triggers when a player gains or loses life.
     LifeChanged,
     PayLife,
     /// CR 702.24: Cumulative upkeep trigger.

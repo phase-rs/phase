@@ -1714,8 +1714,7 @@ pub(super) fn match_life_lost(
     }
 }
 
-/// CR 119.3 + CR 118.4: Match life changed events (gain or loss) for the
-/// trigger controller. Fires when `amount != 0`.
+/// CR 119.3: Match life changed events (gain or loss). Fires when `amount != 0`.
 pub(super) fn match_life_changed(
     event: &GameEvent,
     trigger: &TriggerDefinition,
