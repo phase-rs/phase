@@ -482,20 +482,40 @@ mod tests {
             Zone::Battlefield,
         );
         let teferi_obj = state.objects.get_mut(&teferi).unwrap();
-        teferi_obj.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Draw)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 2 },
-                    target: TargetFilter::Controller,
-                },
-            ))]
+        teferi_obj.replacement_definitions = vec![ReplacementDefinition::new(
+            ReplacementEvent::Draw,
+        )
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+        ))]
         .into();
 
         // Add cards to library
-        let _c1 = create_object(&mut state, CardId(2), PlayerId(0), "Card 1".to_string(), Zone::Library);
-        let _c2 = create_object(&mut state, CardId(3), PlayerId(0), "Card 2".to_string(), Zone::Library);
-        let _c3 = create_object(&mut state, CardId(4), PlayerId(0), "Card 3".to_string(), Zone::Library);
+        let _c1 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card 1".to_string(),
+            Zone::Library,
+        );
+        let _c2 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Card 2".to_string(),
+            Zone::Library,
+        );
+        let _c3 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Card 3".to_string(),
+            Zone::Library,
+        );
 
         // Create Temmet's ability: "draw a card, then discard a card"
         let mut resolved = ResolvedAbility::new(
@@ -527,7 +547,11 @@ mod tests {
         resolve(&mut state, &resolved, &mut events).unwrap();
 
         // Should have drawn 2 cards (Teferi replacement) then discarded 1
-        assert_eq!(state.players[0].hand.len(), 1, "Should draw 2 then discard 1");
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "Should draw 2 then discard 1"
+        );
         assert_eq!(state.players[0].graveyard.len(), 1, "Should discard 1 card");
     }
 
