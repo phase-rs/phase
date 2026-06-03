@@ -705,7 +705,7 @@ export class P2PHostAdapter implements EngineAdapter {
       const actor = aiActorFromWaitingFor(
         waitingFor as WaitingFor,
         this.pregameSeatState.seats,
-        (state as { priority_player: PlayerId }).priority_player,
+        state.priority_player,
       );
       if (actor == null) {
         return;
