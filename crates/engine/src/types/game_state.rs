@@ -1702,6 +1702,13 @@ pub enum PayCostKind {
     ExileFromZone {
         zone: ExileCostSourceZone,
     },
+    /// CR 702.167a/b: Exile craft materials chosen from the union of the
+    /// battlefield (permanents you control) and your graveyard. `materials` is
+    /// the dual-zone `TargetFilter` the choices were drawn from; the handler
+    /// re-validates eligibility against it before exiling.
+    ExileMaterials {
+        materials: TargetFilter,
+    },
     /// Exile objects from any zone (mana-ability exile costs).
     ExileFromManaZone {
         zone: Zone,

@@ -4559,6 +4559,18 @@ pub enum AbilityCost {
         #[serde(default)]
         filter: Option<TargetFilter>,
     },
+    /// CR 702.167a/b: Craft's "Exile [materials] from among permanents you
+    /// control and/or cards in your graveyard" component. Distinct from
+    /// `Exile` (single zone, optional filter): the materials are chosen across
+    /// the *union* of the battlefield (permanents you control) and your
+    /// graveyard, so `materials` carries the dual-zone `TargetFilter::Or` built
+    /// by `craft_materials_filter`. The interactive `PayCostKind::ExileMaterials`
+    /// detour exiles `count` chosen objects; this auto-payment arm is a no-op.
+    ExileMaterials {
+        materials: TargetFilter,
+        #[serde(default = "default_one")]
+        count: u32,
+    },
     /// CR 701.59a / CR 702.163a: Exile cards from your graveyard with total mana value
     /// at least N as a collect evidence cost.
     CollectEvidence {
@@ -4760,6 +4772,8 @@ impl AbilityCost {
             AbilityCost::PayLife { .. } => vec![CostCategory::PaysLife],
             AbilityCost::Discard { .. } => vec![CostCategory::Discards],
             AbilityCost::Exile { .. } => vec![CostCategory::ExilesCards],
+            // CR 702.167a: Craft's materials component exiles other objects.
+            AbilityCost::ExileMaterials { .. } => vec![CostCategory::ExilesCards],
             AbilityCost::CollectEvidence { .. } => vec![CostCategory::ExilesCards],
             AbilityCost::TapCreatures { .. } => vec![CostCategory::TapsOtherCreatures],
             AbilityCost::RemoveCounter { .. } => vec![CostCategory::RemovesCounters],
@@ -4854,6 +4868,9 @@ impl AbilityCost {
             | AbilityCost::Sacrifice { .. }
             | AbilityCost::PayLife { .. }
             | AbilityCost::Exile { .. }
+            // CR 702.167a: Craft's materials exile OTHER objects; the source's
+            // own exile is the separate `Exile { filter: SelfRef }` sub-cost.
+            | AbilityCost::ExileMaterials { .. }
             | AbilityCost::CollectEvidence { .. }
             | AbilityCost::TapCreatures { .. }
             | AbilityCost::RemoveCounter { .. }

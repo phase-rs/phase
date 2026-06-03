@@ -2579,9 +2579,28 @@ function PayCostDispatch({ data }: { data: PayCost["data"] }) {
       return <BeholdModal data={data} action={data.kind.action} />;
     case "ExileFromZone":
       return <ExileForCostDispatch data={data} zone={data.kind.zone} />;
+    case "ExileMaterials":
+      return <CraftMaterialsModal data={data} />;
     case "ExileFromManaZone":
       return <ExileForManaAbilityModal data={data} zone={data.kind.zone} />;
   }
+}
+
+// CR 702.167a/b: Craft materials exile. Reuses the generic `ExileForCostModal`
+// primitive (same as Behold / ExileFromZone) — the player exiles exactly
+// `count` of the engine-supplied eligible objects across the battlefield and
+// graveyard.
+function CraftMaterialsModal({ data }: { data: PayCost["data"] }) {
+  const { t } = useTranslation("game");
+  return (
+    <ExileForCostModal
+      cards={data.choices}
+      count={data.count}
+      title={t("cardChoice.craft.title")}
+      subtitle={t("cardChoice.craft.subtitle", { count: data.count })}
+      confirmLabel={t("cardChoice.badges.exile")}
+    />
+  );
 }
 
 function manaValueOfShard(shard: string): number {

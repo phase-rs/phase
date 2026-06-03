@@ -5,7 +5,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{alpha1, space0, space1};
 use nom::combinator::{all_consuming, not, opt, peek, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::parse_oracle_cost;
@@ -14,15 +14,15 @@ use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, spli
 use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::strip_reminder_text;
-#[cfg(test)]
-use crate::types::ability::ControllerRef;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, Effect, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, AdditionalCost, ControllerRef, Effect, FilterProp, QuantityExpr, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
     BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, Keyword, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
+use crate::types::zones::Zone;
 
 /// CR 702.16 + CR 702.11f: Expand compound "X from A and from B" keyword lines.
 /// Handles both "protection from X and from Y" and "hexproof from X and from Y"
@@ -704,6 +704,114 @@ fn parse_bloodthirst_keyword_line(line: &str) -> Option<Keyword> {
     }
 }
 
+/// CR 702.167b: Build the typed materials filter for a Craft ability. A bare
+/// type/subtype in the materials clause matches *either* a permanent on the
+/// battlefield you control *or* a card in your graveyard you own (an exception
+/// to CR 109.2). The result is a `TargetFilter::Or` of those two zone-scoped
+/// legs so the dual-zone eligibility helper and the runtime filter evaluator
+/// agree on what may be exiled. This is the single authority for the materials
+/// filter shape — `FromStr`, `keyword_from_tagged`, and the Oracle-line parser
+/// all route through it.
+pub fn craft_materials_filter(types: &[TypeFilter]) -> TargetFilter {
+    let with_types = |base: TypedFilter| -> TypedFilter {
+        types
+            .iter()
+            .cloned()
+            .fold(base, |acc, tf| acc.with_type(tf))
+    };
+    // Battlefield leg: a permanent you control of the named type(s).
+    let battlefield = TargetFilter::Typed(
+        with_types(TypedFilter::permanent())
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }]),
+    );
+    // Graveyard leg: a card you own of the named type(s) in your graveyard.
+    let graveyard = TargetFilter::Typed(with_types(TypedFilter::card()).properties(vec![
+        FilterProp::InZone {
+            zone: Zone::Graveyard,
+        },
+        FilterProp::Owned {
+            controller: ControllerRef::You,
+        },
+    ]));
+    TargetFilter::Or {
+        filters: vec![battlefield, graveyard],
+    }
+}
+
+/// CR 702.167b: Default materials class (creature) used when only the bare
+/// "Craft" keyword is available (no Oracle line to specify the materials).
+pub fn craft_materials_default() -> TargetFilter {
+    craft_materials_filter(&[TypeFilter::Creature])
+}
+
+/// CR 702.167a/b: Parse a "craft with [materials] [cost]" Oracle line into a
+/// `Keyword::Craft`. Materials are recognized by a nom `alt` (the compound
+/// "creature or artifact" form must precede the single "artifact"/"creature"
+/// arms so the longer match wins); the "<N> creatures" form supplies a count.
+/// The trailing mana cost is parsed by the shared keyword-cost helper. NOM
+/// ONLY — dispatch is `tag("craft with ")`, never string scanning.
+fn parse_craft_keyword_line(text: &str) -> Option<Keyword> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("craft with ")
+        .parse(text)
+        .ok()?;
+    let (rest, (materials, count)) = parse_craft_materials(rest)?;
+    let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(rest.trim());
+    Some(Keyword::Craft {
+        cost,
+        materials,
+        count,
+    })
+}
+
+/// CR 702.167b: Parse the materials clause of a craft line into
+/// `(filter, count, remainder)`. Covers the single-type forms ("creature",
+/// "artifact"), the disjunction ("creature or artifact"), and the counted form
+/// ("<N> creatures"). The remainder is the trailing mana-cost text.
+fn parse_craft_materials(input: &str) -> Option<(&str, (TargetFilter, u32))> {
+    // "<N> creatures" — counted creatures form.
+    if let Ok((rest, n)) = terminated(
+        nom_primitives::parse_number,
+        tag::<_, _, OracleError<'_>>(" creatures"),
+    )
+    .parse(input)
+    {
+        return Some((
+            rest,
+            (craft_materials_filter(&[TypeFilter::Creature]), n.max(1)),
+        ));
+    }
+    // Single-token / disjunction forms. The compound "creature or artifact"
+    // alt arm is listed first so the longer phrase wins over its prefix.
+    let (rest, types) = alt((
+        value(
+            vec![TypeFilter::Creature, TypeFilter::Artifact],
+            alt((
+                tag::<_, _, OracleError<'_>>("creature or artifact"),
+                tag("artifact or creature"),
+            )),
+        ),
+        value(vec![TypeFilter::Artifact], tag("artifact")),
+        value(vec![TypeFilter::Creature], tag("creature")),
+    ))
+    .parse(input)
+    .ok()?;
+    // A disjunction of types is a union of per-type dual-zone filters.
+    let filter = if types.len() == 1 {
+        craft_materials_filter(&types)
+    } else {
+        TargetFilter::Or {
+            filters: types
+                .iter()
+                .map(|t| craft_materials_filter(std::slice::from_ref(t)))
+                .collect(),
+        }
+    };
+    Some((rest, (filter, 1)))
+}
+
 ///
 /// Oracle text uses space-separated format: "protection from red", "ward {2}",
 /// "flashback {2}{U}". Converts to the colon format that `FromStr` expects,
@@ -759,6 +867,12 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     .parse(text)
     {
         return Some(Keyword::Renown(n));
+    }
+
+    // CR 702.167a/b: Craft with [materials] [cost] — the Oracle line carries the
+    // materials class and activation cost that the bare "Craft" keyword lacks.
+    if let Some(kw) = parse_craft_keyword_line(text) {
+        return Some(kw);
     }
 
     // First try direct parse (handles simple keywords like "flying")
@@ -1202,7 +1316,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Fortify(_) => "fortify".to_string(),
         Keyword::Prototype(_) => "prototype".to_string(),
         Keyword::Plot(_) => "plot".to_string(),
-        Keyword::Craft(_) => "craft".to_string(),
+        Keyword::Craft { .. } => "craft".to_string(),
         Keyword::Offspring(_) => "offspring".to_string(),
         Keyword::Impending { counters, .. } => format!("impending {counters}"),
         Keyword::LevelUp(_) => "level up".to_string(),

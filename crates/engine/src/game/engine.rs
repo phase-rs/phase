@@ -1863,6 +1863,20 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
+                // CR 702.167a/b: Craft materials exile across the
+                // battlefield/graveyard union.
+                PayCostKind::ExileMaterials { materials } => {
+                    engine_casting::handle_exile_materials_for_cost(
+                        state,
+                        *player,
+                        materials.clone(),
+                        *pending_cast.clone(),
+                        *count,
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
                 PayCostKind::RemoveCounter { counter_type } => {
                     casting_costs::handle_remove_counter_for_cost(
                         state,
@@ -1946,6 +1960,7 @@ fn apply_action(
                 // through the spell pipeline.
                 PayCostKind::ReturnToHand
                 | PayCostKind::ExileFromZone { .. }
+                | PayCostKind::ExileMaterials { .. }
                 | PayCostKind::RemoveCounter { .. }
                 | PayCostKind::Behold { .. } => {
                     return Err(EngineError::InvalidAction(

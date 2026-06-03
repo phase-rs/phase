@@ -7997,6 +7997,13 @@ fn pay_ability_cost_inner(
             }
             super::zones::move_to_zone(state, source_id, Zone::Exile, events);
         }
+        // CR 702.167a: Craft's materials are exiled by the interactive
+        // `WaitingFor::PayCost { kind: ExileMaterials }` detour before this
+        // resume runs, so this arm is an idempotent no-op (mirrors the non-self
+        // `Sacrifice` arm above). It exists as its own arm — not folded into the
+        // catch-all — so a future change to the materials payment shape forces a
+        // deliberate decision here.
+        AbilityCost::ExileMaterials { .. } => {}
         // Waterbend cost was already paid via ManaPayment before reaching pay_ability_cost.
         AbilityCost::Waterbend { .. } => {}
         // CR 118.3: An effect performed as a cost. Resolve the effect on the
@@ -8306,6 +8313,18 @@ fn find_non_self_exile(cost: &AbilityCost) -> Option<(u32, Zone, Option<&TargetF
             filter,
         } => Some((*count, *z, filter.as_ref())),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_exile),
+        _ => None,
+    }
+}
+
+/// CR 702.167a/b: Detect a craft materials cost requiring interactive object
+/// selection across the battlefield/graveyard union. Returns `(count,
+/// materials)`. Recurses into `Composite` (the synthesized craft cost is a
+/// `Composite[Mana, Exile{SelfRef}, ExileMaterials]`).
+fn find_craft_materials_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+    match cost {
+        AbilityCost::ExileMaterials { materials, count } => Some((*count, materials)),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_craft_materials_cost),
         _ => None,
     }
 }
@@ -9187,6 +9206,44 @@ pub fn handle_activate_ability(
                 min_count: 0,
                 resume: CostResume::Spell {
                     spell: Box::new(pending_exile),
+                },
+            });
+        }
+
+        // CR 702.167a/b: Pre-check for a craft materials cost — detour to
+        // `WaitingFor::PayCost { kind: ExileMaterials }` so the player selects
+        // which permanents/graveyard cards to exile across the dual-zone union.
+        // The full `Composite` cost (Mana + self-exile + materials) stays in
+        // `activation_cost`; the mana and self-exile are paid by
+        // `push_activated_ability_to_stack` after the selection completes
+        // (CR 601.2h: remaining costs paid in any order). Mirrors the non-self
+        // exile detour above.
+        if let Some((count, materials)) = find_craft_materials_cost(cost) {
+            let eligible = super::cost_payability::eligible_craft_materials(
+                state, player, source_id, materials,
+            );
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible materials to craft".into(),
+                ));
+            }
+            let mut pending_craft =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_craft.activation_cost = Some(cost.clone());
+            pending_craft.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::ExileMaterials {
+                    materials: materials.clone(),
+                },
+                choices: eligible,
+                count: count as usize,
+                // CR 702.167b: craft exiles exactly `count` materials (no fewer)
+                // — `handle_exile_materials_for_cost` enforces the exact count, so
+                // surface `min_count == count` to match (mirrors the sacrifice detour).
+                min_count: count as usize,
+                resume: CostResume::Spell {
+                    spell: Box::new(pending_craft),
                 },
             });
         }

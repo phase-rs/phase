@@ -1306,6 +1306,78 @@ pub(crate) fn handle_exile_for_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+/// CR 702.167a/b + CR 601.2b: Resolve a craft materials cost. The player has
+/// chosen `expected` objects from the battlefield/graveyard union; validate the
+/// count and legality, re-validate eligibility against the live state via the
+/// single-authority `eligible_craft_materials`, exile each chosen object, then
+/// resume the pending activation (whose remaining Mana + self-exile sub-costs
+/// are paid by `push_activated_ability_to_stack`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_exile_materials_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    materials: TargetFilter,
+    pending: PendingCast,
+    expected: usize,
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 601.2b: exactly the required number of materials must be exiled.
+    if chosen.len() != expected {
+        return Err(EngineError::InvalidAction(format!(
+            "Must exile exactly {} material(s), got {}",
+            expected,
+            chosen.len()
+        )));
+    }
+    for id in chosen {
+        if !legal_cards.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected object not eligible as craft material".to_string(),
+            ));
+        }
+    }
+
+    // CR 702.167a/b: Re-validate against the live state through the single
+    // authority so a stale selection (object moved/changed zone since the
+    // choices were offered) is rejected.
+    let still_eligible = super::cost_payability::eligible_craft_materials(
+        state,
+        player,
+        pending.object_id,
+        &materials,
+    );
+    for &id in chosen {
+        if !still_eligible.contains(&id) {
+            return Err(EngineError::InvalidAction(
+                "Selected craft material is no longer eligible".to_string(),
+            ));
+        }
+    }
+
+    // CR 608.2k + CR 702.167c: Stamp the first exiled material onto the
+    // resolving ability so a permanent that later refers to "the exiled cards
+    // used to craft it" can resolve them, mirroring the exile-for-cost handler.
+    let mut pending = pending;
+    if let Some(&first) = chosen.first() {
+        if let Some(obj) = state.objects.get(&first) {
+            pending
+                .ability
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: first,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
+        }
+    }
+
+    for &id in chosen {
+        super::zones::move_to_zone(state, id, Zone::Exile, events);
+    }
+
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// Push an activated ability to the stack after costs are paid.
 /// Shared by: direct path in `handle_activate_ability`, sacrifice detour, and
 /// waterbend/ManaPayment finalization in the PassPriority handler.

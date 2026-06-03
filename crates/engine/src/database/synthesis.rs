@@ -414,6 +414,68 @@ pub fn synthesize_reconfigure(face: &mut CardFace) {
     face.abilities.extend(abilities);
 }
 
+/// CR 702.167a/b: Craft is an activated ability "[Cost], Exile this permanent,
+/// Exile [materials] from among permanents you control and/or cards in your
+/// graveyard: Return this card to the battlefield transformed under its owner's
+/// control. Activate only as a sorcery." (CR 712.14a: "transformed" enters the
+/// back face up.) Synthesized as a sorcery-speed activated ability whose cost is
+/// a `Composite` of the mana cost, the self-exile (`Exile { filter: SelfRef }`),
+/// and the materials exile (`ExileMaterials`); the effect returns the source
+/// from exile to the battlefield transformed. Without this synthesis a card with
+/// `Keyword::Craft` offered no ability at all (issue #1516).
+pub fn synthesize_craft(face: &mut CardFace) {
+    let mut abilities: Vec<AbilityDefinition> = Vec::new();
+    for kw in &face.keywords {
+        let Keyword::Craft {
+            cost,
+            materials,
+            count,
+        } = kw
+        else {
+            continue;
+        };
+        abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    // CR 712.14a: "transformed" — the card enters showing its back face.
+                    enter_transformed: true,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: cost.clone() },
+                    // CR 702.167a: "Exile this permanent" — the source self-exiles
+                    // from the battlefield as part of the cost.
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: Some(Zone::Battlefield),
+                        filter: Some(TargetFilter::SelfRef),
+                    },
+                    // CR 702.167a/b: "Exile [materials] from among permanents you
+                    // control and/or cards in your graveyard."
+                    AbilityCost::ExileMaterials {
+                        materials: materials.clone(),
+                        count: *count,
+                    },
+                ],
+            })
+            // CR 702.167a: "Activate only as a sorcery."
+            .sorcery_speed(),
+        );
+    }
+    face.abilities.extend(abilities);
+}
+
 /// CR 702.49: Synthesize marker activated abilities for the Ninjutsu family
 /// (Ninjutsu, CommanderNinjutsu). The actual activation is handled
 /// by the GameAction::ActivateNinjutsu path, not by normal activated ability
@@ -4584,6 +4646,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_equip(face);
     // CR 702.151a: Reconfigure — attach/unattach activated abilities.
     synthesize_reconfigure(face);
+    // CR 702.167a/b: Craft — sorcery-speed activated ability that exiles the
+    // source plus materials and returns the card transformed.
+    synthesize_craft(face);
     // CR 702.122a: Crew has no synthesized ability — activation is handled by
     // GameAction::CrewVehicle directly, not through ActivateAbility dispatch.
     // The Keyword::Crew(N) on the card provides display information.
@@ -10331,6 +10396,93 @@ mod sorcery_speed_invariant_tests {
                     }
                 )),
             "unattach mode is legal only while attached to a creature (CR 702.151a)"
+        );
+    }
+
+    /// CR 702.167a/b: Parsing the Oracle line "craft with creature {4}{b}" must
+    /// produce a `Keyword::Craft` whose materials are the dual-zone
+    /// (battlefield + graveyard) `Or` and count 1, and `synthesize_craft` must
+    /// turn it into exactly one sorcery-speed activated ability whose cost is a
+    /// `Composite[Mana, Exile{SelfRef}, ExileMaterials]` and whose effect returns
+    /// the source from exile transformed. RED on main (no ability synthesized).
+    #[test]
+    fn synthesize_craft_from_oracle_line_builds_sorcery_speed_return_transformed() {
+        use crate::parser::oracle_keyword::parse_keyword_from_oracle;
+        use crate::types::ability::TargetFilter;
+        use crate::types::zones::Zone;
+
+        let kw = parse_keyword_from_oracle("craft with creature {4}{b}")
+            .expect("craft Oracle line parses to a keyword");
+        let (materials, count) = match &kw {
+            Keyword::Craft {
+                materials, count, ..
+            } => (materials.clone(), *count),
+            other => panic!("expected Keyword::Craft, got {other:?}"),
+        };
+        assert_eq!(count, 1, "single-material craft");
+        match &materials {
+            TargetFilter::Or { filters } => {
+                assert_eq!(filters.len(), 2, "battlefield + graveyard legs");
+            }
+            other => panic!("expected dual-zone Or materials, got {other:?}"),
+        }
+
+        let mut face = CardFace::default();
+        face.keywords.push(kw);
+        synthesize_craft(&mut face);
+
+        assert_eq!(
+            face.abilities.len(),
+            1,
+            "craft synthesizes exactly one activated ability"
+        );
+        let def = &face.abilities[0];
+        assert!(matches!(def.kind, AbilityKind::Activated));
+        assert!(def.sorcery_speed, "craft is sorcery-speed (CR 702.167a)");
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+
+        // Effect: return self from exile to battlefield transformed.
+        match def.effect.as_ref() {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                enter_transformed,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Exile));
+                assert_eq!(*destination, Zone::Battlefield);
+                assert_eq!(*target, TargetFilter::SelfRef);
+                assert!(*enter_transformed, "CR 712.14a: enters transformed");
+            }
+            other => panic!("expected ChangeZone effect, got {other:?}"),
+        }
+
+        // Cost: Composite[Mana, Exile{SelfRef}, ExileMaterials].
+        let Some(AbilityCost::Composite { costs }) = def.cost.as_ref() else {
+            panic!("expected Composite craft cost, got {:?}", def.cost);
+        };
+        assert!(
+            costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })),
+            "mana sub-cost present"
+        );
+        assert!(
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::Exile {
+                    filter: Some(TargetFilter::SelfRef),
+                    ..
+                }
+            )),
+            "self-exile sub-cost present (CR 702.167a)"
+        );
+        assert!(
+            costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::ExileMaterials { count: 1, .. })),
+            "materials-exile sub-cost present (CR 702.167a/b)"
         );
     }
 

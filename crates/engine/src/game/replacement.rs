@@ -168,6 +168,7 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
