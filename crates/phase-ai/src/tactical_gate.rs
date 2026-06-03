@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use engine::ai_support::{AiDecisionContext, CandidateAction};
 use engine::game::combat::AttackTarget;
-use engine::game::targeting::find_legal_targets;
 use engine::types::ability::{AbilityCondition, Effect, PtValue, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -344,18 +343,11 @@ fn is_redundant_creature_only_removal(ctx: &PolicyContext<'_>, effects: &[&Effec
         // engine (Shroud, Hexproof-vs-opponents, "Hexproof from [quality]",
         // Protection, ignore-hexproof) instead of re-checking keywords here.
         let has_live_opponent_target =
-            find_legal_targets(ctx.state, filter, ctx.ai_player, source.id)
-                .into_iter()
-                .any(|target| match target {
-                    TargetRef::Object(id) => ctx.state.objects.get(&id).is_some_and(|object| {
-                        object.controller != ctx.ai_player
-                        && object.card_types.core_types.contains(&CoreType::Creature)
-                        // A target already dying to a stack effect is not a
-                        // reason to keep this redundant removal.
-                        && !will_target_die_from_stack(ctx.state, id)
-                    }),
-                    TargetRef::Player(_) => false,
-                });
+            ctx.has_legal_opponent_creature_target(filter, source.id, |id| {
+                // A target already dying to a stack effect is not a reason to
+                // keep this redundant removal.
+                !will_target_die_from_stack(ctx.state, id)
+            });
         if has_live_opponent_target {
             return false;
         }

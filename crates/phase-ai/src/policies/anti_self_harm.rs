@@ -169,14 +169,18 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     // Protection, and ignore-hexproof effects are all honored — a hand-rolled
     // `!Hexproof && !Shroud` check would whiff on Protection / HexproofFrom and
     // mis-score a fizzling removal spell as castable.
-    let has_targetable_opponent_creature = effects
-        .iter()
-        .filter(|effect| {
-            !matches!(effect, Effect::Bounce { .. })
-                && matches!(effect_polarity(effect), EffectPolarity::Harmful)
-                && targets_creatures_only(effect)
-        })
-        .any(|effect| harmful_effect_has_opponent_creature_target(ctx, effect));
+    let has_targetable_opponent_creature = if effects.is_empty() {
+        harmful_aura_has_opponent_creature_target(ctx)
+    } else {
+        effects
+            .iter()
+            .filter(|effect| {
+                !matches!(effect, Effect::Bounce { .. })
+                    && matches!(effect_polarity(effect), EffectPolarity::Harmful)
+                    && targets_creatures_only(effect)
+            })
+            .any(|effect| harmful_effect_has_opponent_creature_target(ctx, effect))
+    };
 
     let mut penalty = 0.0;
 
@@ -316,28 +320,21 @@ fn has_opponent_bounce_target(ctx: &PolicyContext<'_>, effects: &[&Effect]) -> b
         // `matches_target_filter` is a property filter only and would not
         // reject Shroud/Hexproof/Protection targets, letting a bounce that can
         // only legally hit our own creatures look like a clean opponent line.
-        .any(|target| legal_opponent_creature_target_exists(ctx, target, source.id))
+        .any(|target| ctx.has_legal_opponent_creature_target(target, source.id, |_| true))
 }
 
-/// CR 702.11 / 702.16 / 702.18: True when the spell's `filter` has at least one
-/// legal target that is an opponent-controlled creature, per the engine's
-/// CR-correct targeting legality (Shroud, Hexproof-vs-opponents, "Hexproof from
-/// [quality]", Protection, ignore-hexproof). This is the single chokepoint the
-/// anti-self-harm policy uses instead of re-checking keywords in the AI.
-fn legal_opponent_creature_target_exists(
-    ctx: &PolicyContext<'_>,
-    filter: &TargetFilter,
-    source_id: ObjectId,
-) -> bool {
-    find_legal_targets(ctx.state, filter, ctx.ai_player, source_id)
-        .into_iter()
-        .any(|target| match target {
-            TargetRef::Object(id) => ctx.state.objects.get(&id).is_some_and(|obj| {
-                obj.controller != ctx.ai_player
-                    && obj.card_types.core_types.contains(&CoreType::Creature)
-            }),
-            TargetRef::Player(_) => false,
+fn harmful_aura_has_opponent_creature_target(ctx: &PolicyContext<'_>) -> bool {
+    let Some(source) = ctx.source_object() else {
+        return true;
+    };
+    source
+        .keywords
+        .iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Enchant(filter) => Some(filter),
+            _ => None,
         })
+        .is_none_or(|filter| ctx.has_legal_opponent_creature_target(filter, source.id, |_| true))
 }
 
 /// Resolve the harmful creature-only effect's target filter and check, via the
@@ -351,7 +348,7 @@ fn harmful_effect_has_opponent_creature_target(ctx: &PolicyContext<'_>, effect: 
     let Some(source) = ctx.source_object() else {
         return true;
     };
-    legal_opponent_creature_target_exists(ctx, filter, source.id)
+    ctx.has_legal_opponent_creature_target(filter, source.id, |_| true)
 }
 
 fn is_hostile_or_neutral_bounce(effect: &&Effect) -> bool {
@@ -2368,6 +2365,22 @@ mod tests {
         assert!(
             score < -5.0,
             "Casting harmful aura with only own creatures should be penalised, got {score}"
+        );
+    }
+
+    /// Regression: harmful Auras have no active effects, so pre-cast targetability
+    /// must come from the Enchant filter rather than the empty effect list.
+    #[test]
+    fn pre_cast_allows_harmful_aura_with_legal_opponent_creature() {
+        let mut state = make_state();
+        add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let aura_id = add_harmful_aura(&mut state, PlayerId(0), "Pacifism");
+
+        let score = pre_cast_score_for_spell(&state, aura_id);
+        assert!(
+            score > -5.0,
+            "Casting harmful aura with a legal opponent target should not get the no-target \
+             penalty, got {score}"
         );
     }
 
