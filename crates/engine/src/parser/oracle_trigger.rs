@@ -4899,6 +4899,34 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         return (filter, rest);
     }
 
+    // CR 903.3 + CR 903.3d: Possessive commander reference as trigger subject.
+    // "your commander" / "your commanders" — the commander is identified by
+    // the IsCommander flag. Produces a typed filter with ControllerRef::You +
+    // IsCommander so downstream verb handlers (EntersOrAttacks, ChangesZone,
+    // Attacks, etc.) receive a properly-scoped subject.
+    if let Ok((after_your, ())) = value((), tag::<_, _, OracleError<'_>>("your ")).parse(text) {
+        if let Ok((rest, ())) = alt((
+            value((), tag::<_, _, OracleError<'_>>("commanders ")),
+            value((), tag::<_, _, OracleError<'_>>("commander ")),
+            value(
+                (),
+                all_consuming(tag::<_, _, OracleError<'_>>("commanders")),
+            ),
+            value((), all_consuming(tag::<_, _, OracleError<'_>>("commander"))),
+        ))
+        .parse(after_your)
+        {
+            return (
+                TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::You),
+                    properties: vec![FilterProp::IsCommander],
+                    ..Default::default()
+                }),
+                rest,
+            );
+        }
+    }
+
     let (filter, rest) = parse_type_phrase(text);
     if rest.len() < text.len() {
         return (filter, rest);
@@ -24595,5 +24623,26 @@ mod snapshot_tests {
             }
             other => panic!("expected Or condition, got: {other:?}"),
         }
+    }
+
+    /// CR 903.3 + CR 903.3d: "Whenever your commander enters or attacks" —
+    /// possessive commander subject feeds into the EntersOrAttacks compound
+    /// trigger mode. Unlocks Tome of Legends, Search for Dagger, etc.
+    #[test]
+    fn trigger_your_commander_enters_or_attacks() {
+        let def = parse_trigger_line(
+            "Whenever your commander enters or attacks, put a page counter on Tome of Legends.",
+            "Tome of Legends",
+        );
+        assert_eq!(def.mode, TriggerMode::EntersOrAttacks);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::IsCommander],
+                ..Default::default()
+            }))
+        );
     }
 }
