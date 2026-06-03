@@ -11,7 +11,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption, ConvokeMode,
     CostResume, GameState, NextSpellModifier, PayCostKind, PendingCast, SneakPlacement,
-    SpellCastRecord, StackEntry, StackEntryKind, WaitingFor,
+    SpellCastRecord, SpellCostSource, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -6573,6 +6573,7 @@ fn continue_with_prepared(
                 prepared.mana_cost,
                 Some(prepared.base_mana_cost.clone()),
                 required_cost,
+                SpellCostSource::Other,
                 prepared.casting_variant,
                 prepared.cast_timing_permission,
                 prepared
@@ -6659,6 +6660,7 @@ fn continue_with_prepared(
                 prepared.mana_cost,
                 Some(prepared.base_mana_cost.clone()),
                 casualty_cost,
+                SpellCostSource::Other,
                 prepared.casting_variant,
                 prepared.cast_timing_permission,
                 prepared
@@ -6696,6 +6698,7 @@ fn continue_with_prepared(
                     prepared.mana_cost,
                     Some(prepared.base_mana_cost.clone()),
                     casting_costs::offering_sacrifice_cost(&offering_quality),
+                    SpellCostSource::Offering,
                     prepared.casting_variant,
                     prepared.cast_timing_permission,
                     prepared
@@ -6716,6 +6719,7 @@ fn continue_with_prepared(
                     prepared.mana_cost,
                     Some(prepared.base_mana_cost.clone()),
                     offering_cost,
+                    SpellCostSource::Offering,
                     prepared.casting_variant,
                     prepared.cast_timing_permission,
                     prepared

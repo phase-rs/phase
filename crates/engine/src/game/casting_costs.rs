@@ -8,8 +8,8 @@ use crate::types::ability::{
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CastPaymentMode, CastingVariant, ConvokeMode, CostResume, DistributionUnit, GameState,
-    PayCostKind, PendingCast, PendingDiscardForCostResume, StackEntry, StackEntryKind,
-    StackPaidSnapshot, WaitingFor,
+    PayCostKind, PendingCast, PendingDiscardForCostResume, SpellCostSource, StackEntry,
+    StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -142,6 +142,7 @@ pub(crate) fn handle_decide_additional_cost(
         _ => {}
     }
 
+    let cost_source = pending.additional_cost_source;
     let mut ability = pending.ability;
 
     // CR 702.166a: Track whether this decision paid an optional additional cost
@@ -204,6 +205,7 @@ pub(crate) fn handle_decide_additional_cost(
     };
 
     let mut updated_pending = PendingCast { ability, ..pending };
+    updated_pending.additional_cost_source = SpellCostSource::Other;
 
     // CR 601.2b: When an optional additional cost (e.g. Casualty) was declared
     // before targets (deferred_target_selection = true), clear the flow after
@@ -241,7 +243,7 @@ pub(crate) fn handle_decide_additional_cost(
     }
 
     if let Some(cost) = cost_to_pay {
-        pay_additional_cost(state, player, cost, updated_pending, events)
+        pay_additional_cost_with_source(state, player, cost, cost_source, updated_pending, events)
     } else {
         finish_pending_cost_or_cast(state, player, updated_pending, events)
     }
@@ -478,7 +480,16 @@ fn finish_pending_cost_or_cast(
         Some(AdditionalCost::Required(_))
     ) {
         if let Some(AdditionalCost::Required(cost)) = pending.additional_cost_flow.take() {
-            return pay_additional_cost(state, player, cost, pending, events);
+            let cost_source = pending.additional_cost_source;
+            pending.additional_cost_source = SpellCostSource::Other;
+            return pay_additional_cost_with_source(
+                state,
+                player,
+                cost,
+                cost_source,
+                pending,
+                events,
+            );
         }
     }
 
@@ -617,7 +628,16 @@ fn finish_pending_cost_or_cast(
                 "Cannot pay required additional cost".to_string(),
             ));
         }
-        return pay_additional_cost(state, player, req_cost, pending, events);
+        let cost_source = pending.additional_cost_source;
+        pending.additional_cost_source = SpellCostSource::Other;
+        return pay_additional_cost_with_source(
+            state,
+            player,
+            req_cost,
+            cost_source,
+            pending,
+            events,
+        );
     }
 
     let base_cost = pending.base_cost.clone();
@@ -934,17 +954,33 @@ pub(crate) fn handle_activation_cost_one_of_choice(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct SpellCostPayment<'a> {
+    pub(crate) cost: &'a AbilityCost,
+    pub(crate) source: SpellCostSource,
+}
+
+pub(crate) struct CostSelection<'a> {
+    pub(crate) min_count: usize,
+    pub(crate) count: usize,
+    pub(crate) legal_permanents: &'a [ObjectId],
+    pub(crate) chosen: &'a [ObjectId],
+}
+
 pub(crate) fn handle_sacrifice_for_cost(
     state: &mut GameState,
     player: PlayerId,
     mut pending: PendingCast,
-    cost: Option<&AbilityCost>,
-    selection_bounds: (usize, usize),
-    legal_permanents: &[ObjectId],
-    chosen: &[ObjectId],
+    paid_cost: Option<SpellCostPayment<'_>>,
+    selection: CostSelection<'_>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (min_count, count) = selection_bounds;
+    let CostSelection {
+        min_count,
+        count,
+        legal_permanents,
+        chosen,
+    } = selection;
     if chosen.len() < min_count || chosen.len() > count {
         let requirement = if min_count == count {
             format!("exactly {} permanent(s)", count)
@@ -968,8 +1004,10 @@ pub(crate) fn handle_sacrifice_for_cost(
     // CR 702.48c: use the chosen permanent's ObjectId BEFORE it leaves the
     // battlefield so `apply_offering_cost_reduction` can read its mana cost
     // when recomputing the spell's total cost.
-    let is_offering_sacrifice =
-        cost.is_some_and(|cost| is_offering_sacrifice_cost(state, player, pending.object_id, cost));
+    let is_offering_sacrifice = paid_cost.is_some_and(|payment| {
+        payment.source == SpellCostSource::Offering
+            && is_offering_sacrifice_cost(state, player, pending.object_id, payment.cost)
+    });
 
     // CR 117.1 + CR 400.7j + CR 608.2k: Capture the sacrificed object's public
     // characteristics BEFORE it leaves the battlefield, stamping it onto the
@@ -1819,6 +1857,7 @@ pub(super) fn begin_optional_cost_before_targets(
     cost: ManaCost,
     base_cost: Option<ManaCost>,
     optional_cost: AdditionalCost,
+    cost_source: SpellCostSource,
     casting_variant: CastingVariant,
     cast_timing_permission: Option<CastTimingPermission>,
     distribute: Option<DistributionUnit>,
@@ -1835,6 +1874,7 @@ pub(super) fn begin_optional_cost_before_targets(
     pending.payment_mode = payment_mode;
     pending.deferred_target_selection = true;
     pending.additional_cost_flow = Some(optional_cost);
+    pending.additional_cost_source = cost_source;
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -1869,6 +1909,7 @@ pub(super) fn begin_required_cost_before_targets(
     cost: ManaCost,
     base_cost: Option<ManaCost>,
     required_cost: AbilityCost,
+    cost_source: SpellCostSource,
     casting_variant: CastingVariant,
     cast_timing_permission: Option<CastTimingPermission>,
     distribute: Option<DistributionUnit>,
@@ -1885,6 +1926,7 @@ pub(super) fn begin_required_cost_before_targets(
     pending.payment_mode = payment_mode;
     pending.deferred_target_selection = true;
     pending.additional_cost_flow = Some(AdditionalCost::Required(required_cost));
+    pending.additional_cost_source = cost_source;
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -1968,29 +2010,33 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     // costs. When obj.additional_cost is Required and the spell also has Casualty (e.g.,
     // Village Rites gaining Casualty via a static effect), offer Casualty first and stash
     // the Required cost in additional_cost_flow for processing after Casualty resolves.
-    let (additional, deferred_required) =
+    let casualty_additional = effective_casualty_additional_cost(state, player, object_id);
+    let offering_additional = effective_offering_additional_cost(state, player, object_id);
+
+    let (additional, deferred_required, additional_cost_source) =
         if let Some(AdditionalCost::Required(ref req)) = obj_additional {
-            if let Some(casualty) = effective_casualty_additional_cost(state, player, object_id) {
+            if let Some(casualty) = casualty_additional {
                 if !req.is_payable(state, player, object_id) {
                     return Err(EngineError::ActionNotAllowed(
                         "Cannot pay required additional cost".to_string(),
                     ));
                 }
-                (Some(casualty), obj_additional)
+                (Some(casualty), obj_additional, SpellCostSource::Other)
             } else {
-                (obj_additional, None)
+                (obj_additional, None, SpellCostSource::Other)
             }
+        } else if obj_additional.is_some() {
+            (obj_additional, None, SpellCostSource::Other)
+        } else if let Some(casualty) = casualty_additional {
+            (Some(casualty), None, SpellCostSource::Other)
+        } else if let Some(offering) = offering_additional {
+            // CR 702.48a: Offering — optional sacrifice before target selection
+            // (becomes Required when cast via Offering instant-speed timing; that
+            // case is handled in the casting dispatch which routes to
+            // `begin_required_cost_before_targets` before this function is reached).
+            (Some(offering), None, SpellCostSource::Offering)
         } else {
-            (
-                obj_additional
-                    .or_else(|| effective_casualty_additional_cost(state, player, object_id))
-                    // CR 702.48a: Offering — optional sacrifice before target selection
-                    // (becomes Required when cast via Offering instant-speed timing; that
-                    // case is handled in the casting dispatch which routes to
-                    // `begin_required_cost_before_targets` before this function is reached).
-                    .or_else(|| effective_offering_additional_cost(state, player, object_id)),
-                None,
-            )
+            (None, None, SpellCostSource::Other)
         };
 
     // CR 118.9 + CR 601.2b/f/h: Oracle text alternative costs are announced
@@ -2033,7 +2079,14 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.cast_timing_permission = cast_timing_permission;
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
-                return pay_additional_cost(state, player, req_cost.clone(), pending, events);
+                return pay_additional_cost_with_source(
+                    state,
+                    player,
+                    req_cost.clone(),
+                    additional_cost_source,
+                    pending,
+                    events,
+                );
             }
             AdditionalCost::Kicker { costs, repeatable } => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
@@ -2090,6 +2143,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending.distribute = distribute.clone();
                 pending.origin_zone = origin_zone;
                 pending.payment_mode = payment_mode;
+                pending.additional_cost_source = additional_cost_source;
                 // When a Required cost was deferred so Casualty could be offered first
                 // (e.g., Village Rites + Casualty), stash it so finish_pending_cost_or_cast
                 // can pay it after the Casualty decision.
@@ -2529,6 +2583,17 @@ fn pay_additional_cost(
     pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    pay_additional_cost_with_source(state, player, cost, SpellCostSource::Other, pending, events)
+}
+
+fn pay_additional_cost_with_source(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: AbilityCost,
+    cost_source: SpellCostSource,
+    pending: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     if pending.ability.chosen_x.is_none() {
         if let Some(max) = additional_cost_x_max(state, player, pending.object_id, &cost) {
             let min = pending.ability.min_x_value;
@@ -2711,6 +2776,7 @@ fn pay_additional_cost(
                             target: target.clone(),
                             count,
                         }),
+                        source: cost_source,
                     },
                 });
             }
@@ -5456,6 +5522,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -6920,9 +6987,12 @@ mod tests {
             PlayerId(0),
             pending,
             None,
-            (1, 1),
-            &legal,
-            &chosen,
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &legal,
+                chosen: &chosen,
+            },
             &mut events,
         );
 
@@ -6961,9 +7031,12 @@ mod tests {
             PlayerId(0),
             pending,
             None,
-            (1, 1),
-            &legal,
-            &[],
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &legal,
+                chosen: &[],
+            },
             &mut events,
         );
         assert!(result.is_err());
@@ -7004,9 +7077,12 @@ mod tests {
             PlayerId(0),
             pending,
             None,
-            (1, 1),
-            &legal,
-            &chosen,
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &legal,
+                chosen: &chosen,
+            },
             &mut events,
         );
         assert!(result.is_err());
@@ -7078,9 +7154,12 @@ mod tests {
             PlayerId(0),
             pending,
             None,
-            (0, legal.len()),
-            &legal,
-            &chosen,
+            CostSelection {
+                min_count: 0,
+                count: legal.len(),
+                legal_permanents: &legal,
+                chosen: &chosen,
+            },
             &mut events,
         )
         .expect("variable sacrifice selection should succeed");
@@ -7258,9 +7337,12 @@ mod tests {
             PlayerId(0),
             pending,
             None,
-            (1, 1),
-            &[treasure],
-            &[treasure],
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &[treasure],
+                chosen: &[treasure],
+            },
             &mut events,
         )
         .expect("cost-payment sacrifice succeeds");
@@ -7374,9 +7456,12 @@ mod tests {
             PlayerId(0),
             pending,
             None,
-            (1, 1),
-            &[token],
-            &[token],
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &[token],
+                chosen: &[token],
+            },
             &mut events,
         )
         .expect("cost-payment sacrifice succeeds");
@@ -8904,6 +8989,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -9024,6 +9110,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -9113,6 +9200,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -9191,6 +9279,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -9302,6 +9391,7 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Graveyard,
             additional_cost_flow: None,
+            additional_cost_source: SpellCostSource::Other,
             deferred_modal_choice: None,
             deferred_target_selection: false,
             chosen_modes: Vec::new(),
@@ -10982,11 +11072,17 @@ many tokens that are copies of it.)";
         let CostResume::SpellCost {
             spell: ref pending_box2,
             cost: ref offering_pay_cost,
+            source,
             ..
         } = resume
         else {
             panic!("expected CostResume::SpellCost");
         };
+        assert_eq!(
+            *source,
+            SpellCostSource::Offering,
+            "Offering sacrifice prompt must carry Offering source identity"
+        );
         let pending2 = *pending_box2.clone();
 
         // Move spell to stack (normally done by announce_spell_on_stack in the
@@ -11011,10 +11107,16 @@ many tokens that are copies of it.)";
             &mut state,
             caster,
             pending2,
-            Some(offering_pay_cost.as_ref()),
-            (1, 1),
-            choices,
-            &[spirit],
+            Some(SpellCostPayment {
+                cost: offering_pay_cost.as_ref(),
+                source: *source,
+            }),
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: choices,
+                chosen: &[spirit],
+            },
             &mut events,
         )
         .expect("sacrifice selection must succeed");
@@ -11125,17 +11227,23 @@ many tokens that are copies of it.)";
         );
 
         let non_offering_cost = AbilityCost::Sacrifice {
-            target: TargetFilter::Typed(TypedFilter::creature()),
+            target: offering_quality_filter("Spirit"),
             count: 1,
         };
         let waiting = handle_sacrifice_for_cost(
             &mut state,
             caster,
             pending,
-            Some(&non_offering_cost),
-            (1, 1),
-            &[spirit],
-            &[spirit],
+            Some(SpellCostPayment {
+                cost: &non_offering_cost,
+                source: SpellCostSource::Other,
+            }),
+            CostSelection {
+                min_count: 1,
+                count: 1,
+                legal_permanents: &[spirit],
+                chosen: &[spirit],
+            },
             &mut events,
         )
         .expect("non-offering sacrifice selection must succeed");
