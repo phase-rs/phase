@@ -66,14 +66,24 @@ function Field({
   htmlFor?: string;
   children: ReactNode;
 }) {
+  // A wrapping <label> would absorb the control's own text into its accessible
+  // name (breaking getByLabelText and screen-reader labels). Render the label as
+  // a sibling associated by htmlFor instead; fall back to a plain span for
+  // control groups (segmented buttons) that have no single labelable target.
   return (
-    <label htmlFor={htmlFor} className="flex flex-col gap-1.5">
-      <span className="text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-fg-meta">
-        {label}
-      </span>
+    <div className="flex flex-col gap-1.5">
+      {htmlFor ? (
+        <label htmlFor={htmlFor} className="text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-fg-meta">
+          {label}
+        </label>
+      ) : (
+        <span className="text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-fg-meta">
+          {label}
+        </span>
+      )}
       {children}
       {hint && <span className="text-[11.5px] leading-4 text-fg-meta">{hint}</span>}
-    </label>
+    </div>
   );
 }
 
