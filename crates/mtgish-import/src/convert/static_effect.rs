@@ -356,6 +356,14 @@ pub fn convert_permanent_rule(
             exemption: engine::types::statics::ActivationExemption::None,
         },
 
+        // CR 510.1a: Assigns no combat damage (Master of Cruelties until end of combat).
+        // Mirrors `oracle_effect/subject.rs` — `AssignNoCombatDamage` + modification.
+        P::AssignsNoCombatDamage => {
+            return Ok(StaticDefinition::new(StaticMode::AssignNoCombatDamage)
+                .affected(affected)
+                .modifications(vec![ContinuousModification::AssignNoCombatDamage]));
+        }
+
         _ => {
             return Err(ConversionGap::UnknownVariant {
                 path: String::new(),
@@ -1003,6 +1011,22 @@ mod tests {
 
         assert_eq!(converted.mode, StaticMode::BlockRestriction);
         assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn assigns_no_combat_damage_lowers_to_assign_no_combat_damage_static() {
+        let converted = convert_permanent_rule(
+            &PermanentRule::AssignsNoCombatDamage,
+            TargetFilter::SelfRef,
+        )
+        .unwrap();
+
+        assert_eq!(converted.mode, StaticMode::AssignNoCombatDamage);
+        assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            converted.modifications,
+            vec![ContinuousModification::AssignNoCombatDamage]
+        );
     }
 
     #[test]
