@@ -10,8 +10,8 @@ use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastOfferKind, CastPaymentMode, CastingVariant, CastingVariantChoiceOption, ConvokeMode,
-    CostResume, GameState, PayCostKind, PendingCast, SneakPlacement, SpellCastRecord, StackEntry,
-    StackEntryKind, WaitingFor,
+    CostResume, GameState, NextSpellModifier, PayCostKind, PendingCast, SneakPlacement,
+    SpellCastRecord, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -38,7 +38,7 @@ use super::ability_utils::{
 use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::EngineError;
 use super::functioning_abilities::active_static_definitions;
-use super::game_object::PreparedState;
+use super::game_object::{PreparedState, PrototypeFormState};
 use super::mana_payment;
 use super::quantity::resolve_quantity;
 use super::restrictions;
@@ -772,6 +772,9 @@ fn granted_spell_keywords(
     // CR 611.2c: Player-scoped flash-timing grants applied by activated/triggered
     // abilities (e.g. Teferi +1) live in the TCE table, not on a battlefield static.
     transient_granted_spell_keywords(state, caster, spell_obj, origin_zone, &mut keywords);
+
+    // CR 601.2f: One-shot "the next spell …" keyword/flash grants (Insist, Quicken, Wand).
+    apply_pending_next_spell_keyword_grants(state, caster, object_id, &mut keywords);
 
     keywords
 }
@@ -1891,6 +1894,109 @@ pub(crate) fn hand_cast_free_permission_source(
     })
 }
 
+/// CR 601.2f: Whether `spell_id` matches a pending next-spell modifier's optional filter.
+fn spell_matches_pending_next_spell_filter(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    spell_filter: &Option<TargetFilter>,
+) -> bool {
+    spell_filter
+        .as_ref()
+        .is_none_or(|filter| spell_matches_cost_filter(state, caster, spell_id, filter, spell_id))
+}
+
+/// CR 601.2f: First pending next-spell modifier index matching `caster`, `spell_id`, and `predicate`.
+fn pending_next_spell_modifier_index(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    predicate: impl Fn(&NextSpellModifier) -> bool,
+) -> Option<usize> {
+    state.pending_next_spell_modifiers.iter().position(|entry| {
+        entry.player == caster
+            && spell_matches_pending_next_spell_filter(state, caster, spell_id, &entry.spell_filter)
+            && predicate(&entry.modifier)
+    })
+}
+
+/// CR 601.2f: Apply keyword/flash grants from matching pending next-spell modifiers.
+fn apply_pending_next_spell_keyword_grants(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    keywords: &mut Vec<Keyword>,
+) {
+    for entry in &state.pending_next_spell_modifiers {
+        if entry.player != caster {
+            continue;
+        }
+        if !spell_matches_pending_next_spell_filter(state, caster, spell_id, &entry.spell_filter) {
+            continue;
+        }
+        match &entry.modifier {
+            NextSpellModifier::HasKeyword { keyword } => {
+                upsert_keyword_by_kind(keywords, keyword.clone());
+            }
+            NextSpellModifier::CastAsThoughFlash => {
+                upsert_keyword_by_kind(keywords, Keyword::Flash);
+            }
+            NextSpellModifier::CantBeCountered | NextSpellModifier::WithoutPayingManaCost => {}
+        }
+    }
+}
+
+/// CR 601.2a + CR 113.6g: Stamp stack-resident grants from pending next-spell modifiers.
+pub(super) fn apply_pending_next_spell_stack_grants(
+    state: &mut GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+) {
+    let stamp_cant_be_countered = state.pending_next_spell_modifiers.iter().any(|entry| {
+        entry.player == caster
+            && spell_matches_pending_next_spell_filter(state, caster, spell_id, &entry.spell_filter)
+            && matches!(entry.modifier, NextSpellModifier::CantBeCountered)
+    });
+    if stamp_cant_be_countered {
+        if let Some(obj) = state.objects.get_mut(&spell_id) {
+            if !obj
+                .static_definitions
+                .iter_all()
+                .any(|sd| sd.mode == StaticMode::CantBeCountered)
+            {
+                obj.static_definitions
+                    .push(StaticDefinition::new(StaticMode::CantBeCountered));
+            }
+        }
+    }
+}
+
+/// CR 601.2f: Remove pending next-spell modifiers whose filter matched this cast.
+pub(super) fn consume_pending_next_spell_modifiers(
+    state: &mut GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+) {
+    let remove: Vec<usize> = state
+        .pending_next_spell_modifiers
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, entry)| {
+            (entry.player == caster
+                && spell_matches_pending_next_spell_filter(
+                    state,
+                    caster,
+                    spell_id,
+                    &entry.spell_filter,
+                ))
+            .then_some(idx)
+        })
+        .collect();
+    for idx in remove.into_iter().rev() {
+        state.pending_next_spell_modifiers.remove(idx);
+    }
+}
+
 /// Returns the effective mana cost for casting a spell, after all modifiers
 /// (alt costs, commander tax, battlefield reducers, affinity).
 /// Returns `None` if the object cannot be cast.
@@ -2576,7 +2682,25 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.160a: When the caller explicitly opted into Prototype (via
+    // `variant_override = Some(CastingVariant::Prototype)`), substitute the
+    // prototype mana cost carried by the keyword payload.
+    let prototype_cost = if casting_variant == CastingVariant::Prototype {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Prototype { cost, .. } => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
     let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
+    // CR 601.2f + CR 118.9a: One-shot "the next spell … without paying its mana cost".
+    let next_spell_without_paying = !casting_variant.uses_alternative_cost()
+        && pending_next_spell_modifier_index(state, player, object_id, |modifier| {
+            matches!(modifier, NextSpellModifier::WithoutPayingManaCost)
+        })
+        .is_some();
+
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from hand. Auto-application is restricted to `Unlimited` sources
     // (Omniscience, Tamiyo emblem); `OncePerTurn` sources (Zaffai) must be opted
@@ -2621,6 +2745,11 @@ fn prepare_spell_cast_with_variant_override_inner(
         } else {
             false
         };
+    // CR 118.9a: ExileWithAltCost { zero } / Discover / Suspend payoff — treat as
+    // `NoCost` so the mana-payment phase is skipped identically to hand-free paths.
+    let exile_alt_cost_free = alt_cost_from_exile
+        .as_ref()
+        .is_some_and(ManaCost::is_without_paying_mana);
     // CR 702.94a: Miracle alternative cost — pulled from `Keyword::Miracle(cost)`
     // on the hand object. Only honored when the caller explicitly opted into the
     // Miracle variant via the reveal prompt.
@@ -2681,8 +2810,10 @@ fn prepare_spell_cast_with_variant_override_inner(
     };
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
+        || next_spell_without_paying
         || is_hand_permission_variant
         || is_exile_permission_free_cast
+        || exile_alt_cost_free
         || pure_non_mana_flashback
         || pure_non_mana_evoke
         || casting_variant == CastingVariant::Plot
@@ -2698,6 +2829,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(awaken_cost)
             .or(cleave_cost)
             .or(impending_cost)
+            .or(prototype_cost)
             .or(effective_escape_cost_for_path)
             .or(effective_harmonize_cost_for_path)
             .or(effective_flashback_mana_cost_for_path)
@@ -4223,6 +4355,130 @@ pub fn handle_impending_cost_choice_with_payment_mode(
                 object_id,
                 Some(CastingVariant::Impending),
             )?;
+            prepared.payment_mode = payment_mode;
+            continue_with_prepared(state, player, prepared, events)
+        }
+        AlternativeCastDecision::Normal => {
+            continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+        }
+    }
+}
+
+fn prototype_form_from_object(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<PrototypeFormState> {
+    obj.keywords.iter().find_map(|keyword| {
+        let Keyword::Prototype {
+            cost,
+            power: Some(power),
+            toughness: Some(toughness),
+        } = keyword
+        else {
+            return None;
+        };
+        Some(PrototypeFormState {
+            mana_cost: cost.clone(),
+            power: *power,
+            toughness: *toughness,
+            colors: prototype_colors_from_cost(cost),
+        })
+    })
+}
+
+fn prototype_colors_from_cost(cost: &ManaCost) -> Vec<ManaColor> {
+    let ManaCost::Cost { shards, .. } = cost else {
+        return Vec::new();
+    };
+    ManaColor::ALL
+        .into_iter()
+        .filter(|color| shards.iter().any(|shard| shard.contributes_to(*color)))
+        .collect()
+}
+
+/// CR 702.160a: Apply the prototype alternative characteristics to the object
+/// once the player chooses to cast it prototyped. This mutates only live
+/// characteristics plus the typed marker; printed base characteristics remain
+/// unchanged so zone cleanup and normal future casts can restore them.
+fn apply_prototype_form(obj: &mut crate::game::game_object::GameObject) -> bool {
+    let Some(form) = prototype_form_from_object(obj) else {
+        return false;
+    };
+    obj.mana_cost = form.mana_cost.clone();
+    obj.power = Some(form.power);
+    obj.toughness = Some(form.toughness);
+    obj.color = form.colors.clone();
+    obj.prototype_form = Some(form);
+    true
+}
+
+/// CR 702.160a + CR 400.7: Restore printed characteristics when a prototyped
+/// cast is backed out before the object reaches a live Prototype zone, or when
+/// zone cleanup turns it into a new object.
+pub(crate) fn clear_prototype_form(obj: &mut crate::game::game_object::GameObject) {
+    obj.prototype_form = None;
+    obj.mana_cost = obj.base_mana_cost.clone();
+    obj.power = obj.base_power;
+    obj.toughness = obj.base_toughness;
+    obj.color = obj.base_color.clone();
+}
+
+/// CR 702.160a: Player chose the normal or prototyped cast path for a Prototype
+/// card. `Alternative` applies the secondary mana cost and P/T before
+/// preparation so the announced stack spell already has prototype
+/// characteristics; `Normal` proceeds as the printed spell.
+pub fn handle_prototype_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    handle_prototype_cost_choice_with_payment_mode(
+        state,
+        player,
+        object_id,
+        card_id,
+        decision,
+        CastPaymentMode::Auto,
+        events,
+    )
+}
+
+pub fn handle_prototype_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match decision {
+        AlternativeCastDecision::Alternative => {
+            if !state
+                .objects
+                .get_mut(&object_id)
+                .is_some_and(apply_prototype_form)
+            {
+                return Err(EngineError::InvalidAction(
+                    "Prototype characteristics are unavailable for this object".to_string(),
+                ));
+            }
+            let mut prepared = match prepare_spell_cast_with_variant_override(
+                state,
+                player,
+                object_id,
+                Some(CastingVariant::Prototype),
+            ) {
+                Ok(prepared) => prepared,
+                Err(err) => {
+                    if let Some(obj) = state.objects.get_mut(&object_id) {
+                        clear_prototype_form(obj);
+                    }
+                    return Err(err);
+                }
+            };
             prepared.payment_mode = payment_mode;
             continue_with_prepared(state, player, prepared, events)
         }
@@ -5862,6 +6118,54 @@ pub fn handle_cast_spell_with_payment_mode(
                     );
                 }
                 // Otherwise (normal-only or neither): fall through to normal cast.
+            }
+        }
+    }
+
+    // CR 702.160a: Prototype — when a hand card has complete prototype
+    // secondary characteristics, present a choice between the printed mana cost
+    // and the prototype cost when both are affordable. Prototype is opt-in via
+    // `variant_override`, so falling through proceeds as the printed creature.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand {
+            if let Some(prototype_form) = prototype_form_from_object(obj) {
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let prototype_cost_eff = apply_cost_modifiers_to_base(
+                    state,
+                    player,
+                    object_id,
+                    prototype_form.mana_cost.clone(),
+                )
+                .unwrap_or_else(|| prototype_form.mana_cost.clone());
+                let normal_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+                let prototype_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &prototype_cost_eff);
+                if normal_affordable && prototype_affordable {
+                    return Ok(WaitingFor::AlternativeCastChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        payment_mode,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Prototype,
+                        normal_cost,
+                        alternative_cost: Some(prototype_cost_eff),
+                        alternative_additional_cost: None,
+                    });
+                }
+                if !normal_affordable && prototype_affordable {
+                    return handle_prototype_cost_choice_with_payment_mode(
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        payment_mode,
+                        events,
+                    );
+                }
             }
         }
     }
@@ -9610,6 +9914,14 @@ pub fn handle_cancel_cast(
         }
     }
 
+    if pending.casting_variant == CastingVariant::Prototype {
+        // CR 601.2i + CR 702.160a: backing out of a prototyped cast before
+        // costs are committed restores the printed characteristics in hand.
+        if let Some(obj) = state.objects.get_mut(&pending.object_id) {
+            clear_prototype_form(obj);
+        }
+    }
+
     if let Some(source_id) = pending.cancel_restore_prepared_source {
         // CR 601.2i + CR 722.3c: Prepare-copy cast cancellation must restore
         // the source's prepared marker and clear the synthetic copy object.
@@ -10561,6 +10873,214 @@ mod tests {
         let prepared = prepare_spell_cast(&state, PlayerId(0), object_id).unwrap();
         assert_eq!(prepared.casting_variant, CastingVariant::Foretell);
         assert_eq!(prepared.mana_cost, foretell_test_cost());
+    }
+
+    #[test]
+    fn pending_next_spell_without_paying_zeros_mana_cost() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_instant_in_hand(&mut state, PlayerId(0));
+        state.pending_next_spell_modifiers.push(
+            crate::types::game_state::PendingNextSpellModifier {
+                player: PlayerId(0),
+                modifier: NextSpellModifier::WithoutPayingManaCost,
+                spell_filter: None,
+            },
+        );
+        let prepared = prepare_spell_cast(&state, PlayerId(0), spell_id).unwrap();
+        assert!(matches!(prepared.mana_cost, ManaCost::NoCost));
+    }
+
+    #[test]
+    fn pending_next_spell_convoke_grant_applies_to_next_cast() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_instant_in_hand(&mut state, PlayerId(0));
+        state.pending_next_spell_modifiers.push(
+            crate::types::game_state::PendingNextSpellModifier {
+                player: PlayerId(0),
+                modifier: NextSpellModifier::HasKeyword {
+                    keyword: Keyword::Convoke,
+                },
+                spell_filter: None,
+            },
+        );
+        let keywords = effective_spell_keywords(&state, PlayerId(0), spell_id);
+        assert!(keywords.iter().any(|k| matches!(k, Keyword::Convoke)));
+    }
+
+    #[test]
+    fn pending_next_spell_cant_be_countered_stamped_on_stack() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_instant_in_hand(&mut state, PlayerId(0));
+        state.pending_next_spell_modifiers.push(
+            crate::types::game_state::PendingNextSpellModifier {
+                player: PlayerId(0),
+                modifier: NextSpellModifier::CantBeCountered,
+                spell_filter: None,
+            },
+        );
+        super::apply_pending_next_spell_stack_grants(&mut state, PlayerId(0), spell_id);
+        assert!(state
+            .objects
+            .get(&spell_id)
+            .unwrap()
+            .static_definitions
+            .iter_all()
+            .any(|sd| sd.mode == StaticMode::CantBeCountered));
+        super::consume_pending_next_spell_modifiers(&mut state, PlayerId(0), spell_id);
+        assert!(state.pending_next_spell_modifiers.is_empty());
+    }
+
+    #[test]
+    fn pending_next_spell_without_paying_respects_type_filter() {
+        let mut state = setup_game_at_main_phase();
+        let instant_id = create_instant_in_hand(&mut state, PlayerId(0));
+        let creature_id = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Creature Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&creature_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(3);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+        state.pending_next_spell_modifiers.push(
+            crate::types::game_state::PendingNextSpellModifier {
+                player: PlayerId(0),
+                modifier: NextSpellModifier::WithoutPayingManaCost,
+                spell_filter: Some(TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Creature),
+                )),
+            },
+        );
+
+        let instant_prepared = prepare_spell_cast(&state, PlayerId(0), instant_id).unwrap();
+        assert!(
+            !matches!(instant_prepared.mana_cost, ManaCost::NoCost),
+            "creature-only grant must not zero an instant's mana cost"
+        );
+        assert_eq!(state.pending_next_spell_modifiers.len(), 1);
+
+        let creature_prepared = prepare_spell_cast(&state, PlayerId(0), creature_id).unwrap();
+        assert!(matches!(creature_prepared.mana_cost, ManaCost::NoCost));
+    }
+
+    #[test]
+    fn grant_next_spell_without_paying_casts_for_free() {
+        use super::super::engine::apply_as_current;
+        use crate::types::ability::{EffectKind, ResolvedAbility};
+
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_object(
+            &mut state,
+            CardId(77),
+            PlayerId(0),
+            "Simple Draw".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::generic(4);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+
+        let source = create_object(
+            &mut state,
+            CardId(78),
+            PlayerId(0),
+            "Grant Source".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GrantNextSpellAbility {
+                modifier: NextSpellModifier::WithoutPayingManaCost,
+                spell_filter: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::GrantNextSpellAbility,
+                ..
+            }
+        )));
+
+        let prepared = prepare_spell_cast(&state, PlayerId(0), spell_id).unwrap();
+        assert!(matches!(prepared.mana_cost, ManaCost::NoCost));
+
+        let mut cast_events = Vec::new();
+        let waiting = handle_cast_spell(
+            &mut state,
+            PlayerId(0),
+            spell_id,
+            CardId(77),
+            &mut cast_events,
+        )
+        .expect("free next-spell cast should be legal without mana");
+        if !matches!(waiting, WaitingFor::Priority { .. }) {
+            state.waiting_for = waiting;
+            loop {
+                match &state.waiting_for {
+                    WaitingFor::Priority { .. } => break,
+                    WaitingFor::TargetSelection { .. } => {
+                        apply_as_current(&mut state, GameAction::SelectTargets { targets: vec![] })
+                            .expect("targetless draw spell should not need targets");
+                    }
+                    other => panic!("unexpected waiting state during free cast: {other:?}"),
+                }
+            }
+        }
+        assert_eq!(state.stack.len(), 1);
+        assert!(state.pending_next_spell_modifiers.is_empty());
+    }
+
+    #[test]
+    fn exile_with_alt_cost_zero_uses_no_cost_path() {
+        let mut state = setup_game_at_main_phase();
+        let exiled = create_object(
+            &mut state,
+            CardId(90),
+            PlayerId(0),
+            "Exiled Spell".to_string(),
+            Zone::Exile,
+        );
+        state.objects.get_mut(&exiled).unwrap().mana_cost = ManaCost::generic(5);
+        state
+            .objects
+            .get_mut(&exiled)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::ExileWithAltCost {
+                cost: ManaCost::zero(),
+                cast_transformed: false,
+                constraint: None,
+                granted_to: None,
+                resolution_cleanup: None,
+                duration: None,
+            });
+        let prepared = prepare_spell_cast(&state, PlayerId(0), exiled).unwrap();
+        assert!(matches!(prepared.mana_cost, ManaCost::NoCost));
     }
 
     #[test]
@@ -28743,6 +29263,143 @@ mod tests {
                 "expected DestroyAll after overload transform, got {:?}",
                 def.effect
             );
+        }
+
+        #[test]
+        fn next_spell_without_paying_does_not_replace_overload_cost() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::White, 4);
+            let obj = create_damn_in_hand(&mut state, PlayerId(0));
+            state.pending_next_spell_modifiers.push(
+                crate::types::game_state::PendingNextSpellModifier {
+                    player: PlayerId(0),
+                    modifier: NextSpellModifier::WithoutPayingManaCost,
+                    spell_filter: None,
+                },
+            );
+
+            let normal_prepared = prepare_spell_cast(&state, PlayerId(0), obj).unwrap();
+            assert!(matches!(normal_prepared.mana_cost, ManaCost::NoCost));
+
+            let overload_prepared = prepare_spell_cast_with_variant_override(
+                &state,
+                PlayerId(0),
+                obj,
+                Some(CastingVariant::Overload),
+            )
+            .expect("overload prepare succeeds");
+            assert_eq!(overload_prepared.casting_variant, CastingVariant::Overload);
+            match overload_prepared.mana_cost {
+                ManaCost::Cost {
+                    ref shards,
+                    generic,
+                } => {
+                    assert_eq!(generic, 2);
+                    assert_eq!(shards.len(), 2);
+                }
+                other => panic!("expected overload cost to remain selected, got {:?}", other),
+            }
+        }
+    }
+
+    /// CR 702.160a: Prototype end-to-end — `handle_cast_spell` offers a
+    /// Prototype alternative-cost choice when both costs are affordable, and
+    /// selecting Prototype prepares the spell with secondary mana cost/P/T
+    /// characteristics on the object before it is announced on the stack.
+    mod prototype_cast_flow {
+        use super::*;
+        use crate::types::game_state::AlternativeCastKeyword;
+        use crate::types::keywords::Keyword;
+
+        fn create_prototype_creature_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
+            let obj_id = create_object(
+                state,
+                CardId(160),
+                player,
+                "Combat Thresher".to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 7,
+            };
+            obj.base_mana_cost = obj.mana_cost.clone();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.base_power = obj.power;
+            obj.base_toughness = obj.toughness;
+            obj.keywords.push(Keyword::Prototype {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 2,
+                },
+                power: Some(1),
+                toughness: Some(1),
+            });
+            obj.base_keywords = obj.keywords.clone();
+            obj_id
+        }
+
+        #[test]
+        fn offer_prototype_when_both_costs_affordable() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 7);
+            add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+            let obj = create_prototype_creature_in_hand(&mut state, PlayerId(0));
+
+            let wf = handle_cast_spell(&mut state, PlayerId(0), obj, CardId(160), &mut Vec::new())
+                .expect("prototype cast offer should be generated");
+
+            assert!(
+                matches!(
+                    wf,
+                    WaitingFor::AlternativeCastChoice {
+                        keyword: AlternativeCastKeyword::Prototype,
+                        ..
+                    }
+                ),
+                "expected AlternativeCastChoice(Prototype), got {wf:?}"
+            );
+        }
+
+        #[test]
+        fn choosing_prototype_sets_stack_characteristics() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+            add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+            let obj = create_prototype_creature_in_hand(&mut state, PlayerId(0));
+
+            let wf = handle_prototype_cost_choice_with_payment_mode(
+                &mut state,
+                PlayerId(0),
+                obj,
+                CardId(160),
+                AlternativeCastDecision::Alternative,
+                CastPaymentMode::Auto,
+                &mut Vec::new(),
+            )
+            .expect("prototype choice should enter the cast pipeline");
+
+            assert!(
+                matches!(
+                    wf,
+                    WaitingFor::ManaPayment { .. } | WaitingFor::Priority { .. }
+                ),
+                "prototype cast should continue to payment or complete, got {wf:?}"
+            );
+            let prototyped = state.objects.get(&obj).unwrap();
+            assert!(prototyped.prototype_form.is_some());
+            assert_eq!(prototyped.mana_cost.mana_value(), 3);
+            assert_eq!(prototyped.power, Some(1));
+            assert_eq!(prototyped.toughness, Some(1));
+            assert_eq!(prototyped.color, vec![ManaColor::White]);
+            assert_eq!(prototyped.base_mana_cost.mana_value(), 7);
+            assert_eq!(prototyped.base_power, Some(3));
+            assert_eq!(prototyped.base_toughness, Some(3));
         }
     }
 

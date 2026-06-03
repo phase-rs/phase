@@ -652,6 +652,11 @@ fn controller_ref_player(
         ControllerRef::ChosenPlayer { index } => {
             ability.and_then(|a| a.chosen_players.get(*index as usize).copied())
         }
+        // CR 613.1: The player persisted on the source via an "as ~ enters,
+        // choose a player" replacement — read durably from the source object.
+        ControllerRef::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, source_id)
+        }
         // CR 603.2 + CR 109.4: The player identified by the triggering event.
         ControllerRef::TriggeringPlayer => crate::game::quantity::triggering_event_player(state),
     }
@@ -1106,6 +1111,14 @@ fn filter_inner_for_object(
                     }
                     ControllerRef::DefendingPlayer => {
                         match crate::game::combat::defending_player_for_attacker(state, source_id) {
+                            Some(pid) if pid == obj_ctrl => {}
+                            _ => return false,
+                        }
+                    }
+                    // CR 613.1: "the chosen player controls" — match against the
+                    // player persisted on the source.
+                    ControllerRef::SourceChosenPlayer => {
+                        match crate::game::game_object::source_chosen_player(state, source_id) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
@@ -1674,6 +1687,9 @@ pub fn spell_record_matches_filter(
                     ControllerRef::TargetPlayer => return false,
                     ControllerRef::ParentTargetController => return false,
                     ControllerRef::DefendingPlayer => return false,
+                    // CR 613.1: "the chosen player" has no meaning for a
+                    // spell-history record. Fail closed.
+                    ControllerRef::SourceChosenPlayer => return false,
                     // CR 109.4: A chosen-player scope has no meaning for a
                     // spell-history record (no resolution context). Fail closed.
                     ControllerRef::ChosenPlayer { .. } => return false,
@@ -2581,6 +2597,7 @@ fn matches_filter_prop(
                         perm.controller == pid
                     }
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
+                    (Some(ControllerRef::SourceChosenPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::ChosenPlayer { .. }), Some(pid)) => perm.controller == pid,
                     // CR 603.2 + CR 109.4: triggering-player-scoped name match.
                     (Some(ControllerRef::TriggeringPlayer), Some(pid)) => perm.controller == pid,
@@ -2617,6 +2634,11 @@ fn matches_filter_prop(
             }
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
+                    .is_some_and(|pid| pid == obj.owner)
+            }
+            // CR 613.1: Ownership relative to the source's persisted chosen player.
+            ControllerRef::SourceChosenPlayer => {
+                crate::game::game_object::source_chosen_player(state, source.id)
                     .is_some_and(|pid| pid == obj.owner)
             }
             // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
@@ -3124,6 +3146,11 @@ fn zone_change_record_matches_property(
                 crate::game::combat::defending_player_for_attacker(state, source.id)
                     .is_some_and(|pid| pid == record.owner)
             }
+            // CR 613.1: Ownership relative to the source's persisted chosen player.
+            ControllerRef::SourceChosenPlayer => {
+                crate::game::game_object::source_chosen_player(state, source.id)
+                    .is_some_and(|pid| pid == record.owner)
+            }
             // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
             ControllerRef::ChosenPlayer { index } => source
                 .ability
@@ -3314,6 +3341,11 @@ fn attachment_controller_matches(
         }
         Some(ControllerRef::DefendingPlayer) => {
             combat::defending_player_for_attacker(state, source.id)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
+        // CR 613.1: Attachment controller relative to the source's chosen player.
+        Some(ControllerRef::SourceChosenPlayer) => {
+            crate::game::game_object::source_chosen_player(state, source.id)
                 .is_some_and(|pid| pid == attachment_controller)
         }
         // CR 608.2c + CR 109.4: Attachment controller relative to a chosen player.
@@ -3788,6 +3820,9 @@ pub fn player_matches_target_filter(
             Some(ControllerRef::TargetPlayer) => false,
             Some(ControllerRef::ParentTargetController) => false,
             Some(ControllerRef::DefendingPlayer) => false,
+            // CR 613.1: "the chosen player" has no meaning in this name-filter
+            // context. Fail closed (mirrors `TargetPlayer`).
+            Some(ControllerRef::SourceChosenPlayer) => false,
             // CR 109.4: Chosen-player scope has no meaning without resolution
             // context. Fail closed (mirrors `TargetPlayer`).
             Some(ControllerRef::ChosenPlayer { .. }) => false,

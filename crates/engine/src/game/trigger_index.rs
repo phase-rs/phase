@@ -709,6 +709,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::PhaseOut
         | EffectKind::PhaseIn
         | EffectKind::ForceBlock
+        | EffectKind::ForceAttack
         | EffectKind::SolveCase
         | EffectKind::BecomePrepared
         | EffectKind::BecomeUnprepared

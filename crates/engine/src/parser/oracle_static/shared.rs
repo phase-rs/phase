@@ -1559,8 +1559,9 @@ pub(crate) fn parse_commander_subject_filter_prefix(subject: &str) -> Option<(Ta
     let lower = subject.to_lowercase();
     let i = lower.as_str();
 
-    // Possessive "your commander(s)" follows the same controller-scoped
-    // runtime shape used by target parsing for Command Beacon-style effects.
+    // Possessive "your commander(s)" is owner-scoped: it refers to the
+    // commander's designation for the evaluating player, not just any
+    // commander currently controlled by that player.
     let (i, possessive_your) = opt(tag::<_, _, VE>("your ")).parse(i).ok()?;
 
     // Optional leading "other " — emits FilterProp::Another.
@@ -1611,8 +1612,13 @@ pub(crate) fn parse_commander_subject_filter_prefix(subject: &str) -> Option<(Ta
     .parse(i)
     .ok()?;
 
-    // CR 903.3d: a commander, when controlled, is a permanent on the battlefield.
-    let mut props = vec![FilterProp::IsCommander];
+    let mut props = Vec::new();
+    if possessive_your.is_some() {
+        props.push(FilterProp::Owned {
+            controller: ControllerRef::You,
+        });
+    }
+    props.push(FilterProp::IsCommander);
     if has_other {
         props.push(FilterProp::Another);
     }
@@ -1621,13 +1627,13 @@ pub(crate) fn parse_commander_subject_filter_prefix(subject: &str) -> Option<(Ta
     }
     let mut typed = if is_creature_subject {
         TypedFilter::creature().properties(props)
+    } else if possessive_your.is_some() {
+        TypedFilter::default().properties(props)
     } else {
         TypedFilter::permanent().properties(props)
     };
     if let Some(c) = controller {
         typed = typed.controller(c);
-    } else if possessive_your.is_some() {
-        typed = typed.controller(ControllerRef::You);
     }
 
     let consumed = lower.len() - i.len();
