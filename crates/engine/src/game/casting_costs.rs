@@ -3615,6 +3615,11 @@ fn handle_resolution_cast_rejection(
             crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
             super::zones::move_to_zone(state, object_id, Zone::Hand, events);
         }
+        // CR 702.62a / CR 702.88a: Suspend / Rebound — no dig misses and no
+        // resulting-MV gate, so this path is unreachable in practice. "If you
+        // don't [cast it], it remains exiled": the card simply stays in exile
+        // (the announcement-time stack entry was already removed above).
+        ResolutionMvRejectAction::RemainExiled => {}
     }
 
     // CR 601.2a: Priority returns to the would-be caster.

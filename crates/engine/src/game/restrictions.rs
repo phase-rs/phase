@@ -37,12 +37,14 @@ pub fn check_spell_timing(
         return Ok(());
     }
 
-    // CR 608.2g + CR 702.85a / CR 701.57a: A cascade/discover hit is cast DURING
-    // the resolution of its source ability, following the 601.2a-i cast steps but
-    // bypassing normal timing — sorcery-speed, empty-stack, and active-player
-    // gates do not apply (the stack is necessarily non-empty mid-resolution). Such
-    // a cast is driven by `initiate_cast_during_resolution`, which marks the
-    // exiled hit with an `ExileWithAltCost` permission carrying `resolution_cleanup`.
+    // CR 608.2g + CR 702.85a / CR 701.57a + CR 702.62a/d: A spell cast DURING
+    // the resolution of its source ability — a Cascade/Discover hit, or
+    // Suspend's last-time-counter free cast — follows the 601.2a-i cast steps
+    // but bypasses normal timing: sorcery-speed, empty-stack, and active-player
+    // gates do not apply (Treasure Cruise is a sorcery cast at upkeep with the
+    // trigger still on the stack). Such a cast is driven by
+    // `initiate_cast_during_resolution`, which marks the card with an
+    // `ExileWithAltCost` permission carrying `resolution_cleanup`.
     if obj.casting_permissions.iter().any(|p| {
         matches!(
             p,

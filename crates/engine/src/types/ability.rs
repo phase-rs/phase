@@ -1642,22 +1642,27 @@ pub enum CastPermissionConstraint {
 }
 
 /// CR 608.2g: Rejection-cleanup state carried by a cast-during-resolution
-/// `ExileWithAltCost` permission (Cascade / Discover). When the cast-time
-/// resulting-mana-value check fails at finalization, the source spell's
-/// `WaitingFor::CastOffer` has already been consumed, so the misses ride
-/// inside the permission and the engine still knows where the rejected hit
-/// goes (`reject_action`).
+/// `ExileWithAltCost` permission. Its presence is the engine's marker that the
+/// cast happens *during the resolution* of its source ability (CR 608.2g —
+/// normal timing/empty-stack/active-player gates do not apply). For Cascade /
+/// Discover, when the cast-time resulting-mana-value check fails at
+/// finalization the source spell's `WaitingFor::CastOffer` has already been
+/// consumed, so the misses ride inside the permission and the engine still
+/// knows where the rejected hit goes (`reject_action`). Suspend's last-counter
+/// free cast (CR 702.62a/d) has no dig, so it carries an empty `exiled_misses`
+/// and `RemainExiled` — the marker still arms the CR 608.2g timing bypass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionCastCleanup {
     /// Cards exiled during the dig that were not the hit; they go to the
     /// bottom of the library in a random order on resolution completion.
+    /// Empty for Suspend's self-free-cast (no dig).
     pub exiled_misses: Vec<super::identifiers::ObjectId>,
     /// Where the hit goes if the player declines or the cast-time MV check
     /// rejects the cast.
     pub reject_action: ResolutionMvRejectAction,
 }
 
-/// CR 608.2g: Disposition of a Cascade/Discover hit that is not cast.
+/// CR 608.2g: Disposition of a during-resolution card that is not cast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ResolutionMvRejectAction {
@@ -1665,6 +1670,11 @@ pub enum ResolutionMvRejectAction {
     BottomWithMisses,
     /// CR 701.57a: discover — hit goes to its owner's hand; misses to bottom.
     ToHand,
+    /// CR 702.62a: Suspend's last-counter free cast — the card has no dig
+    /// misses and no resulting-MV gate, so this reject disposition is only
+    /// reached if a future during-resolution free cast adds a constraint. "If
+    /// you don't [cast it], it remains exiled" — the card stays in exile.
+    RemainExiled,
 }
 
 /// When a delayed triggered ability fires (CR 603.7).

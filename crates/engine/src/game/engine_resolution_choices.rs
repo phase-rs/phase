@@ -410,7 +410,7 @@ pub(super) fn handle_resolution_choice(
                             value: discover_value as i32,
                         },
                     }),
-                    cleanup,
+                    Some(cleanup),
                     events,
                 )?;
                 ResolutionChoiceOutcome::WaitingFor(result)
@@ -542,7 +542,7 @@ pub(super) fn handle_resolution_choice(
                             value: source_mv as i32,
                         },
                     }),
-                    cleanup,
+                    Some(cleanup),
                     events,
                 )?;
                 ResolutionChoiceOutcome::WaitingFor(result)

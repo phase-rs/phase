@@ -5219,19 +5219,25 @@ pub(super) fn initiate_cast_during_resolution(
     player: PlayerId,
     hit_card: ObjectId,
     constraint: Option<crate::types::ability::CastPermissionConstraint>,
-    cleanup: crate::types::ability::ResolutionCastCleanup,
+    cleanup: Option<crate::types::ability::ResolutionCastCleanup>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if let Some(obj) = state.objects.get_mut(&hit_card) {
         // CR 601.2a + CR 601.2i: zero-cost permission consumed by
         // `prepare_spell_cast_with_variant_override`'s exile alt-cost scan.
+        // `resolution_cleanup` is `Some` only for the library-dig casts
+        // (Cascade/Discover) that must dispose of misses / the hit on a
+        // cast-time MV rejection (CR 608.2g). Self-free-casts that have no dig
+        // misses and no MV gate (Suspend's last-counter cast, CR 702.62a;
+        // Rebound's upkeep recast, CR 702.88a) pass `None`, so the permission
+        // is a plain alt-cost grant and never enters the cascade reject path.
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
                 cost: ManaCost::zero(),
                 cast_transformed: false,
                 constraint,
                 granted_to: Some(player),
-                resolution_cleanup: Some(cleanup),
+                resolution_cleanup: cleanup,
                 duration: None,
             });
     }
@@ -14448,9 +14454,13 @@ mod tests {
         // Resolve the synthesized last-counter trigger's `CastFromZone` body
         // directly. This is the exact effect the suspend last-counter trigger
         // synthesis (`build_suspend_last_counter_cast_trigger`) executes when
-        // the final time counter is removed (CR 702.62a). Resolving it
-        // installs `CastingPermission::ExileWithAltCost { cost: zero, .. }`
-        // on the exiled card via `cast_from_zone::resolve`.
+        // the final time counter is removed (CR 702.62a). Per CR 702.62a/d +
+        // CR 608.2g the cast now happens DURING resolution: `cast_from_zone`'s
+        // self-free-cast branch drives `initiate_cast_during_resolution`, which
+        // detects the granted off-zone Suspend keyword (CR 604.1) and casts the
+        // spell at zero cost, placing it on the stack — rather than leaving a
+        // lingering `ExileWithAltCost` permission for a later priority window
+        // (issue #1520).
         let cast_trigger_ability = ResolvedAbility::new(
             Effect::CastFromZone {
                 target: TargetFilter::SelfRef,
@@ -14472,33 +14482,40 @@ mod tests {
             &mut events,
             0,
         )
-        .expect("CastFromZone must install ExileWithAltCost on the suspended card");
+        .expect("CastFromZone must cast the suspended card during resolution");
 
-        assert!(
-            state.objects[&suspended]
-                .casting_permissions
-                .iter()
-                .any(|p| matches!(
-                    p,
-                    CastingPermission::ExileWithAltCost { cost, .. } if *cost == ManaCost::zero()
-                )),
-            "CastFromZone must grant a zero-cost ExileWithAltCost permission \
-             on the exiled card (CR 702.62a synthesized trigger body)"
+        // CR 608.2g: the spell is cast during the trigger's resolution and
+        // becomes the topmost object on the stack.
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "suspend last-counter cast (CR 702.62a) must put the spell on the \
+             stack during resolution, not stamp a lingering permission"
+        );
+        assert_eq!(
+            state.objects[&suspended].zone,
+            Zone::Stack,
+            "the suspended card must move to the stack when cast for free"
         );
 
-        // The discriminator: ask the casting pipeline what variant would be
-        // selected. With the fix the granted off-zone Suspend keyword feeds
-        // both `casting_variant_candidates` and
-        // `prepare_spell_cast_with_variant_override_inner` through
-        // `object_has_effective_keyword_kind`, so the variant is Suspend.
-        let prepared =
-            prepare_spell_cast_with_variant_override(&state, PlayerId(0), suspended, None)
-                .expect("prepare_spell_cast must succeed with granted Suspend + ExileWithAltCost");
+        // The discriminator (issue #863): the granted off-zone Suspend keyword
+        // (CR 604.1) must be visible to the casting pipeline so the cast is
+        // tagged `CastingVariant::Suspend`, not `Normal`. With both predicates
+        // reading `obj.keywords` instead of `object_has_effective_keyword_kind`
+        // the granted Suspend is invisible and the cast misroutes to Normal.
+        // Read the variant off the stack entry (stamped at announcement, before
+        // resolution writes `cast_variant_paid`).
+        let stack_variant = match &state.stack.back().expect("spell on stack").kind {
+            crate::types::game_state::StackEntryKind::Spell {
+                casting_variant, ..
+            } => *casting_variant,
+            other => panic!("expected a Spell stack entry, got {other:?}"),
+        };
         assert_eq!(
-            prepared.casting_variant,
+            stack_variant,
             CastingVariant::Suspend,
-            "granted Suspend (CR 604.1) must produce CastingVariant::Suspend, \
-             not Normal — the off-zone effective keyword set must be consulted"
+            "granted Suspend (CR 604.1) must produce a CastingVariant::Suspend \
+             cast — the off-zone effective keyword set must be consulted"
         );
     }
 
@@ -14519,7 +14536,6 @@ mod tests {
     // apply to granted-Suspend casts (CR 604.1) too.
     #[test]
     fn jhoira_granted_suspend_creature_cast_gains_haste() {
-        use super::super::engine::apply_as_current;
         use crate::types::ability::{
             CardPlayMode, ContinuousModification, Duration, Effect, ResolvedAbility, TargetRef,
         };
@@ -14569,8 +14585,13 @@ mod tests {
             None,
         );
 
-        // Resolve the synthesized last-counter trigger body to install
-        // `ExileWithAltCost { cost: zero, .. }` on the exiled creature.
+        // Resolve the synthesized last-counter trigger body. Per CR 702.62a/d +
+        // CR 608.2g this casts the creature DURING resolution: `cast_from_zone`'s
+        // self-free-cast branch drives `initiate_cast_during_resolution`, which
+        // picks `CastingVariant::Suspend` (the discriminator covered by the
+        // cast-variant test above), puts the spell on the stack at zero cost,
+        // and tags `cast_variant_paid` so `stack::resolve_top`'s Suspend branch
+        // installs the haste TCE for creatures.
         let cast_trigger_ability = ResolvedAbility::new(
             Effect::CastFromZone {
                 target: TargetFilter::SelfRef,
@@ -14592,28 +14613,12 @@ mod tests {
             &mut events,
             0,
         )
-        .expect("CastFromZone must install ExileWithAltCost on the suspended card");
-
-        // Cast the spell through the real pipeline. The casting pipeline must
-        // pick `CastingVariant::Suspend` (the discriminator covered by the
-        // cast-variant test above), the spell goes to the stack at zero cost,
-        // and resolution enters `stack::resolve_top`'s Suspend branch which
-        // tags `cast_variant_paid` and installs the haste TCE for creatures.
-        let card_id = state.objects[&suspended].card_id;
-        apply_as_current(
-            &mut state,
-            GameAction::CastSpell {
-                object_id: suspended,
-                card_id,
-                targets: vec![],
-            },
-        )
-        .expect("granted-Suspend creature must cast at zero cost through the real pipeline");
+        .expect("CastFromZone must cast the suspended creature during resolution");
 
         assert_eq!(
             state.stack.len(),
             1,
-            "Suspend cast must place the spell on the stack"
+            "Suspend cast must place the spell on the stack during resolution"
         );
 
         let mut events = Vec::new();
