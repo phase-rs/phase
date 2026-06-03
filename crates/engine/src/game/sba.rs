@@ -1290,6 +1290,13 @@ fn is_valid_attachment_target(
     {
         return false;
     }
+    if !crate::game::effects::attach::attachment_host_matches_only_to_restrictions(
+        state,
+        attacher_id,
+        target_id,
+    ) {
+        return false;
+    }
     let enchant_filter = attacher.keywords.iter().find_map(|k| match k {
         crate::types::keywords::Keyword::Enchant(f) => Some(f),
         _ => None,

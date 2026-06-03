@@ -343,6 +343,12 @@ pub fn convert_permanent_rule(
         P::CantBeBlockedByDefenders(p) => StaticMode::CantBeBlockedBy {
             filter: filter::convert(p)?,
         },
+        P::CanBeAttachedOnlyToAPermanent(p) => {
+            return Ok(StaticDefinition::new(StaticMode::CanBeAttachedOnlyTo {
+                filter: filter::convert(p)?,
+            })
+            .affected(affected));
+        }
 
         // CR 602.5 + CR 603.2a: "[This permanent's] activated abilities can't
         // be activated." Mirrors the parser's self-ref form (oracle_static.rs
@@ -1003,6 +1009,34 @@ mod tests {
 
         assert_eq!(converted.mode, StaticMode::BlockRestriction);
         assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn can_be_attached_only_to_permanent_lowers_to_attach_filter_static() {
+        use crate::schema::types::{CardType, PermanentRule, Permanents, SuperType};
+        use engine::types::ability::{FilterProp, TargetFilter, TypeFilter};
+        use engine::types::card_type::Supertype as EngineSupertype;
+        use engine::types::statics::StaticMode;
+
+        let converted = convert_permanent_rule(
+            &PermanentRule::CanBeAttachedOnlyToAPermanent(Box::new(Permanents::And(vec![
+                Permanents::IsCardtype(CardType::Creature),
+                Permanents::IsSupertype(SuperType::Legendary),
+            ]))),
+            TargetFilter::SelfRef,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(
+                converted.mode,
+                StaticMode::CanBeAttachedOnlyTo { filter: TargetFilter::Typed(ref tf) }
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.properties.iter().any(|p| matches!(p, FilterProp::HasSupertype { value: EngineSupertype::Legendary }))
+            ),
+            "got {:?}",
+            converted.mode
+        );
     }
 
     #[test]

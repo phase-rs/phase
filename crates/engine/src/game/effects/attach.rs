@@ -266,13 +266,40 @@ pub(crate) fn player_attachment_illegality(
     None
 }
 
+/// CR 301.5b / CR 303.4j: Returns false when `attachment` has a
+/// `CanBeAttachedOnlyTo` static and `host_id` does not match its filter.
+pub(crate) fn attachment_host_matches_only_to_restrictions(
+    state: &GameState,
+    attachment_id: ObjectId,
+    host_id: ObjectId,
+) -> bool {
+    let Some(attachment) = state.objects.get(&attachment_id) else {
+        return false;
+    };
+    let ctx = crate::game::filter::FilterContext::from_source_with_controller(
+        attachment_id,
+        attachment.controller,
+    );
+    for def in crate::game::functioning_abilities::active_static_definitions(state, attachment) {
+        if let crate::types::statics::StaticMode::CanBeAttachedOnlyTo { filter } = &def.mode {
+            if !crate::game::filter::matches_target_filter(state, host_id, filter, &ctx) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 pub(crate) fn can_attach_to_object(
     state: &GameState,
     attachment_id: ObjectId,
     target_id: ObjectId,
 ) -> bool {
     // CR 701.3a: A blocked attachment is not a legal host for an attach effect.
-    attachment_illegality(state, attachment_id, target_id).is_none()
+    if attachment_illegality(state, attachment_id, target_id).is_some() {
+        return false;
+    }
+    attachment_host_matches_only_to_restrictions(state, attachment_id, target_id)
 }
 
 pub(crate) fn can_attach_to_player(
@@ -421,6 +448,30 @@ mod tests {
             StaticDefinition::new(StaticMode::Other(mode_name.to_string()))
                 .affected(TargetFilter::SelfRef),
         );
+    }
+
+    fn apply_attach_only_to(state: &mut GameState, equipment_id: ObjectId, min_power: i32) {
+        use crate::types::ability::{
+            Comparator, FilterProp, PtStat, PtValueScope, QuantityExpr, TypedFilter,
+        };
+        state
+            .objects
+            .get_mut(&equipment_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CanBeAttachedOnlyTo {
+                    filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::GE,
+                            value: QuantityExpr::Fixed { value: min_power },
+                        },
+                    ])),
+                })
+                .affected(TargetFilter::SelfRef),
+            );
     }
 
     #[test]
@@ -1054,5 +1105,35 @@ mod tests {
         attach_to(&mut state, equipment2, cant_be_attached);
         assert_eq!(state.objects.get(&aura2).unwrap().attached_to, None);
         assert_eq!(state.objects.get(&equipment2).unwrap().attached_to, None);
+    }
+
+    #[test]
+    fn can_be_attached_only_to_blocks_illegal_equipment_host() {
+        let mut state = setup();
+        let equipment = spawn_with_subtype(&mut state, "O-Naginata", "Equipment");
+        apply_attach_only_to(&mut state, equipment, 3);
+
+        let weak = spawn_creature(&mut state, "Goblin");
+        {
+            let obj = state.objects.get_mut(&weak).unwrap();
+            obj.base_power = Some(2);
+            obj.power = Some(2);
+        }
+
+        let strong = spawn_creature(&mut state, "Giant");
+        {
+            let obj = state.objects.get_mut(&strong).unwrap();
+            obj.base_power = Some(4);
+            obj.power = Some(4);
+        }
+
+        attach_to(&mut state, equipment, weak);
+        assert_eq!(state.objects.get(&equipment).unwrap().attached_to, None);
+
+        attach_to(&mut state, equipment, strong);
+        assert_eq!(
+            state.objects.get(&equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(strong))
+        );
     }
 }

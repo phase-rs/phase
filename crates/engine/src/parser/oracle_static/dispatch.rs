@@ -1265,6 +1265,15 @@ pub(crate) fn parse_static_line_inner(
         );
     }
 
+    // --- "~ can be attached only to {filter}" (CR 301.5b / CR 303.4j) ---
+    if nom_primitives::scan_contains(tp.lower, "can be attached only to ")
+        || nom_primitives::scan_contains(tp.lower, "may be attached only to ")
+    {
+        if let Some(def) = super::attach_restriction::parse_can_be_attached_only_to(&tp, &text) {
+            return Some(def);
+        }
+    }
+
     // --- "~ can't be equipped or enchanted" (CR 701.3 + CR 702.5 + CR 702.6) ---
     // Compound attach prohibition. MUST be scanned BEFORE the solo "can't be enchanted"
     // and "can't be equipped" blocks below, otherwise the compound phrase falls through

@@ -548,6 +548,37 @@ fn static_cant_be_blocked_by_power_ge() {
 }
 
 #[test]
+fn static_can_be_attached_only_to_power_ge() {
+    let def = parse_static_line("can be attached only to a creature with power 3 or greater.")
+        .expect("should parse attach-only restriction");
+    assert!(
+        matches!(
+            &def.mode,
+            StaticMode::CanBeAttachedOnlyTo { filter }
+            if matches!(filter, TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p, FilterProp::PtComparison { stat: PtStat::Power, comparator: Comparator::GE, value: QuantityExpr::Fixed { value: 3 }, .. })))
+        ),
+        "expected CanBeAttachedOnlyTo with power >= 3, got {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn static_can_be_attached_only_to_legendary_creature() {
+    use crate::types::card_type::Supertype;
+    let def = parse_static_line("can be attached only to a legendary creature.").expect("parse");
+    assert!(
+        matches!(
+            &def.mode,
+            StaticMode::CanBeAttachedOnlyTo { filter }
+            if matches!(filter, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)
+                && tf.properties.iter().any(|p| matches!(p, FilterProp::HasSupertype { value: Supertype::Legendary })))
+        ),
+        "expected legendary creature filter, got {:?}",
+        def.mode
+    );
+}
+
+#[test]
 fn static_cant_be_blocked_by_greater_power() {
     // CR 509.1b: Prehistoric Pet — can't be blocked by creatures with greater power
     let def = parse_static_line("This creature can't be blocked by creatures with greater power.")

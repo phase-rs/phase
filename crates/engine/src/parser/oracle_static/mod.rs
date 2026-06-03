@@ -67,6 +67,7 @@ pub(super) use super::{
 };
 
 mod anthem;
+mod attach_restriction;
 mod cda;
 mod cost_mod;
 mod dispatch;

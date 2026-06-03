@@ -838,6 +838,11 @@ pub enum StaticMode {
     CantBeBlockedByMoreThan {
         max: u32,
     },
+    /// CR 301.5b / CR 303.4j: This Equipment or Aura can be attached only to
+    /// permanents matching `filter` (positive restriction on the attachment).
+    CanBeAttachedOnlyTo {
+        filter: TargetFilter,
+    },
     /// CR 702.16: Protection prevents targeting, blocking, damage, and attachment.
     Protection,
     /// CR 702.12: Indestructible — prevents destruction by lethal damage and destroy effects.
@@ -1096,6 +1101,7 @@ impl Hash for StaticMode {
             },
             StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::CantBeBlockedByMoreThan { max } => max.hash(state),
+            StaticMode::CanBeAttachedOnlyTo { .. } => {}
             StaticMode::AdditionalLandDrop { count } => count.hash(state),
             StaticMode::StepEndUnspentMana { filter, action } => {
                 filter.hash(state);
@@ -1312,6 +1318,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::CantBeBlockedByMoreThan { max } => {
                 write!(f, "CantBeBlockedByMoreThan({max})")
+            }
+            StaticMode::CanBeAttachedOnlyTo { filter } => {
+                write!(f, "CanBeAttachedOnlyTo({filter:?})")
             }
             StaticMode::Protection => write!(f, "Protection"),
             StaticMode::Indestructible => write!(f, "Indestructible"),
