@@ -21,6 +21,7 @@ use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
 use super::oracle_nom::quantity as nom_quantity;
+use super::oracle_static::parse_commander_subject_filter_prefix;
 use super::oracle_target::{
     attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase,
     starts_with_type_word,
@@ -4899,32 +4900,8 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         return (filter, rest);
     }
 
-    // CR 903.3 + CR 903.3d: Possessive commander reference as trigger subject.
-    // "your commander" / "your commanders" — the commander is identified by
-    // the IsCommander flag. Produces a typed filter with ControllerRef::You +
-    // IsCommander so downstream verb handlers (EntersOrAttacks, ChangesZone,
-    // Attacks, etc.) receive a properly-scoped subject.
-    if let Ok((after_your, ())) = value((), tag::<_, _, OracleError<'_>>("your ")).parse(text) {
-        if let Ok((rest, ())) = alt((
-            value((), tag::<_, _, OracleError<'_>>("commanders ")),
-            value((), tag::<_, _, OracleError<'_>>("commander ")),
-            value(
-                (),
-                all_consuming(tag::<_, _, OracleError<'_>>("commanders")),
-            ),
-            value((), all_consuming(tag::<_, _, OracleError<'_>>("commander"))),
-        ))
-        .parse(after_your)
-        {
-            return (
-                TargetFilter::Typed(TypedFilter {
-                    controller: Some(ControllerRef::You),
-                    properties: vec![FilterProp::IsCommander],
-                    ..Default::default()
-                }),
-                rest,
-            );
-        }
+    if let Some((filter, rest)) = parse_commander_subject_filter_prefix(text) {
+        return (filter, rest.trim_start());
     }
 
     let (filter, rest) = parse_type_phrase(text);
@@ -24639,9 +24616,9 @@ mod snapshot_tests {
         assert_eq!(
             def.valid_card,
             Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Permanent],
                 controller: Some(ControllerRef::You),
                 properties: vec![FilterProp::IsCommander],
-                ..Default::default()
             }))
         );
     }

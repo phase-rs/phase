@@ -1545,9 +1545,23 @@ pub(crate) fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> T
 /// you control"), and analogous "[other] commander(s) [you control | your
 /// opponents control]" subject phrases.
 pub(crate) fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilter> {
+    let (filter, rest) = parse_commander_subject_filter_prefix(subject.trim())?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(filter)
+}
+
+/// CR 903.3 + CR 903.3d: Parse a commander subject prefix, returning the
+/// unconsumed text for trigger/event parsers that need to continue at the verb.
+pub(crate) fn parse_commander_subject_filter_prefix(subject: &str) -> Option<(TargetFilter, &str)> {
     type VE<'a> = OracleError<'a>;
-    let lower = subject.trim().to_lowercase();
+    let lower = subject.to_lowercase();
     let i = lower.as_str();
+
+    // Possessive "your commander(s)" follows the same controller-scoped
+    // runtime shape used by target parsing for Command Beacon-style effects.
+    let (i, possessive_your) = opt(tag::<_, _, VE>("your ")).parse(i).ok()?;
 
     // Optional leading "other " — emits FilterProp::Another.
     let (i, other) = opt(tag::<_, _, VE>("other ")).parse(i).ok()?;
@@ -1597,10 +1611,6 @@ pub(crate) fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilt
     .parse(i)
     .ok()?;
 
-    if !i.trim().is_empty() {
-        return None;
-    }
-
     // CR 903.3d: a commander, when controlled, is a permanent on the battlefield.
     let mut props = vec![FilterProp::IsCommander];
     if has_other {
@@ -1616,8 +1626,12 @@ pub(crate) fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilt
     };
     if let Some(c) = controller {
         typed = typed.controller(c);
+    } else if possessive_your.is_some() {
+        typed = typed.controller(ControllerRef::You);
     }
-    Some(TargetFilter::Typed(typed))
+
+    let consumed = lower.len() - i.len();
+    Some((TargetFilter::Typed(typed), &subject[consumed..]))
 }
 
 /// CR 205.1a / CR 205.3 / CR 111.1: Returns true when `descriptor` is a

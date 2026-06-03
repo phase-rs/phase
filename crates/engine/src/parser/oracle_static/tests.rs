@@ -12316,6 +12316,16 @@ fn parse_commander_subject_filter_basic_variants() {
         _ => panic!("expected Typed"),
     }
 
+    let f = parse_commander_subject_filter("your commander").expect("your commander");
+    match f {
+        TargetFilter::Typed(tf) => {
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+            assert!(tf.properties.contains(&FilterProp::IsCommander));
+        }
+        _ => panic!("expected Typed"),
+    }
+
     let f = parse_commander_subject_filter("commander creatures you own")
         .expect("commander creatures you own");
     match f {
