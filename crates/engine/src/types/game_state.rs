@@ -308,6 +308,9 @@ pub enum NextSpellModifier {
     HasKeyword { keyword: Keyword },
     /// "The next spell you cast this turn can be cast as though it had flash."
     CastAsThoughFlash,
+    /// CR 118.9a: "The next [filter] spell you cast this turn can be cast without
+    /// paying its mana cost." Additional costs still apply (CR 118.8).
+    WithoutPayingManaCost,
 }
 
 /// CR 400.7: Snapshot of an object's properties at the time of a zone change,
@@ -1690,6 +1693,10 @@ pub enum AlternativeCastKeyword {
     /// permanent enters with N time counters and isn't a creature until the last
     /// is removed. An end-step trigger removes one counter per turn.
     Impending,
+    /// CR 702.160a: Prototype alternative cost paid from hand. The resulting
+    /// spell/permanent uses the secondary power, toughness, and mana cost
+    /// characteristics while it is a creature.
+    Prototype,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -3752,11 +3759,49 @@ pub enum CastingVariant {
     /// with N time counters (from the keyword) and is not a creature while any
     /// remain. At the beginning of your end step one time counter is removed.
     Impending,
+    /// CR 702.160a: Cast from hand prototyped. The printed mana cost is replaced
+    /// by the prototype cost during cast preparation, and the object is tagged so
+    /// stack display plus layer evaluation use the secondary mana cost and P/T
+    /// while it is a creature.
+    Prototype,
 }
 
 impl CastingVariant {
     pub fn is_normal(&self) -> bool {
         *self == CastingVariant::Normal
+    }
+
+    /// CR 118.9a: Only one alternative cost can be applied to a spell.
+    pub fn uses_alternative_cost(self) -> bool {
+        match self {
+            CastingVariant::Warp
+            | CastingVariant::Escape
+            | CastingVariant::Harmonize
+            | CastingVariant::Flashback
+            | CastingVariant::HandPermission { .. }
+            | CastingVariant::Sneak { .. }
+            | CastingVariant::WebSlinging { .. }
+            | CastingVariant::Miracle
+            | CastingVariant::Madness
+            | CastingVariant::Evoke
+            | CastingVariant::Suspend
+            | CastingVariant::Plot
+            | CastingVariant::Foretell
+            | CastingVariant::Overload
+            | CastingVariant::Bestow
+            | CastingVariant::Awaken
+            | CastingVariant::Cleave
+            | CastingVariant::MoreThanMeetsTheEye
+            | CastingVariant::Impending
+            | CastingVariant::Prototype => true,
+            CastingVariant::Normal
+            | CastingVariant::Adventure
+            | CastingVariant::Omen
+            | CastingVariant::Retrace
+            | CastingVariant::Aftermath
+            | CastingVariant::GraveyardPermission { .. }
+            | CastingVariant::ExilePermission { .. } => false,
+        }
     }
 
     pub fn exiles_when_leaving_stack_for_any_reason(self) -> bool {

@@ -1926,7 +1926,12 @@ fn parse_enters_with_counters(
     // sibling shorthand "counters on it equal to [quantity]", parse the
     // dynamic expression.
     if let Ok((_, (_, qty_text))) = nom_primitives::split_once_on(work_text, "equal to ") {
-        let trimmed = qty_text.trim().trim_end_matches('.');
+        // The quantity phrase never spans a sentence boundary, so isolate the
+        // first sentence before parsing — Slumbering Trudge trails a separate
+        // "If X is 2 or less, it enters tapped." clause after "equal to three
+        // minus X.", which would otherwise leave the quantity parsers a dangling
+        // tail and force the `Fixed { 1 }` fallback (only 1 stun counter).
+        let trimmed = qty_text.split('.').next().unwrap_or(qty_text).trim();
         if let Some(qty_ref) = crate::parser::oracle_quantity::parse_quantity_ref(trimmed) {
             count_expr = QuantityExpr::Ref { qty: qty_ref };
         } else if let Some(qty) = crate::parser::oracle_quantity::parse_cda_quantity(trimmed) {
@@ -1935,11 +1940,24 @@ fn parse_enters_with_counters(
             crate::parser::oracle_quantity::parse_event_context_quantity(trimmed)
         {
             count_expr = qty;
+        } else if let Some((qty, rest_q)) = crate::parser::oracle_util::parse_count_expr(trimmed) {
+            // CR 107.3a: arithmetic over the cost variable ("three minus X").
+            // `parse_count_expr` emits `Variable("X")`; the rewrite below maps it
+            // to the entering object's `CostXPaid`. Require full consumption so a
+            // partial parse never silently truncates the quantity.
+            if rest_q.trim().is_empty() {
+                count_expr = qty;
+            }
         }
     }
     if let Some(qty) = parse_enters_with_where_x_suffix(work_text) {
         count_expr = qty;
     }
+    // CR 614.12: Any `Variable("X")` that survived the dynamic-quantity
+    // overrides above refers to the X paid on the *entering* object's cost, not
+    // a trigger-event source, so rewrite it to `CostXPaid` (idempotent —
+    // already-rewritten `CostXPaid` leaves are untouched).
+    rewrite_variable_x_to_cost_x_paid(&mut count_expr);
 
     let put_counter = build_enters_counter_ability(
         counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
@@ -7184,6 +7202,63 @@ mod tests {
         ));
     }
 
+    /// Issue #1988 — Slumbering Trudge. "This creature enters with a number of
+    /// stun counters on it equal to three minus X. If X is 2 or less, it enters
+    /// tapped." The "three minus X" arithmetic plus the trailing tapped sentence
+    /// previously defeated every quantity parser, so `count` fell back to
+    /// `Fixed { 1 }` (1 stun counter regardless of X). The count must be the
+    /// `Offset { Multiply { -1, CostXPaid }, 3 }` expression so X=0 resolves to
+    /// 3 stun counters (and X>3 clamps to 0 in the resolver).
+    #[test]
+    fn slumbering_trudge_enters_with_three_minus_x_stun_counters() {
+        let def = parse_replacement_line(
+            "This creature enters with a number of stun counters on it equal to \
+             three minus X. If X is 2 or less, it enters tapped.",
+            "Slumbering Trudge",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().expect("execute ability");
+        // "it enters tapped" → Tap wrapper with the counter as its sub_ability.
+        assert!(matches!(
+            *execute.effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        let sub = execute.sub_ability.as_ref().expect("counter sub_ability");
+        match &*sub.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Stun);
+                assert_eq!(*target, TargetFilter::SelfRef);
+                match count {
+                    QuantityExpr::Offset { inner, offset } => {
+                        assert_eq!(*offset, 3);
+                        match inner.as_ref() {
+                            QuantityExpr::Multiply { factor, inner } => {
+                                assert_eq!(*factor, -1);
+                                assert!(matches!(
+                                    inner.as_ref(),
+                                    QuantityExpr::Ref {
+                                        qty: QuantityRef::CostXPaid
+                                    }
+                                ));
+                            }
+                            other => panic!("expected Multiply{{-1, CostXPaid}}, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected Offset{{.., 3}}, got {other:?}"),
+                }
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+    }
+
     #[test]
     fn self_enters_with_counters() {
         let def = parse_replacement_line(
@@ -7556,7 +7631,9 @@ mod tests {
             CounterType::Plus1Plus1,
             CounterType::Keyword(crate::types::keywords::KeywordKind::Flying),
             CounterType::Keyword(crate::types::keywords::KeywordKind::Deathtouch),
-            CounterType::Generic("shield".to_string()),
+            // CR 122.1c: "shield" is now a first-class counter type (issue #1959),
+            // no longer a Generic.
+            CounterType::Shield,
         ];
         for counter in expected {
             assert!(matches!(
@@ -7567,7 +7644,7 @@ mod tests {
                     target: TargetFilter::SelfRef,
                 } if *counter_type == counter
             ));
-            if counter == CounterType::Generic("shield".to_string()) {
+            if counter == CounterType::Shield {
                 assert!(cursor.sub_ability.is_none());
             } else {
                 cursor = cursor.sub_ability.as_deref().expect("next counter");

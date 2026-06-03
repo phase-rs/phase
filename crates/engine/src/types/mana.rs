@@ -786,6 +786,16 @@ impl ManaCost {
         }
     }
 
+    /// CR 118.9a: Whether this mana cost represents casting without paying mana
+    /// (`NoCost`, or a zero `{0}` cost from `ExileWithAltCost` grants).
+    pub fn is_without_paying_mana(&self) -> bool {
+        match self {
+            ManaCost::NoCost => true,
+            ManaCost::Cost { shards, generic } => shards.is_empty() && *generic == 0,
+            ManaCost::SelfManaCost => false,
+        }
+    }
+
     /// Create a cost with only generic mana (e.g., {3}).
     pub fn generic(amount: u32) -> Self {
         ManaCost::Cost {

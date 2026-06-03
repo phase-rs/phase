@@ -1602,6 +1602,75 @@ fn static_instant_sorcery_spells_cost_less() {
 }
 
 #[test]
+fn static_red_or_green_spell_cost_less_issue_141() {
+    // Goblin Anarchomancer (issue #141): "Each spell you cast that's red or green …"
+    let def = parse_static_line("Each spell you cast that's red or green costs {1} less to cast.");
+    assert!(
+        def.is_some(),
+        "Goblin Anarchomancer cost-reduction line must parse"
+    );
+    let def = def.unwrap();
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        spell_filter: Some(filter),
+        ..
+    } = def.mode
+    else {
+        panic!(
+            "expected ModifyCost Reduce with spell_filter, got {:?}",
+            def.mode
+        );
+    };
+    match filter {
+        TargetFilter::Typed(tf) => {
+            let any_of = tf
+                .properties
+                .iter()
+                .find_map(|p| match p {
+                    FilterProp::AnyOf { props } => Some(props),
+                    _ => None,
+                })
+                .expect("expected AnyOf red/green HasColor props");
+            assert!(
+                any_of.contains(&FilterProp::HasColor {
+                    color: ManaColor::Red
+                }),
+                "expected Red in filter, got {any_of:?}"
+            );
+            assert!(
+                any_of.contains(&FilterProp::HasColor {
+                    color: ManaColor::Green
+                }),
+                "expected Green in filter, got {any_of:?}"
+            );
+        }
+        other => panic!("expected Typed spell filter with color AnyOf, got {other:?}"),
+    }
+}
+
+#[test]
+fn static_typed_spell_with_that_clause_cost_less() {
+    let def = parse_static_line("Each creature spell you cast that's red costs {1} less to cast.")
+        .expect("typed spell cost modifier with that-clause should parse");
+    let StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        spell_filter: Some(TargetFilter::Typed(filter)),
+        ..
+    } = def.mode
+    else {
+        panic!(
+            "expected ModifyCost Reduce with typed spell_filter, got {:?}",
+            def.mode
+        );
+    };
+
+    assert!(filter.type_filters.contains(&TypeFilter::Creature));
+    assert!(filter.properties.contains(&FilterProp::HasColor {
+        color: ManaColor::Red
+    }));
+}
+
+#[test]
 fn static_white_spells_cost_more() {
     // "White spells your opponents cast cost {1} more to cast."
     let def = parse_static_line("White spells your opponents cast cost {1} more to cast.").unwrap();

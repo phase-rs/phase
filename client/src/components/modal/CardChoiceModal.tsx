@@ -68,6 +68,45 @@ type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type ChooseRingBearer = Extract<WaitingFor, { type: "ChooseRingBearer" }>;
 const CHOICE_CARD_IMAGE_CLASS = "";
 
+type EffectZoneMode = "Sacrifice" | "Topdeck" | "Hand" | "Battlefield";
+
+const EFFECT_ZONE_VISUAL_CLASSES: Record<EffectZoneMode, { ring: string; overlay: string; badge: string }> = {
+  Sacrifice: {
+    ring: "ring-red-400/80",
+    overlay: "bg-red-500/20",
+    badge: "bg-red-500/90",
+  },
+  Topdeck: {
+    ring: "ring-sky-300/80",
+    overlay: "bg-sky-500/20",
+    badge: "bg-sky-500/90",
+  },
+  Hand: {
+    ring: "ring-sky-300/80",
+    overlay: "bg-sky-500/20",
+    badge: "bg-sky-500/90",
+  },
+  Battlefield: {
+    ring: "ring-emerald-400/80",
+    overlay: "bg-emerald-500/20",
+    badge: "bg-emerald-500/90",
+  },
+};
+
+const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
+  Sacrifice: "cardChoice.effectZone.labelConfirm",
+  Topdeck: "cardChoice.effectZone.labelTop",
+  Hand: "cardChoice.effectZone.labelReturn",
+  Battlefield: "cardChoice.effectZone.labelPut",
+};
+
+const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
+  Sacrifice: "cardChoice.badges.sacrifice",
+  Topdeck: "cardChoice.badges.put",
+  Hand: "cardChoice.badges.return",
+  Battlefield: "cardChoice.badges.put",
+};
+
 function CostActionFooter({
   onCancel,
   children,
@@ -1329,34 +1368,31 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   if (!objects) return null;
 
   const isTopdeck = data.effect_kind === "PutAtLibraryPosition";
+  const mode: EffectZoneMode = isSacrifice
+    ? "Sacrifice"
+    : isTopdeck
+      ? "Topdeck"
+      : data.destination === "Hand"
+        ? "Hand"
+        : "Battlefield";
+  const visualClasses = EFFECT_ZONE_VISUAL_CLASSES[mode];
   const selectedOrder = isTopdeck ? Array.from(selected) : [];
   const selectedOrderLabels = selectedOrder.map((_, index) => formatTopdeckOrderLabel(index, t));
   const isReady = isUpTo
     ? selected.size >= minCount && selected.size <= data.count
     : selected.size === data.count;
-  const kind = isSacrifice ? "Sacrifice" : isTopdeck ? "Topdeck" : "Battlefield";
-  const title = isSacrifice
-    ? t("cardChoice.effectZone.titleSacrifice")
-    : isTopdeck
-      ? t("cardChoice.effectZone.titleTopdeck")
-      : t("cardChoice.effectZone.titleBattlefield");
-  const subtitle = isUpTo
+  const subtitleKey = isUpTo
     ? minCount > 0
-      ? t(`cardChoice.effectZone.subtitle${kind}Range`, { min: minCount, count: data.count })
-      : t(`cardChoice.effectZone.subtitle${kind}UpTo`, { count: data.count })
-    : t(`cardChoice.effectZone.subtitle${kind}Exact`, { count: data.count });
+      ? `cardChoice.effectZone.subtitle${mode}Range`
+      : `cardChoice.effectZone.subtitle${mode}UpTo`
+    : `cardChoice.effectZone.subtitle${mode}Exact`;
+  const title = t(`cardChoice.effectZone.title${mode}`);
+  const subtitle = t(subtitleKey, { min: minCount, count: data.count });
   const actionLabel = selected.size === 0 && isUpTo && minCount === 0
     ? (isSacrifice ? t("cardChoice.effectZone.labelSkip") : t("cardChoice.effectZone.labelDecline"))
     : isTopdeck && selectedOrderLabels.length > 0
       ? t("cardChoice.effectZone.labelPutOnTop", { order: selectedOrderLabels.join(" -> ") })
-      : isSacrifice
-        ? t("cardChoice.effectZone.labelConfirm", { selected: selected.size, count: data.count })
-        : isTopdeck
-          ? t("cardChoice.effectZone.labelTop", { selected: selected.size, count: data.count })
-          : t("cardChoice.effectZone.labelPut", { selected: selected.size, count: data.count });
-  const ringClass = isSacrifice ? "ring-red-400/80" : isTopdeck ? "ring-sky-300/80" : "ring-emerald-400/80";
-  const overlayClass = isSacrifice ? "bg-red-500/20" : isTopdeck ? "bg-sky-500/20" : "bg-emerald-500/20";
-  const badgeClass = isSacrifice ? "bg-red-500/90" : isTopdeck ? "bg-sky-500/90" : "bg-emerald-500/90";
+      : t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], { selected: selected.size, count: data.count });
 
   return (
     <ChoiceOverlay
@@ -1370,17 +1406,15 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
           if (!obj) return null;
           const isSelected = selected.has(id);
           const selectedIndex = selectedOrder.indexOf(id);
-          const badgeLabel = isSacrifice
-            ? t("cardChoice.badges.sacrifice")
-            : isTopdeck && selectedIndex >= 0
+          const badgeLabel = isTopdeck && selectedIndex >= 0
               ? formatTopdeckOrderLabel(selectedIndex, t)
-              : t("cardChoice.badges.put");
+              : t(EFFECT_ZONE_BADGE_KEYS[mode]);
           return (
             <motion.button
               key={id}
               className={`relative rounded-lg transition ${
                 isSelected
-                  ? `z-10 ring-2 ${ringClass}`
+                  ? `z-10 ring-2 ${visualClasses.ring}`
                   : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
               }`}
               initial={{ opacity: 0, y: 60, scale: 0.85 }}
@@ -1396,8 +1430,8 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
               {isSelected && (
-                <div className={`absolute inset-0 flex items-center justify-center rounded-lg ${overlayClass}`}>
-                  <span className={`rounded-full px-3 py-1 text-xs font-bold text-white ${badgeClass}`}>
+                <div className={`absolute inset-0 flex items-center justify-center rounded-lg ${visualClasses.overlay}`}>
+                  <span className={`rounded-full px-3 py-1 text-xs font-bold text-white ${visualClasses.badge}`}>
                     {badgeLabel}
                   </span>
                 </div>
