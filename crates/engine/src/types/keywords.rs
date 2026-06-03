@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use super::ability::ControllerRef;
 use super::ability::{
-    AbilityCost, Comparator, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, Comparator, CostObjectCount, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
@@ -608,11 +609,12 @@ pub enum Keyword {
     /// battlefield transformed under its owner's control. Activate only as a
     /// sorcery." `materials` is the typed object class to exile (CR 702.167b:
     /// a bare type/subtype matches permanents on the battlefield OR cards in a
-    /// graveyard); `count` is how many materials must be exiled.
+    /// graveyard); `count` is the exact/minimum material-count requirement.
     Craft {
         cost: ManaCost,
         materials: TargetFilter,
-        count: u32,
+        #[serde(default)]
+        count: CostObjectCount,
     },
     Offspring(ManaCost),
     /// CR 702.176a: Impending N—{cost} — alternative cast that enters with
@@ -1685,7 +1687,7 @@ impl FromStr for Keyword {
                     return Ok(Keyword::Craft {
                         cost: parse_keyword_mana_cost(p),
                         materials: craft_materials_default(),
-                        count: 1,
+                        count: CostObjectCount::exactly(1),
                     })
                 }
                 "offspring" => return Ok(Keyword::Offspring(parse_keyword_mana_cost(p))),
@@ -2393,7 +2395,18 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
                     })
                     .transpose()?
                     .unwrap_or_else(craft_materials_default);
-                let count = data.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                let count = data
+                    .get("count")
+                    .and_then(|value| {
+                        serde_json::from_value::<CostObjectCount>(value.clone())
+                            .ok()
+                            .or_else(|| {
+                                value
+                                    .as_u64()
+                                    .map(|count| CostObjectCount::exactly(count as u32))
+                            })
+                    })
+                    .unwrap_or_default();
                 Ok(Keyword::Craft {
                     cost: mana(cost_val)?,
                     materials,
@@ -2403,7 +2416,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
                 Ok(Keyword::Craft {
                     cost: mana(data)?,
                     materials: craft_materials_default(),
-                    count: 1,
+                    count: CostObjectCount::exactly(1),
                 })
             }
         }

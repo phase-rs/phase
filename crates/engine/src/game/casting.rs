@@ -1,9 +1,9 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
-    CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, Duration, Effect,
-    GameRestriction, ModalSelectionCondition, ObjectScope, PlayerScope, ProhibitedActivity,
-    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, StaticDefinition,
-    TargetFilter, TargetRef,
+    CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, CostObjectCount,
+    Duration, Effect, GameRestriction, ModalSelectionCondition, ObjectScope, PlayerScope,
+    ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope,
+    StaticDefinition, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -8743,7 +8743,7 @@ fn find_non_self_exile(cost: &AbilityCost) -> Option<(u32, Zone, Option<&TargetF
 /// selection across the battlefield/graveyard union. Returns `(count,
 /// materials)`. Recurses into `Composite` (the synthesized craft cost is a
 /// `Composite[Mana, Exile{SelfRef}, ExileMaterials]`).
-fn find_craft_materials_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+fn find_craft_materials_cost(cost: &AbilityCost) -> Option<(CostObjectCount, &TargetFilter)> {
     match cost {
         AbilityCost::ExileMaterials { materials, count } => Some((*count, materials)),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_craft_materials_cost),
@@ -9644,7 +9644,9 @@ pub fn handle_activate_ability(
             let eligible = super::cost_payability::eligible_craft_materials(
                 state, player, source_id, materials,
             );
-            if eligible.len() < count as usize {
+            let min_count = count.min_count();
+            let max_count = count.max_count(eligible.len());
+            if eligible.len() < min_count {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible materials to craft".into(),
                 ));
@@ -9659,11 +9661,10 @@ pub fn handle_activate_ability(
                     materials: materials.clone(),
                 },
                 choices: eligible,
-                count: count as usize,
-                // CR 702.167b: craft exiles exactly `count` materials (no fewer)
-                // — `handle_exile_materials_for_cost` enforces the exact count, so
-                // surface `min_count == count` to match (mirrors the sacrifice detour).
-                min_count: count as usize,
+                count: max_count,
+                // CR 702.167a: "one or more" material costs set `min_count < count`;
+                // exact material costs set both bounds to the same value.
+                min_count,
                 resume: CostResume::Spell {
                     spell: Box::new(pending_craft),
                 },

@@ -181,11 +181,12 @@ impl AbilityCost {
                     .len()
                     >= *count as usize
             }
-            // CR 702.167a/b: Craft's materials cost — payable iff at least
-            // `count` eligible objects exist across the battlefield/graveyard
-            // union (excluding the source, whose self-exile is a separate cost).
+            // CR 702.167a/b: Craft's materials cost — payable iff enough
+            // eligible objects exist across the battlefield/graveyard union
+            // (excluding the source, whose self-exile is a separate cost).
             AbilityCost::ExileMaterials { materials, count } => {
-                eligible_craft_materials(state, player, source, materials).len() >= *count as usize
+                eligible_craft_materials(state, player, source, materials).len()
+                    >= count.min_count()
             }
             // CR 701.59b: Can't collect evidence if graveyard total mana value
             // is less than N.

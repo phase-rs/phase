@@ -1883,7 +1883,7 @@ fn apply_action(
                         *player,
                         materials.clone(),
                         *pending_cast.clone(),
-                        *count,
+                        (*min_count, *count),
                         choices,
                         &chosen,
                         &mut events,

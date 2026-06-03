@@ -4530,6 +4530,48 @@ pub enum BeholdCostAction {
     ExileChosen,
 }
 
+/// CR 702.167a: Object-count requirement for costs whose text may ask for an
+/// exact number ("two creatures") or a minimum ("one or more creatures").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CostObjectCount {
+    Exactly { count: u32 },
+    AtLeast { count: u32 },
+}
+
+impl Default for CostObjectCount {
+    fn default() -> Self {
+        Self::exactly(1)
+    }
+}
+
+impl CostObjectCount {
+    pub fn exactly(count: u32) -> Self {
+        Self::Exactly {
+            count: count.max(1),
+        }
+    }
+
+    pub fn at_least(count: u32) -> Self {
+        Self::AtLeast {
+            count: count.max(1),
+        }
+    }
+
+    pub fn min_count(self) -> usize {
+        match self {
+            Self::Exactly { count } | Self::AtLeast { count } => count.max(1) as usize,
+        }
+    }
+
+    pub fn max_count(self, eligible_count: usize) -> usize {
+        match self {
+            Self::Exactly { count } => count.max(1) as usize,
+            Self::AtLeast { .. } => eligible_count,
+        }
+    }
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -4590,11 +4632,11 @@ pub enum AbilityCost {
     /// the *union* of the battlefield (permanents you control) and your
     /// graveyard, so `materials` carries the dual-zone `TargetFilter::Or` built
     /// by `craft_materials_filter`. The interactive `PayCostKind::ExileMaterials`
-    /// detour exiles `count` chosen objects; this auto-payment arm is a no-op.
+    /// detour exiles objects satisfying `count`; this auto-payment arm is a no-op.
     ExileMaterials {
         materials: TargetFilter,
-        #[serde(default = "default_one")]
-        count: u32,
+        #[serde(default)]
+        count: CostObjectCount,
     },
     /// CR 701.59a / CR 702.163a: Exile cards from your graveyard with total mana value
     /// at least N as a collect evidence cost.

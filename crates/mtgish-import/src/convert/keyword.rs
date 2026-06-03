@@ -10,7 +10,7 @@
 //! type-system lookup; there is no semantic translation. Cost/filter
 //! keywords need real conversion logic, so they land with their phase.
 
-use engine::types::ability::{AbilityCost, QuantityExpr};
+use engine::types::ability::{AbilityCost, CostObjectCount, QuantityExpr};
 use engine::types::keywords::{
     ActivationCadence, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter,
     ProtectionTarget, WardCost,
@@ -374,7 +374,7 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         | Rule::CraftWithANumberOfGroupCraftables(_, _, _, cost) => Keyword::Craft {
             cost: crate::convert::mana::convert(cost)?,
             materials: engine::types::keywords::craft_materials_default(),
-            count: 1,
+            count: CostObjectCount::exactly(1),
         },
 
         // CR 702.48a: "[Quality] offering" — additional-cost-on-cast

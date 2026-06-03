@@ -5536,12 +5536,25 @@ fn build_oracle_face_inner(
         &subtypes,
     );
 
+    let extracted_keywords = parsed.extracted_keywords;
+    let extracted_has_craft = extracted_keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Craft { .. }));
+    let oracle_has_craft_materials = raw_oracle_text
+        .lines()
+        .map(str::trim_start)
+        .map(str::to_ascii_lowercase)
+        .any(|line| line.strip_prefix("craft with ").is_some());
+    if oracle_has_craft_materials && !extracted_has_craft {
+        keywords.retain(|keyword| !matches!(keyword, Keyword::Craft { .. }));
+    }
+
     // Merge keywords extracted from Oracle text with MTGJSON keywords via the
     // shared `merge_extracted_keywords` authority (also used by the scenario test
     // harness so the two pipelines cannot diverge). It reconciles parameterized
     // keywords (e.g., Morph) and CR 113.2c multi-instance keywords (Cascade/Storm/
     // Myriad/Exalted) — see the helper's doc comment for the per-class rules.
-    merge_extracted_keywords(&mut keywords, parsed.extracted_keywords);
+    merge_extracted_keywords(&mut keywords, extracted_keywords);
 
     // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
@@ -10981,7 +10994,7 @@ mod sorcery_speed_invariant_tests {
     #[test]
     fn synthesize_craft_from_oracle_line_builds_sorcery_speed_return_transformed() {
         use crate::parser::oracle_keyword::parse_keyword_from_oracle;
-        use crate::types::ability::TargetFilter;
+        use crate::types::ability::{CostObjectCount, TargetFilter};
         use crate::types::zones::Zone;
 
         let kw = parse_keyword_from_oracle("craft with creature {4}{b}")
@@ -10992,7 +11005,7 @@ mod sorcery_speed_invariant_tests {
             } => (materials.clone(), *count),
             other => panic!("expected Keyword::Craft, got {other:?}"),
         };
-        assert_eq!(count, 1, "single-material craft");
+        assert_eq!(count, CostObjectCount::exactly(1), "single-material craft");
         match &materials {
             TargetFilter::Or { filters } => {
                 assert_eq!(filters.len(), 2, "battlefield + graveyard legs");
@@ -11052,9 +11065,13 @@ mod sorcery_speed_invariant_tests {
             "self-exile sub-cost present (CR 702.167a)"
         );
         assert!(
-            costs
-                .iter()
-                .any(|c| matches!(c, AbilityCost::ExileMaterials { count: 1, .. })),
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::ExileMaterials {
+                    count: CostObjectCount::Exactly { count: 1 },
+                    ..
+                }
+            )),
             "materials-exile sub-cost present (CR 702.167a/b)"
         );
     }
@@ -13831,6 +13848,55 @@ mod bloodthirst_synthesis_tests {
         merge_extracted_keywords(&mut base, vec![Keyword::Squad(squad_cost.clone())]);
 
         assert_eq!(base, vec![Keyword::Squad(squad_cost)]);
+    }
+
+    #[test]
+    fn build_oracle_face_drops_craft_default_when_material_constraint_is_unparsed() {
+        let mtgjson = AtomicCard {
+            name: "Threefold Thunderhulk".to_string(),
+            mana_cost: Some("{7}".to_string()),
+            colors: Vec::new(),
+            color_identity: Vec::new(),
+            power: Some("0".to_string()),
+            toughness: Some("0".to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some("Craft with two that share a card type {6}".to_string()),
+            layout: "transform".to_string(),
+            type_line: Some("Artifact Creature — Gnome".to_string()),
+            types: vec!["Artifact".to_string(), "Creature".to_string()],
+            subtypes: vec!["Gnome".to_string()],
+            supertypes: Vec::new(),
+            keywords: Some(vec!["Craft:{6}".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 7.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_id: None,
+                scryfall_oracle_id: None,
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert!(
+            face.keywords
+                .iter()
+                .all(|keyword| !matches!(keyword, Keyword::Craft { .. })),
+            "unparsed Craft material constraints must not keep MTGJSON's generic Craft fallback"
+        );
+        assert!(
+            face.abilities
+                .iter()
+                .all(|definition| !matches!(definition.cost, Some(AbilityCost::Composite { .. }))),
+            "unsupported Craft must not synthesize an approximate activated ability"
+        );
     }
 
     /// Re-running synthesis must not duplicate the replacement.

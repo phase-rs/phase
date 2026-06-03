@@ -31,8 +31,9 @@ use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp, PlayerFilter,
-    QuantityExpr, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, CostObjectCount, Effect,
+    FilterProp, PlayerFilter, QuantityExpr, TargetFilter, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
@@ -109,7 +110,7 @@ fn craft_ability(cost: ManaCost) -> AbilityDefinition {
             },
             AbilityCost::ExileMaterials {
                 materials: craft_with_creature_materials(),
-                count: 1,
+                count: CostObjectCount::exactly(1),
             },
         ],
     })
@@ -147,7 +148,7 @@ fn craft_activation_offers_materials_detour_and_exiles_source_plus_material() {
                 generic: 1,
             },
             materials: craft_with_creature_materials(),
-            count: 1,
+            count: CostObjectCount::exactly(1),
         })
         .with_ability_definition(craft_ability(ManaCost::Cost {
             shards: vec![],
@@ -453,7 +454,7 @@ fn craft_returns_blade_transformed_and_front_etb_does_not_refire() {
                 generic: 1,
             },
             materials: craft_with_creature_materials(),
-            count: 1,
+            count: CostObjectCount::exactly(1),
         })
         .with_ability_definition(craft_ability(ManaCost::Cost {
             shards: vec![],
