@@ -346,13 +346,21 @@ export function HostControlTile() {
     });
   };
 
+  // Position depends on surface. In-game (/game/:id is full-screen, no shell)
+  // keeps the established top-right anchor — clear of the hand. On the menu
+  // shell the top-right holds the chrome cluster and the centered action tiles
+  // sit high, so the floating tile would cover them (e.g. the Draft card);
+  // there it floats bottom-right instead, clear of both rail and content.
+  const inGame = location.pathname.startsWith("/game/");
+  const posClass = inGame
+    ? "fixed inset-x-3 top-[calc(env(safe-area-inset-top)+4.75rem)] z-40 sm:left-auto sm:right-3 sm:top-[calc(env(titlebar-area-height,0px)+0.75rem)] sm:w-72"
+    : "fixed inset-x-3 bottom-[calc(env(safe-area-inset-bottom)+4.75rem)] z-40 sm:left-auto sm:right-3 sm:bottom-3 sm:w-72";
+
   return (
-    <div
-      className="fixed inset-x-3 top-[calc(env(safe-area-inset-top)+4.75rem)] z-40 sm:left-auto sm:right-3 sm:top-[calc(env(titlebar-area-height,0px)+0.75rem)] sm:w-72"
-    >
-      <div className="rounded-xl border border-white/10 bg-black/70 shadow-lg shadow-black/40 backdrop-blur-md">
+    <div className={posClass}>
+      <div className="surface-card rounded-panel border border-hairline shadow-panel backdrop-blur-md">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-white/5 px-3 py-2">
+        <div className="flex items-center justify-between border-b border-hairline px-3 py-2">
           <button
             type="button"
             onClick={() => {
@@ -417,7 +425,7 @@ export function HostControlTile() {
           </div>
         )}
         {canEditSeats && hostSession && (
-          <div className="border-t border-white/5 px-3 py-2">
+          <div className="border-t border-hairline px-3 py-2">
             <div className="mb-2 text-xs uppercase tracking-wide text-slate-500">
               {t("hostControl.seatsOccupied", { occupied: occupiedSeats, total: playerSlots.length })}
             </div>
