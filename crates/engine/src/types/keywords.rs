@@ -778,7 +778,7 @@ pub enum Keyword {
 
     /// RUNTIME: `database::synthesis::synthesize_replicate` — repeatable
     /// optional additional cost (`AdditionalCost::Optional { repeatable: true }`)
-    /// + a `SpellCast` trigger whose execute is
+    /// plus a `SpellCast` trigger whose execute is
     /// `replicate_copy_ability_definition()` (a `CopySpell` with
     /// `repeat_for = AdditionalCostPaymentCount`).
     /// CR 702.56a: Replicate {cost} — additional-cost-on-cast copy
