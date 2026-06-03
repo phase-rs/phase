@@ -45,9 +45,7 @@ use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
-use server_core::lookup_join_guard::{
-    guard_lookup_join_target_inbound, LookupJoinTargetInbound,
-};
+use server_core::lookup_join_guard::{guard_lookup_join_target_inbound, LookupJoinTargetInbound};
 use server_core::protocol::{
     build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
     MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
