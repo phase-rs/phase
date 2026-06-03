@@ -475,7 +475,7 @@ body {
 .zone-viewer-strip .animate-pulse,
 .card-choice-strip [role="img"],
 .card-choice-strip .animate-pulse {
-  --strip-card-h: clamp(180px, 52vh, 420px);
+  --strip-card-h: clamp(240px, 64vh, 560px);
   width: auto !important;
   height: var(--strip-card-h) !important;
   aspect-ratio: 5 / 7;

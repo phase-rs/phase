@@ -1372,11 +1372,14 @@ export type DebugAction =
         owner: PlayerId;
         zone: Zone;
         attach_to?: AttachTarget;
+        run_etb: boolean;
       };
     }
   | { type: "RemoveObject"; data: { object_id: ObjectId } }
+  | { type: "Sacrifice"; data: { object_id: ObjectId } }
   | { type: "DrawCards"; data: { player_id: PlayerId; count: number } }
   | { type: "Mill"; data: { player_id: PlayerId; count: number } }
+  | { type: "Reveal"; data: { player_id: PlayerId; count: number } }
   | { type: "ShuffleLibrary"; data: { player_id: PlayerId } }
   | { type: "Proliferate"; data: { player_id: PlayerId } }
   | { type: "SetBasePowerToughness"; data: { object_id: ObjectId; power: number | null; toughness: number | null } }
@@ -1400,6 +1403,7 @@ export type DebugAction =
       type: "CreateToken";
       data: {
         request: DebugTokenRequest;
+        run_etb: boolean;
       };
     }
   | { type: "CreateTokenCopy"; data: { source_id: ObjectId; owner: PlayerId } };

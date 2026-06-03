@@ -761,9 +761,10 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
         owner,
         zone,
         attach_to,
+        run_etb,
     }) = action
     {
-        return handle_debug_create_card(card_name, owner, zone, attach_to);
+        return handle_debug_create_card(card_name, owner, zone, attach_to, run_etb);
     }
 
     match with_state_mut(|state| match apply(state, actor, action) {
@@ -783,6 +784,7 @@ fn handle_debug_create_card(
     owner: PlayerId,
     zone: engine::types::zones::Zone,
     attach_to: Option<engine::game::game_object::AttachTarget>,
+    run_etb: bool,
 ) -> JsValue {
     let face = CARD_DB.with(|cell| {
         let db = cell.borrow();
@@ -880,7 +882,7 @@ fn handle_debug_create_card(
         }
 
         let result = if zone == engine::types::zones::Zone::Battlefield {
-            engine::game::route_debug_create_to_battlefield(state, obj_id)
+            engine::game::route_debug_create_to_battlefield(state, obj_id, run_etb)
         } else {
             engine::types::game_state::ActionResult {
                 events: vec![],
