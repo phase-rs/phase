@@ -564,7 +564,15 @@ fn check_lethal_damage(
 /// Mirror Box's "permanents you control", Cadric / Sliver Gravemother's
 /// type-scoped variants). The candidate is passed as the target object so
 /// type-scoped exemptions are evaluated per-permanent, not per-player.
-fn legend_rule_exempt(
+///
+/// This is the single authority the legend-rule SBA consults; it is public so
+/// rules-aware consumers (e.g. the AI's anti-self-harm policy) can ask the same
+/// question — "would a same-name legendary be collapsed by the legend rule?" —
+/// without duplicating the exemption logic. Pass the `ObjectId` of an
+/// already-controlled same-name legendary permanent: a prospective duplicate
+/// shares its name, controller, and subtypes, so the exemption verdict is
+/// identical.
+pub fn legend_rule_exempt(
     state: &GameState,
     permanent_id: crate::types::identifiers::ObjectId,
 ) -> bool {
