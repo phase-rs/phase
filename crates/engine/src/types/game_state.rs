@@ -3806,7 +3806,8 @@ impl CastingVariant {
             | CastingVariant::MoreThanMeetsTheEye
             | CastingVariant::Disturb
             | CastingVariant::Impending
-            | CastingVariant::Prototype => true,
+            | CastingVariant::Prototype
+            | CastingVariant::Freerunning => true,
             CastingVariant::Normal
             | CastingVariant::Adventure
             | CastingVariant::Omen
