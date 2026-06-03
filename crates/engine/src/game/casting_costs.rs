@@ -1312,44 +1312,74 @@ pub(crate) fn handle_exile_for_cost(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if chosen.len() != expected {
+    finish_exile_selection_for_cost(
+        state,
+        player,
+        pending,
+        (expected, expected),
+        legal_cards,
+        chosen,
+        events,
+        "card(s)",
+        "Selected card not eligible for exile",
+        |state, player, id, _pending| {
+            // Re-validate: chosen cards must still be in the cost's source zone.
+            let still_in_zone = state
+                .players
+                .get(player.0 as usize)
+                .is_some_and(|p| match zone {
+                    ExileCostSourceZone::Hand => p.hand.contains(&id),
+                    ExileCostSourceZone::Graveyard => p.graveyard.contains(&id),
+                });
+            if !still_in_zone {
+                return Err(EngineError::InvalidAction(format!(
+                    "Selected card is no longer in {:?}",
+                    zone.as_zone()
+                )));
+            }
+            Ok(())
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_exile_selection_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    bounds: (usize, usize),
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+    object_label: &str,
+    illegal_message: &str,
+    revalidate: impl Fn(&GameState, PlayerId, ObjectId, &PendingCast) -> Result<(), EngineError>,
+) -> Result<WaitingFor, EngineError> {
+    let (min_count, max_count) = bounds;
+    if chosen.len() < min_count || chosen.len() > max_count {
+        let expected = if min_count == max_count {
+            format!("exactly {min_count}")
+        } else {
+            format!("{min_count} to {max_count}")
+        };
         return Err(EngineError::InvalidAction(format!(
-            "Must exile exactly {} card(s), got {}",
-            expected,
+            "Must exile {expected} {object_label}, got {}",
             chosen.len()
         )));
     }
     for id in chosen {
         if !legal_cards.contains(id) {
-            return Err(EngineError::InvalidAction(
-                "Selected card not eligible for exile".to_string(),
-            ));
+            return Err(EngineError::InvalidAction(illegal_message.to_string()));
         }
     }
 
-    // Re-validate: chosen cards must still be in the cost's source zone.
     for &id in chosen {
-        let still_in_zone = state
-            .players
-            .get(player.0 as usize)
-            .is_some_and(|p| match zone {
-                ExileCostSourceZone::Hand => p.hand.contains(&id),
-                ExileCostSourceZone::Graveyard => p.graveyard.contains(&id),
-            });
-        if !still_in_zone {
-            return Err(EngineError::InvalidAction(format!(
-                "Selected card is no longer in {:?}",
-                zone.as_zone()
-            )));
-        }
+        revalidate(state, player, id, &pending)?;
     }
 
-    // CR 608.2k: Capture the first exiled card's public characteristics BEFORE
-    // it leaves the zone, stamping it (recursively into the sub_ability) onto
-    // the resolving ability so `TargetFilter::CostPaidObject` ("the exiled
-    // card") resolves at ability resolution. Inert for pitch/escape callers —
-    // their effects never reference the cost-paid object.
-    let mut pending = pending;
+    // CR 608.2k: Capture the first exiled object's public characteristics BEFORE
+    // it leaves the zone, stamping it recursively onto the resolving ability so
+    // `TargetFilter::CostPaidObject` resolves during ability resolution.
     if let Some(&first) = chosen.first() {
         if let Some(obj) = state.objects.get(&first) {
             pending
@@ -1366,6 +1396,52 @@ pub(crate) fn handle_exile_for_cost(
     }
 
     finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 702.167a/b + CR 601.2b: Resolve a craft materials cost. The player has
+/// chosen objects from the battlefield/graveyard union; validate the
+/// count and legality, re-validate eligibility against the live state via the
+/// single-authority `eligible_craft_materials`, exile each chosen object, then
+/// resume the pending activation (whose remaining Mana + self-exile sub-costs
+/// are paid by `push_activated_ability_to_stack`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_exile_materials_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    materials: TargetFilter,
+    pending: PendingCast,
+    bounds: (usize, usize),
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let still_eligible = super::cost_payability::eligible_craft_materials(
+        state,
+        player,
+        pending.object_id,
+        &materials,
+    );
+    // CR 702.167a/b + CR 601.2h: chosen materials are revalidated against the
+    // live battlefield/graveyard union immediately before payment.
+    finish_exile_selection_for_cost(
+        state,
+        player,
+        pending,
+        bounds,
+        legal_cards,
+        chosen,
+        events,
+        "material(s)",
+        "Selected object not eligible as craft material",
+        move |_state, _player, id, _pending| {
+            if !still_eligible.contains(&id) {
+                return Err(EngineError::InvalidAction(
+                    "Selected craft material is no longer eligible".to_string(),
+                ));
+            }
+            Ok(())
+        },
+    )
 }
 
 /// Push an activated ability to the stack after costs are paid.

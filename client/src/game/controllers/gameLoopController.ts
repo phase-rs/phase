@@ -50,7 +50,7 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
       return;
     }
 
-    if (waitingFor.data.player !== getPlayerId()) return;
+    if (gameState.priority_player !== getPlayerId()) return;
 
     const { fullControl } = useUiStore.getState();
     const { autoPassRecommended } = useGameStore.getState();

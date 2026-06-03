@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use super::ability::ControllerRef;
 use super::ability::{
-    AbilityCost, Comparator, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, Comparator, CostObjectCount, FilterProp, QuantityExpr, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
@@ -602,7 +603,19 @@ pub enum Keyword {
         toughness: Option<i32>,
     },
     Plot(ManaCost),
-    Craft(ManaCost),
+    /// CR 702.167a/b: Craft with [materials] [cost] — an activated ability
+    /// "[Cost], Exile this permanent, Exile [materials] from among permanents
+    /// you control and/or cards in your graveyard: Return this card to the
+    /// battlefield transformed under its owner's control. Activate only as a
+    /// sorcery." `materials` is the typed object class to exile (CR 702.167b:
+    /// a bare type/subtype matches permanents on the battlefield OR cards in a
+    /// graveyard); `count` is the exact/minimum material-count requirement.
+    Craft {
+        cost: ManaCost,
+        materials: TargetFilter,
+        #[serde(default)]
+        count: CostObjectCount,
+    },
     Offspring(ManaCost),
     /// CR 702.176a: Impending N—{cost} — alternative cast that enters with
     /// `counters` time counters and is not a creature until the last is removed.
@@ -1127,7 +1140,11 @@ impl Keyword {
     pub fn instances_function_separately(&self) -> bool {
         matches!(
             self,
-            Keyword::Cascade | Keyword::Storm | Keyword::Myriad | Keyword::Exalted
+            Keyword::Cascade
+                | Keyword::Storm
+                | Keyword::Myriad
+                | Keyword::Exalted
+                | Keyword::DoubleTeam
         )
     }
 }
@@ -1187,6 +1204,15 @@ fn extract_companion_subtypes(text: &str) -> Vec<String> {
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// CR 702.167b: Public re-export of the default craft materials filter (the
+/// creature class) so external crates (the dormant `mtgish-import` converter)
+/// and the keyword deserializers can request it without reaching into the
+/// `pub(crate)` parser module. The single authority remains
+/// `parser::oracle_keyword::craft_materials_filter`.
+pub fn craft_materials_default() -> TargetFilter {
+    crate::parser::oracle_keyword::craft_materials_default()
 }
 
 /// Parse a mana cost string into ManaCost. Supports both MTGJSON format ({1}{W})
@@ -1651,7 +1677,19 @@ impl FromStr for Keyword {
                     });
                 }
                 "plot" => return Ok(Keyword::Plot(parse_keyword_mana_cost(p))),
-                "craft" => return Ok(Keyword::Craft(parse_keyword_mana_cost(p))),
+                // CR 702.167a/b: The MTGJSON keyword list carries only "Craft"
+                // and the activation cost; the materials class is supplied by
+                // the Oracle-line parser (`parse_craft_keyword_line`). This
+                // bare-keyword path defaults to the most common materials class
+                // (creature) so a card whose Oracle line is unavailable still
+                // synthesizes a usable craft ability.
+                "craft" => {
+                    return Ok(Keyword::Craft {
+                        cost: parse_keyword_mana_cost(p),
+                        materials: craft_materials_default(),
+                        count: CostObjectCount::exactly(1),
+                    })
+                }
                 "offspring" => return Ok(Keyword::Offspring(parse_keyword_mana_cost(p))),
                 "impending" => {
                     // CR 702.176a: "Impending N—{cost}" — extract N before the em-dash,
@@ -2343,7 +2381,45 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             }
         }
         "Plot" => Ok(Keyword::Plot(mana(data)?)),
-        "Craft" => Ok(Keyword::Craft(mana(data)?)),
+        // CR 702.167a/b: New struct format
+        // `{"Craft": {"cost": {...}, "materials": {...}, "count": N}}`.
+        // Legacy format `{"Craft": {mana_cost}}` (and the bare-mana fallback)
+        // defaults materials to the creature class and count to 1.
+        "Craft" => {
+            if let Some(cost_val) = data.get("cost") {
+                let materials = data
+                    .get("materials")
+                    .map(|m| {
+                        serde_json::from_value::<TargetFilter>(m.clone())
+                            .map_err(|e| format!("Craft materials: {e}"))
+                    })
+                    .transpose()?
+                    .unwrap_or_else(craft_materials_default);
+                let count = data
+                    .get("count")
+                    .and_then(|value| {
+                        serde_json::from_value::<CostObjectCount>(value.clone())
+                            .ok()
+                            .or_else(|| {
+                                value
+                                    .as_u64()
+                                    .map(|count| CostObjectCount::exactly(count as u32))
+                            })
+                    })
+                    .unwrap_or_default();
+                Ok(Keyword::Craft {
+                    cost: mana(cost_val)?,
+                    materials,
+                    count,
+                })
+            } else {
+                Ok(Keyword::Craft {
+                    cost: mana(data)?,
+                    materials: craft_materials_default(),
+                    count: CostObjectCount::exactly(1),
+                })
+            }
+        }
         "Offspring" => Ok(Keyword::Offspring(mana(data)?)),
         "Impending" => {
             // New format: {"Impending": {"cost": {...}, "counters": N}}
