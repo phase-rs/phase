@@ -1015,11 +1015,9 @@ mod tests {
 
     #[test]
     fn assigns_no_combat_damage_lowers_to_assign_no_combat_damage_static() {
-        let converted = convert_permanent_rule(
-            &PermanentRule::AssignsNoCombatDamage,
-            TargetFilter::SelfRef,
-        )
-        .unwrap();
+        let converted =
+            convert_permanent_rule(&PermanentRule::AssignsNoCombatDamage, TargetFilter::SelfRef)
+                .unwrap();
 
         assert_eq!(converted.mode, StaticMode::AssignNoCombatDamage);
         assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
