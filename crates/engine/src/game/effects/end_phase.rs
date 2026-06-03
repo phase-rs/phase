@@ -27,6 +27,7 @@ pub(super) fn exile_nonresolving_stack_objects(
 ) -> bool {
     while let Some(entry) = state.stack.pop_back() {
         state.stack_paid_facts.remove(&entry.id);
+        state.stack_trigger_event_batches.remove(&entry.id);
         if matches!(entry.kind, StackEntryKind::Spell { .. }) {
             match change_zone::execute_zone_move(
                 state,
