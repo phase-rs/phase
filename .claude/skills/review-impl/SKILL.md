@@ -12,7 +12,8 @@ Review for gaps: things that are missing or wrong. Do not spend findings on styl
 1. Identify the changed surface from the diff, commit, or named files.
 2. Classify the surface area: engine logic, parser, frontend/UI, multiplayer/transport, AI heuristics, deck/format/feeds, build/CI/release, or docs.
 3. Apply only the relevant lenses below.
-4. Report findings only. Silence means LGTM.
+4. If the scope is a PR, fetch existing bot/human review comments (Gemini, CodeRabbit, reviewers) and confirm-or-refute each against the current head with code evidence. Fold confirmed findings into your own. Never review in a vacuum — silently omitting a finding another reviewer already raised, or returning a verdict less severe than an open, unrefuted finding from another reviewer, is itself a defect.
+5. Report findings only. Silence means LGTM.
 
 Skip checks CI already enforces:
 
@@ -48,7 +49,8 @@ Two gates lead every review; apply them before the rest.
 ### Parser
 
 - Reject verbatim full-string Oracle matches and ad hoc dispatch.
-- Verify plural, possessive, opponent, non-X, another, and sibling phrase variants for new parser arms.
+- Verify plural, possessive, opponent, non-X, another, and sibling phrase variants for new parser arms — including article/quantity word-forms (`a`/`an`/`one`/`two`/`N`/`X`/`each`) when dispatch splits on a count or article boundary.
+- When one parser arm rejects a value to defer to another (e.g. a multi-count arm returns `None` for count==1 so the single-count arm handles it), trace the receiving arm and prove it actually accepts that form — do not trust the comment. A deferral to a path that doesn't handle the form silently drops the card to Unimplemented (precedent: "roll one d6" — the multi-die arm rejected count==1 and the single-die arm only matched `"a "`/`"an "`, so the word "one" parsed nowhere despite a comment claiming otherwise).
 - Prefer composable `nom` axes over cartesian lists of full `tag()` strings.
 
 ### Frontend / UI
@@ -83,5 +85,7 @@ Use this exact finding shape:
 ```text
 **[HIGH/MED/LOW]** <short summary>. Evidence: <path:line>. Why it matters: <one sentence>. Suggested fix: <one line>.
 ```
+
+Severity calibration: a latent bug — one not reachable today because a guard or parser blocks it — is still a finding. Rate it by what happens when the form is reached or the guard removed, not by today's reachability: if it then produces a wrong result for a card-class the feature appears to cover, it is at least MED, and "unreachable today" belongs in the evidence, not as a reason to downgrade to LOW. A feature that ships silently incorrect for a sub-class it looks like it handles (e.g. a multi-die roll that overwrites the stored result each iteration instead of supporting the aggregate) is a MED the maintainer must see — never a NIT.
 
 Findings first. No praise, no diff recap.
