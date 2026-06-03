@@ -1150,32 +1150,9 @@ pub fn parse_target_with_syntax<'a>(
         }
     }
 
-    // CR 903.3: Possessive commander reference ("your commander" /
-    // "their commander" / "your commanders"). The commander is identified by
-    // the IsCommander flag, not by a creature subtype. Effects like Command
-    // Beacon's "Put your commander into your hand from the command zone" need
-    // a typed target carrying IsCommander + the controller scope so the
-    // resolver can locate the right card.
-    if let Some((_poss, rest)) = strip_possessive(&lower) {
-        for word in &["commanders", "commander"] {
-            if let Ok((after, _)) = tag::<_, _, OracleError<'_>>(*word).parse(rest) {
-                let consumed = lower.len() - after.len();
-                return (
-                    TargetFilter::Typed(TypedFilter {
-                        controller: Some(ControllerRef::You),
-                        properties: vec![FilterProp::IsCommander],
-                        ..Default::default()
-                    }),
-                    &text[consumed..],
-                    syntax,
-                );
-            }
-        }
-    }
-
     // Bare type phrase fallback: try parse_type_phrase before giving up.
     // Handles "commander[s] you own / they control" (non-possessive — the
-    // possessive form is matched above), bare "commander" (Witch's Clinic
+    // possessive form is matched inside the typed-phrase grammar), bare "commander" (Witch's Clinic
     // class), and combinations like "commander creature you control"
     // (Drillworks Mole class). The commander recognition itself lives in
     // `parse_type_phrase_with_ctx` so it composes with the full suffix grammar
@@ -1423,6 +1400,22 @@ pub fn parse_type_phrase_with_ctx<'a>(
         if starts_with_type_phrase_lead(rest) {
             properties.push(FilterProp::Historic);
             pos += lower[pos..].len() - rest.len();
+        }
+    }
+
+    // CR 903.3 + CR 109.5: "your commander" is owner-scoped, not merely
+    // controller-scoped. Consume only the possessive determiner here; the
+    // commander atom below still supplies `IsCommander` and leaves suffix
+    // parsing centralized for zones, counters, and control clauses.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("your ").parse(&lower[pos..]) {
+        if alt((tag::<_, _, OracleError<'_>>("commanders"), tag("commander")))
+            .parse(rest)
+            .is_ok()
+        {
+            properties.push(FilterProp::Owned {
+                controller: ControllerRef::You,
+            });
+            pos += "your ".len();
         }
     }
 
@@ -5069,6 +5062,66 @@ mod tests {
                 ..Default::default()
             }),
             "'target commander you own' must lower to Typed{{IsCommander, Owned{{You}}, InZone{{BF}}}}"
+        );
+        assert_eq!(rest, "");
+
+        // "Your commander" is owner-scoped. This matters for trigger subjects
+        // like Tome of Legends; a stolen opponent's commander must not satisfy
+        // the phrase just because its current controller is you.
+        let (f, rest) = parse_type_phrase("your commander enters or attacks");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::IsCommander,
+                ],
+                ..Default::default()
+            }),
+            "'your commander' must be owned-by-you and IsCommander, not controller-scoped"
+        );
+        assert_eq!(rest, "enters or attacks");
+
+        let (f, rest) = parse_type_phrase("your commanders attack");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::IsCommander,
+                ],
+                ..Default::default()
+            }),
+            "'your commanders' must use the same owned commander filter as the singular phrase"
+        );
+        assert_eq!(rest, "attack");
+
+        // Command Beacon class — the target parser should now reach the same
+        // typed-phrase commander grammar instead of owning a separate
+        // possessive-commander shortcut.
+        let (f, rest) = parse_target("your commander from the command zone");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: None,
+                properties: vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::IsCommander,
+                    FilterProp::InZone {
+                        zone: Zone::Command,
+                    },
+                ],
+                ..Default::default()
+            }),
+            "'your commander from the command zone' must compose ownership, commander identity, and zone"
         );
         assert_eq!(rest, "");
 

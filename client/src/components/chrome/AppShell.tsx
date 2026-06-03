@@ -3,6 +3,7 @@ import { Outlet } from "react-router";
 
 import { SceneParticles } from "../menu/MenuParticles";
 import { BuildBadge } from "./BuildBadge";
+import { CardDataLoadingBar } from "./CardDataLoadingBar";
 import { ChromeControls } from "./ChromeControls";
 import { MobileSocialBar } from "./MobileSocialBar";
 import { Rail } from "./Rail";
@@ -38,6 +39,7 @@ export function AppShell() {
         <div className="menu-scene__sigil menu-scene__sigil--right" />
         <div className="menu-scene__haze" />
 
+        <CardDataLoadingBar />
         <Rail onSettings={() => setSettingsOpen(true)} />
         <MobileSocialBar />
 

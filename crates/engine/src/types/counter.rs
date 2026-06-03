@@ -38,6 +38,13 @@ pub enum CounterType {
     /// total age-counter count on the permanent at resolution time
     /// (CR 702.24b).
     Age,
+    /// CR 122.1c: A shield counter creates one replacement effect ("if this
+    /// permanent would be destroyed as the result of an effect, instead remove
+    /// a shield counter from it") and one prevention effect ("if damage would
+    /// be dealt to this permanent, prevent that damage and remove a shield
+    /// counter from it"). One or more shield counters share this single pair of
+    /// effects. See `game::replacement::consume_shield_counter`.
+    Shield,
     /// CR 122.1b: A keyword counter grants its keyword to the permanent (flying,
     /// first strike, deathtouch, lifelink, ...). Uses the parameterless
     /// `KeywordKind` discriminant — keyword counters never carry parameters
@@ -82,6 +89,7 @@ impl CounterType {
             CounterType::Lore => Cow::Borrowed("lore"),
             CounterType::Time => Cow::Borrowed("time"),
             CounterType::Age => Cow::Borrowed("age"),
+            CounterType::Shield => Cow::Borrowed("shield"),
             CounterType::Keyword(kind) => KEYWORD_COUNTERS
                 .iter()
                 .find(|(_, k)| k == kind)
@@ -118,6 +126,7 @@ impl CounterType {
             | CounterType::Lore
             | CounterType::Time
             | CounterType::Age
+            | CounterType::Shield
             | CounterType::Keyword(_)
             | CounterType::Generic(_) => None,
         }
@@ -199,6 +208,7 @@ pub fn try_parse_counter_type(text: &str) -> Option<CounterType> {
         "lore" | "LORE" => return Some(CounterType::Lore),
         "time" | "TIME" => return Some(CounterType::Time),
         "age" => return Some(CounterType::Age),
+        "shield" => return Some(CounterType::Shield),
         _ => {}
     }
     if let Some((power, toughness)) = parse_power_toughness_counter(trimmed) {
@@ -271,7 +281,7 @@ fn format_counter_delta(value: i32, paired_value: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_counter_type, CounterType};
+    use super::{parse_counter_type, try_parse_counter_type, CounterType};
 
     #[test]
     fn parses_legacy_power_toughness_counter_deltas() {
@@ -328,6 +338,20 @@ mod tests {
             .unwrap(),
             "\"-1/-0\""
         );
+    }
+
+    #[test]
+    fn shield_counter_parses_serializes_and_has_no_pt_delta() {
+        // CR 122.1c: "shield" is a first-class counter type, not a Generic.
+        assert_eq!(parse_counter_type("shield"), CounterType::Shield);
+        assert_eq!(parse_counter_type("shield counter"), CounterType::Shield);
+        assert_eq!(try_parse_counter_type("shield"), Some(CounterType::Shield));
+        assert_eq!(CounterType::Shield.as_str().as_ref(), "shield");
+        assert_eq!(
+            serde_json::to_string(&CounterType::Shield).unwrap(),
+            "\"shield\""
+        );
+        assert_eq!(CounterType::Shield.power_toughness_delta(), None);
     }
 
     #[test]
