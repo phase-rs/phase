@@ -33,7 +33,7 @@ import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.t
 import { BlockRequirementBadges } from "../components/combat/BlockRequirementBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
-import { CardPreview } from "../components/card/CardPreview.tsx";
+import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
@@ -107,7 +107,6 @@ import { MANA_PAYMENT_WAITING_FOR_TYPES } from "../game/waitingForRegistry.ts";
 import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
-import { usePreviewDismiss } from "../hooks/usePreviewDismiss.ts";
 import { clearGame, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
@@ -125,7 +124,6 @@ import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from ".
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
 import { getWaitingForObjectChoiceIds } from "../viewmodel/gameStateView.ts";
 import { gameButtonClass } from "../components/ui/buttonStyles.ts";
-import { cardImageLookup } from "../services/cardImageLookup.ts";
 
 type ZoneRailStyle = CSSProperties & {
   "--card-w": string;
@@ -696,7 +694,6 @@ function GamePageContent({
   const dispatch = useGameDispatch();
   const isMobile = useIsMobile();
   const isCompactHeight = useIsCompactHeight();
-  const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const objects = useGameStore((s) => s.gameState?.objects);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const players = useGameStore((s) => s.gameState?.players);
@@ -762,6 +759,31 @@ function GamePageContent({
   const activeOpponentId =
     focusedOpponent ?? opponents[0] ?? (perspectivePlayerId === 0 ? 1 : 0);
 
+  // Memoize the HUD elements passed to GameBoard. GameBoard is wrapped in
+  // React.memo, which shallow-compares props; without stable element
+  // references these inline JSX nodes would be new on every GamePageContent
+  // render, defeating the memo. Stable refs let GameBoard skip re-rendering
+  // when GamePageContent re-renders for reasons that don't touch these props.
+  const oppHud = useMemo(
+    () => (
+      <OpponentHud
+        opponentName={isOnlineMode ? opponentDisplayName : undefined}
+        onKickPlayer={
+          isP2PHost
+            ? (pid) => {
+                const adapter = useGameStore.getState().adapter as
+                  | { kickPlayer?: (pid: number) => Promise<void> }
+                  | null;
+                void adapter?.kickPlayer?.(pid);
+              }
+            : undefined
+        }
+      />
+    ),
+    [isOnlineMode, opponentDisplayName, isP2PHost],
+  );
+  const playerHud = useMemo(() => <PlayerHud />, []);
+
   useAudioContext("battlefield");
 
   // Update battlefield music phase based on turn progression
@@ -808,35 +830,7 @@ function GamePageContent({
     navigate("/");
   }, [isOnlineMode, gameId, handleConcede, navigate]);
 
-  const isDragging = useUiStore((s) => s.isDragging);
-  const inspectedFaceIndex = useUiStore((s) => s.inspectedFaceIndex);
-  // Card-preview behavior preference (item: hover preview side/Shift). In
-  // "shift" mode the preview only renders while Shift is held; in "side" mode
-  // it docks to the screen edge instead of following the cursor.
-  const cardPreviewMode = usePreferencesStore((s) => s.cardPreviewMode);
-  const shiftHeld = useUiStore((s) => s.shiftHeld);
-  const previewSuppressed = cardPreviewMode === "shift" && !shiftHeld;
-  const inspectedObj =
-    !isDragging && inspectedObjectId != null && objects
-      ? (objects[inspectedObjectId] ?? null)
-      : null;
-  // Scryfall lookups must use the front-face name (scryfall-data.json indexes
-  // only front faces). When a permanent has transformed, the engine swaps
-  // obj.name to the back-face name — cardImageLookup recovers the front name
-  // from obj.back_face. See services/cardImageLookup.ts (issue #90).
-  const inspectedLookup = inspectedObj ? cardImageLookup(inspectedObj) : null;
-  const inspectedCardName = inspectedObj && !inspectedObj.face_down
-    ? inspectedFaceIndex === 1 && inspectedObj.back_face
-      ? inspectedObj.back_face.name
-      : inspectedLookup?.name ?? inspectedObj.name
-    : null;
-  // The "other" face: when viewing front, this is back_face; when viewing back, this is the front
-  const inspectedOtherFaceName = inspectedObj?.back_face && !inspectedObj.face_down
-    ? inspectedFaceIndex === 1 ? inspectedObj.name : inspectedObj.back_face.name
-    : null;
-
   useKeyboardShortcuts();
-  usePreviewDismiss();
 
   // Toggle debug layout bounds with Ctrl+Shift+D
   useEffect(() => {
@@ -1101,24 +1095,7 @@ function GamePageContent({
 
         {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
         <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
-          <GameBoard
-            oppHud={
-              <OpponentHud
-                opponentName={isOnlineMode ? opponentDisplayName : undefined}
-                onKickPlayer={
-                  isP2PHost
-                    ? (pid) => {
-                        const adapter = useGameStore.getState().adapter as
-                          | { kickPlayer?: (pid: number) => Promise<void> }
-                          | null;
-                        void adapter?.kickPlayer?.(pid);
-                      }
-                    : undefined
-                }
-              />
-            }
-            playerHud={<PlayerHud />}
-          />
+          <GameBoard oppHud={oppHud} playerHud={playerHud} />
         </div>
 
         {/* Row 3: Player hand + zones */}
@@ -1363,12 +1340,9 @@ function GamePageContent({
           to attackers that carry a minimum-blocker requirement. */}
       <BlockRequirementBadges />
 
-      {/* Card preview overlay */}
-      <CardPreview
-        cardName={previewSuppressed ? null : inspectedCardName}
-        backFaceName={previewSuppressed ? null : inspectedOtherFaceName}
-        dockSide={cardPreviewMode === "side"}
-      />
+      {/* Card preview overlay. Owns its own inspect-state subscriptions so a
+          hover doesn't re-render GamePageContent (and the whole battlefield). */}
+      <GameCardPreview />
 
       {/* WaitingFor-driven prompt overlays (only for human player).
           Wrapped in DialogHost so any active dialog can be peeked away to
