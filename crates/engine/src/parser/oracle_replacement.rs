@@ -7631,7 +7631,9 @@ mod tests {
             CounterType::Plus1Plus1,
             CounterType::Keyword(crate::types::keywords::KeywordKind::Flying),
             CounterType::Keyword(crate::types::keywords::KeywordKind::Deathtouch),
-            CounterType::Generic("shield".to_string()),
+            // CR 122.1c: "shield" is now a first-class counter type (issue #1959),
+            // no longer a Generic.
+            CounterType::Shield,
         ];
         for counter in expected {
             assert!(matches!(
@@ -7642,7 +7644,7 @@ mod tests {
                     target: TargetFilter::SelfRef,
                 } if *counter_type == counter
             ));
-            if counter == CounterType::Generic("shield".to_string()) {
+            if counter == CounterType::Shield {
                 assert!(cursor.sub_ability.is_none());
             } else {
                 cursor = cursor.sub_ability.as_deref().expect("next counter");
