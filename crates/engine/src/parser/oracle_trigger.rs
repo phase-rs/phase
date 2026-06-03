@@ -39,7 +39,7 @@ use crate::types::ability::{
     TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
 use crate::types::card_type::CoreType;
-use crate::types::counter::parse_counter_type;
+use crate::types::counter::CounterType;
 use crate::types::events::PlayerActionKind;
 use crate::types::mana::ManaColor;
 use crate::types::phase::Phase;
@@ -2677,11 +2677,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                     phases: vec![Phase::PreCombatMain, Phase::PostCombatMain],
                 },
             ),
-            // CR 400.7: "if it had counters on it" — past-state counter check
-            (
-                "if it had counters on it",
-                TriggerCondition::HadCounters { counter_type: None },
-            ),
+            // CR 400.7: "if it had [no] counters on it" / "if it had [no]
+            // <type> counter(s) on it" are handled by the combinator-based
+            // `try_extract_had_counter_condition` (composes the negation and
+            // type axes) so the positive and negated forms share one authority.
             // CR 702.112a: "if it's renowned" / "if ~ is renowned" — renown state check
             ("if it's renowned", TriggerCondition::SourceIsRenowned),
             ("if ~ is renowned", TriggerCondition::SourceIsRenowned),
@@ -2725,8 +2724,8 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return result;
     }
 
-    // CR 400.7: "if it had a +1/+1 counter on it" — typed counter past-state check.
-    // Dynamic: parses counter type from "if it had a [type] counter on it".
+    // CR 400.7 + CR 603.10: "if it had [no] [a <type>] counter(s) on it" —
+    // past-state counter check (positive, negated, typed, and untyped forms).
     if let Some(result) = try_extract_had_counter_condition(&tp, &lower, text) {
         return result;
     }
@@ -3511,32 +3510,88 @@ fn try_extract_not_completed_dungeon(
     None
 }
 
-/// CR 400.7: Extract "if it had a [type] counter on it" conditions.
+/// CR 400.7 + CR 603.10: Extract "if it had [no] [a <type>] counter(s) on it"
+/// past-state counter conditions from the source's last-known information.
 ///
-/// Uses nom `tag()` + `take_until()` to extract the counter type dynamically.
+/// Composed along two orthogonal axes rather than enumerated as verbatim
+/// phrases (CLAUDE.md "compose nom combinators, don't enumerate permutations"):
+///   * negation axis — an optional leading `"no "` (after `"if it had "`) wraps
+///     the predicate in `TriggerCondition::Not`. Covers the Unstoppable Slasher
+///     class ("if it had no counters on it", which gates the recursion-return so
+///     a creature that returned with stun counters does not return a second
+///     time).
+///   * type axis — an optional `"a <type> "` discriminator selects a single
+///     counter type (`HadCounters { counter_type: Some(_) }`); its absence
+///     means any counter (`counter_type: None`).
+///
+/// Recognized forms: "if it had counters on it", "if it had no counters on it",
+/// "if it had a +1/+1 counter on it", "if it had no +1/+1 counters on it", etc.
+/// The trailing `" on it"` is optional grammatical filler.
 fn try_extract_had_counter_condition(
     tp: &TextPair<'_>,
     lower: &str,
     text: &str,
 ) -> Option<(String, Option<TriggerCondition>)> {
-    use nom::bytes::complete::take_until;
-    let prefix = "if it had a ";
+    let prefix = "if it had ";
     let pos = tp.find(prefix)?;
     let after = &lower[pos + prefix.len()..];
-    // Parse: "[counter_type] counter on it"
-    let (rest, counter_type_text) = take_until::<_, _, OracleError<'_>>(" counter on it")
-        .parse(after)
-        .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" counter on it")
-        .parse(rest)
-        .ok()?;
+
+    let (rest, (negated, counter_type)) = parse_had_counters_body(after).ok()?;
     let clause_len = prefix.len() + (after.len() - rest.len());
+
+    let mut condition = TriggerCondition::HadCounters { counter_type };
+    if negated {
+        condition = TriggerCondition::Not {
+            condition: Box::new(condition),
+        };
+    }
     Some((
         strip_condition_clause(text, pos, clause_len),
-        Some(TriggerCondition::HadCounters {
-            counter_type: Some(parse_counter_type(counter_type_text)),
-        }),
+        Some(condition),
     ))
+}
+
+/// Parse the body that follows `"if it had "`: an optional `"no "` negation, an
+/// optional `"a <type> "` type discriminator, then `"counter(s)[ on it]"`.
+/// Returns `(negated, counter_type)` where `counter_type` is `Some` only for the
+/// typed form. The type discriminator is whatever non-empty token precedes
+/// `" counter"`, with an optional leading article (`"a "` / `"an "`) consumed —
+/// so "a +1/+1 counter on it" and the negated plural "no +1/+1 counters on it"
+/// both classify the type, while the bare "counters on it" form yields `None`.
+fn parse_had_counters_body(input: &str) -> OracleResult<'_, (bool, Option<CounterType>)> {
+    let (input, negated) = opt(tag("no ")).parse(input)?;
+    let negated = negated.is_some();
+
+    // Typed form: "[a |an ]<type> counter(s) [on it]". `take_until(" counter")`
+    // is anchored on the literal " counter" so the type token cannot bleed past
+    // it. The article is optional grammatical filler (present in the singular
+    // "a +1/+1 counter", absent in the plural "no +1/+1 counters").
+    let (after_article, _) = opt(alt((tag("a "), tag("an ")))).parse(input)?;
+    if let Ok((rest, type_text)) =
+        take_until::<_, _, OracleError<'_>>(" counter").parse(after_article)
+    {
+        if let Some(counter_type) = crate::types::counter::try_parse_counter_type(type_text) {
+            // `take_until` stops before the leading space of " counter"; consume
+            // it so `parse_counter_word_tail` starts on the bare word.
+            let (rest, _) = tag(" ").parse(rest)?;
+            let (rest, _) = parse_counter_word_tail(rest)?;
+            return Ok((rest, (negated, Some(counter_type))));
+        }
+    }
+
+    // Any-counter form: "counter(s) [on it]".
+    let (rest, _) = parse_counter_word_tail(input)?;
+    Ok((rest, (negated, None)))
+}
+
+/// Consume `" counter"` (or, when already at the word, `"counter"`), an optional
+/// plural `"s"`, and an optional trailing `" on it"`. Shared tail for both the
+/// typed and any-counter branches of [`parse_had_counters_body`].
+fn parse_counter_word_tail(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("counter").parse(input)?;
+    let (input, _) = opt(tag("s")).parse(input)?;
+    let (input, _) = opt(tag(" on it")).parse(input)?;
+    Ok((input, ()))
 }
 
 /// CR 207.2c: Extract Adamant conditions — "if at least N [color] mana was spent to cast"
@@ -21577,6 +21632,36 @@ mod tests {
             cond.unwrap(),
             TriggerCondition::HadCounters {
                 counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
+            }
+        );
+    }
+
+    /// CR 400.7 + CR 603.4 + issue #1498: the negated untyped form
+    /// ("if it had no counters on it") — Unstoppable Slasher's dies-return gate.
+    #[test]
+    fn extract_had_no_counters_negates() {
+        let (cleaned, cond) =
+            extract_if_condition("return it to the battlefield if it had no counters on it");
+        assert_eq!(cleaned, "return it to the battlefield");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::HadCounters { counter_type: None }),
+            }
+        );
+    }
+
+    /// CR 400.7: the negated typed form composes the negation and type axes.
+    #[test]
+    fn extract_had_no_typed_counters_negates() {
+        let (cleaned, cond) = extract_if_condition("draw a card if it had no +1/+1 counters on it");
+        assert_eq!(cleaned, "draw a card");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::HadCounters {
+                    counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
+                }),
             }
         );
     }
