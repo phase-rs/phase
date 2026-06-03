@@ -1093,6 +1093,16 @@
       "subtitle": "Wähle, welche Manakombination erzeugt wird"
     }
   },
+  "specializeColor": {
+    "title": "Spezialisierung wählen",
+    "subtitle": "Wähle eine Farbe, die zur abgeworfenen Karte passt",
+    "confirm": "Spezialisieren",
+    "white": "Weiß",
+    "blue": "Blau",
+    "black": "Schwarz",
+    "red": "Rot",
+    "green": "Grün"
+  },
   "dialogShell": {
     "eyebrow": "Spielentscheidung",
     "restoreDialog": "Dialog wiederherstellen",
