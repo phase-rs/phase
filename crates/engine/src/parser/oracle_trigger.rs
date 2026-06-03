@@ -14837,6 +14837,45 @@ mod tests {
         );
     }
 
+    /// Issue #551 — The Raven Man: "At the beginning of each end step, if a
+    /// player discarded a card this turn, create a 1/1 black Bird ...". The
+    /// "a player" (any player) intervening-if must be hoisted as an all-players
+    /// `CardsDiscardedThisTurn` comparison; before this fix the condition was
+    /// dropped and the bird was created every end step regardless of discards.
+    #[test]
+    fn trigger_intervening_if_a_player_discarded_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of each end step, if a player discarded a card this turn, create a 1/1 black Bird creature token with flying.",
+            "The Raven Man",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        let Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }) = &def.condition
+        else {
+            panic!(
+                "expected QuantityComparison intervening-if, got {:?}",
+                def.condition
+            );
+        };
+        assert_eq!(*comparator, Comparator::GE);
+        assert_eq!(*rhs, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            *lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::CardsDiscardedThisTurn {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Sum,
+                        exclude: None,
+                    },
+                },
+            }
+        );
+    }
+
     #[test]
     fn trigger_intervening_if_card_left_your_graveyard_this_turn() {
         let def = parse_trigger_line(

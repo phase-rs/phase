@@ -3053,6 +3053,26 @@ fn parse_discard_history_condition(input: &str) -> OracleResult<'_, StaticCondit
                 tag("any opponent discarded a card this turn"),
             )),
         ),
+        // CR 701.9 + CR 603.4: "a player discarded a card this turn" — any
+        // player, including you (The Raven Man). Summing discards across all
+        // players makes the threshold true whenever anyone discarded; without
+        // this arm the intervening-if is dropped and the trigger fires even
+        // when no discard occurred.
+        value(
+            make_quantity_ge(
+                QuantityRef::CardsDiscardedThisTurn {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Sum,
+                        exclude: None,
+                    },
+                },
+                1,
+            ),
+            alt((
+                tag("a player discarded a card this turn"),
+                tag("any player discarded a card this turn"),
+            )),
+        ),
         parse_you_discarded_card_this_turn,
     ))
     .parse(input)
@@ -8359,6 +8379,36 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 1 },
             }
         );
+    }
+
+    /// Issue #551 — The Raven Man: "if a player discarded a card this turn".
+    /// "A player" means any player (including you), so the discards are summed
+    /// across all players; the intervening-if is true whenever anyone discarded.
+    #[test]
+    fn a_player_discarded_a_card_this_turn_counts_all_players() {
+        for text in [
+            "a player discarded a card this turn",
+            "any player discarded a card this turn",
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "leftover for {text:?}");
+            assert_eq!(
+                c,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CardsDiscardedThisTurn {
+                            player: PlayerScope::AllPlayers {
+                                aggregate: AggregateFunction::Sum,
+                                exclude: None,
+                            },
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                "condition mismatch for {text:?}"
+            );
+        }
     }
 
     #[test]
