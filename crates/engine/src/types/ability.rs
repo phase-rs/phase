@@ -9976,8 +9976,13 @@ pub enum TriggerCondition {
     EchoDue,
     /// CR 508.1a: "Whenever ~ and at least N other creatures attack."
     /// True when combat is active and at least `minimum` other creatures
-    /// controlled by the same player are also attacking.
-    MinCoAttackers { minimum: u32 },
+    /// controlled by the same player are also attacking. When `filter` is set,
+    /// only attackers matching the filter are counted (excluding the source).
+    MinCoAttackers {
+        minimum: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// CR 719.2: Intervening-if for Case auto-solve.
     /// True when the source Case is unsolved AND its solve condition is met.
     SolveConditionMet,
@@ -10207,8 +10212,14 @@ pub enum TriggerCondition {
     ///     CR 506.2), so counting "≠ trigger controller" is equivalent to counting the
     ///     triggering player's creatures.
     ///
-    /// True when the count meets or exceeds `minimum`.
-    AttackersDeclaredMin { scope: ControllerRef, minimum: u32 },
+    /// True when the count meets or exceeds `minimum`. When `filter` is set,
+    /// only attackers in the batch matching the filter are counted.
+    AttackersDeclaredMin {
+        scope: ControllerRef,
+        minimum: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// CR 506.2 + CR 603.4: Intervening-if "if none of those creatures attacked you".
     /// Reads the triggering `AttackersDeclared` event's per-attacker `AttackTarget` tuples
     /// (CR 508.1b) and returns true iff no attacker in the batch targeted the trigger's

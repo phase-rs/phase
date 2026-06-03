@@ -5502,7 +5502,10 @@ fn try_parse_event(
                 let mut def = make_base();
                 def.mode = TriggerMode::Attacks;
                 def.valid_card = Some(subject.clone());
-                def.condition = Some(TriggerCondition::MinCoAttackers { minimum: n });
+                def.condition = Some(TriggerCondition::MinCoAttackers {
+                    minimum: n,
+                    filter: Some(subject.clone()),
+                });
                 return Some((TriggerMode::Attacks, def));
             }
         }
@@ -7047,15 +7050,17 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
 
         let mut def = make_base();
         def.mode = TriggerMode::YouAttack;
-        def.valid_card = Some(filter);
         if attacks_player {
             def.valid_target = Some(TargetFilter::Player);
         }
         if min_count > 1 {
-            def.condition = Some(TriggerCondition::MinCoAttackers {
-                minimum: min_count - 1,
+            def.condition = Some(TriggerCondition::AttackersDeclaredMin {
+                scope: ControllerRef::You,
+                minimum: min_count,
+                filter: Some(filter.clone()),
             });
         }
+        def.valid_card = Some(filter);
         // CR 603.2c: "One or more creatures ... attack" fires once per batch of
         // simultaneous attackers (not once per attacker). Killian's trigger relies
         // on this to yield exactly one draw when multiple enchanted creatures
@@ -7157,23 +7162,14 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
         return Some((TriggerMode::YouAttack, def));
     }
 
-    // count > 1 ("two or more creatures"): byte-identical to the pre-existing
-    // behavior — hardcoded "creatures" head noun, count condition via
-    // `AttackersDeclaredMin`, no `valid_card`. Typed count>1 ("two or more Gods")
-    // is deferred — populating `valid_card` for count>1 without a condition-level
-    // type axis would over-fire (≥1 God + ≥2 any-attackers).
-    let (after_creatures, ()) = value((), tag::<_, _, OracleError<'_>>("creatures"))
-        .parse(after_or_more)
-        .ok()?;
-    // Accept optional trailing " each turn" / " this turn" qualifier (unused here,
-    // but keeps the matcher permissive for CR 603.4 timing qualifiers). Must end
-    // at the condition boundary — the caller already split the effect text off,
-    // so `after_creatures` should be empty or punctuation-only.
+    // count > 1 ("two or more creatures/gods/..."): type phrase on both
+    // `valid_card` (matcher subset) and `AttackersDeclaredMin.filter` (count axis).
+    let (filter, remainder) = parse_type_phrase(after_or_more);
     let (rest, _) = opt(alt((
         tag::<_, _, OracleError<'_>>(" each turn"),
         tag(" this turn"),
     )))
-    .parse(after_creatures)
+    .parse(remainder)
     .ok()?;
     if !rest.trim().is_empty() {
         return None;
@@ -7188,9 +7184,11 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     def.valid_target = Some(TargetFilter::Typed(
         TypedFilter::default().controller(actor.clone()),
     ));
+    def.valid_card = Some(filter.clone());
     def.condition = Some(TriggerCondition::AttackersDeclaredMin {
         scope: actor,
         minimum: n,
+        filter: Some(filter),
     });
 
     Some((TriggerMode::YouAttack, def))
@@ -11825,8 +11823,12 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
         assert!(def.condition.is_some());
-        if let Some(TriggerCondition::MinCoAttackers { minimum }) = &def.condition {
+        if let Some(TriggerCondition::MinCoAttackers { minimum, filter }) = &def.condition {
             assert_eq!(*minimum, 2);
+            assert!(
+                filter.is_some(),
+                "battalion co-attacker count is typed to ~"
+            );
         } else {
             panic!("Expected MinCoAttackers");
         }
@@ -20265,16 +20267,20 @@ mod tests {
 
     #[test]
     fn trigger_two_or_more_creatures_attack() {
-        // CR 508.1a: "two or more" uses MinCoAttackers with minimum=1 (2-1).
+        // CR 508.1a: "two or more" uses AttackersDeclaredMin on the typed batch.
         let def = parse_trigger_line(
             "Whenever two or more creatures you control attack a player, draw a card.",
             "Edric, Spymaster of Trest",
         );
         assert_eq!(def.mode, TriggerMode::YouAttack);
-        assert_eq!(
+        assert!(matches!(
             def.condition,
-            Some(TriggerCondition::MinCoAttackers { minimum: 1 })
-        );
+            Some(TriggerCondition::AttackersDeclaredMin {
+                scope: ControllerRef::You,
+                minimum: 2,
+                filter: Some(_),
+            })
+        ));
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
         assert!(def.execute.is_some());
     }
@@ -23060,30 +23066,25 @@ mod tests {
         }
     }
 
-    /// Issue #610 REV 2 GUARDRAIL (deferral lock). The actor-led count>1 form
-    /// ("two or more creatures") must remain byte-identical to pre-fix behavior:
-    /// `valid_card` UNSET and the count condition is the unchanged 2-field
-    /// `AttackersDeclaredMin { scope, minimum }`. Populating `valid_card` for
-    /// count>1 without a condition-level type axis would over-fire. This test
-    /// locks the deferral so a future edit cannot silently regress it.
+    /// Issue #2128: Typed count>1 ("two or more Gods") must set both `valid_card`
+    /// and `AttackersDeclaredMin.filter` so one matching + one non-matching
+    /// attacker does not satisfy the intervening-if.
     #[test]
-    fn you_attack_with_two_or_more_creatures_defers_filter() {
+    fn you_attack_with_two_or_more_gods_sets_filter_on_condition() {
         let def = parse_trigger_line(
-            "Whenever you attack with two or more creatures, draw a card.",
-            "Firemane Commando",
+            "Whenever you attack with two or more Gods, draw a card.",
+            "Test Card",
         );
         assert_eq!(def.mode, TriggerMode::YouAttack);
-        assert_eq!(
-            def.valid_card, None,
-            "count>1 must NOT set valid_card (REV 2 deferral)"
-        );
-        assert_eq!(
+        assert!(def.valid_card.is_some());
+        assert!(matches!(
             def.condition,
             Some(TriggerCondition::AttackersDeclaredMin {
                 scope: ControllerRef::You,
                 minimum: 2,
+                filter: Some(_),
             })
-        );
+        ));
     }
 
     #[test]
@@ -23100,13 +23101,14 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::You)
             ))
         );
-        assert_eq!(
+        assert!(matches!(
             def.condition,
             Some(TriggerCondition::AttackersDeclaredMin {
                 scope: ControllerRef::You,
                 minimum: 2,
+                filter: Some(_),
             })
-        );
+        ));
     }
 
     #[test]
@@ -23132,6 +23134,7 @@ mod tests {
                     TriggerCondition::AttackersDeclaredMin {
                         scope: ControllerRef::Opponent,
                         minimum: 2,
+                        filter: Some(_),
                     }
                 ));
                 assert!(matches!(
@@ -23175,13 +23178,14 @@ mod tests {
             "Test Card",
         );
         assert_eq!(def.mode, TriggerMode::YouAttack);
-        assert_eq!(
+        assert!(matches!(
             def.condition,
             Some(TriggerCondition::AttackersDeclaredMin {
                 scope: ControllerRef::Opponent,
                 minimum: 2,
+                filter: Some(_),
             })
-        );
+        ));
         assert!(def.batched);
     }
 

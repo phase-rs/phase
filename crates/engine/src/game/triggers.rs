@@ -3687,17 +3687,20 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.echo_due),
         // CR 508.1a: Count co-attackers excluding the source creature.
-        TriggerCondition::MinCoAttackers { minimum } => {
+        TriggerCondition::MinCoAttackers { minimum, filter } => {
+            let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
             state.combat.as_ref().is_some_and(|combat| {
                 let co_attacker_count = combat
                     .attackers
                     .iter()
                     .filter(|a| {
                         a.object_id != source_id.unwrap_or(ObjectId(0))
-                            && state
-                                .objects
-                                .get(&a.object_id)
-                                .is_some_and(|obj| obj.controller == controller)
+                            && state.objects.get(&a.object_id).is_some_and(|obj| {
+                                obj.controller == controller
+                                    && filter.as_ref().is_none_or(|f| {
+                                        matches_target_filter(state, a.object_id, f, &ctx)
+                                    })
+                            })
                     })
                     .count();
                 co_attacker_count >= *minimum as usize
@@ -3705,19 +3708,30 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 508.1 + CR 603.2c: Count attackers in the triggering AttackersDeclared
         // batch whose controller matches `scope` relative to the trigger controller.
-        TriggerCondition::AttackersDeclaredMin { scope, minimum } => {
+        TriggerCondition::AttackersDeclaredMin {
+            scope,
+            minimum,
+            filter,
+        } => {
             let Some(GameEvent::AttackersDeclared { attacker_ids, .. }) = trigger_event else {
                 return false;
             };
+            let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
             let count = attacker_ids
                 .iter()
                 .filter(|id| {
-                    state.objects.get(id).is_some_and(|obj| match scope {
-                        ControllerRef::You => obj.controller == controller,
-                        ControllerRef::Opponent => obj.controller != controller,
-                        // Other ControllerRef variants are not used by the attacks-with-N
-                        // combinator; treat as permissive to avoid silently dropping matches.
-                        _ => true,
+                    state.objects.get(id).is_some_and(|obj| {
+                        let scope_ok = match scope {
+                            ControllerRef::You => obj.controller == controller,
+                            ControllerRef::Opponent => obj.controller != controller,
+                            // Other ControllerRef variants are not used by the attacks-with-N
+                            // combinator; treat as permissive to avoid silently dropping matches.
+                            _ => true,
+                        };
+                        scope_ok
+                            && filter
+                                .as_ref()
+                                .is_none_or(|f| matches_target_filter(state, **id, f, &ctx))
                     })
                 })
                 .count();
@@ -11886,6 +11900,7 @@ pub mod tests {
         let cond = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::You,
             minimum: 2,
+            filter: None,
         };
         assert!(check_trigger_condition(
             &state,
@@ -11899,6 +11914,7 @@ pub mod tests {
         let cond3 = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::You,
             minimum: 3,
+            filter: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -11939,6 +11955,7 @@ pub mod tests {
         let cond = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::Opponent,
             minimum: 2,
+            filter: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -11946,6 +11963,101 @@ pub mod tests {
             trigger_controller,
             None,
             Some(&event),
+        ));
+    }
+
+    #[test]
+    fn attackers_declared_min_typed_filter_counts_only_matching_attackers() {
+        use crate::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+
+        let mut state = setup();
+        let trigger_controller = PlayerId(0);
+        let dino = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dino".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dino).unwrap();
+            obj.card_types
+                .core_types
+                .push(CoreType::Creature);
+            obj.card_types.subtypes.push("Dinosaur".to_string());
+        }
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&other).unwrap();
+            obj.card_types
+                .core_types
+                .push(CoreType::Creature);
+            obj.card_types.subtypes.push("Soldier".to_string());
+        }
+        let event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino, other],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (dino, crate::game::combat::AttackTarget::Player(PlayerId(1))),
+                (
+                    other,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+        };
+        let cond = TriggerCondition::AttackersDeclaredMin {
+            scope: ControllerRef::You,
+            minimum: 2,
+            filter: Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype("Dinosaur".to_string())],
+                ..Default::default()
+            })),
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &cond,
+            trigger_controller,
+            None,
+            Some(&event),
+        ));
+
+        let dino2 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Dino2".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&dino2).unwrap();
+            obj.card_types
+                .core_types
+                .push(CoreType::Creature);
+            obj.card_types.subtypes.push("Dinosaur".to_string());
+        }
+        let two_dinos = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino, dino2],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (dino, crate::game::combat::AttackTarget::Player(PlayerId(1))),
+                (
+                    dino2,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+        };
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            trigger_controller,
+            None,
+            Some(&two_dinos),
         ));
     }
 

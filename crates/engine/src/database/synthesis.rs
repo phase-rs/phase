@@ -3077,7 +3077,10 @@ fn build_exalted_trigger() -> TriggerDefinition {
             TypedFilter::creature().controller(ControllerRef::You),
         ))
         .condition(TriggerCondition::Not {
-            condition: Box::new(TriggerCondition::MinCoAttackers { minimum: 1 }),
+            condition: Box::new(TriggerCondition::MinCoAttackers {
+                minimum: 1,
+                filter: None,
+            }),
         })
         .execute(execute)
         .description(
