@@ -131,8 +131,6 @@ export interface LobbyGame {
    * joiners to confirm before entering.
    */
   is_sandbox?: boolean;
-  /** `true` when the room uses competitive ranked rating updates. */
-  is_ranked?: boolean;
   /** Draft-specific metadata. Present when the room is a draft pod. */
   draft_metadata?: DraftLobbyMetadata | null;
 }
