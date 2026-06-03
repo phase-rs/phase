@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { useNavigate } from "react-router";
 
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { MenuShell } from "../components/menu/MenuShell";
+import { MenuActionTile } from "../components/menu/MenuActionTile";
 import {
   loadActiveQuickDraft,
   type ActiveQuickDraftMeta,
@@ -56,6 +57,9 @@ function formatRelativeTime(timestamp: number, t: TFunction<"draft">): string {
 
 export function DraftLandingPage() {
   const { t } = useTranslation("draft");
+  // The shared bento tile's "Enter" CTA lives in the menu namespace; reuse it
+  // rather than duplicating the string into draft locales.
+  const { t: tMenu } = useTranslation("menu");
   const navigate = useNavigate();
   const [activeDraft, setActiveDraft] = useState<ActiveQuickDraftMeta | null>(null);
   const [activePod, setActivePod] = useState<ActiveDraftPodMeta | null>(null);
@@ -71,39 +75,56 @@ export function DraftLandingPage() {
       <div className="menu-scene__vignette" />
       <div className="menu-scene__haze" />
 
-      <div className="relative z-10 mx-auto flex w-full max-w-3xl flex-col px-6 py-20">
-        <h1 className="menu-display mb-10 text-4xl text-white">{t("landing.title")}</h1>
+      <MenuShell
+        eyebrow={t("landing.eyebrow")}
+        title={t("landing.title")}
+        description={t("landing.description")}
+        layout="stacked"
+        contentWidthClass="max-w-3xl"
+      >
+        <div className="flex w-full flex-col">
+          {activeDraft && <ActiveDraftCard meta={activeDraft} />}
+          {activePod && <ActivePodCard meta={activePod} />}
 
-        {activeDraft && <ActiveDraftCard meta={activeDraft} />}
-        {activePod && <ActivePodCard meta={activePod} />}
+          <div className="flex flex-col gap-3">
+            <h2 className="text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-fg-meta">
+              {t("landing.startNew")}
+            </h2>
 
-        <div className="flex flex-col gap-3">
-          <h2 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-            {t("landing.startNew")}
-          </h2>
-
-          <DraftModeCard
-            title={t("landing.quickDraft.title")}
-            description={t("landing.quickDraft.description")}
-            icon={<BotIcon />}
-            onClick={() => navigate("/draft/quick")}
-          />
-
-          <DraftModeCard
-            title={t("landing.cubeDraft.title")}
-            description={t("landing.cubeDraft.description")}
-            icon={<CubeIcon />}
-            onClick={() => navigate("/draft/quick?mode=cube")}
-          />
-
-          <DraftModeCard
-            title={t("landing.podDraft.title")}
-            description={t("landing.podDraft.description")}
-            icon={<PodIcon />}
-            onClick={() => navigate("/draft-pod")}
-          />
+            {/* Same bento action tiles as the home dashboard — one accent tone
+                per mode — so the draft landing shares the home card grammar. */}
+            <div className="grid grid-cols-1 gap-4 min-[640px]:grid-cols-3">
+              <MenuActionTile
+                tone="arcane"
+                motif="pack"
+                title={t("landing.quickDraft.title")}
+                description={t("landing.quickDraft.description")}
+                enterLabel={tMenu("home.dashboard.enter")}
+                renderIcon={(cls) => <BotIcon className={cls} />}
+                onClick={() => navigate("/draft/quick")}
+              />
+              <MenuActionTile
+                tone="ember"
+                motif="pack"
+                title={t("landing.cubeDraft.title")}
+                description={t("landing.cubeDraft.description")}
+                enterLabel={tMenu("home.dashboard.enter")}
+                renderIcon={(cls) => <CubeIcon className={cls} />}
+                onClick={() => navigate("/draft/quick?mode=cube")}
+              />
+              <MenuActionTile
+                tone="jade"
+                motif="network"
+                title={t("landing.podDraft.title")}
+                description={t("landing.podDraft.description")}
+                enterLabel={tMenu("home.dashboard.enter")}
+                renderIcon={(cls) => <PodIcon className={cls} />}
+                onClick={() => navigate("/draft-pod")}
+              />
+            </div>
+          </div>
         </div>
-      </div>
+      </MenuShell>
     </div>
   );
 }
@@ -125,7 +146,7 @@ function ActivePodCard({ meta }: { meta: ActiveDraftPodMeta }) {
 
   return (
     <div className="mb-8">
-      <h2 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+      <h2 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-fg-meta">
         {t("landing.podInProgress")}
       </h2>
       <button
@@ -223,7 +244,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
 
   return (
     <div className="mb-8">
-      <h2 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+      <h2 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.22em] text-fg-meta">
         {heading}
       </h2>
       <button
@@ -271,60 +292,25 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
   );
 }
 
-function DraftModeCard({
-  title,
-  description,
-  icon,
-  onClick,
-}: {
-  title: string;
-  description: string;
-  icon: ReactNode;
-  onClick: () => void;
-}) {
+function BotIcon({ className = "h-6 w-6" }: { className?: string }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="group flex w-full cursor-pointer items-center gap-4 rounded-[18px] border border-white/10 bg-white/[0.02] p-4 text-left transition-colors hover:border-white/18 hover:bg-white/[0.05]"
-    >
-      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-black/18 text-white/50 group-hover:text-white/70">
-        {icon}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="text-base font-semibold text-white">{title}</div>
-        </div>
-        <p className="mt-1 text-sm text-white/40">{description}</p>
-      </div>
-      <div className="rounded-full border border-white/10 bg-black/18 px-3 py-2 text-white/40 transition-colors group-hover:text-white/70">
-        <svg aria-hidden="true" viewBox="0 0 24 24" className="h-5 w-5 fill-current">
-          <path d="m13.2 5.4 1.4-1.4 8 8-8 8-1.4-1.4 5.6-5.6H2v-2h16.8l-5.6-5.6Z" />
-        </svg>
-      </div>
-    </button>
-  );
-}
-
-function BotIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-6 w-6 fill-current">
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
       <path d="M17.753 14a2.25 2.25 0 0 1 2.25 2.25v.904A3.75 3.75 0 0 1 18.696 20H5.304a3.75 3.75 0 0 1-1.307-2.846v-.904A2.25 2.25 0 0 1 6.247 14h11.506ZM11 15.5H8a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5Zm5 0h-1.5a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5H16a.5.5 0 0 0 .5-.5v-1a.5.5 0 0 0-.5-.5ZM12 2a4 4 0 0 1 4 4v4a4 4 0 0 1-8 0V6a4 4 0 0 1 4-4Zm-1.5 5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Zm3 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Z" />
     </svg>
   );
 }
 
-function CubeIcon() {
+function CubeIcon({ className = "h-6 w-6" }: { className?: string }) {
   return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-6 w-6 fill-current">
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
       <path d="M12 2.4 3.5 6.8v10.4L12 21.6l8.5-4.4V6.8L12 2.4Zm0 2.25 5.55 2.88L12 10.4 6.45 7.53 12 4.65Zm-6.5 4.5 5.5 2.85v6.8l-5.5-2.85v-6.8Zm7.5 9.65V12l5.5-2.85v6.8L13 18.8Z" />
     </svg>
   );
 }
 
-function PodIcon() {
+function PodIcon({ className = "h-6 w-6" }: { className?: string }) {
   return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-6 w-6 fill-current">
+    <svg aria-hidden="true" viewBox="0 0 24 24" className={`${className} fill-current`}>
       <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3Zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3Zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5Zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5Z" />
     </svg>
   );

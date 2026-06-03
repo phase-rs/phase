@@ -1093,6 +1093,16 @@
       "subtitle": "Select which combination of mana to produce"
     }
   },
+  "specializeColor": {
+    "title": "Choose Specialization",
+    "subtitle": "Pick a color matching the card you discarded",
+    "confirm": "Specialize",
+    "white": "White",
+    "blue": "Blue",
+    "black": "Black",
+    "red": "Red",
+    "green": "Green"
+  },
   "dialogShell": {
     "eyebrow": "Game Choice",
     "restoreDialog": "Restore dialog",

@@ -103,12 +103,16 @@ local_resource('server',
 # Compile the native test harnesses once, then let the test runners fan out to
 # parallel execution. Without this, test-engine and test-ai each serialize on
 # the cargo build lock during their compile phase. `--no-run` builds the test
-# binaries without executing them; the downstream `cargo test -p ...` then finds
-# everything fingerprint-fresh and just runs (no recompile). Default features —
-# matching the test resources, which (unlike `cargo test-all`) do not enable
-# engine/proptest; a feature mismatch here would force a rebuild.
+# binaries without executing them; the downstream `cargo nextest run -p ...` then
+# finds everything fingerprint-fresh and just runs (no recompile). nextest (the
+# same runner CI uses) schedules every test across all binaries in one global
+# pool, overlapping the lib and integration harnesses instead of running them
+# back-to-back like `cargo test` — much faster local feedback at zero compile
+# cost. Default features — matching the test resources, which (unlike
+# `cargo test-all`) do not enable engine/proptest; a feature mismatch here would
+# force a rebuild.
 local_resource('build-native',
-    cmd = 'cargo test -p engine -p phase-ai --no-run',
+    cmd = 'cargo nextest run -p engine -p phase-ai --no-run',
     deps = ENGINE_SRC + AI_SRC,
     allow_parallel = True,
     auto_init = 'test' in enabled,
@@ -116,7 +120,7 @@ local_resource('build-native',
 )
 
 local_resource('test-engine',
-    cmd = 'cargo test -p engine',
+    cmd = 'cargo nextest run -p engine',
     deps = ENGINE_SRC,
     resource_deps = ['build-native'],
     allow_parallel = True,
@@ -125,7 +129,7 @@ local_resource('test-engine',
 )
 
 local_resource('test-ai',
-    cmd = 'cargo test -p phase-ai',
+    cmd = 'cargo nextest run -p phase-ai',
     deps = ENGINE_SRC + AI_SRC,
     resource_deps = ['build-native'],
     allow_parallel = True,

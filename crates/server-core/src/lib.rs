@@ -6,6 +6,7 @@ pub mod draft_session;
 pub mod draft_wire_guard;
 pub mod emote_guard;
 pub mod filter;
+pub mod game_action_payload_guard;
 pub mod game_reconnect_guard;
 #[cfg(test)]
 mod harness;
@@ -49,6 +50,6 @@ pub use session::{
     SessionManager,
 };
 pub use spectator_wire_guard::{
-    guard_game_spectator_capacity, guard_spectate_draft, guard_spectator_join,
-    MAX_GAME_SPECTATORS_PER_GAME,
+    guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
+    guard_spectator_join, MAX_DRAFT_SPECTATORS_PER_DRAFT, MAX_GAME_SPECTATORS_PER_GAME,
 };

@@ -38,7 +38,11 @@ struct ActiveCombatAssignmentRuleEffect {
 }
 
 // CR 205.3c: Each subtype is correlated to its appropriate card type.
-fn subtype_matches_core_types(
+/// CR 205.1a: Whether a subtype correlates to at least one of the given core
+/// types — i.e. whether it survives a card-type replacement. Shared with the
+/// token-copy "stamp at creation" path so both the layered and baked
+/// applications of `SetCardTypes` drop the same uncorrelated subtypes.
+pub(crate) fn subtype_matches_core_types(
     subtype: &str,
     core_types: &[CoreType],
     all_creature_types: &[String],

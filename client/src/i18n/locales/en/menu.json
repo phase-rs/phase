@@ -67,7 +67,31 @@
     "load": {
       "title": "Load Game State"
     },
-    "exit": "Exit"
+    "exit": "Exit",
+    "dashboard": {
+      "welcome": "Welcome back",
+      "enter": "Enter",
+      "continue": "Continue where you left off",
+      "resumeDraft": "Resume Draft",
+      "draftPod": "Draft Pod",
+      "activeDeck": "Active Deck",
+      "noActiveDeck": "Pick a deck to get started",
+      "fromFeeds": "From your feeds",
+      "feedsEmpty": "Subscribe to a feed to see fresh decks",
+      "cards": "{{count}} cards",
+      "mode": {
+        "ai": "vs AI",
+        "online": "Online",
+        "local": "Local",
+        "p2p-host": "P2P",
+        "p2p-join": "P2P"
+      },
+      "tagline": "An open-source Magic: The Gathering rules engine and game client",
+      "turn": "Turn {{n}}",
+      "yourTurn": "Your turn",
+      "opponentTurn": "Opponent's turn",
+      "yourLife": "You {{life}}"
+    }
   },
   "loadState": {
     "title": "Load Game State",
@@ -242,5 +266,16 @@
   },
   "loadGameState": {
     "readFailed": "Failed to read file"
+  },
+  "nav": {
+    "label": "Primary navigation",
+    "home": "Home",
+    "play": "Play",
+    "online": "Online",
+    "draft": "Draft",
+    "decks": "Decks",
+    "alpha": "Alpha",
+    "profile": "Profile",
+    "settings": "Settings"
   }
 }

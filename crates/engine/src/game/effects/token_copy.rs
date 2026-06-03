@@ -404,6 +404,8 @@ pub(crate) fn compute_copy_batch_prefix(
 /// - `AddType` / `RemoveType` / `AddSubtype` / `RemoveSubtype` — type
 ///   exception support for token-copy (compose with type-modifying except
 ///   bodies that share grammar with `BecomeCopy`).
+/// - `SetCardTypes` — Myrkul, Lord of Bones: "it's an enchantment and loses
+///   all other card types" replaces the copied core card-type set (CR 613.1d).
 /// - `AddKeyword` is NOT consumed here — keywords flow through the typed
 ///   `extra_keywords` channel earlier in the resolver.
 ///
@@ -530,6 +532,31 @@ fn apply_token_modifications(
                         *set,
                         all_creature_types,
                     );
+                }
+            }
+            // CR 205.1a + CR 613.1d + CR 707.9d: "it's an enchantment and loses
+            // all other card types" (Myrkul, Lord of Bones) REPLACES the copied
+            // card's core card-type set. Supertypes (Legendary) are retained;
+            // subtypes are filtered through the shared `subtype_matches_core_types`
+            // rule so this baked path keeps exactly the subtypes the layered
+            // `SetCardTypes` arm would (uncorrelated noncreature subtypes drop).
+            // Stamped into both live and base card types so the override is part
+            // of the token's copiable values (CR 707.9b).
+            ContinuousModification::SetCardTypes { core_types } => {
+                let all_creature_types = &state.all_creature_types;
+                let objects = &mut state.objects;
+                if let Some(token) = objects.get_mut(&token_id) {
+                    token.card_types.core_types = core_types.clone();
+                    token.base_card_types.core_types = core_types.clone();
+                    let keep = |subtype: &String| {
+                        crate::game::layers::subtype_matches_core_types(
+                            subtype,
+                            core_types,
+                            all_creature_types,
+                        )
+                    };
+                    token.card_types.subtypes.retain(|s| keep(s));
+                    token.base_card_types.subtypes.retain(|s| keep(s));
                 }
             }
             // CR 707.9b + CR 613.1e: a copy exception that sets color (no
@@ -760,6 +787,82 @@ mod tests {
             .base_card_types
             .subtypes
             .contains(&"Soldier".to_string()));
+    }
+
+    /// CR 205.1a + CR 613.1d + CR 707.9d: Myrkul, Lord of Bones — "create a
+    /// token that's a copy of that card, except it's an enchantment and loses
+    /// all other card types." `SetCardTypes` replaces the copied creature's
+    /// core types with `[Enchantment]` (no longer a creature), while supertypes
+    /// (Legendary) survive. Subtype retention follows the shared
+    /// `subtype_matches_core_types` rule used by the layered path: a noncreature
+    /// subtype not correlated to the new core types (here the artifact subtype
+    /// "Equipment") drops, keeping both applications consistent. Applied to both
+    /// live and base (copiable) card types.
+    #[test]
+    fn copy_token_set_card_types_replaces_core_types_and_drops_uncorrelated_subtype() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dying God".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_power = Some(7);
+            source.base_toughness = Some(5);
+            source.power = Some(7);
+            source.toughness = Some(5);
+            source.base_card_types = CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Artifact, CoreType::Creature],
+                subtypes: vec!["Equipment".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::SelfRef,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: vec![],
+                additional_modifications: vec![ContinuousModification::SetCardTypes {
+                    core_types: vec![CoreType::Enchantment],
+                }],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        // Core types replaced: enchantment only, no longer a creature or artifact.
+        assert_eq!(token.card_types.core_types, vec![CoreType::Enchantment]);
+        assert_eq!(
+            token.base_card_types.core_types,
+            vec![CoreType::Enchantment]
+        );
+        // CR 205.1a: the "Equipment" artifact subtype is no longer correlated, so it drops.
+        assert!(!token.card_types.subtypes.contains(&"Equipment".to_string()));
+        assert!(!token
+            .base_card_types
+            .subtypes
+            .contains(&"Equipment".to_string()));
+        // Supertypes are unaffected by a card-type replacement.
+        assert!(token.card_types.supertypes.contains(&Supertype::Legendary));
+        assert!(token
+            .base_card_types
+            .supertypes
+            .contains(&Supertype::Legendary));
     }
 
     #[test]

@@ -3,48 +3,36 @@ import { useUiStore } from "../stores/uiStore";
 
 type DieRolledEvent = Extract<GameEvent, { type: "DieRolled" }>;
 type CoinFlippedEvent = Extract<GameEvent, { type: "CoinFlipped" }>;
-
-/**
- * The leading run of consecutive `DieRolled` events — the starting-player
- * contest the engine emits before `GameStarted` (CR 103.1). Empty when the
- * starter was chosen explicitly (play/draw in setup), so callers no-op.
- */
-function leadingDieRolls(events: GameEvent[]): DieRolledEvent[] {
-  const out: DieRolledEvent[] = [];
-  for (const e of events) {
-    if (e.type !== "DieRolled") break;
-    out.push(e);
-  }
-  return out;
-}
-
-/**
- * The last roll per player — the decisive round after any tie rerolls — in
- * first-seen seat order. The engine emits every reroll round; for display we
- * show each player's final value.
- */
-function finalRollPerPlayer(rolls: DieRolledEvent[]): { playerId: PlayerId; value: number }[] {
-  const byPlayer = new Map<PlayerId, number>();
-  for (const r of rolls) byPlayer.set(r.data.player_id, r.data.result);
-  return [...byPlayer.entries()].map(([playerId, value]) => ({ playerId, value }));
-}
+type StartingPlayerContestEvent = Extract<GameEvent, { type: "StartingPlayerContest" }>;
 
 /**
  * Fire the starting-player contest overlay from a game-start event batch.
  *
- * `startingPlayer` is the engine's authoritative choice (the player taking turn
- * 1) — never recomputed on the frontend, so the highlighted winner always
- * matches engine state even in the all-tied-at-cap → lowest-seat fallback. The
- * `context` is supplied here (this code path IS the contest), not inferred from
- * event ordering. No-ops on an empty contest (explicit play/draw choice).
+ * The engine emits one `StartingPlayerContest` event carrying the full roll-off
+ * by round (round 0 = every seat; each later round = the previous round's
+ * tied-max group that rerolled) plus the authoritative winner (CR 103.1). The
+ * overlay renders it round-by-round so the winner is always the high roller of
+ * the round shown — fixing the prior last-roll-per-player collapse, which could
+ * surface an eliminated seat's higher earlier die as beating the winner's lower
+ * reroll. `startingPlayer` is the engine's pick (never recomputed here); it
+ * equals the event's `winner` by construction. No-ops when no contest ran
+ * (explicit play/draw choice).
  */
 export function flashStartingPlayerContest(events: GameEvent[], startingPlayer: PlayerId): void {
-  const rolls = leadingDieRolls(events);
-  if (rolls.length === 0) return;
+  const contest = events.find(
+    (e): e is StartingPlayerContestEvent => e.type === "StartingPlayerContest",
+  );
+  if (!contest) return;
+  const rounds = contest.data.rounds.map((round) =>
+    round.rolls.map(([playerId, value]) => ({ playerId, value })),
+  );
   useUiStore.getState().flashDiceRoll({
     kind: "die",
-    sides: rolls[0].data.sides,
-    rolls: finalRollPerPlayer(rolls),
+    // CR 103.1: the first-player roll-off is always a d20.
+    sides: 20,
+    // The decisive (final) round, kept for the no-rounds fallback and keying.
+    rolls: rounds[rounds.length - 1] ?? [],
+    rounds,
     context: "startingPlayer",
     winner: startingPlayer,
   });

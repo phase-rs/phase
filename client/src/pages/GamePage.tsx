@@ -1690,7 +1690,10 @@ function MulliganPanel({
               </div>
             )}
           </div>
-          <PeekTab onClick={togglePeek} />
+          <PeekTab
+            direction={isNarrow ? "bottom" : "right"}
+            onClick={togglePeek}
+          />
         </motion.div>
       </div>
     </div>

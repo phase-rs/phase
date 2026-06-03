@@ -1093,6 +1093,16 @@
       "subtitle": "Wybierz, jaką kombinację many wytworzyć"
     }
   },
+  "specializeColor": {
+    "title": "Wybierz specjalizację",
+    "subtitle": "Wybierz kolor zgodny z odrzuconą kartą",
+    "confirm": "Specjalizuj",
+    "white": "Biały",
+    "blue": "Niebieski",
+    "black": "Czarny",
+    "red": "Czerwony",
+    "green": "Zielony"
+  },
   "dialogShell": {
     "eyebrow": "Wybór w grze",
     "restoreDialog": "Przywróć okno dialogowe",
