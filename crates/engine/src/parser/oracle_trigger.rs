@@ -7902,25 +7902,38 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         let mut def = make_base();
         def.mode = TriggerMode::LandPlayed;
         def.valid_target = valid_target;
-        // If the land-play subject already produced a typed filter (e.g.,
-        // "another land" or "a legendary land"), use it directly.
-        // Otherwise, parse additional type qualifiers from the trailing clause
-        // (e.g., "from exile" → parse_type_phrase picks up from-zone).
-        if let Some(filter) = land_filter {
-            def.valid_card = Some(filter);
-        } else {
-            let after_land_play = after_land_play.trim_start();
-            let clause = terminated(
-                take_until::<_, _, OracleError<'_>>(", "),
-                tag::<_, _, OracleError<'_>>(", "),
-            )
-            .parse(after_land_play)
-            .map(|(_, before)| before)
-            .unwrap_or(after_land_play);
-            let (filter, _) = parse_type_phrase(clause);
-            if !matches!(filter, TargetFilter::Any) {
+        // Parse trailing qualifiers (e.g. "from exile") from the clause
+        // following the land object. These may add FilterProp::InZone or other
+        // constraints regardless of whether the subject already produced a
+        // concrete land_filter.
+        let after_land_play = after_land_play.trim_start();
+        let clause = terminated(
+            take_until::<_, _, OracleError<'_>>(", "),
+            tag::<_, _, OracleError<'_>>(", "),
+        )
+        .parse(after_land_play)
+        .map(|(_, before)| before)
+        .unwrap_or(after_land_play);
+        let (trailing_filter, _) = parse_type_phrase(clause);
+        // Merge: if we already have a land_filter from the subject, fold any
+        // additional properties from the trailing clause into it. Otherwise
+        // use the trailing filter directly.
+        match (land_filter, &trailing_filter) {
+            (Some(mut filter), TargetFilter::Typed(trailing_tf))
+                if !trailing_tf.properties.is_empty() =>
+            {
+                if let TargetFilter::Typed(ref mut tf) = filter {
+                    tf.properties.extend(trailing_tf.properties.clone());
+                }
                 def.valid_card = Some(filter);
             }
+            (Some(filter), _) => {
+                def.valid_card = Some(filter);
+            }
+            (None, _) if !matches!(trailing_filter, TargetFilter::Any) => {
+                def.valid_card = Some(trailing_filter);
+            }
+            _ => {}
         }
         return Some((TriggerMode::LandPlayed, def));
     }
