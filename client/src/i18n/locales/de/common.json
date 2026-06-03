@@ -49,6 +49,8 @@
     "volume": "Lautstärke"
   },
   "hostControl": {
+    "collapse": "Einklappen",
+    "expand": "Host-Panel ausklappen",
     "seatHost": "Host",
     "seatPlayer": "Spieler",
     "seatOpen": "Frei",

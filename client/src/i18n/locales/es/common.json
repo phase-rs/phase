@@ -49,6 +49,8 @@
     "volume": "Volumen"
   },
   "hostControl": {
+    "collapse": "Contraer",
+    "expand": "Expandir panel del anfitrión",
     "seatHost": "Anfitrión",
     "seatPlayer": "Jugador",
     "seatOpen": "Abierto",
