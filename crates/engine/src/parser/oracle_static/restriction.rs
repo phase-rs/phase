@@ -160,6 +160,57 @@ pub(crate) fn parse_cant_be_countered_subject(tp: &TextPair) -> TargetFilter {
     TargetFilter::SelfRef
 }
 
+/// CR 301.5 + CR 303.4 + CR 701.3a: Parse a positive attachment restriction —
+/// "~ can be attached only to {filter}" — into a `StaticMode::AttachmentRestriction`
+/// carrying the legal-host `TargetFilter`.
+///
+/// The subject is always the source Aura/Equipment itself: by the time the static
+/// parser sees the line, "This Equipment" / the card name has already been
+/// normalized to `~` (see `SELF_REF_TYPE_PHRASES` / `normalize_self_refs_for_static`).
+/// We therefore require the `~` subject and reject any non-self subject so a
+/// hypothetical "other equipment can be attached only to ..." (no such printed
+/// card) is deferred rather than mis-scoped.
+///
+/// Grammar:
+///   "~ can be attached only to " <FILTER> "."?
+///
+/// `<FILTER>` is parsed by the shared `parse_target` building block (the same
+/// combinator used for "a creature with power N or greater", "a legendary
+/// creature", "an {type}", etc.) — no new filter language is invented. The
+/// entire remainder must be consumed; a non-empty tail means the filter phrase
+/// was only partially understood, so we bail to avoid a silently-wrong filter.
+///
+/// Corpus: Strata Scythe ("a creature with power 3 or greater"), Brass Knuckles
+/// ("a creature with toughness 4 or greater"), Konda's Banner ("a legendary
+/// creature").
+pub(crate) fn parse_attach_only_restriction(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    // Require the self-referential subject + verb phrase. `nom_tag_tp` consumes
+    // the prefix on the lowercase view while preserving original casing on the
+    // returned remainder (needed for `parse_target`'s type-name canonicalization).
+    let rest = nom_tag_tp(tp, "~ can be attached only to ")?;
+
+    // Trim the sentence terminator before handing the noun phrase to parse_target.
+    // allow-noncombinator: punctuation cleanup on a pre-tokenized chunk, not dispatch.
+    let host_phrase = rest.original.trim().trim_end_matches('.').trim();
+
+    let (filter, tail) = parse_target(host_phrase);
+    // The whole host phrase must be consumed and must resolve to a real filter —
+    // `parse_target` returns `TargetFilter::Any` / `SelfRef` for input it cannot
+    // interpret, which would silently whitelist everything/nothing.
+    if !tail.trim().is_empty() || matches!(filter, TargetFilter::Any | TargetFilter::SelfRef) {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::AttachmentRestriction { filter })
+            .affected(TargetFilter::SelfRef)
+            .description(text.to_string()),
+    )
+}
+
 /// CR 605.1a: Parse the optional "unless they're mana abilities" suffix that
 /// follows a `CantBeActivated` predicate. Returns `ActivationExemption::None`
 /// (and the unconsumed input) when no suffix is present.
