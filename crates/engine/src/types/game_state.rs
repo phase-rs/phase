@@ -4744,6 +4744,12 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_continuation: Option<PendingContinuation>,
 
+    /// Stashes the original ability's sub_ability before calling the replacement pipeline.
+    /// If the replacement filters out the continuation (e.g., simple count modifier),
+    /// this is restored as a continuation to preserve the sub_ability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_sub_ability_before_replacement: Option<ResolvedAbility>,
+
     /// CR 609.3 + CR 109.5: Pending `repeat_for` iteration loop paused mid-flight
     /// because the inner effect entered an interactive `WaitingFor` state.
     /// Drained by `drain_pending_continuation` AFTER `pending_continuation`,
@@ -5402,6 +5408,7 @@ impl GameState {
             revealed_cards: HashSet::new(),
             public_revealed_cards: HashSet::new(),
             pending_continuation: None,
+            original_sub_ability_before_replacement: None,
             pending_repeat_iteration: None,
             pending_change_zone_iteration: None,
             pending_coin_flip: None,

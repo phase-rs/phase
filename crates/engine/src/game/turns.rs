@@ -939,7 +939,7 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Optio
     // separate rules question outside this fix's scope. Do not silently
     // "fix" by adding the miracle hook here without first verifying the
     // CR 702.94a reading against draw-step vs spell-resolution draws.
-    let result = crate::game::effects::draw::draw_through_replacement(
+    let (result, _) = crate::game::effects::draw::draw_through_replacement(
         state,
         active,
         1,

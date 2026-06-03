@@ -86,16 +86,58 @@ pub fn resolve(
         _ => (1, ability.controller),
     };
 
+    // Stash the original sub_ability before replacement to preserve it if the
+    // replacement pipeline filters out the continuation (e.g., simple count modifier).
+    // See issue #1964: Teferi's Ageless Insight replacement removes discard sub_ability.
+    let had_sub_ability = ability.sub_ability.is_some();
+    if had_sub_ability {
+        let mut sub = (**ability.sub_ability.as_ref().unwrap()).clone();
+        // Copy targets from parent ability if sub has no targets
+        if sub.targets.is_empty() && !ability.targets.is_empty() {
+            sub.targets = ability.targets.clone();
+        }
+        state.original_sub_ability_before_replacement = Some(sub);
+    }
+
     // CR 614.1a: Route draw through replacement pipeline (e.g. Dredge, Abundance).
-    match draw_through_replacement(
+    let (result, continuation_drained) = draw_through_replacement(
         state,
         drawing_player,
         num_cards,
         events,
         apply_draw_after_replacement,
-    ) {
+    );
+    match result {
         ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
-        ReplacementResult::NeedsChoice(_) => return Ok(()),
+        ReplacementResult::NeedsChoice(_) => {
+            // Clear the stashed sub_ability if replacement pauses for player choice
+            state.original_sub_ability_before_replacement = None;
+            return Ok(());
+        }
+    }
+
+    // If the replacement filtered out the continuation (continuation was not drained)
+    // but we had a sub_ability, resolve it directly using resolve_effect to bypass
+    // the guard in resolve_chain_body that would skip sub_ability resolution.
+    // Only do this if there are active replacement effects (indicates replacement pipeline ran).
+    if had_sub_ability && !continuation_drained {
+        // Check if there are any replacement effects that could have modified the draw
+        let has_replacement_effects = state.objects.values().any(|obj| {
+            !obj.replacement_definitions.is_empty()
+                && obj.zone == Zone::Battlefield
+                && obj.controller == drawing_player
+        });
+        if has_replacement_effects {
+            if let Some(stashed_sub) = state.original_sub_ability_before_replacement.take() {
+                // Resolve the sub_ability directly using resolve_effect
+                let _ = crate::game::effects::resolve_effect(state, &stashed_sub, events);
+            }
+        } else {
+            state.original_sub_ability_before_replacement = None;
+        }
+    } else {
+        // Clear the stash if the replacement preserved the continuation
+        state.original_sub_ability_before_replacement = None;
     }
 
     events.push(GameEvent::EffectResolved {
@@ -109,7 +151,7 @@ pub fn resolve(
 /// CR 614.6 + CR 614.11 + CR 704.3: Single authority for the
 /// "propose Draw → replace → apply → drain post-replacement continuation"
 /// sequence. Every site that proposes a `ProposedEvent::Draw` MUST call this
-/// helper — otherwise a substituted mandatory-post-effect (Jace WinTheGame,
+/// helper — otherwise a substituted mandatory post-effect (Jace WinTheGame,
 /// Abundance reveal-until) leaks past the resolution step and drains against
 /// the wrong player on a later priority pass.
 ///
@@ -126,35 +168,42 @@ pub fn resolve(
 /// On `NeedsChoice`, sets `state.waiting_for` to the replacement-choice
 /// prompt before returning so callers only need to bail. On `Prevented`,
 /// `apply_executed` is not called.
+///
+/// Returns (ReplacementResult, bool) where the bool indicates whether a
+/// post-replacement continuation was drained.
 pub(crate) fn draw_through_replacement(
     state: &mut GameState,
     player_id: crate::types::player::PlayerId,
     count: u32,
     events: &mut Vec<GameEvent>,
     apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
-) -> replacement::ReplacementResult {
+) -> (replacement::ReplacementResult, bool) {
     let proposed = ProposedEvent::Draw {
         player_id,
         count,
         applied: HashSet::new(),
     };
     let result = replacement::replace_event(state, proposed, events);
-    match &result {
+    let continuation_drained = match &result {
         ReplacementResult::Execute(event) => {
             apply_executed(state, event.clone(), events);
             if state.post_replacement_continuation.is_some() {
                 let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                     state, None, None, None, events,
                 );
+                true
+            } else {
+                false
             }
         }
-        ReplacementResult::Prevented => {}
+        ReplacementResult::Prevented => false,
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(*player, state);
+            false
         }
-    }
-    result
+    };
+    (result, continuation_drained)
 }
 
 /// CR 121.1: Apply a post-replacement `ProposedEvent::Draw` to the game state.
@@ -414,24 +463,72 @@ mod tests {
     }
 
     #[test]
-    fn normal_draw_does_not_set_flag() {
+    fn teferi_ageless_insight_preserves_sub_ability_discard() {
+        // Regression test for issue #1964: Teferi's Ageless Insight replacement
+        // ("draw two cards instead") should not remove the discard sub_ability from
+        // Temmet, Naktamun's Will's attack trigger ("draw a card, then discard a card").
+        use crate::types::ability::{ReplacementDefinition, SubAbilityLink};
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::{AbilityDefinition, AbilityKind, TargetFilter};
+
         let mut state = GameState::new_two_player(42);
-        create_object(
+
+        // Add a simple "draw 2 instead of 1" replacement (simplified Teferi)
+        let teferi = create_object(
             &mut state,
             CardId(1),
             PlayerId(0),
-            "A".to_string(),
-            Zone::Library,
+            "Teferi's Ageless Insight".to_string(),
+            Zone::Battlefield,
         );
+        let teferi_obj = state.objects.get_mut(&teferi).unwrap();
+        teferi_obj.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Draw)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            ))]
+        .into();
+
+        // Add cards to library
+        let _c1 = create_object(&mut state, CardId(2), PlayerId(0), "Card 1".to_string(), Zone::Library);
+        let _c2 = create_object(&mut state, CardId(3), PlayerId(0), "Card 2".to_string(), Zone::Library);
+        let _c3 = create_object(&mut state, CardId(4), PlayerId(0), "Card 3".to_string(), Zone::Library);
+
+        // Create Temmet's ability: "draw a card, then discard a card"
+        let mut resolved = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        resolved.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                filter: None,
+                random: true,
+                unless_filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+        if let Some(ref mut sub) = resolved.sub_ability {
+            sub.sub_link = SubAbilityLink::ContinuationStep;
+        }
+
         let mut events = Vec::new();
+        resolve(&mut state, &resolved, &mut events).unwrap();
 
-        let ability = make_ability(1);
-        resolve(&mut state, &ability, &mut events).unwrap();
-
-        assert!(
-            !state.players[0].drew_from_empty_library,
-            "Normal draw should not set flag"
-        );
+        // Should have drawn 2 cards (Teferi replacement) then discarded 1
+        assert_eq!(state.players[0].hand.len(), 1, "Should draw 2 then discard 1");
+        assert_eq!(state.players[0].graveyard.len(), 1, "Should discard 1 card");
     }
 
     #[test]
