@@ -5476,7 +5476,7 @@ pub(super) fn parse_imperative_family_ast(
             } else if let Some(ast) = try_parse_roll_n_dice(lower) {
                 // CR 706.1: "roll two six-sided dice" / "roll X d12" — the
                 // multi-dice form. Tried before the single-die path; returns
-                // None for count == 1 so "roll a d6" falls through.
+                // None for count == 1 so "roll a d6" / "roll one d6" falls through.
                 Some(ast)
             } else {
                 try_parse_roll_die_with_modifier(lower).map(|(sides, modifier)| {
@@ -6100,8 +6100,8 @@ fn try_parse_flip_n_coins(lower: &str) -> Option<ImperativeFamilyAst> {
 /// the multi-dice form. Mirrors `try_parse_flip_n_coins`: strip the
 /// "roll "/"rolls " prefix, take the count via `parse_count_expr` (digit,
 /// word-number, and `X` forms), then parse the die size from the remainder.
-/// Returns None for count == 1 so "roll a d6" / "roll a six-sided die" falls
-/// through to the existing single-die path.
+/// Returns None for count == 1 so "roll a d6" / "roll one d6" falls through
+/// to the existing single-die path.
 fn try_parse_roll_n_dice(lower: &str) -> Option<ImperativeFamilyAst> {
     let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll "), tag("rolls ")))
         .parse(lower)
@@ -6143,10 +6143,15 @@ fn try_parse_roll_n_dice(lower: &str) -> Option<ImperativeFamilyAst> {
 /// the consumed die phrase, with whitespace untrimmed. Callers needing to
 /// attach trailing modifiers / clauses can branch on the remainder shape.
 fn try_parse_roll_die_sides_with_rest(lower: &str) -> Option<(u8, &str)> {
-    // Strip the "roll a " / "rolls a " prefix.
-    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll a "), tag("rolls a ")))
-        .parse(lower)
-        .ok()?;
+    // Strip the single-die article/count prefix.
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("roll a "),
+        tag("rolls a "),
+        tag("roll one "),
+        tag("rolls one "),
+    ))
+    .parse(lower)
+    .ok()?;
     parse_die_sides_with_rest(rest)
 }
 
@@ -10842,6 +10847,35 @@ mod tests {
                     },
                     other => panic!("expected Add modifier, got {other:?}"),
                 }
+            }
+            other => panic!("expected RollDie, got {other:?}"),
+        }
+    }
+
+    /// CR 706.1a + CR 706.2: The single-die parser accepts word-count "one"
+    /// as the same semantic count as article "a", including modifier clauses.
+    #[test]
+    fn roll_one_d20_with_add_modifier_parses_to_roll_die_with_modifier() {
+        let def = super::super::parse_effect_chain(
+            "Roll one d20 and add the number of cards in your hand.",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::RollDie {
+                count,
+                sides,
+                modifier,
+                ..
+            } => {
+                assert_eq!(*sides, 20);
+                assert_eq!(
+                    *count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
+                assert!(matches!(
+                    modifier,
+                    Some(crate::types::ability::DieRollModifier::Add { .. })
+                ));
             }
             other => panic!("expected RollDie, got {other:?}"),
         }

@@ -3911,7 +3911,7 @@ pub enum StackEntryKind {
         /// original resolution scope cleared) can re-stamp
         /// `die_result_this_resolution`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        die_result: Option<u8>,
+        die_result: Option<i32>,
     },
     /// CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     /// enter the stack after cost-payment + target selection and resolve with
@@ -4925,18 +4925,18 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_amount: Option<i32>,
 
-    /// CR 706.2: The actual result (natural + modifiers, clamped at 0) of the
-    /// most recent die roll within the current ability resolution. Set by
-    /// `roll_die::resolve` immediately after emitting `GameEvent::DieRolled`, read by
-    /// `QuantityRef::EventContextAmount` so an inline "equal to the result" sub_ability
-    /// (CR 706.4 — no results table) consumes the rolled value rather than the
-    /// numeric amount of the triggering event (e.g. combat damage). Resolution-scoped:
-    /// cleared at `apply()` entry and at every depth-0 chain entry, so it is `Some`
-    /// only between the roll and the sub_ability that reads it. Follows the
-    /// `last_effect_amount` PartialEq-OMISSION pattern: NOT compared in the
-    /// hand-written `PartialEq` (safe — always cleared at comparison boundaries).
+    /// CR 706.2 + CR 706.4: The actual scalar result available to the current
+    /// ability resolution. During a results-table roll, `roll_die::resolve`
+    /// stamps each individual die result before resolving that die's branch
+    /// (CR 706.3a). After a no-table multi-die roll, it stamps the aggregate
+    /// total so an inline "equal to the result(s)" sub_ability consumes the
+    /// rolled value rather than the numeric amount of the triggering event
+    /// (e.g. combat damage). Resolution-scoped: cleared at `apply()` entry and
+    /// at cross-resolution stack boundaries. Follows the `last_effect_amount`
+    /// PartialEq-OMISSION pattern: NOT compared in the hand-written `PartialEq`
+    /// (safe — always cleared at comparison boundaries).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub die_result_this_resolution: Option<u8>,
+    pub die_result_this_resolution: Option<i32>,
 
     /// Count from the most recent interactive effect resolution (e.g., number of cards
     /// actually discarded in a DiscardChoice). Used as fallback for EventContextAmount

@@ -82,7 +82,7 @@ pub struct PendingTrigger {
     /// on its own stack entry (in a later apply(), after the original
     /// resolution scope cleared) can re-stamp `die_result_this_resolution`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub die_result: Option<u8>,
+    pub die_result: Option<i32>,
 }
 
 pub(super) struct TriggerEventContextSnapshot {
