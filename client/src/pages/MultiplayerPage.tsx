@@ -26,7 +26,7 @@ import { expandParsedDeck } from "../services/deckParser";
 import type { LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import { classifyCompatResult } from "./multiplayerPageState";
 import { clearWsSession } from "../services/multiplayerSession";
-import { useMultiplayerStore } from "../stores/multiplayerStore";
+import { findLobbyGameByCode, useMultiplayerStore } from "../stores/multiplayerStore";
 import {
   useMultiplayerDraftStore,
   type MultiplayerDraftPhase,
@@ -536,16 +536,30 @@ export function MultiplayerPage() {
   );
 
   const handleSpectate = useCallback(
-    (code: string, context?: LobbyGame) => {
-      if (context?.draft_metadata) {
+    async (code: string, context?: LobbyGame) => {
+      const resolved = context ?? findLobbyGameByCode(code);
+      if (resolved?.draft_metadata) {
         navigate(`/draft-spectator?code=${encodeURIComponent(code)}`);
         return;
+      }
+      // Typed codes skip lobby-row context; drafts not in the public lobby
+      // still resolve via SpectateDraft when lookup reports not_found.
+      if (!resolved?.draft_metadata && connectionMode === "server") {
+        const lookup = await lookupJoinTargetFromStore(code);
+        if (!lookup.ok && lookup.reason === "not_found") {
+          navigate(`/draft-spectator?code=${encodeURIComponent(code)}`);
+          return;
+        }
+        if (!lookup.ok) {
+          showToast(lookup.message);
+          return;
+        }
       }
       const gameId = crypto.randomUUID();
       useGameStore.setState({ gameId });
       navigate(`/game/${gameId}?mode=spectate&code=${encodeURIComponent(code)}`);
     },
-    [navigate],
+    [navigate, connectionMode, lookupJoinTargetFromStore, showToast],
   );
 
   // Join from lobby → execute immediately if deck exists, otherwise prompt

@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import type { DraftPlayerView, SpectatorDraftView } from "../../adapter/draft-adapter";
+import type { SpectatorDraftView } from "../../adapter/draft-adapter";
 import { DraftProgress } from "./DraftProgress";
 
 interface DraftSpectatorDashboardProps {
@@ -23,7 +23,7 @@ export function DraftSpectatorDashboard({ view }: DraftSpectatorDashboardProps) 
         )}
       </div>
 
-      <DraftProgress view={view as DraftPlayerView} />
+      <DraftProgress view={view} />
 
       <section className="rounded-xl border border-white/10 bg-black/20 p-4">
         <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-400">

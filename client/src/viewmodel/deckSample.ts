@@ -1,4 +1,5 @@
 import type { DeckEntry } from "../services/deckParser";
+import { expandEntries } from "../services/deckParser";
 
 /** Fisher–Yates shuffle for deck-list preview (display only, not game logic). */
 function shuffleNames(names: string[]): string[] {
@@ -10,18 +11,8 @@ function shuffleNames(names: string[]): string[] {
   return copy;
 }
 
-export function expandDeckNames(entries: DeckEntry[]): string[] {
-  const names: string[] = [];
-  for (const entry of entries) {
-    for (let i = 0; i < entry.count; i++) {
-      names.push(entry.name);
-    }
-  }
-  return names;
-}
-
 export function sampleOpeningHand(entries: DeckEntry[], size = 7): string[] {
-  const names = expandDeckNames(entries);
+  const names = expandEntries(entries);
   if (names.length <= size) return names;
   return shuffleNames(names).slice(0, size);
 }

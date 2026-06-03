@@ -31,15 +31,19 @@ export async function connectDraftSpectator(
   };
 
   const onMessage = (event: MessageEvent) => {
+    if (typeof event.data !== "string") return;
     let msg: { type: string; data?: unknown };
     try {
-      msg = JSON.parse(event.data as string) as { type: string; data?: unknown };
+      msg = JSON.parse(event.data) as { type: string; data?: unknown };
     } catch {
       return;
     }
     switch (msg.type) {
       case "DraftSpectatorView":
-        emit({ type: "view", view: msg.data as SpectatorDraftView });
+        emit({
+          type: "view",
+          view: (msg.data as { view: SpectatorDraftView }).view,
+        });
         emit({ type: "connected" });
         break;
       case "Error":

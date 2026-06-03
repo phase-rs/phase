@@ -40,6 +40,15 @@ export type PodPolicy = "Competitive" | "Casual";
 
 export type PairingStatus = "Pending" | "InProgress" | "Complete";
 
+/** Fields consumed by `DraftProgress` (shared by player and spectator views). */
+export interface DraftProgressFields {
+  current_pack_number: number;
+  pick_number: number;
+  cards_per_pack: number;
+  pack_count: number;
+  pass_direction: "Left" | "Right";
+}
+
 // @sync-with: crates/draft-core/src/view.rs
 export interface StandingEntry {
   seat_index: number;

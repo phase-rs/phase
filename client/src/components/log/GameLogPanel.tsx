@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { GameLogEntry, LogCategory } from "../../adapter/types.ts";
+import { LOG_CATEGORIES, type GameLogEntry, type LogCategory } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -10,6 +10,7 @@ import { filterLogByVerbosity, type LogVerbosity } from "../../viewmodel/logForm
 import {
   exportLogEntriesJson,
   filterLogEntries,
+  segmentsToPlainText,
   uniqueTurns,
 } from "../../viewmodel/logSearch.ts";
 import { LogEntry } from "./LogEntry.tsx";
@@ -24,22 +25,6 @@ const VERBOSITY_LABEL_KEYS: Record<LogVerbosity, string> = {
   compact: "log.verbosityCompact",
   minimal: "log.verbosityMinimal",
 };
-
-const CATEGORY_OPTIONS: LogCategory[] = [
-  "Game",
-  "Turn",
-  "Stack",
-  "Combat",
-  "Zone",
-  "Life",
-  "Mana",
-  "State",
-  "Token",
-  "Trigger",
-  "Special",
-  "Destroy",
-  "Debug",
-];
 
 const CATEGORY_LABEL_KEYS: Record<LogCategory, string> = {
   Game: "log.categoryGame",
@@ -156,7 +141,7 @@ export function GameLogPanel() {
 
   const handleCopy = async () => {
     const text = filteredEntries
-      .map((entry) => entry.segments.map((s) => (s.type === "Text" ? s.value : "")).join(""))
+      .map((entry) => segmentsToPlainText(entry.segments))
       .join("\n");
     try {
       await navigator.clipboard.writeText(text);
@@ -242,7 +227,7 @@ export function GameLogPanel() {
                 ))}
               </div>
               <div className="flex flex-wrap gap-1 max-h-16 overflow-y-auto">
-                {CATEGORY_OPTIONS.map((category) => (
+                {LOG_CATEGORIES.map((category) => (
                   <button
                     key={category}
                     type="button"

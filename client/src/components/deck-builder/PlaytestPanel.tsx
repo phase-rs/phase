@@ -64,8 +64,8 @@ export function PlaytestPanel({ deck, format, mainCount }: PlaytestPanelProps) {
         </div>
         <p className="mb-3 text-[11px] text-slate-500">{t("playtest.sampleHandHint")}</p>
         <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {handEntries.map((entry) => (
-            <PlaytestCardRow key={`${entry.name}-${entry.count}`} name={entry.name} />
+          {handEntries.map((entry, index) => (
+            <PlaytestCardRow key={`${entry.name}-${index}`} name={entry.name} />
           ))}
         </ul>
       </section>
