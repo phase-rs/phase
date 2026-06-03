@@ -1498,7 +1498,8 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
     // tail is an unmodeled shape — decline so it surfaces as a coverage gap
     // rather than a silent misparse.
     let tail = after_clause.trim_start();
-    let tail = tail.strip_prefix('.').unwrap_or(tail);
+    // allow-noncombinator: punctuation cleanup (drop the sentence terminator) on a pre-tokenized chunk, not parsing dispatch.
+    let tail = tail.strip_prefix('.').unwrap_or(tail); // allow-noncombinator: punctuation cleanup on a pre-tokenized chunk, not parsing dispatch.
     if !tail.trim().is_empty() {
         return None;
     }
