@@ -616,17 +616,7 @@ fn guard_full_create_game_settings_inbound(
     ai_seats: &[server_core::protocol::AiSeatRequest],
 ) -> Result<u8, String> {
     let pc = fields.player_count.clamp(2, MAX_FULL_GAME_PLAYER_COUNT);
-    lobby_broker::validation::validate_create_game_settings_fields(
-        lobby_broker::validation::CreateGameSettingsFields {
-            display_name: fields.display_name,
-            password: fields.password,
-            timer_seconds: fields.timer_seconds,
-            player_count: fields.player_count,
-            room_name: fields.room_name,
-            host_peer_id: fields.host_peer_id,
-            draft_metadata: fields.draft_metadata,
-        },
-    )?;
+    lobby_broker::validate_create_game_settings_inbound_fields(&fields)?;
     guard_create_ai_seats(ai_seats, pc)?;
     lobby_broker::validate_deck_payload("deck", fields.deck)?;
     Ok(pc)
