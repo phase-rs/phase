@@ -713,9 +713,26 @@ pub(super) fn handle_unless_payment(
         // further stripping is needed here.
         let previous_trigger_event = state.current_trigger_event.clone();
         state.current_trigger_event = trigger_event.clone();
+        let events_before = events.len();
         let result = effects::resolve_ability_chain(state, &ability, events, 0);
         state.current_trigger_event = previous_trigger_event;
         result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+        // CR 603.2 + CR 603.6 + CR 700.4: The unpaid unless-effect can move a
+        // permanent off the battlefield — echo / cumulative-upkeep sacrifice
+        // (#1981, Mogg War Marshal), Static Prison's self-sacrifice, or a
+        // destroy/damage unless-effect. Those battlefield → graveyard moves are
+        // "dies" / leaves-the-battlefield events whose triggers ("when this
+        // creature dies, create a 1/1 Goblin") must trigger. This branch returns
+        // directly without flowing through `run_post_action_pipeline` (the inline
+        // note in engine.rs), so the standard trigger scan never runs — scan the
+        // events this resolution just emitted explicitly, mirroring the inline
+        // `process_triggers` after `handle_tap_land_for_mana` (engine.rs). Scoped
+        // to the new events and a no-op when none fire.
+        if events.len() > events_before {
+            let unless_effect_events: Vec<_> = events[events_before..].to_vec();
+            super::triggers::process_triggers(state, &unless_effect_events);
+        }
 
         // CR 610.3 + #783: The unless-payment resume bypasses
         // `run_post_action_pipeline` (see the inline-scan note in
