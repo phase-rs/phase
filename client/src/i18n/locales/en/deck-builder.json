@@ -177,7 +177,15 @@
     "setAsCommander": "Set as commander:",
     "cardCount": "{{count}}/{{expected}} cards",
     "singletonViolations": "Singleton violations: {{cards}}",
-    "colorViolations": "Color identity violations: {{cards}}"
+    "colorViolations": "Color identity violations: {{cards}}",
+    "signatureSpell": {
+      "heading": "Signature Spell",
+      "noSignatureSpell": "No signature spell selected",
+      "setAsSignatureSpell": "Set as signature spell:",
+      "remove": "Remove signature spell",
+      "mustBeInstantOrSorcery": "Signature spell must be an instant or sorcery",
+      "outsideColorIdentity": "{{name}}: outside Oathbreaker color identity"
+    }
   },
   "manaCurve": {
     "title": "Mana Curve",

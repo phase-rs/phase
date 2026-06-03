@@ -1,4 +1,5 @@
 import type { AttachTarget, CardType, GameObject, Keyword, ManaColor, ObjectId } from "../adapter/types";
+import { isChangeling } from "./keywordProps";
 
 const ROMAN = ["", "I", "II", "III", "IV", "V"] as const;
 export const FACE_DOWN_CARD_NAME = "Face-down card";
@@ -96,11 +97,17 @@ export function formatCounterTooltip(type: string, count: number): string {
   return `${label} counter${count !== 1 ? "s" : ""}: ${count}`;
 }
 
-export function formatTypeLine(cardTypes: CardType): string {
+export function formatTypeLine(cardTypes: CardType, keywords?: Keyword[]): string {
   const parts: string[] = [];
   if (cardTypes.supertypes.length > 0) parts.push(cardTypes.supertypes.join(" "));
   parts.push(cardTypes.core_types.join(" "));
   const main = parts.join(" ");
+  // CR 702.73a: a Changeling object is every creature type. The engine expands
+  // its subtypes to the full creature-type list; collapse that to "Changeling"
+  // so the type line doesn't overflow the card.
+  if (keywords && isChangeling(keywords)) {
+    return `${main} \u2014 Changeling`;
+  }
   if (cardTypes.subtypes.length > 0) {
     return `${main} \u2014 ${cardTypes.subtypes.join(" ")}`;
   }

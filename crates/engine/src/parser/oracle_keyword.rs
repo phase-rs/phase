@@ -211,7 +211,7 @@ pub(crate) fn extract_keyword_line(
     mtgjson_keyword_names: &[String],
 ) -> Option<Vec<Keyword>> {
     let line_without_reminder = strip_reminder_text(line);
-    let line = line_without_reminder.trim();
+    let line = strip_keyword_activation_cost_prefix(line_without_reminder.trim());
 
     if mtgjson_keyword_names.is_empty() {
         return parse_mtgjson_missing_standalone_keyword_line(line);
@@ -279,8 +279,19 @@ pub(crate) fn extract_keyword_line(
         if mtgjson_match {
             any_mtgjson_match = true;
 
-            // Exact name match means MTGJSON already has the parsed keyword — skip
+            // Exact name match means MTGJSON already carries one parsed copy.
             if mtgjson_keyword_names.contains(&lower) {
+                // CR 702.85c / CR 702.40b: keywords whose instances each trigger
+                // separately are printed as repeated bare words ("Cascade, cascade"),
+                // but MTGJSON's keywords array dedupes them. The Oracle line is the only
+                // place printed multiplicity survives — emit one Keyword per occurrence
+                // so the runtime's per-instance trigger loop fires correctly. Synthesis
+                // reconciles the deduped MTGJSON copy against these.
+                if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                    if kw.instances_function_separately() {
+                        new_keywords.push(kw);
+                    }
+                }
                 continue;
             }
 
@@ -317,6 +328,51 @@ pub(crate) fn extract_keyword_line(
     } else {
         None
     }
+}
+
+fn strip_keyword_activation_cost_prefix(line: &str) -> &str {
+    if let Some(keyword_text) = strip_mana_activation_cost_prefix(line) {
+        return keyword_text;
+    }
+    strip_ticket_activation_cost_prefix(line).unwrap_or(line)
+}
+
+fn strip_mana_activation_cost_prefix(line: &str) -> Option<&str> {
+    let Ok((rest, _cost)) = nom_primitives::parse_mana_cost.parse(line) else {
+        return None;
+    };
+    strip_activation_cost_dash(rest)
+}
+
+fn strip_ticket_activation_cost_prefix(line: &str) -> Option<&str> {
+    let lower = line.to_ascii_lowercase();
+    let mut rest = lower.as_str();
+    let mut consumed = 0;
+    let mut matched = false;
+
+    while let Ok((next, _)) = tag::<_, _, OracleError<'_>>("{tk}").parse(rest) {
+        matched = true;
+        consumed = lower.len() - next.len();
+        rest = next;
+    }
+
+    matched
+        .then(|| &line[consumed..])
+        .and_then(strip_activation_cost_dash)
+}
+
+fn strip_activation_cost_dash(rest: &str) -> Option<&str> {
+    preceded(
+        space0,
+        alt((
+            tag::<_, _, OracleError<'_>>("\u{2014}"),
+            tag("\u{2013}"),
+            tag("-"),
+        )),
+    )
+    .parse(rest)
+    .ok()
+    .map(|(keyword_text, _)| keyword_text.trim_start())
 }
 
 fn parse_mtgjson_missing_standalone_keyword_line(line: &str) -> Option<Vec<Keyword>> {
@@ -1458,6 +1514,107 @@ mod tests {
         // CR 702.85a: Cascade is a no-parameter keyword.
         let kw = parse_keyword_from_oracle("cascade").unwrap();
         assert_eq!(kw, Keyword::Cascade);
+    }
+
+    /// CR 702.85c: a spell printing cascade as repeated bare words has one instance
+    /// per word; each triggers separately. MTGJSON dedupes the keywords array to a
+    /// single "Cascade", so the Oracle line is the sole source of printed
+    /// multiplicity — extract_keyword_line must recover every occurrence.
+    #[test]
+    fn extract_keyword_line_recovers_repeated_cascade_instances() {
+        let mtgjson_kws = vec!["cascade".to_string()];
+        let two = extract_keyword_line("Cascade, cascade", &mtgjson_kws)
+            .expect("repeated cascade line is a keyword line");
+        assert_eq!(
+            two.iter().filter(|k| matches!(k, Keyword::Cascade)).count(),
+            2
+        );
+        let four = extract_keyword_line("Cascade, cascade, cascade, cascade", &mtgjson_kws)
+            .expect("repeated cascade line is a keyword line");
+        assert_eq!(
+            four.iter()
+                .filter(|k| matches!(k, Keyword::Cascade))
+                .count(),
+            4
+        );
+    }
+
+    /// CR 702.85c regression guard: a single printed cascade (Bloodbraid Elf) must
+    /// still net exactly one instance — recovery must not over-count.
+    #[test]
+    fn extract_keyword_line_single_cascade_yields_one_instance() {
+        let mtgjson_kws = vec!["cascade".to_string()];
+        let one = extract_keyword_line("Cascade", &mtgjson_kws)
+            .expect("single cascade line is a keyword line");
+        assert_eq!(
+            one.iter().filter(|k| matches!(k, Keyword::Cascade)).count(),
+            1
+        );
+    }
+
+    /// CR 702.116b: a creature printing myriad as repeated bare words has one
+    /// instance per word; each triggers separately. MTGJSON dedupes the keywords
+    /// array to a single "Myriad", so the Oracle line is the sole source of printed
+    /// multiplicity — extract_keyword_line must recover every occurrence. Scurry of
+    /// Squirrels ("Myriad, myriad") is the real card this fixes.
+    #[test]
+    fn extract_keyword_line_recovers_repeated_myriad_instances() {
+        let mtgjson_kws = vec!["myriad".to_string()];
+        let two = extract_keyword_line("Myriad, myriad", &mtgjson_kws)
+            .expect("repeated myriad line is a keyword line");
+        assert_eq!(
+            two.iter().filter(|k| matches!(k, Keyword::Myriad)).count(),
+            2
+        );
+    }
+
+    /// CR 702.116b regression guard: a single printed myriad must net exactly one
+    /// instance — recovery must not over-count.
+    #[test]
+    fn extract_keyword_line_single_myriad_yields_one_instance() {
+        let mtgjson_kws = vec!["myriad".to_string()];
+        let one = extract_keyword_line("Myriad", &mtgjson_kws)
+            .expect("single myriad line is a keyword line");
+        assert_eq!(
+            one.iter().filter(|k| matches!(k, Keyword::Myriad)).count(),
+            1
+        );
+    }
+
+    /// BUILDING-BLOCK / forward-looking test (CR 702.83a: Exalted is a triggered
+    /// ability; CR 113.2c: multiple instances of an ability function independently).
+    /// Exercises the `instances_function_separately()` recovery path for Exalted at
+    /// the building-block level. This is NOT a claim that a specific printed card is
+    /// fixed: no clean real "Exalted, exalted" keyword-only line exists yet — the one
+    /// candidate (Urza's Dark Cannonball) prints "{cost} — Exalted, exalted", which
+    /// the `{cost} —` keyword-line parser does not yet strip (see the deferred-gap
+    /// pin below). When a clean printed instance lands, this test already covers it.
+    #[test]
+    fn extract_keyword_line_recovers_repeated_exalted_instances() {
+        let mtgjson_kws = vec!["exalted".to_string()];
+        let two = extract_keyword_line("Exalted, exalted", &mtgjson_kws)
+            .expect("repeated exalted line is a keyword line");
+        assert_eq!(
+            two.iter().filter(|k| matches!(k, Keyword::Exalted)).count(),
+            2
+        );
+    }
+
+    /// CR 113.2c / CR 702.83a: Urza's Dark Cannonball prints a keyword line behind
+    /// an activation-cost prefix. The prefix is not part of the keyword text, so
+    /// `extract_keyword_line` must still recover both Exalted instances.
+    #[test]
+    fn extract_keyword_line_cost_prefixed_exalted_recovers_instances() {
+        let mtgjson_kws = vec!["exalted".to_string()];
+        let result = extract_keyword_line("{TK}{TK} — Exalted, exalted", &mtgjson_kws)
+            .expect("cost-prefixed repeated exalted line is a keyword line");
+        assert_eq!(
+            result
+                .iter()
+                .filter(|k| matches!(k, Keyword::Exalted))
+                .count(),
+            2
+        );
     }
 
     /// CR 702.60a: Ripple N triggers when the spell is cast. The engine

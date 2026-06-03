@@ -1,4 +1,4 @@
-import type { BatchResolveResult, GameAction, GameEvent, GameState, LegalActionsResult } from "../adapter/types";
+import type { BatchResolveResult, GameAction, GameEvent, GameState, LegalActionsResult, WaitingFor } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
@@ -49,6 +49,8 @@ interface PendingLocalAction {
   kind: "local";
   action: GameAction;
   actor: number;
+  /** WaitingFor object that prompted this local action. */
+  waitingFor: WaitingFor | null;
   resolve: () => void;
   reject: (err: unknown) => void;
 }
@@ -72,17 +74,18 @@ const pendingQueue: PendingWork[] = [];
 
 /**
  * The local action currently being processed (set while inside processAction),
- * paired with the seat that dispatched it. Used alongside pendingQueue to
- * deduplicate rapid double-clicks: if the same action from the same actor is
- * already in flight, a second dispatch is a silent no-op rather than a queued
- * duplicate that would fail against a transitioned engine state.
+ * paired with the seat and WaitingFor object it was issued against. Used with
+ * pendingQueue to deduplicate rapid double-clicks.
  *
- * The actor is part of the identity: a double-click is one seat firing the
- * same action twice. Two different seats firing the same action type (e.g.
- * the human and the AI both passing priority across an intervening priority
- * round — issue #459) are distinct game decisions and must NOT be collapsed.
+ * Actor preserves the #459 cross-seat priority case. WaitingFor preserves the
+ * #1513 doubled-trigger case where two structurally identical choices are
+ * responses to different engine prompts.
  */
-let inFlightLocalAction: { action: GameAction; actor: number } | null = null;
+let inFlightLocalAction: {
+  action: GameAction;
+  actor: number;
+  waitingFor: WaitingFor | null;
+} | null = null;
 
 /** Structural equality for GameAction — action objects are small plain JSON. */
 function actionsEqual(a: GameAction, b: GameAction): boolean {
@@ -335,7 +338,7 @@ async function processQueue(): Promise<void> {
     const next = pendingQueue.shift()!;
     try {
       if (next.kind === "local") {
-        inFlightLocalAction = { action: next.action, actor: next.actor };
+        inFlightLocalAction = { action: next.action, actor: next.actor, waitingFor: next.waitingFor };
         try {
           await processAction(next.action, next.actor);
         } finally {
@@ -398,18 +401,18 @@ export async function dispatchAction(
   actor: number = getPlayerId(),
 ): Promise<void> {
   const submittedAction = actor === getPlayerId() ? applySpellPaymentPreference(action) : action;
+  // Snapshot the prompt object that caused this action. The same action from
+  // the same actor is a duplicate only while it answers the same prompt.
+  const currentWaitingFor = useGameStore.getState().waitingFor;
 
   if (isAnimating) {
-    // Enqueue-time de-dup: if the exact same action from the same actor is
-    // already in flight or already queued, silently resolve. Covers rapid
-    // double-clicks (e.g. a planeswalker ability fired twice before the first
-    // transitions the engine into TargetSelection). The actor is part of the
-    // identity — two seats passing priority across an intervening priority
-    // round are distinct decisions and must both be delivered (issue #459).
+    // Same action + same actor + same prompt is a duplicate. A changed prompt
+    // is a new decision even when the payload is structurally identical.
     if (
       inFlightLocalAction &&
       inFlightLocalAction.actor === actor &&
-      actionsEqual(inFlightLocalAction.action, submittedAction)
+      actionsEqual(inFlightLocalAction.action, submittedAction) &&
+      Object.is(inFlightLocalAction.waitingFor, currentWaitingFor)
     ) {
       return;
     }
@@ -417,19 +420,27 @@ export async function dispatchAction(
       if (
         pending.kind === "local" &&
         pending.actor === actor &&
-        actionsEqual(pending.action, submittedAction)
+        actionsEqual(pending.action, submittedAction) &&
+        Object.is(pending.waitingFor, currentWaitingFor)
       ) {
         return;
       }
     }
     debugLog(`dispatch queued (mutex held): ${submittedAction.type}, queue=${pendingQueue.length}`, "warn");
     return new Promise<void>((resolve, reject) => {
-      pendingQueue.push({ kind: "local", action: submittedAction, actor, resolve, reject });
+      pendingQueue.push({
+        kind: "local",
+        action: submittedAction,
+        actor,
+        waitingFor: currentWaitingFor,
+        resolve,
+        reject,
+      });
     });
   }
 
   isAnimating = true;
-  inFlightLocalAction = { action: submittedAction, actor };
+  inFlightLocalAction = { action: submittedAction, actor, waitingFor: currentWaitingFor };
   try {
     await processAction(submittedAction, actor);
   } catch (e) {

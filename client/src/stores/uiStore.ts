@@ -18,11 +18,19 @@ export type DiceRollPayload =
       kind: "die";
       /** d-sides (e.g. 20 for the first-player contest, dN for card rolls). */
       sides: number;
-      /** One entry per physical die shown — one per player for the contest. */
+      /** One entry per physical die shown. For the contest this is the FINAL
+       *  (decisive) round — kept for the no-rounds fallback and overlay keying. */
       rolls: { playerId: PlayerId; value: number }[];
       context: "startingPlayer" | "ability";
       /** Starting-player contest: the high roller who takes the first turn. */
       winner?: PlayerId;
+      /** Starting-player contest only (CR 103.1): the roll-off by round. Round 0
+       *  is every seat; each later round is the previous round's tied-max group
+       *  that rerolled. Rendered round-by-round so the winner is always the high
+       *  roller of the round shown — never conflated across rounds (the bug that
+       *  made an eliminated seat's higher earlier die look like it beat the
+       *  winner's lower reroll). Absent for in-game `ability` rolls. */
+      rounds?: { playerId: PlayerId; value: number }[][];
     }
   | {
       kind: "coin";

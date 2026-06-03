@@ -7,14 +7,17 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::database::synthesis::{parse_oracle_with_cleave_brackets, synthesize_all};
+use crate::database::synthesis::{
+    merge_extracted_keywords, parse_oracle_with_cleave_brackets, synthesize_all,
+};
 use crate::game::engine::{apply_as_current, EngineError};
 use crate::game::game_object::GameObject;
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::zones::create_object;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AdditionalCost, Effect, PtValue, QuantityExpr,
-    ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TriggerDefinition,
+    ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    TriggerDefinition,
 };
 use crate::types::actions::GameAction;
 use crate::types::card::CardFace;
@@ -26,7 +29,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
-use crate::types::mana::{ManaColor, ManaUnit};
+use crate::types::mana::{ManaColor, ManaType, ManaUnit};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -98,10 +101,13 @@ fn build_face_from_oracle(
         &subtype_strings,
     );
 
-    // Merge keywords: parse keyword names into Keyword values (mirroring how
-    // build_oracle_face merges MTGJSON keywords with extracted_keywords).
-    // extract_keyword_line skips exact matches (since MTGJSON already has them),
-    // so we need to parse them here and merge, just like the real pipeline.
+    // Parse the keyword-hint names into base `Keyword` values (the scenario
+    // analog of MTGJSON's keywords array), then delegate the merge of the
+    // parser-extracted keywords to the shared `merge_extracted_keywords`
+    // authority. CR 113.2c: routing through the same helper as the production
+    // pipeline guarantees the scenario path cannot diverge from production —
+    // multi-instance keywords (Cascade/Storm/Myriad/Exalted) keep their printed
+    // multiplicity instead of being presence-deduped.
     let mut keywords: Vec<Keyword> = effective_kw_names
         .iter()
         .filter_map(|s| {
@@ -113,12 +119,7 @@ fn build_face_from_oracle(
             }
         })
         .collect();
-    // Merge parser-extracted keywords, skipping any already present from hints.
-    for kw in parsed.extracted_keywords {
-        if !keywords.contains(&kw) {
-            keywords.push(kw);
-        }
-    }
+    merge_extracted_keywords(&mut keywords, parsed.extracted_keywords);
 
     let mut face = CardFace {
         name: obj.name.clone(),
@@ -1037,6 +1038,21 @@ pub struct GameRunner {
 }
 
 impl GameRunner {
+    /// Wrap a raw `GameState` so tests that build state imperatively (rather
+    /// than via `GameScenario`) can still drive casts through the fluent
+    /// [`GameRunner::cast`] pipeline. Pure additive escape hatch — the caller
+    /// owns construction of `state` (phase, mana, objects).
+    pub fn from_state(state: GameState) -> GameRunner {
+        GameRunner { state }
+    }
+
+    /// Begin a fluent cast of `spell` through the full casting pipeline
+    /// (CR 601.2a–h). See [`SpellCast`] for the builder methods and the
+    /// driving-loop contract.
+    pub fn cast(&mut self, spell: ObjectId) -> SpellCast<'_> {
+        SpellCast::new(self, spell)
+    }
+
     /// Execute a single action. Returns the `ActionResult` from the engine.
     pub fn act(&mut self, action: GameAction) -> Result<ActionResult, EngineError> {
         apply_as_current(&mut self.state, action)
@@ -1429,6 +1445,475 @@ impl GameRunner {
             state: self.state.clone(),
             events: all_events,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SpellCast (fluent cast-pipeline driver)
+// ---------------------------------------------------------------------------
+
+/// Fluent builder that drives a spell through the full casting pipeline
+/// (CR 601.2a–h): announcement, mode choice, X announcement, target selection,
+/// mana payment (including convoke), and resolution. Constructed via
+/// [`GameRunner::cast`].
+///
+/// The driver exists to make five test-harness foot-guns structurally
+/// impossible:
+///
+/// 1. **Hand-written `TargetRef` vectors.** Callers declare *intent*
+///    (`.target_object`, `.target_player`); the driver matches that intent to
+///    each slot's `legal_targets` itself. No flat `SelectTargets` vector is
+///    ever built by hand.
+/// 2. **Incomplete modal target submission.** The driver answers exactly one
+///    slot per `ChooseTarget`, walking `target_slots` in written order
+///    (CR 601.2c) so every mode's slot is covered.
+/// 3. **Hand baseline captured at the wrong point.** CR 601.2a: the spell
+///    leaves hand only when it is put on the stack. The driver captures the
+///    per-player hand-size baseline at stack commit (the `Priority` window),
+///    so [`CastOutcome::hand_drawn`] reports a clean resolution delta.
+/// 4. **Keywords fed as inline Oracle text.** Convoke (and other keywords) must
+///    be built via [`CardBuilder::from_oracle_text_with_keywords`]; the driver
+///    pays convoke via `TapForConvoke` rather than reparsing reminder text.
+/// 5. **Asserting representation-internal flags.** [`CastOutcome`] exposes
+///    behavior/semantic deltas (`hand_drawn`, `zone_of`, `life_delta`,
+///    `final_waiting_for`) instead of dual-encoded AST fields.
+pub struct SpellCast<'a> {
+    runner: &'a mut GameRunner,
+    spell: ObjectId,
+    modes: Option<Vec<usize>>,
+    x: Option<u32>,
+    target_players: Vec<PlayerId>,
+    target_objects: Vec<ObjectId>,
+    convoke_with: Vec<ObjectId>,
+}
+
+impl<'a> SpellCast<'a> {
+    fn new(runner: &'a mut GameRunner, spell: ObjectId) -> Self {
+        SpellCast {
+            runner,
+            spell,
+            modes: None,
+            x: None,
+            target_players: Vec::new(),
+            target_objects: Vec::new(),
+            convoke_with: Vec::new(),
+        }
+    }
+
+    /// Declare the modal "choose N" mode indices for a modal spell (CR 700.2).
+    /// Omit for non-modal spells.
+    pub fn modes(mut self, modes: &[usize]) -> Self {
+        self.modes = Some(modes.to_vec());
+        self
+    }
+
+    /// Announce the value of X (CR 107.3a / CR 601.2b). Omit for non-X spells.
+    pub fn x(mut self, value: u32) -> Self {
+        self.x = Some(value);
+        self
+    }
+
+    /// Declare a player as an intended target (CR 601.2c). Matched to the first
+    /// slot whose `legal_targets` contains it.
+    pub fn target_player(mut self, player: PlayerId) -> Self {
+        self.target_players.push(player);
+        self
+    }
+
+    /// Declare several players as intended targets, in order.
+    pub fn target_players(mut self, players: &[PlayerId]) -> Self {
+        self.target_players.extend_from_slice(players);
+        self
+    }
+
+    /// Declare an object as an intended target (CR 601.2c). Matched to the first
+    /// unused slot whose `legal_targets` contains it.
+    pub fn target_object(mut self, object: ObjectId) -> Self {
+        self.target_objects.push(object);
+        self
+    }
+
+    /// Declare several objects as intended targets, in order.
+    pub fn target_objects(mut self, objects: &[ObjectId]) -> Self {
+        self.target_objects.extend_from_slice(objects);
+        self
+    }
+
+    /// Tap these creatures to pay the cost via Convoke (CR 702.51a). Each is
+    /// tapped during the `ManaPayment { convoke_mode }` window with mana of the
+    /// creature's first declared color (falling back to colorless for the
+    /// generic portion of the cost — CR 702.51b).
+    pub fn convoke_with(mut self, creatures: &[ObjectId]) -> Self {
+        self.convoke_with.extend_from_slice(creatures);
+        self
+    }
+
+    /// Drive the full cast pipeline to its conclusion and return the outcome.
+    ///
+    /// Panics with a clear, extend-me message on any pipeline state the driver
+    /// is not yet taught to handle, or when a declared intent cannot be matched
+    /// to a required slot. A panic here is a *test-harness* signal: extend the
+    /// driver or drive the case manually — never assert around a silent skip.
+    pub fn resolve(self) -> CastOutcome {
+        let SpellCast {
+            runner,
+            spell,
+            modes,
+            x,
+            target_players,
+            target_objects,
+            convoke_with,
+        } = self;
+
+        // CR 119.3: snapshot life totals before the cast so `life_delta` reads a
+        // clean pre-cast → final difference.
+        let life_before: Vec<(PlayerId, i32)> = runner
+            .state
+            .players
+            .iter()
+            .map(|p| (p.id, p.life))
+            .collect();
+
+        let card_id = runner.state.objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+            })
+            .expect("CastSpell must be accepted by the engine");
+
+        // Intent the driver matches as it walks slots: object targets are
+        // consumed one per slot (most slots are object slots), while player
+        // targets are reusable across slots (one player may be targeted by
+        // several modes — see `pick_slot_target`).
+        let mut remaining_objects: Vec<ObjectId> = target_objects;
+        let declared_players: Vec<PlayerId> = target_players;
+
+        // CR 601.2a: the spell leaves hand only at stack commit. Captured when
+        // the driver reaches the post-cast `Priority` window.
+        let mut hand_at_commit: Option<Vec<(PlayerId, usize)>> = None;
+
+        for _ in 0..64 {
+            match &runner.state.waiting_for {
+                // CR 601.2b: modal spell announces its mode choice.
+                WaitingFor::ModeChoice { .. } => {
+                    let indices = modes.clone().unwrap_or_else(|| {
+                        panic!(
+                            "SpellCast reached WaitingFor::ModeChoice but no .modes(..) were \
+                             declared — this is a modal spell; declare its chosen mode indices"
+                        )
+                    });
+                    runner
+                        .act(GameAction::SelectModes { indices })
+                        .expect("SelectModes must be accepted");
+                }
+                // CR 107.3a / CR 601.2b: announce X.
+                WaitingFor::ChooseXValue { .. } => {
+                    let value = x.unwrap_or_else(|| {
+                        panic!(
+                            "SpellCast reached WaitingFor::ChooseXValue but no .x(..) was \
+                             declared — this spell needs X announced"
+                        )
+                    });
+                    runner
+                        .act(GameAction::ChooseX { value })
+                        .expect("ChooseX must be accepted");
+                }
+                // CR 702.51a / CR 601.2g–h: mana payment, possibly via convoke.
+                WaitingFor::ManaPayment { .. } => {
+                    if convoke_with.is_empty() {
+                        // Pool-funded casts usually auto-pay and never surface a
+                        // ManaPayment window. If one surfaces with no convoke
+                        // declared, the driver has no payment policy — fail loud.
+                        panic!(
+                            "SpellCast reached WaitingFor::ManaPayment with no .convoke_with(..) \
+                             declared — pool-funded casts should auto-pay; drive this payment \
+                             manually or declare convoke creatures"
+                        );
+                    }
+                    for &creature in &convoke_with {
+                        // CR 702.51b: pay one mana of the creature's color, or
+                        // colorless toward the generic portion of the cost.
+                        let mana_type = runner
+                            .state
+                            .objects
+                            .get(&creature)
+                            .and_then(|obj| obj.color.first().copied())
+                            .map(ManaType::from)
+                            .unwrap_or(ManaType::Colorless);
+                        runner
+                            .act(GameAction::TapForConvoke {
+                                object_id: creature,
+                                mana_type,
+                            })
+                            .expect("TapForConvoke must be accepted");
+                    }
+                    // CR 601.2h: finalize the (now fully convoke-paid) cost.
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("finalizing the convoke payment must be accepted");
+                }
+                // CR 601.2c: declare one target per slot, in written order.
+                WaitingFor::TargetSelection {
+                    target_slots,
+                    selection,
+                    ..
+                } => {
+                    let slot = &target_slots[selection.current_slot];
+                    let choice = pick_slot_target(
+                        slot,
+                        &mut remaining_objects,
+                        &declared_players,
+                        selection.current_slot,
+                    );
+                    runner
+                        .act(GameAction::ChooseTarget { target: choice })
+                        .expect("ChooseTarget must be accepted");
+                }
+                // CR 601.2a: spell is on the stack — capture the hand baseline.
+                WaitingFor::Priority { .. } => {
+                    hand_at_commit = Some(
+                        runner
+                            .state
+                            .players
+                            .iter()
+                            .map(|p| (p.id, p.hand.len()))
+                            .collect(),
+                    );
+                    break;
+                }
+                other => panic!(
+                    "SpellCast driver does not handle WaitingFor::{} yet — extend the driver \
+                     or drive this case manually",
+                    waiting_for_variant_name(other)
+                ),
+            }
+        }
+
+        let hand_baseline = hand_at_commit.unwrap_or_else(|| {
+            panic!(
+                "SpellCast never reached a Priority window after committing the cast \
+                 (loop cap exceeded) — the spell did not commit to the stack"
+            )
+        });
+
+        // Resolution. Auto-answer ordering/scry prompts; stop at any prompt the
+        // driver is not taught to answer so the caller can assert on it via
+        // `final_waiting_for()` (e.g. a `SearchChoice` fail-to-find boundary).
+        for _ in 0..64 {
+            match &runner.state.waiting_for {
+                WaitingFor::OrderTriggers { .. } => {
+                    // CR 603.3b: drain the per-controller ordering prompt.
+                    super::triggers::drain_order_triggers_with_identity(&mut runner.state);
+                }
+                WaitingFor::ScryChoice { cards, .. } => {
+                    // CR 701.22a: default policy keeps the looked-at cards on top.
+                    let cards = cards.clone();
+                    runner
+                        .act(GameAction::SelectCards { cards })
+                        .expect("SelectCards (scry) must be accepted");
+                }
+                WaitingFor::Priority { .. } => {
+                    if runner.state.stack.is_empty() {
+                        break;
+                    }
+                    if runner.act(GameAction::PassPriority).is_err() {
+                        break;
+                    }
+                }
+                // Any other prompt (e.g. SearchChoice) is left for the caller to
+                // inspect via `final_waiting_for()`; the driver stops here.
+                _ => break,
+            }
+        }
+
+        CastOutcome {
+            state: runner.state.clone(),
+            hand_baseline,
+            life_before,
+        }
+    }
+}
+
+/// Pick the `ChooseTarget` payload for a single slot from declared intent,
+/// matching CR 601.2c (targets declared one per slot, in written order).
+///
+/// Object intent is *consumed* (each declared object satisfies at most one
+/// slot, so distinct exile/destroy targets never alias). Player intent is
+/// *reusable* — the same player is routinely targeted by several modes of one
+/// modal spell (e.g. Kozilek's Command mode 1 scries *and* draws for the same
+/// target player), so a declared player may satisfy multiple player slots.
+/// Falls back to `None` for optional slots; panics for an unsatisfiable
+/// required slot.
+fn pick_slot_target(
+    slot: &crate::types::game_state::TargetSelectionSlot,
+    remaining_objects: &mut Vec<ObjectId>,
+    declared_players: &[PlayerId],
+    slot_index: usize,
+) -> Option<TargetRef> {
+    if let Some(pos) = remaining_objects
+        .iter()
+        .position(|&o| slot.legal_targets.contains(&TargetRef::Object(o)))
+    {
+        return Some(TargetRef::Object(remaining_objects.remove(pos)));
+    }
+    if let Some(&player) = declared_players
+        .iter()
+        .find(|&&p| slot.legal_targets.contains(&TargetRef::Player(p)))
+    {
+        return Some(TargetRef::Player(player));
+    }
+    if slot.optional {
+        return None;
+    }
+    panic!(
+        "SpellCast could not satisfy required target slot {slot_index}: no declared target \
+         matches its legal set.\n  legal_targets: {:?}\n  remaining declared objects: {:?}\n  \
+         declared players: {:?}",
+        slot.legal_targets, remaining_objects, declared_players
+    );
+}
+
+/// Stable variant name for the extend-me panic messages (mirrors the engine's
+/// own discriminant naming so failures point at the exact unhandled prompt).
+fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
+    // Reuse the runner's authoritative mapping by wrapping in a throwaway
+    // borrow-free match. Kept in sync with `GameRunner::waiting_for_kind`.
+    match waiting {
+        WaitingFor::ManaPayment { .. } => "ManaPayment",
+        WaitingFor::ChooseXValue { .. } => "ChooseXValue",
+        WaitingFor::TargetSelection { .. } => "TargetSelection",
+        WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
+        WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
+        WaitingFor::ModeChoice { .. } => "ModeChoice",
+        WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
+        WaitingFor::Priority { .. } => "Priority",
+        WaitingFor::OrderTriggers { .. } => "OrderTriggers",
+        WaitingFor::ScryChoice { .. } => "ScryChoice",
+        WaitingFor::SearchChoice { .. } => "SearchChoice",
+        WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+        WaitingFor::GameOver { .. } => "GameOver",
+        _ => "<other>",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CastOutcome (behavior/semantic delta accessors)
+// ---------------------------------------------------------------------------
+
+/// Post-cast snapshot exposing behavior/semantic deltas — never AST-internal
+/// flags. Produced by [`SpellCast::resolve`].
+pub struct CastOutcome {
+    state: GameState,
+    /// Per-player hand sizes captured at stack commit (CR 601.2a) — the clean
+    /// baseline for resolution-draw deltas (foot-gun 3 fix).
+    hand_baseline: Vec<(PlayerId, usize)>,
+    /// Per-player life totals captured before the cast (CR 119.3).
+    life_before: Vec<(PlayerId, i32)>,
+}
+
+impl CastOutcome {
+    fn hand_baseline_for(&self, player: PlayerId) -> usize {
+        self.hand_baseline
+            .iter()
+            .find(|(p, _)| *p == player)
+            .map(|(_, n)| *n)
+            .expect("player must have a hand baseline")
+    }
+
+    fn life_before_for(&self, player: PlayerId) -> i32 {
+        self.life_before
+            .iter()
+            .find(|(p, _)| *p == player)
+            .map(|(_, l)| *l)
+            .expect("player must have a pre-cast life snapshot")
+    }
+
+    fn current_hand(&self, player: PlayerId) -> usize {
+        self.state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.hand.len())
+            .expect("player must exist")
+    }
+
+    fn current_life(&self, player: PlayerId) -> i32 {
+        self.state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.life)
+            .expect("player must exist")
+    }
+
+    /// Net cards drawn during resolution: final hand minus the stack-commit
+    /// baseline (CR 601.2a). Positive = net draw, negative = net discard.
+    pub fn hand_drawn(&self, player: PlayerId) -> i64 {
+        self.current_hand(player) as i64 - self.hand_baseline_for(player) as i64
+    }
+
+    /// The zone an object currently occupies (CR 400.1).
+    pub fn zone_of(&self, object: ObjectId) -> Zone {
+        self.state.objects[&object].zone
+    }
+
+    /// Net life change for a player: final minus pre-cast (CR 119.3).
+    pub fn life_delta(&self, player: PlayerId) -> i32 {
+        self.current_life(player) - self.life_before_for(player)
+    }
+
+    /// The waiting state the pipeline halted in (e.g. `Priority` for a clean
+    /// resolve, or a `SearchChoice` the driver left for the caller to inspect).
+    pub fn final_waiting_for(&self) -> &WaitingFor {
+        &self.state.waiting_for
+    }
+
+    /// Read-only view of the final game state for assertions the typed
+    /// accessors don't yet cover.
+    pub fn state(&self) -> &GameState {
+        &self.state
+    }
+
+    /// Assert net cards drawn since stack commit (foot-gun 3 fix).
+    pub fn assert_hand_drawn(&self, player: PlayerId, expected: i64) {
+        let actual = self.hand_drawn(player);
+        assert_eq!(
+            actual,
+            expected,
+            "P{} hand delta since stack commit: expected {expected}, got {actual} \
+             (baseline {}, final {})",
+            player.0,
+            self.hand_baseline_for(player),
+            self.current_hand(player)
+        );
+    }
+
+    /// Assert every listed object now occupies `zone`.
+    pub fn assert_zone(&self, objects: &[ObjectId], zone: Zone) {
+        for &object in objects {
+            let actual = self.zone_of(object);
+            assert_eq!(
+                actual, zone,
+                "object {} expected in {zone:?}, found in {actual:?}",
+                object.0
+            );
+        }
+    }
+
+    /// Assert a player's net life change since before the cast (CR 119.3).
+    pub fn assert_life_delta(&self, player: PlayerId, expected: i32) {
+        let actual = self.life_delta(player);
+        assert_eq!(
+            actual,
+            expected,
+            "P{} life delta: expected {expected}, got {actual} \
+             (before {}, final {})",
+            player.0,
+            self.life_before_for(player),
+            self.current_life(player)
+        );
     }
 }
 
@@ -2062,6 +2547,33 @@ mod tests {
 
         assert!(obj.keywords.contains(&Keyword::Flying));
         assert!(obj.keywords.contains(&Keyword::Vigilance));
+    }
+
+    /// CR 113.2c / CR 702.116b: the scenario harness routes its keyword merge
+    /// through the shared `merge_extracted_keywords` authority, so a creature whose
+    /// Oracle text prints "Myriad, myriad" must carry two Keyword::Myriad instances
+    /// — locking the scenario path to the production multiplicity behavior.
+    #[test]
+    fn from_oracle_text_recovers_repeated_myriad_instances() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature(P0, "Scurry of Squirrels", 3, 3)
+            .from_oracle_text_with_keywords(
+                &["myriad"],
+                "Myriad, myriad (Whenever this creature attacks, for each opponent other than defending player, you may create a token that's a copy of this creature that's tapped and attacking that player or a planeswalker they control. Then do it again. Exile the tokens at end of combat.)",
+            )
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert_eq!(
+            obj.keywords
+                .iter()
+                .filter(|k| matches!(k, Keyword::Myriad))
+                .count(),
+            2,
+            "scenario face must carry two Myriad instances via the shared merge"
+        );
     }
 
     #[test]

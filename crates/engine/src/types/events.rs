@@ -99,6 +99,15 @@ pub enum ClashResult {
     Tied,
 }
 
+/// CR 103.1 / CR 706: one round of the starting-player d20 roll-off.
+/// `rolls` are in seat order; round 1 contains every seat, and each later
+/// round contains exactly the previous round's tied-max group (CR 103.1
+/// reroll). The high roller of the final round becomes the starting player.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContestRound {
+    pub rolls: Vec<(PlayerId, u8)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
@@ -531,6 +540,18 @@ pub enum GameEvent {
         sides: u8,
         result: u8,
     },
+    /// CR 103.1 / CR 706: The game-1 starting-player roll-off, emitted as one
+    /// authoritative structured event so the contest can be rendered round by
+    /// round (including tie rerolls) with no downstream re-derivation. `rounds`
+    /// preserves the round boundaries the engine computes; `winner` is the
+    /// engine's authoritative starting player (unique max of the final round, or
+    /// the lowest-seat fallback when tied at the reroll cap). Replaces the prior
+    /// flat per-roll `DieRolled` batch on the starting-player contest path; in-game
+    /// die rolls still emit `DieRolled`.
+    StartingPlayerContest {
+        rounds: Vec<ContestRound>,
+        winner: PlayerId,
+    },
     /// CR 705: A coin was flipped.
     CoinFlipped {
         player_id: PlayerId,
@@ -567,6 +588,22 @@ pub enum GameEvent {
     /// CR 725: A player took the initiative.
     InitiativeTaken {
         player_id: PlayerId,
+    },
+    /// CR 701.51c: An Attraction was opened onto the battlefield.
+    AttractionOpened {
+        player_id: PlayerId,
+        object_id: ObjectId,
+    },
+    /// CR 701.52: The active player rolled to visit their Attractions.
+    AttractionsRolledToVisit {
+        player_id: PlayerId,
+        roll: u8,
+    },
+    /// CR 701.52a + CR 702.159a: A specific Attraction was visited this roll.
+    AttractionVisited {
+        player_id: PlayerId,
+        roll: u8,
+        attraction_id: ObjectId,
     },
     /// Avatar crossover: A firebending ability resolved and produced mana.
     Firebend {

@@ -170,7 +170,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::SetInMotion
         | TriggerMode::Specializes
         | TriggerMode::Trains
-        | TriggerMode::VisitAttraction => match_unimplemented,
+        | TriggerMode::VisitAttraction => match_visit_attraction,
         // CR 603.8: State triggers are not event-based — they are checked separately
         // in the priority pipeline, not through the event-matching trigger system.
         TriggerMode::StateCondition => return None,
@@ -345,6 +345,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 701.54: Ring tempts you trigger
     r.insert(TriggerMode::RingTemptsYou, match_ring_tempts_you);
 
+    // CR 701.52a + CR 702.159a: Attraction visit triggers
+    r.insert(TriggerMode::VisitAttraction, match_visit_attraction);
+
     // CR 309 / CR 701.49: Dungeon triggers
     r.insert(TriggerMode::DungeonCompleted, match_dungeon_completed);
     r.insert(TriggerMode::RoomEntered, match_room_entered);
@@ -425,7 +428,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Specializes,
         // TriggerMode::Stationed — moved to real matcher below
         TriggerMode::Trains,
-        TriggerMode::VisitAttraction,
+        // TriggerMode::VisitAttraction — moved to real matcher above
         // TriggerMode::BecomesCrewed — moved to real matcher below
         // TriggerMode::BecomesPlotted — moved to real matcher above
         // TriggerMode::BecomesSaddled — moved to real matcher below
@@ -803,6 +806,9 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::BecomesPlotted { .. }
         | GameEvent::DungeonCompleted { .. }
         | GameEvent::InitiativeTaken { .. }
+        | GameEvent::AttractionOpened { .. }
+        | GameEvent::AttractionsRolledToVisit { .. }
+        | GameEvent::AttractionVisited { .. }
         | GameEvent::Firebend { .. }
         | GameEvent::Airbend { .. }
         | GameEvent::Earthbend { .. }
@@ -823,7 +829,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::CascadeMissed { .. }
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
-        | GameEvent::DebugPermissionRevoked { .. } => 0,
+        | GameEvent::DebugPermissionRevoked { .. }
+        | GameEvent::StartingPlayerContest { .. } => 0,
     }
 }
 
@@ -2921,6 +2928,25 @@ pub(super) fn match_vote_resolved(
     _state: &GameState,
 ) -> bool {
     matches!(event, GameEvent::VoteResolved { .. })
+}
+
+/// CR 701.52a + CR 702.159a: Visit ability on an Attraction permanent.
+pub(super) fn match_visit_attraction(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::AttractionVisited {
+        player_id,
+        attraction_id,
+        ..
+    } = event
+    {
+        *attraction_id == source_id && valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
 }
 
 /// CR 309.7: Match dungeon completion events.
@@ -7909,6 +7935,7 @@ mod tests {
                 description: None,
                 source_name: "Innkeeper's Talent".to_string(),
                 subject_match_count: Some(0),
+                die_result: None,
             },
         });
 

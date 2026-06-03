@@ -177,7 +177,15 @@
     "setAsCommander": "Als Kommandeur festlegen:",
     "cardCount": "{{count}}/{{expected}} Karten",
     "singletonViolations": "Singleton-Verstöße: {{cards}}",
-    "colorViolations": "Verstöße gegen die Farbidentität: {{cards}}"
+    "colorViolations": "Verstöße gegen die Farbidentität: {{cards}}",
+    "signatureSpell": {
+      "heading": "Signaturzauber",
+      "noSignatureSpell": "Kein Signaturzauber ausgewählt",
+      "setAsSignatureSpell": "Als Signaturzauber festlegen:",
+      "remove": "Signaturzauber entfernen",
+      "mustBeInstantOrSorcery": "Der Signaturzauber muss ein Spontanzauber oder eine Hexerei sein",
+      "outsideColorIdentity": "{{name}}: außerhalb der Farbidentität des Eidbrechers"
+    }
   },
   "manaCurve": {
     "title": "Manakurve",
