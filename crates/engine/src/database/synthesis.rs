@@ -1704,6 +1704,142 @@ pub fn synthesize_casualty(face: &mut CardFace) {
     );
 }
 
+/// CR 702.56a: The canonical `AbilityDefinition` produced by a Replicate
+/// trigger — a self-referential `CopySpell` repeated once for each time the
+/// replicate cost was paid, gated on the replicate (additional) cost having
+/// been paid. This is the single authority for what a replicate trigger
+/// resolves into.
+///
+/// Differs from `casualty_copy_ability_definition` in exactly one axis:
+/// Casualty copies the spell once (a single sacrifice), while Replicate is a
+/// *repeatable* additional cost (CR 702.56a: "pay [cost] any number of times")
+/// that copies the spell once per payment. That per-payment count flows through
+/// `repeat_for = QuantityRef::AdditionalCostPaymentCount`, which the
+/// `resolve_chain_body` iteration loop reads (CR 609.3) to drive N `CopySpell`
+/// iterations — each producing one stack copy with its own CR 707.10c retarget
+/// step.
+pub fn replicate_copy_ability_definition() -> AbilityDefinition {
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        // CR 702.56a + CR 707.10c: "If the spell has any targets, you may
+        // choose new targets for any of the copies."
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+        },
+    )
+    // CR 702.56a: "if a replicate cost was paid for it". With zero payments the
+    // count is also zero, but the condition keeps the trigger's resolution a
+    // no-op (no SpellCopied events) when replicate was declined, matching the
+    // intervening-if phrasing exactly.
+    .condition(AbilityCondition::additional_cost_paid_any());
+    // CR 702.56a + CR 609.3: "copy it for each time its replicate cost was
+    // paid." The replicate cost is a repeatable additional cost, so the number
+    // of copies equals the cast-time payment count
+    // (`SpellContext::additional_cost_payment_count`).
+    def.repeat_for = Some(QuantityExpr::Ref {
+        qty: QuantityRef::AdditionalCostPaymentCount,
+    });
+    def
+}
+
+/// CR 702.56a: Synthesize Replicate {cost} into a repeatable optional additional
+/// cost and a "when you cast this spell" trigger that copies it once for each
+/// time the replicate cost was paid.
+///
+/// Replicate = two abilities (CR 702.56a):
+/// 1. Static ability: "As an additional cost to cast this spell, you may pay
+///    [cost] any number of times" — modeled as
+///    `AdditionalCost::Optional { repeatable: true, .. }` (same shape as Squad,
+///    CR 702.157a).
+/// 2. Triggered ability: "When you cast this spell, if a replicate cost was paid
+///    for it, copy it for each time its replicate cost was paid. If the spell
+///    has any targets, you may choose new targets for any of the copies." —
+///    modeled as a `SpellCast` trigger (same shape as Casualty, CR 702.153a)
+///    whose execute is `replicate_copy_ability_definition()`.
+///
+/// Build-for-the-class: every card with `Keyword::Replicate(cost)` flows through
+/// this single synthesizer. Idempotent across repeated invocations.
+pub fn synthesize_replicate(face: &mut CardFace) {
+    let replicate_costs: Vec<_> = face
+        .keywords
+        .iter()
+        .filter_map(|k| match k {
+            Keyword::Replicate(cost) => Some(cost.clone()),
+            _ => None,
+        })
+        .collect();
+    if replicate_costs.is_empty() {
+        return;
+    }
+
+    // CR 702.56b: Multiple Replicate instances are paid separately and each
+    // instance's linked trigger counts only its own payments. The engine tracks
+    // a single aggregate `additional_cost_payment_count`, so it cannot keep
+    // per-instance payment tallies. Defer rather than over-count copies. Mirrors
+    // the Squad multi-instance deferral (CR 702.157b).
+    if replicate_costs.len() > 1 {
+        defer_synthesis(
+            face,
+            "replicate_multiple_instances",
+            "CR 702.56b: multiple Replicate instances require per-instance payment tracking"
+                .to_string(),
+        );
+        return;
+    }
+
+    let replicate_cost = replicate_costs[0].clone();
+
+    // CR 702.56a: "As an additional cost to cast this spell, you may pay [cost]
+    // any number of times." Repeatable optional mana cost — the cast-time
+    // payment loop records each payment in `additional_cost_payment_count`.
+    if face.additional_cost.is_none() {
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::Mana {
+                cost: replicate_cost,
+            },
+            repeatable: true,
+        });
+    }
+
+    // CR 702.56a: "When you cast this spell, if a replicate cost was paid for
+    // it, copy it for each time its replicate cost was paid."
+    // Idempotency: skip if the replicate copy-on-cast trigger already exists.
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::SpellCast)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && t.trigger_zones.contains(&Zone::Stack)
+            && t.execute.as_deref().is_some_and(|a| {
+                matches!(
+                    &*a.effect,
+                    Effect::CopySpell {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                ) && matches!(
+                    a.repeat_for,
+                    Some(QuantityExpr::Ref {
+                        qty: QuantityRef::AdditionalCostPaymentCount,
+                    })
+                )
+            })
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    face.triggers.push(
+        TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Stack])
+            .execute(replicate_copy_ability_definition())
+            .description(
+                "Replicate — copy this spell once for each time its replicate cost was paid"
+                    .to_string(),
+            ),
+    );
+}
+
 /// CR 702.42a: Synthesize Entwine cost onto modal spell's ModalChoice.
 ///
 /// Sets `entwine_cost` on the face's modal abilities and raises `max_choices`
@@ -4673,6 +4809,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_outlast(face);
     synthesize_reinforce(face);
     synthesize_casualty(face);
+    // CR 702.56a: Replicate — repeatable optional additional cost + SpellCast
+    // copy trigger that makes one copy per replicate payment.
+    synthesize_replicate(face);
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
     synthesize_evoke(face);
@@ -11098,6 +11237,126 @@ mod squad_synthesis_tests {
                         &*ability.effect,
                         Effect::Unimplemented { name, .. }
                             if name == "squad_multiple_instances"
+                    )
+                })
+                .count(),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
+mod replicate_synthesis_tests {
+    use super::*;
+    use crate::types::mana::ManaCostShard;
+
+    /// CR 702.56a: Replicate synthesizes a repeatable optional additional cost
+    /// and a SpellCast trigger whose `CopySpell` count is the number of
+    /// replicate payments (`AdditionalCostPaymentCount`).
+    #[test]
+    fn synthesize_replicate_sets_repeatable_cost_and_payment_count_copy_trigger() {
+        let replicate_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Blue],
+        };
+        let mut face = CardFace {
+            keywords: vec![Keyword::Replicate(replicate_cost.clone())],
+            ..CardFace::default()
+        };
+
+        synthesize_replicate(&mut face);
+
+        match face.additional_cost.as_ref().expect("additional_cost set") {
+            AdditionalCost::Optional {
+                cost: AbilityCost::Mana { cost },
+                repeatable: true,
+            } => {
+                assert_eq!(cost, &replicate_cost);
+            }
+            other => panic!("expected repeatable Optional mana cost, got {other:?}"),
+        }
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("replicate SpellCast trigger");
+        let execute = trigger.execute.as_ref().expect("execute body");
+        assert_eq!(
+            **execute,
+            replicate_copy_ability_definition(),
+            "replicate trigger's execute must equal the canonical \
+             replicate_copy_ability_definition() — single source of truth"
+        );
+        // CR 707.10c: copies may choose new targets.
+        match &*execute.effect {
+            Effect::CopySpell { target, retarget } => {
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert!(matches!(
+                    retarget,
+                    CopyRetargetPermission::MayChooseNewTargets
+                ));
+            }
+            other => panic!("expected CopySpell, got {other:?}"),
+        }
+        // CR 609.3: one copy per replicate payment.
+        assert!(matches!(
+            execute.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::AdditionalCostPaymentCount,
+            })
+        ));
+    }
+
+    #[test]
+    fn synthesize_replicate_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Replicate(ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })],
+            ..CardFace::default()
+        };
+
+        synthesize_replicate(&mut face);
+        let first_cost = face.additional_cost.clone();
+        let first_trigger_count = face.triggers.len();
+        synthesize_replicate(&mut face);
+
+        assert_eq!(face.additional_cost, first_cost);
+        assert_eq!(face.triggers.len(), first_trigger_count);
+    }
+
+    /// CR 702.56b: Multiple Replicate instances require per-instance payment
+    /// tracking the engine cannot yet model, so synthesis defers.
+    #[test]
+    fn synthesize_replicate_defers_multiple_instances() {
+        let mut face = CardFace {
+            keywords: vec![
+                Keyword::Replicate(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![],
+                }),
+                Keyword::Replicate(ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![],
+                }),
+            ],
+            ..CardFace::default()
+        };
+
+        synthesize_replicate(&mut face);
+
+        assert!(face.additional_cost.is_none());
+        assert!(face.triggers.is_empty());
+        assert_eq!(
+            face.abilities
+                .iter()
+                .filter(|ability| {
+                    matches!(
+                        &*ability.effect,
+                        Effect::Unimplemented { name, .. }
+                            if name == "replicate_multiple_instances"
                     )
                 })
                 .count(),
