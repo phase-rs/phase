@@ -3,52 +3,73 @@
 //!
 //! https://github.com/phase-rs/phase/issues/141
 
-use std::path::Path;
-use std::sync::OnceLock;
-
-use engine::database::card_db::CardDatabase;
-use engine::game::mana_payment::can_pay_for_spell;
 use engine::game::scenario::{GameScenario, P0};
-use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
+use engine::parser::oracle_static::parse_static_line;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{
-    ManaCost, ManaRestriction, ManaType, ManaUnit, PaymentContext,
+    ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit,
 };
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-fn load_db() -> Option<&'static CardDatabase> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
-    if !path.exists() {
-        let data_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/card-data.json");
-        if !data_path.exists() {
-            return None;
-        }
-        static DB_DATA: OnceLock<CardDatabase> = OnceLock::new();
-        return Some(DB_DATA.get_or_init(|| {
-            CardDatabase::from_export(&data_path).expect("data/card-data.json should load")
-        }));
-    }
-    static DB: OnceLock<CardDatabase> = OnceLock::new();
-    Some(DB.get_or_init(|| CardDatabase::from_export(&path).expect("card-data.json should load")))
-}
-
 /// Doors of Durin is {3}{R}{G}; Goblin Anarchomancer should reduce generic by 1.
 #[test]
-fn goblin_anarchomancer_reduces_doors_of_durin_display_cost() {
-    let Some(db) = load_db() else {
-        return;
-    };
-
+fn goblin_anarchomancer_reduces_only_red_or_green_spell_costs() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_real_card(P0, "Goblin Anarchomancer", Zone::Battlefield, db);
-    let doors = scenario.add_real_card(P0, "Doors of Durin", Zone::Hand, db);
-
     let mut game = scenario.build();
-    engine::game::rehydrate_game_from_card_db(game.state_mut(), db);
+
+    let state = game.state_mut();
+    let reducer = create_object(
+        state,
+        CardId(9000),
+        P0,
+        "Goblin Anarchomancer".to_string(),
+        Zone::Battlefield,
+    );
+    let anarchomancer_static =
+        parse_static_line("Each spell you cast that's red or green costs {1} less to cast.")
+            .expect("Goblin Anarchomancer static should parse");
+    state
+        .objects
+        .get_mut(&reducer)
+        .unwrap()
+        .static_definitions
+        .push(anarchomancer_static);
+
+    let doors = create_object(
+        state,
+        CardId(9001),
+        P0,
+        "Doors of Durin".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&doors).unwrap();
+        obj.card_types.supertypes.push(Supertype::Legendary);
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Green],
+            generic: 3,
+        };
+        obj.color = vec![ManaColor::Red, ManaColor::Green];
+        obj.base_color = obj.color.clone();
+    }
+
+    let colorless_artifact = create_object(
+        state,
+        CardId(9002),
+        P0,
+        "Colorless Artifact".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&colorless_artifact).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.mana_cost = ManaCost::generic(3);
+    }
 
     let cost =
         engine::game::casting::display_spell_cost(game.state(), P0, doors).expect("display cost");
@@ -57,69 +78,56 @@ fn goblin_anarchomancer_reduces_doors_of_durin_display_cost() {
     };
     assert_eq!(
         generic, 2,
-        "Doors of Durin should display {2}{R}{G} with Anarchomancer on board (issue #141)"
+        "Doors of Durin should display {{2}}{{R}}{{G}} with Anarchomancer on board (issue #141)"
     );
-}
 
-/// Delighted Halfling mana with legendary restriction must pay for a commander.
-#[test]
-fn delighted_halfling_restricted_mana_pays_legendary_commander() {
-    let Some(db) = load_db() else {
-        return;
+    let cost = engine::game::casting::display_spell_cost(game.state(), P0, colorless_artifact)
+        .expect("display cost");
+    let ManaCost::Cost { generic, .. } = cost else {
+        panic!("expected ManaCost::Cost, got {cost:?}");
     };
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let halfling = scenario.add_real_card(P0, "Delighted Halfling", Zone::Battlefield, db);
-    let commander = scenario.add_real_card(P0, "Frodo, Adventurous Hobbit", Zone::Command, db);
-
-    let mut game = scenario.build();
-    engine::game::rehydrate_game_from_card_db(game.state_mut(), db);
-
-    // Tap Halfling for restricted mana (simulate the second ability resolving).
-    let restriction = ManaRestriction::OnlyForSpellType("Legendary".to_string());
-    game.state_mut().players[P0].mana_pool.mana.push(ManaUnit::new(
-        ManaType::Red,
-        halfling,
-        false,
-        vec![restriction],
-    ));
-
-    let meta = engine::game::casting::build_spell_meta(game.state(), P0, commander)
-        .expect("commander spell meta");
-    assert!(
-        meta.types
-            .iter()
-            .any(|t| t.eq_ignore_ascii_case("Legendary")),
-        "commander meta must include Legendary supertype"
+    assert_eq!(
+        generic, 3,
+        "Goblin Anarchomancer must not reduce non-red/non-green spells"
     );
 
-    let cost = engine::game::casting::display_spell_cost(game.state(), P0, commander)
-        .expect("commander display cost");
-    let spell_ctx = PaymentContext::Spell(&meta);
-    assert!(
-        can_pay_for_spell(
-            &game.state().players[P0].mana_pool,
-            &cost,
-            Some(&spell_ctx),
-            engine::game::static_abilities::build_cost_permission_context(
-                game.state(),
-                P0,
-                false,
-            ),
-        ),
-        "legendary-restricted mana must be eligible for commander cast (issue #141)"
+    {
+        let player = game
+            .state_mut()
+            .players
+            .iter_mut()
+            .find(|player| player.id == P0)
+            .unwrap();
+        for mana_type in [
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Red,
+            ManaType::Green,
+        ] {
+            player
+                .mana_pool
+                .add(ManaUnit::new(mana_type, ObjectId(0), false, vec![]));
+        }
+    }
+
+    let outcome = game.cast(doors).resolve();
+    outcome.assert_zone(&[doors], Zone::Battlefield);
+    assert_eq!(
+        outcome.mana_pool_total(P0),
+        0,
+        "the reduced {{2}}{{R}}{{G}} cost should consume the exact four-mana pool"
     );
 }
 
-/// Manual regression without card-data: Halfling-style restriction + commander types.
+/// Delighted Halfling-style restricted mana must pay for a commander.
 #[test]
-fn legendary_restricted_mana_allows_commander_spell_meta() {
+fn restricted_mana_pays_legendary_commander_through_cast_pipeline() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
     let mut game = scenario.build();
     let state = game.state_mut();
+    state.format_config.command_zone = true;
     let commander_id = create_object(
         state,
         CardId(9001),
@@ -132,29 +140,28 @@ fn legendary_restricted_mana_allows_commander_spell_meta() {
         obj.card_types.supertypes.push(Supertype::Legendary);
         obj.card_types.core_types.push(CoreType::Creature);
         obj.is_commander = true;
+        obj.mana_cost = ManaCost::generic(1);
     }
 
     let restriction = ManaRestriction::OnlyForSpellType("Legendary".to_string());
-    state.players[P0].mana_pool.mana.push(ManaUnit::new(
-        ManaType::Green,
-        ObjectId(1),
-        false,
-        vec![restriction],
-    ));
+    state
+        .players
+        .iter_mut()
+        .find(|player| player.id == P0)
+        .unwrap()
+        .mana_pool
+        .add(ManaUnit::new(
+            ManaType::Green,
+            ObjectId(1),
+            false,
+            vec![restriction],
+        ));
 
-    let meta = engine::game::casting::build_spell_meta(game.state(), P0, commander_id).unwrap();
-    let spell_ctx = PaymentContext::Spell(&meta);
-    let cost = ManaCost::generic(3);
-    assert!(
-        can_pay_for_spell(
-            &game.state().players[P0].mana_pool,
-            &cost,
-            Some(&spell_ctx),
-            engine::game::static_abilities::build_cost_permission_context(
-                game.state(),
-                P0,
-                false,
-            ),
-        )
+    let outcome = game.cast(commander_id).resolve();
+    outcome.assert_zone(&[commander_id], Zone::Battlefield);
+    assert_eq!(
+        outcome.mana_pool_total(P0),
+        0,
+        "legendary-restricted mana must be eligible for commander casts (issue #141)"
     );
 }

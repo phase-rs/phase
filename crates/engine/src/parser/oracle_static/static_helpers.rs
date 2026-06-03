@@ -18,33 +18,40 @@ use super::support::*;
 /// `"cost"`. Handles compound subjects such as Goblin Anarchomancer's
 /// "Each spell you cast that's red or green" via `parse_that_clause_suffix`.
 fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
-    let mut base = type_desc.trim();
-    // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-    base = base.strip_prefix("each ").unwrap_or(base);
+    let base = type_desc.trim();
+    let base = tag::<_, _, OracleError<'_>>("each ")
+        .parse(base)
+        .map_or(base, |(rest, _)| rest);
 
-    let (base_part, qual_props) = if let Some(pos) = base
-        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .find(" that's ")
-        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| base.find(" that is "))
-        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .or_else(|| base.find(" that are "))
-    {
-        let before = base[..pos].trim();
-        let suffix = base[pos..].trim_start();
+    let that_split: Result<(&str, (&str, &str)), nom::Err<OracleError<'_>>> = all_consuming(alt((
+        (
+            take_until(" that's "),
+            recognize((tag::<_, _, OracleError<'_>>(" that's "), rest)),
+        ),
+        (
+            take_until(" that is "),
+            recognize((tag::<_, _, OracleError<'_>>(" that is "), rest)),
+        ),
+        (
+            take_until(" that are "),
+            recognize((tag::<_, _, OracleError<'_>>(" that are "), rest)),
+        ),
+    )))
+    .parse(base);
+
+    let (base_part, qual_props) = if let Ok((_, (before, suffix))) = that_split {
+        let suffix = suffix.trim_start();
         let (props, consumed) = crate::parser::oracle_target::parse_that_clause_suffix(suffix)?;
         if !suffix[consumed..].trim().is_empty() {
             return None;
         }
-        (before, props)
+        (before.trim(), props)
     } else {
         (base, Vec::new())
     };
 
-    let base_part = base_part
-        .trim_end_matches(" spells") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .trim_end_matches(" spell") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        .trim();
+    let base_part = strip_cost_mod_cast_scope_suffix(base_part);
+    let base_part = strip_cost_mod_spell_noun_suffix(base_part);
 
     let typed_filter = if base_part.is_empty() {
         None
@@ -90,6 +97,34 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
             TypedFilter::card().properties(qual_props),
         )),
     }
+}
+
+fn strip_cost_mod_cast_scope_suffix(input: &str) -> &str {
+    let (_, stripped) = all_consuming(alt((
+        terminated(
+            take_until(" your opponents cast"),
+            (tag::<_, _, OracleError<'_>>(" your opponents cast"), eof),
+        ),
+        terminated(take_until(" opponents cast"), (tag(" opponents cast"), eof)),
+        terminated(take_until(" you cast"), (tag(" you cast"), eof)),
+        rest,
+    )))
+    .parse(input)
+    .expect("rest fallback makes cast-scope suffix stripping infallible");
+    stripped.trim()
+}
+
+fn strip_cost_mod_spell_noun_suffix(input: &str) -> &str {
+    let (_, stripped) = all_consuming(alt((
+        value("", terminated(tag::<_, _, OracleError<'_>>("spells"), eof)),
+        value("", terminated(tag("spell"), eof)),
+        terminated(take_until(" spells"), (tag(" spells"), eof)),
+        terminated(take_until(" spell"), (tag(" spell"), eof)),
+        rest,
+    )))
+    .parse(input)
+    .expect("rest fallback makes spell-noun suffix stripping infallible");
+    stripped.trim()
 }
 
 /// Dynamic "for each" counts are extracted when present.
