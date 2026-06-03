@@ -546,20 +546,24 @@ pub(crate) fn parse_cda_quantity_with_context(
     // recursion below).
     if let Ok((after_divisor, divisor)) = nom_quantity::parse_fraction_divisor(text) {
         // Optional "of " ("half of ~"), consumed via the nom combinator per the
-        // parser mandate (`opt` never fails, so the fallback is unreachable).
+        // parser mandate.
         let (after_divisor, _) = opt(tag::<_, _, OracleError<'_>>("of "))
             .parse(after_divisor)
-            .unwrap_or((after_divisor, None));
-        let (inner_text, rounding) =
-            match take_until::<_, _, OracleError<'_>>(", round").parse(after_divisor) {
-                Ok((suffix, inner)) => (
-                    inner,
-                    nom_quantity::parse_rounding_suffix(suffix)
-                        .map(|(_, r)| r)
-                        .unwrap_or(RoundingMode::Down),
-                ),
-                Err(_) => (after_divisor, RoundingMode::Down),
-            };
+            .ok()?;
+
+        // `parse_cda_quantity_with_context` returns an `Option` without a nom
+        // remainder, so split the explicit rounding suffix first and recurse on
+        // only the inner CDA grammar. With no suffix, keep the shared
+        // parse_rounding_suffix default of Down.
+        let rounded_inner = pair(
+            take_until::<_, _, OracleError<'_>>(", round"),
+            nom_quantity::parse_explicit_rounding_suffix,
+        )
+        .parse(after_divisor);
+        let (inner_text, rounding) = match rounded_inner {
+            Ok(("", (inner, rounding))) => (inner, rounding),
+            _ => (after_divisor, RoundingMode::Down),
+        };
         if let Some(inner) = parse_cda_quantity_with_context(inner_text.trim(), ctx) {
             return Some(QuantityExpr::DivideRounded {
                 inner: Box::new(inner),

@@ -356,14 +356,18 @@ fn quantity_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
 /// to `Down` — the more common direction in actual Magic cards and a safe
 /// fallback for misparses.
 pub(crate) fn parse_rounding_suffix(input: &str) -> OracleResult<'_, RoundingMode> {
-    let (rest, rounding) = opt(alt((
+    let (rest, rounding) = opt(parse_explicit_rounding_suffix).parse(input)?;
+    Ok((rest, rounding.unwrap_or(RoundingMode::Down)))
+}
+
+pub(crate) fn parse_explicit_rounding_suffix(input: &str) -> OracleResult<'_, RoundingMode> {
+    alt((
         value(RoundingMode::Up, tag(", rounded up")),
         value(RoundingMode::Down, tag(", rounded down")),
         value(RoundingMode::Up, tag(", round up")),
         value(RoundingMode::Down, tag(", round down")),
-    )))
-    .parse(input)?;
-    Ok((rest, rounding.unwrap_or(RoundingMode::Down)))
+    ))
+    .parse(input)
 }
 
 /// Parse a literal number OR the variable `X` in filter-threshold contexts.
