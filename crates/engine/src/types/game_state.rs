@@ -4719,8 +4719,8 @@ pub struct GameState {
     /// turn, a creature controlled by P that was an Assassin OR a commander
     /// (snapshot at damage-dealing time per CR 608.2i — "looks back in time")
     /// dealt combat damage to ANY player. Populated by the trigger pipeline's
-    /// `DamageDealt` observer in `game::triggers` and cleared at cleanup
-    /// (`game::cleanup`) per CR 514. Read by `casting_variant_candidates`
+    /// `DamageDealt` observer in `game::triggers` and cleared in
+    /// `turns::start_next_turn` per CR 514. Read by `casting_variant_candidates`
     /// to gate the Freerunning cast permission on the spell's controller.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub assassin_or_commander_dealt_combat_damage_this_turn: HashSet<PlayerId>,

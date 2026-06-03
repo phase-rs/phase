@@ -1,13 +1,11 @@
-use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
+use super::resolve_player_for_context_ref;
 use crate::game::elimination::eliminate_player;
 use crate::game::players;
 use crate::game::static_abilities::player_has_cant_win;
-use crate::game::targeting::extract_player_from_event;
 
 /// CR 104.3e: Resolve "lose the game" — the affected player loses.
 ///
@@ -37,13 +35,23 @@ pub fn resolve_lose(
         _ => return Err(EffectError::MissingParam("expected LoseTheGame".into())),
     };
 
-    let players_to_eliminate: Vec<_> =
-        if let Some(pid) = resolve_context_ref_player(state, ability, target_filter) {
-            vec![pid]
-        } else if ability.targets.is_empty() {
-            // No target: controller loses (e.g., "you lose the game")
+    let players_to_eliminate: Vec<_> = match target_filter {
+        // Directed single-player subject ("that player loses", "you lose",
+        // "target player loses"). The canonical context-ref resolver in
+        // `effects::resolve_player_for_context_ref` is a superset of the
+        // prior bespoke helper: it handles Controller, SelfRef-equivalent,
+        // TriggeringPlayer (via event-context lookup), and the
+        // `TargetFilter::Player` case by reading `ability.targets`.
+        Some(filter) => vec![resolve_player_for_context_ref(state, ability, filter)],
+        None if ability.targets.is_empty() => {
+            // No directed subject and no targets: controller loses
+            // (e.g., "you lose the game").
             vec![ability.controller]
-        } else {
+        }
+        None => {
+            // CR 115.1: Multi-player loss path (e.g., "target player and
+            // target opponent lose the game"). Iterate every player target
+            // captured at announcement.
             ability
                 .targets
                 .iter()
@@ -52,7 +60,8 @@ pub fn resolve_lose(
                     _ => None,
                 })
                 .collect()
-        };
+        }
+    };
 
     for pid in players_to_eliminate {
         // CR 104.3e: A player who loses the game leaves the game.
@@ -64,28 +73,6 @@ pub fn resolve_lose(
         source_id: ability.source_id,
     });
     Ok(())
-}
-
-/// CR 603.7c + CR 109.4: Resolve a `target` filter that is a context-ref
-/// player subject to a concrete `PlayerId` at effect-resolution time.
-/// Returns `None` if the filter is absent, not a context ref, or cannot
-/// resolve from the current trigger event.
-///
-/// Shared by `resolve_lose` and `resolve_win` so the directed-subject
-/// semantics ("that player loses", "that player wins") are uniform.
-fn resolve_context_ref_player(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    target: Option<&TargetFilter>,
-) -> Option<crate::types::player::PlayerId> {
-    match target? {
-        TargetFilter::Controller | TargetFilter::SelfRef => Some(ability.controller),
-        TargetFilter::TriggeringPlayer => state
-            .current_trigger_event
-            .as_ref()
-            .and_then(|event| extract_player_from_event(event, state)),
-        _ => None,
-    }
 }
 
 /// CR 104.2b + CR 104.3e: Resolve "win the game" — the winner's opponents lose.
@@ -111,16 +98,15 @@ pub fn resolve_win(
         _ => return Err(EffectError::MissingParam("expected WinTheGame".into())),
     };
 
-    let winner = resolve_context_ref_player(state, ability, target_filter).unwrap_or_else(|| {
-        ability
-            .targets
-            .iter()
-            .find_map(|t| match t {
-                TargetRef::Player(pid) => Some(*pid),
-                _ => None,
-            })
-            .unwrap_or(ability.controller)
-    });
+    // Directed single-winner subject. The canonical context-ref resolver in
+    // `effects::resolve_player_for_context_ref` handles Controller, SelfRef,
+    // TriggeringPlayer, and `TargetFilter::Player` (consulting
+    // `ability.targets`) in one call; absence of a filter falls back to the
+    // controller (standard "you win the game" reading).
+    let winner = match target_filter {
+        Some(filter) => resolve_player_for_context_ref(state, ability, filter),
+        None => ability.controller,
+    };
 
     // CR 104.2b: CantWinTheGame blocks effect-based wins. If the winner is
     // under a CantWinTheGame static, the win effect resolves but has no
