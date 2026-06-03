@@ -129,7 +129,7 @@ pub fn guard_client_message_before_dispatch(
         } => guard_create_draft_with_settings(
             display_name,
             set_code,
-            password.as_deref(),
+            password,
             *timer_seconds,
             *pod_size,
         ),
@@ -137,7 +137,7 @@ pub fn guard_client_message_before_dispatch(
             draft_code,
             display_name,
             password,
-        } => guard_join_draft_with_password(draft_code, display_name, password.as_deref()),
+        } => guard_join_draft_with_password(draft_code, display_name, password),
         ClientMessage::DraftAction { draft_code, action } => {
             guard_draft_action(draft_code)?;
             guard_draft_action_payload(action)
@@ -228,12 +228,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::starter_decks::DeckData;
     use lobby_broker::validation::MAX_CONSUMED_TOKENS;
-
-    fn empty_deck() -> DeckData {
-        serde_json::from_str(r#"{"main_deck":[]}"#).expect("deck fixture")
-    }
 
     #[test]
     fn dispatch_guard_accepts_subscribe_lobby() {
