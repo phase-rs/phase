@@ -26,6 +26,7 @@ pub mod oracle_util;
 pub(crate) mod oracle_vote;
 pub(crate) mod swallow_check;
 #[cfg(test)]
+#[allow(dead_code)] // shared parser test assertions; ad-hoc call sites converted incrementally
 pub(crate) mod test_support;
 
 pub use oracle::parse_oracle_text;

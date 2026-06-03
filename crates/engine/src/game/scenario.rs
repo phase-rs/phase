@@ -1756,17 +1756,17 @@ impl<'a> SpellCast<'a> {
                         .expect("ChooseX must be accepted");
                 }
                 // CR 702.51a / CR 601.2g–h: mana payment, possibly via convoke.
+                //
+                // Most pool-funded casts auto-pay and never surface this window.
+                // But a Convoke (CR 702.51) spell always opens a `ManaPayment
+                // { convoke_mode }` window to offer tapping creatures — even when
+                // the controller intends to pay entirely from their pool. With no
+                // convoke creatures declared, the convoke loop is a no-op and the
+                // trailing `PassPriority` finalizes the remaining cost from the
+                // pool (the engine auto-allocates pool mana, incl. the generic
+                // portion). If the pool can't cover it, `PassPriority` errors and
+                // the `.expect` below fails loudly — fund the pool in the scenario.
                 WaitingFor::ManaPayment { .. } => {
-                    if convoke_with.is_empty() {
-                        // Pool-funded casts usually auto-pay and never surface a
-                        // ManaPayment window. If one surfaces with no convoke
-                        // declared, the driver has no payment policy — fail loud.
-                        panic!(
-                            "SpellCast reached WaitingFor::ManaPayment with no .convoke_with(..) \
-                             declared — pool-funded casts should auto-pay; drive this payment \
-                             manually or declare convoke creatures"
-                        );
-                    }
                     for &creature in &convoke_with {
                         // CR 702.51b: pay one mana of the creature's color, or
                         // colorless toward the generic portion of the cost.
@@ -2615,7 +2615,7 @@ impl Outcome {
 
     /// Assert the count of a counter kind on an object (CR 122.1).
     pub fn assert_counters(&self, obj: ObjectId, kind: CounterType, expected: u32) {
-        let actual = self.counters(obj, kind);
+        let actual = self.counters(obj, kind.clone());
         assert_eq!(
             actual, expected,
             "object {} {kind:?} counters: expected {expected}, got {actual}",

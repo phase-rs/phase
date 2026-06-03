@@ -26,7 +26,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::CastingPermission;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastingVariant, StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastingVariant, StackEntryKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
