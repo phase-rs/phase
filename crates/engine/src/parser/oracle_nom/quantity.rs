@@ -769,22 +769,19 @@ fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
 }
 
 /// CR 613.1: Parse "cards in the chosen player's <zone>" after "the number of"
-/// into a player-scoped zone count for the source's persisted chosen player
-/// (Entropic Specter — hand; Sewer Nemesis — graveyard).
+/// into the general zone-count building block scoped to the source's persisted
+/// chosen player.
 fn parse_number_of_cards_in_chosen_player_zone(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("cards in the chosen player's ").parse(input)?;
     let (rest, zone) = parse_zone_ref_singular(rest)?;
-    let qty = match zone {
-        ZoneRef::Graveyard => QuantityRef::GraveyardSize {
-            player: PlayerScope::SourceChosenPlayer,
+    Ok((
+        rest,
+        QuantityRef::ZoneCardCount {
+            zone,
+            card_types: Vec::new(),
+            scope: CountScope::SourceChosenPlayer,
         },
-        // Default the remaining personal zones to hand-size semantics; only
-        // hand and graveyard occur on the chosen-player CDA cards today.
-        _ => QuantityRef::HandSize {
-            player: PlayerScope::SourceChosenPlayer,
-        },
-    };
-    Ok((rest, qty))
+    ))
 }
 
 /// Parse "cards in your graveyard" / "creature cards in your graveyard" after "the number of".
@@ -3430,7 +3427,7 @@ mod tests {
     /// player" is the player persisted on the source via `ChosenAttribute::Player`
     /// (Skyshroud War Beast, Lost Order of Jarkeld, Entropic Specter, Sewer
     /// Nemesis). Controls-counts route through `ControllerRef::SourceChosenPlayer`;
-    /// zone-counts through `PlayerScope::SourceChosenPlayer`.
+    /// zone-counts through `CountScope::SourceChosenPlayer`.
     #[test]
     fn parse_quantity_ref_chosen_player_cda_forms() {
         let (rest, q) =
@@ -3446,25 +3443,35 @@ mod tests {
             other => panic!("expected ObjectCount, got {other:?}"),
         }
 
-        let (rest, q) =
-            parse_quantity_ref("the number of cards in the chosen player's hand").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(
-            q,
-            QuantityRef::HandSize {
-                player: PlayerScope::SourceChosenPlayer
-            }
-        );
-
-        let (rest, q) =
-            parse_quantity_ref("the number of cards in the chosen player's graveyard").unwrap();
-        assert_eq!(rest, "");
-        assert_eq!(
-            q,
-            QuantityRef::GraveyardSize {
-                player: PlayerScope::SourceChosenPlayer
-            }
-        );
+        for (text, zone) in [
+            (
+                "the number of cards in the chosen player's hand",
+                ZoneRef::Hand,
+            ),
+            (
+                "the number of cards in the chosen player's graveyard",
+                ZoneRef::Graveyard,
+            ),
+            (
+                "the number of cards in the chosen player's library",
+                ZoneRef::Library,
+            ),
+            (
+                "the number of cards in the chosen player's exile",
+                ZoneRef::Exile,
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(rest, "");
+            assert_eq!(
+                q,
+                QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types: Vec::new(),
+                    scope: CountScope::SourceChosenPlayer,
+                }
+            );
+        }
     }
 
     #[test]

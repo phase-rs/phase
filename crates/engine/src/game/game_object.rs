@@ -12,7 +12,7 @@ use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::definitions::Definitions;
-use crate::types::game_state::LKISnapshot;
+use crate::types::game_state::{GameState, LKISnapshot};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
@@ -1288,6 +1288,25 @@ impl GameObject {
 /// Serde helper: skip serialization when a `u32` field is zero.
 fn is_zero_u32_field(n: &u32) -> bool {
     *n == 0
+}
+
+/// CR 607.2d + CR 608.2c: Resolve "the chosen player" from the source's
+/// linked persisted choice. Triggered abilities may resolve after the source
+/// left the battlefield; in that case the LKI cache carries the source choices
+/// as they last existed in the public zone.
+pub(crate) fn source_chosen_player(state: &GameState, source_id: ObjectId) -> Option<PlayerId> {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(GameObject::chosen_player)
+        .or_else(|| {
+            state.lki_cache.get(&source_id).and_then(|lki| {
+                lki.chosen_attributes.iter().find_map(|attr| match attr {
+                    ChosenAttribute::Player(player) => Some(*player),
+                    _ => None,
+                })
+            })
+        })
 }
 
 #[cfg(test)]

@@ -1484,8 +1484,9 @@ fn resolve_ref(
                     ZoneRef::Exile => {
                         for &obj_id in &state.exile {
                             if let Some(obj) = state.objects.get(&obj_id) {
-                                let owner_matches =
-                                    count_scope_owner_matches(scope, ctx, controller, obj.owner);
+                                let owner_matches = count_scope_owner_matches(
+                                    state, scope, ctx, controller, obj.owner,
+                                );
                                 if owner_matches {
                                     for ct in &obj.card_types.core_types {
                                         seen.insert(*ct);
@@ -1576,7 +1577,7 @@ fn resolve_ref(
                     for &obj_id in &state.exile {
                         if let Some(obj) = state.objects.get(&obj_id) {
                             let owner_matches =
-                                count_scope_owner_matches(scope, ctx, controller, obj.owner);
+                                count_scope_owner_matches(state, scope, ctx, controller, obj.owner);
                             if owner_matches && matches_zone_card_filter(state, obj_id, card_types)
                             {
                                 count += 1;
@@ -1785,11 +1786,10 @@ fn resolve_ref(
                                 .is_some_and(|pid| pid == obj.controller)
                         }
                         // CR 613.1: Land controlled by the source's chosen player.
-                        ControllerRef::SourceChosenPlayer => state
-                            .objects
-                            .get(&ctx.source)
-                            .and_then(|o| o.chosen_player())
-                            .is_some_and(|pid| pid == obj.controller),
+                        ControllerRef::SourceChosenPlayer => {
+                            crate::game::game_object::source_chosen_player(state, ctx.source)
+                                .is_some_and(|pid| pid == obj.controller)
+                        }
                         // CR 608.2c + CR 109.4: Land controlled by a chosen player.
                         ControllerRef::ChosenPlayer { index } => ability
                             .and_then(|a| a.chosen_players.get(*index as usize).copied())
@@ -2015,7 +2015,7 @@ fn resolve_ref(
                 .counter_added_this_turn
                 .iter()
                 .filter(|record| {
-                    counter_added_actor_matches(actor, ctx, controller, record.actor)
+                    counter_added_actor_matches(state, actor, ctx, controller, record.actor)
                         && counters.matches(&record.counter_type)
                         && matches_target_filter_on_counter_added_record(
                             state,
@@ -2158,11 +2158,10 @@ fn resolve_ref(
                                 .is_some_and(|pid| pid == snap.controller)
                         }
                         // CR 613.1: Attachment controlled by the source's chosen player.
-                        Some(ControllerRef::SourceChosenPlayer) => state
-                            .objects
-                            .get(&ctx.source)
-                            .and_then(|o| o.chosen_player())
-                            .is_some_and(|pid| pid == snap.controller),
+                        Some(ControllerRef::SourceChosenPlayer) => {
+                            crate::game::game_object::source_chosen_player(state, ctx.source)
+                                .is_some_and(|pid| pid == snap.controller)
+                        }
                         // CR 608.2c + CR 109.4: Attachment controlled by a chosen player.
                         Some(ControllerRef::ChosenPlayer { index }) => ability
                             .and_then(|a| a.chosen_players.get(*index as usize).copied())
@@ -2217,11 +2216,10 @@ fn damage_source_controller_matches(
                 .is_some_and(|player| actual == player)
         }
         // CR 613.1: Damage source controlled by the source's chosen player.
-        ControllerRef::SourceChosenPlayer => state
-            .objects
-            .get(&ctx.source)
-            .and_then(|o| o.chosen_player())
-            .is_some_and(|player| actual == player),
+        ControllerRef::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+                .is_some_and(|player| actual == player)
+        }
         // CR 608.2c + CR 109.4: Damage source controlled by a chosen player.
         ControllerRef::ChosenPlayer { index } => ability
             .and_then(|ability| ability.chosen_players.get(*index as usize).copied())
@@ -2272,6 +2270,10 @@ fn scoped_players<'a>(
     state.players.iter().filter(move |p| match scope {
         CountScope::Controller | CountScope::Owner => p.id == controller,
         CountScope::ScopedPlayer => p.id == scoped_player,
+        CountScope::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+                .is_some_and(|player| p.id == player)
+        }
         CountScope::All => true,
         CountScope::Opponents => p.id != controller,
     })
@@ -2281,6 +2283,7 @@ fn scoped_players<'a>(
 /// known object owner. Mirrors `scoped_players` for global zones (exile)
 /// where iteration over players is replaced by per-object owner predication.
 fn count_scope_owner_matches(
+    state: &GameState,
     scope: &CountScope,
     ctx: QuantityContext,
     controller: PlayerId,
@@ -2289,12 +2292,17 @@ fn count_scope_owner_matches(
     match scope {
         CountScope::Controller | CountScope::Owner => owner == controller,
         CountScope::ScopedPlayer => owner == ctx.scoped_player.unwrap_or(controller),
+        CountScope::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+                .is_some_and(|player| owner == player)
+        }
         CountScope::All => true,
         CountScope::Opponents => owner != controller,
     }
 }
 
 fn counter_added_actor_matches(
+    state: &GameState,
     scope: &CountScope,
     ctx: QuantityContext,
     controller: PlayerId,
@@ -2303,6 +2311,10 @@ fn counter_added_actor_matches(
     match scope {
         CountScope::Controller | CountScope::Owner => actor == controller,
         CountScope::ScopedPlayer => actor == ctx.scoped_player.unwrap_or(controller),
+        CountScope::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+                .is_some_and(|player| actor == player)
+        }
         CountScope::All => true,
         CountScope::Opponents => actor != controller,
     }
@@ -2967,10 +2979,9 @@ fn resolve_single_player_scope(
         }
         // CR 613.1: the player persisted on the source via an "as ~ enters,
         // choose a player" replacement (Entropic Specter, Sewer Nemesis).
-        PlayerScope::SourceChosenPlayer => state
-            .objects
-            .get(&ctx.source)
-            .and_then(|o| o.chosen_player()),
+        PlayerScope::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+        }
         // Aggregate scopes have no single-player reading.
         PlayerScope::Opponent { .. } | PlayerScope::AllPlayers { .. } => None,
     }
@@ -3047,12 +3058,11 @@ where
             .map_or(0, &mut extract),
         // CR 613.1: the player persisted on the source via an "as ~ enters,
         // choose a player" replacement (Entropic Specter, Sewer Nemesis).
-        PlayerScope::SourceChosenPlayer => state
-            .objects
-            .get(&ctx.source)
-            .and_then(|o| o.chosen_player())
-            .and_then(|pid| state.players.iter().find(|p| p.id == pid))
-            .map_or(0, &mut extract),
+        PlayerScope::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, ctx.source)
+                .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+                .map_or(0, &mut extract)
+        }
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
             state.players.iter().filter(|p| p.id != controller),
             *aggregate,
@@ -5253,9 +5263,9 @@ mod tests {
         );
     }
 
-    /// CR 613.1: `SourceChosenPlayer` resolves to the player persisted on the
-    /// source via `ChosenAttribute::Player`, so a CDA P/T tracks the chosen
-    /// player's zones (Sewer Nemesis — graveyard; Entropic Specter — hand).
+    /// CR 613.1: `CountScope::SourceChosenPlayer` resolves to the player
+    /// persisted on the source via `ChosenAttribute::Player`, so CDA P/T can
+    /// track any chosen-player zone.
     #[test]
     fn resolve_quantity_source_chosen_player_zone_counts() {
         let mut state = GameState::new_two_player(42);
@@ -5273,7 +5283,7 @@ mod tests {
             .unwrap()
             .chosen_attributes
             .push(crate::types::ability::ChosenAttribute::Player(PlayerId(1)));
-        // Player 1: 2 cards in hand, 3 in graveyard.
+        // Player 1: 2 cards in hand, 3 in graveyard, 4 in library, 1 in exile.
         for i in 0..2 {
             create_object(
                 &mut state,
@@ -5292,26 +5302,42 @@ mod tests {
                 Zone::Graveyard,
             );
         }
-        let hand = QuantityExpr::Ref {
-            qty: QuantityRef::HandSize {
-                player: PlayerScope::SourceChosenPlayer,
-            },
-        };
-        let gy = QuantityExpr::Ref {
-            qty: QuantityRef::GraveyardSize {
-                player: PlayerScope::SourceChosenPlayer,
-            },
-        };
-        assert_eq!(
-            resolve_quantity(&state, &hand, PlayerId(0), src),
-            2,
-            "chosen player's hand"
+        for i in 0..4 {
+            create_object(
+                &mut state,
+                CardId(30 + i),
+                PlayerId(1),
+                format!("L{i}"),
+                Zone::Library,
+            );
+        }
+        create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(1),
+            "E0".to_string(),
+            Zone::Exile,
         );
-        assert_eq!(
-            resolve_quantity(&state, &gy, PlayerId(0), src),
-            3,
-            "chosen player's graveyard"
-        );
+
+        for (zone, expected, label) in [
+            (ZoneRef::Hand, 2, "chosen player's hand"),
+            (ZoneRef::Graveyard, 3, "chosen player's graveyard"),
+            (ZoneRef::Library, 4, "chosen player's library"),
+            (ZoneRef::Exile, 1, "chosen player's exile"),
+        ] {
+            let qty = QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types: Vec::new(),
+                    scope: CountScope::SourceChosenPlayer,
+                },
+            };
+            assert_eq!(
+                resolve_quantity(&state, &qty, PlayerId(0), src),
+                expected,
+                "{label}"
+            );
+        }
     }
 
     #[test]

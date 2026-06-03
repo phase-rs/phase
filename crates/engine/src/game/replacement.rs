@@ -2391,7 +2391,7 @@ fn matches_damage_target_filter(
                 // CR 607.2d + CR 614.1a: A damage replacement can scope
                 // "the chosen player" through the replacement source's linked
                 // persisted choice.
-                crate::game::effects::source_chosen_player(state, repl_source)
+                crate::game::game_object::source_chosen_player(state, repl_source)
                     .is_some_and(|chosen| player == chosen)
             }
             DamageTargetPlayerScope::Specific(specific) => player == *specific,

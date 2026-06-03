@@ -654,10 +654,9 @@ fn controller_ref_player(
         }
         // CR 613.1: The player persisted on the source via an "as ~ enters,
         // choose a player" replacement — read durably from the source object.
-        ControllerRef::SourceChosenPlayer => state
-            .objects
-            .get(&source_id)
-            .and_then(|o| o.chosen_player()),
+        ControllerRef::SourceChosenPlayer => {
+            crate::game::game_object::source_chosen_player(state, source_id)
+        }
         // CR 603.2 + CR 109.4: The player identified by the triggering event.
         ControllerRef::TriggeringPlayer => crate::game::quantity::triggering_event_player(state),
     }
@@ -1119,11 +1118,7 @@ fn filter_inner_for_object(
                     // CR 613.1: "the chosen player controls" — match against the
                     // player persisted on the source.
                     ControllerRef::SourceChosenPlayer => {
-                        match state
-                            .objects
-                            .get(&source_id)
-                            .and_then(|o| o.chosen_player())
-                        {
+                        match crate::game::game_object::source_chosen_player(state, source_id) {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,
                         }
@@ -2642,11 +2637,10 @@ fn matches_filter_prop(
                     .is_some_and(|pid| pid == obj.owner)
             }
             // CR 613.1: Ownership relative to the source's persisted chosen player.
-            ControllerRef::SourceChosenPlayer => state
-                .objects
-                .get(&source.id)
-                .and_then(|o| o.chosen_player())
-                .is_some_and(|pid| pid == obj.owner),
+            ControllerRef::SourceChosenPlayer => {
+                crate::game::game_object::source_chosen_player(state, source.id)
+                    .is_some_and(|pid| pid == obj.owner)
+            }
             // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
             ControllerRef::ChosenPlayer { index } => source
                 .ability
@@ -3153,11 +3147,10 @@ fn zone_change_record_matches_property(
                     .is_some_and(|pid| pid == record.owner)
             }
             // CR 613.1: Ownership relative to the source's persisted chosen player.
-            ControllerRef::SourceChosenPlayer => state
-                .objects
-                .get(&source.id)
-                .and_then(|o| o.chosen_player())
-                .is_some_and(|pid| pid == record.owner),
+            ControllerRef::SourceChosenPlayer => {
+                crate::game::game_object::source_chosen_player(state, source.id)
+                    .is_some_and(|pid| pid == record.owner)
+            }
             // CR 608.2c + CR 109.4: Ownership relative to a resolution-chosen player.
             ControllerRef::ChosenPlayer { index } => source
                 .ability
@@ -3351,11 +3344,10 @@ fn attachment_controller_matches(
                 .is_some_and(|pid| pid == attachment_controller)
         }
         // CR 613.1: Attachment controller relative to the source's chosen player.
-        Some(ControllerRef::SourceChosenPlayer) => state
-            .objects
-            .get(&source.id)
-            .and_then(|o| o.chosen_player())
-            .is_some_and(|pid| pid == attachment_controller),
+        Some(ControllerRef::SourceChosenPlayer) => {
+            crate::game::game_object::source_chosen_player(state, source.id)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
         // CR 608.2c + CR 109.4: Attachment controller relative to a chosen player.
         Some(ControllerRef::ChosenPlayer { index }) => source
             .ability
