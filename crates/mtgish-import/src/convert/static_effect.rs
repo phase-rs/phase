@@ -330,6 +330,29 @@ pub fn convert_permanent_rule(
         // untap step." Mirrors `oracle_static.rs`'s `MayChooseNotToUntap` at
         // line 474.
         P::MayChooseNotToUntapDuringUntap => StaticMode::MayChooseNotToUntap,
+        // CR 502.3 + CR 113.6: "Untap all permanents you control during each
+        // other player's untap step" (Seedborn Muse class). The `players`
+        // parameter specifies which permanents untap; we lower it into the
+        // `affected` filter. The `affected` parameter passed to this function
+        // is ignored (similar to `CantBeBlockedByDefenders`).
+        P::UntapsDuringOtherPlayersUntapSteps(players) => {
+            use crate::schema::types::Players;
+            match players.as_ref() {
+                Players::ControlsA(perms) => {
+                    let filter = bind_filter_controller_you(filter::convert(perms)?);
+                    return Ok(StaticDefinition::new(
+                        StaticMode::UntapsDuringEachOtherPlayersUntapStep,
+                    )
+                    .affected(filter));
+                }
+                other => {
+                    return Err(ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "StaticMode::UntapsDuringEachOtherPlayersUntapStep",
+                        needed_variant: format!("Players variant: {}", players_variant_tag(other)),
+                    });
+                }
+            }
+        }
 
         // CR 509.1b: Bare "can't be blocked" → `StaticMode::CantBeBlocked`.
         P::CantBeBlocked => StaticMode::CantBeBlocked,
@@ -751,6 +774,52 @@ fn rule_tag(r: &Rule) -> String {
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
+fn players_variant_tag(p: &crate::schema::types::Players) -> String {
+    serde_json::to_value(p)
+        .ok()
+        .and_then(|v| v.get("_Players").and_then(|t| t.as_str()).map(String::from))
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+/// Bind `ControllerRef::You` onto the converted filter. Mirrors the
+/// post-processing step in `oracle_trigger::parse_control_none_filter`
+/// for `TriggerCondition::ControlsType` / `ControlsNone` /
+/// `ControlCount` / `ControllerControlsMatching` filters whose runtime
+/// matchers do not separately enforce a controller equality check.
+///
+/// Local copy of `convert::condition::bind_filter_controller_you` (private
+/// in that module) — keeping the helper inline preserves multi-agent file
+/// boundaries. Both copies share the same recursive shape over `Or`/`And`/
+/// `Not`/`Typed`; if the canonical helper is ever made `pub(crate)`, this
+/// duplicate should be removed.
+fn bind_filter_controller_you(
+    filter: engine::types::ability::TargetFilter,
+) -> engine::types::ability::TargetFilter {
+    use engine::types::ability::{ControllerRef, TargetFilter};
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            tf.controller = Some(ControllerRef::You);
+            TargetFilter::Typed(tf)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(bind_filter_controller_you)
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(bind_filter_controller_you)
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(bind_filter_controller_you(*filter)),
+        },
+        other => other,
+    }
+}
+
 /// CR 613.1f + CR 602.1 + CR 603.1: Convert a single `Rule` appearing
 /// inside a layer-6 `AddAbility` payload into one `ContinuousModification`.
 ///
@@ -986,8 +1055,8 @@ fn check_hasable_to_keyword(c: &CheckHasable) -> ConvResult<engine::types::keywo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::types::{LandType, PermanentRule, Permanents, Player};
-    use engine::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+    use crate::schema::types::{LandType, PermanentRule, Permanents, Player, Players};
+    use engine::types::ability::{ControllerRef, TargetFilter, TypeFilter, TypedFilter};
 
     #[test]
     fn can_block_only_creatures_with_flying_lowers_to_block_restriction() {
@@ -1032,6 +1101,28 @@ mod tests {
             panic!("expected DefendingPlayerControls condition");
         };
         assert!(type_filters.contains(&TypeFilter::Creature));
+    }
+
+    #[test]
+    fn untaps_during_other_players_untap_steps_converts_with_affected_filter() {
+        let converted = convert_permanent_rule(
+            &PermanentRule::UntapsDuringOtherPlayersUntapSteps(Box::new(Players::ControlsA(
+                Box::new(Permanents::AnyPermanent),
+            ))),
+            TargetFilter::SelfRef,
+        )
+        .unwrap();
+
+        assert_eq!(
+            converted.mode,
+            StaticMode::UntapsDuringEachOtherPlayersUntapStep
+        );
+        assert_eq!(
+            converted.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You)
+            ))
+        );
     }
 
     #[test]
