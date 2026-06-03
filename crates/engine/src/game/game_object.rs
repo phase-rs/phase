@@ -65,6 +65,17 @@ pub struct PreparedState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BestowFormState;
 
+/// CR 702.160a: Prototype form marker — `Some(_)` means this object was cast
+/// prototyped and should use the secondary power, toughness, and mana cost
+/// characteristics while it is a spell or permanent on the battlefield.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrototypeFormState {
+    pub mana_cost: ManaCost,
+    pub power: i32,
+    pub toughness: i32,
+    pub colors: Vec<ManaColor>,
+}
+
 /// Oathbreaker RC: command-zone role marker for a signature spell.
 ///
 /// A signature spell is an instant or sorcery that starts in the command zone,
@@ -369,6 +380,14 @@ pub struct GameObject {
     // Back face data for double-faced cards (DFCs)
     pub back_face: Option<BackFaceData>,
 
+    /// Digital-only Specialize: specialized faces keyed by added color pip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialize_faces: Option<super::specialize::SpecializeFaceMap>,
+
+    /// Digital-only Specialize: set after specializing; prevents re-specializing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialized_color: Option<ManaColor>,
+
     // Base characteristics (for layer system)
     pub base_power: Option<i32>,
     pub base_toughness: Option<i32>,
@@ -497,6 +516,12 @@ pub struct GameObject {
     /// CR 702.103e–g (illegal target, unattach, zone exit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bestow_form: Option<BestowFormState>,
+
+    /// CR 702.160a: `Some(_)` while this object was cast prototyped. The
+    /// layer system uses the stored secondary characteristics whenever the
+    /// object is a creature; normal casts leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prototype_form: Option<PrototypeFormState>,
 
     /// CR 702.148a-b + CR 612: `Some(_)` while this object's cleave
     /// text-changing effect is live (the spell was cast for its cleave cost).
@@ -892,6 +917,8 @@ impl GameObject {
             token_image_ref: None,
             source_related_token_ids: Vec::new(),
             back_face: None,
+            specialize_faces: None,
+            specialized_color: None,
             base_power: None,
             base_toughness: None,
             base_name: name.clone(),
@@ -918,6 +945,7 @@ impl GameObject {
             additional_cost_payment_count: 0,
             convoked_creatures: Vec::new(),
             bestow_form: None,
+            prototype_form: None,
             cleave_form: None,
             cleave_variant: None,
             unimplemented_mechanics: Vec::new(),

@@ -449,6 +449,20 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
         }
     }
 
+    // CR 506.5 + CR 508.1a: A creature with "can't attack alone" may be declared
+    // as an attacker only if it isn't the sole attacker. Two such creatures may
+    // attack together (CR 506.5 Example), so this only triggers at exactly one.
+    if attacker_ids.len() == 1 {
+        let id = attacker_ids[0];
+        if let Some(obj) = state.objects.get(&id) {
+            if super::functioning_abilities::active_static_definitions(state, obj)
+                .any(|sd| sd.mode == StaticMode::CantAttackAlone)
+            {
+                return Err(format!("{id:?} can't attack alone (CR 506.5)"));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -802,6 +816,20 @@ pub fn validate_blockers_for_player(
             .or_default()
             .push(blocker_id);
         *attackers_per_blocker.entry(blocker_id).or_default() += 1;
+    }
+
+    // CR 506.5 + CR 509.1b: A creature with "can't block alone" may be declared
+    // as a blocker only if it isn't the sole creature this player declares as a
+    // blocker this step. Two such creatures may block together.
+    if attackers_per_blocker.len() == 1 {
+        let (&blocker_id, _) = attackers_per_blocker.iter().next().expect("len checked");
+        if let Some(obj) = state.objects.get(&blocker_id) {
+            if super::functioning_abilities::active_static_definitions(state, obj)
+                .any(|sd| sd.mode == StaticMode::CantBlockAlone)
+            {
+                return Err(format!("{blocker_id:?} can't block alone (CR 506.5)"));
+            }
+        }
     }
 
     // CR 509.1a + CR 509.1b: Enforce per-blocker limit on how many attackers it can block.
@@ -2657,6 +2685,52 @@ mod tests {
         let mut state = setup();
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
         assert!(validate_attackers(&state, &[id]).is_ok());
+    }
+
+    #[test]
+    fn cant_attack_alone_rejects_sole_attacker() {
+        // CR 506.5 + CR 508.1a: a "can't attack alone" creature is illegal as the
+        // only attacker, but legal alongside another attacker.
+        let mut state = setup();
+        let a = create_creature(&mut state, PlayerId(0), "Bonded Construct", 2, 2);
+        state
+            .objects
+            .get_mut(&a)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantAttackAlone));
+        let b = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        assert!(validate_attackers(&state, &[a]).is_err());
+        assert!(validate_attackers(&state, &[a, b]).is_ok());
+    }
+
+    #[test]
+    fn cant_block_alone_rejects_sole_blocker() {
+        // CR 506.5 + CR 509.1b: a "can't block alone" creature is illegal as the
+        // only blocker, but legal alongside another blocker.
+        let mut state = setup();
+        let atk1 = create_creature(&mut state, PlayerId(0), "Atk1", 2, 2);
+        let atk2 = create_creature(&mut state, PlayerId(0), "Atk2", 2, 2);
+        let lone = create_creature(&mut state, PlayerId(1), "Mogg Flunkies", 3, 3);
+        state
+            .objects
+            .get_mut(&lone)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::CantBlockAlone));
+        let other = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(atk1, PlayerId(1)),
+                AttackerInfo::attacking_player(atk2, PlayerId(1)),
+            ],
+            ..Default::default()
+        });
+
+        assert!(validate_blockers(&state, &[(lone, atk1)]).is_err());
+        assert!(validate_blockers(&state, &[(lone, atk1), (other, atk2)]).is_ok());
     }
 
     /// CR 508.1 + CR 109.5: Angelic Arbiter — "Each opponent who cast a spell this

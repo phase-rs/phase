@@ -157,6 +157,8 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::Goaded, handle_rule_mod);
     registry.insert(StaticMode::CantAttackAlone, handle_rule_mod);
     registry.insert(StaticMode::CantBlockAlone, handle_rule_mod);
+    // CR 702.122c: CantCrew — creature can't be tapped to pay a crew cost.
+    registry.insert(StaticMode::CantCrew, handle_rule_mod);
     registry.insert(StaticMode::MayLookAtTopOfLibrary, handle_rule_mod);
     // CR 104.3b: CantLoseTheGame — player can't lose the game (Platinum Angel).
     // Runtime enforcement is in sba.rs::player_has_cant_lose().
@@ -766,6 +768,19 @@ pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool
     ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::CantLoseLife)
 }
 
+/// CR 702.11e: Check if `player_id` may target creatures as though they didn't
+/// have hexproof, including "hexproof from [quality]" variants.
+pub fn player_ignores_hexproof(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::IgnoreHexproof,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    ) || transient_grants_static_mode_to_player(state, player_id, &StaticMode::IgnoreHexproof)
+}
+
 /// CR 118.3 + CR 119.4b + CR 601.2h + CR 602.2b: Check whether a static
 /// ability prohibits `player_id` from paying life as a cost.
 ///
@@ -1052,6 +1067,14 @@ fn static_condition_matches_context(
         } else {
             evaluate_condition(state, condition, controller, source_id)
         }
+    })
+}
+
+/// CR 702.122c: Returns true when the creature has an active "can't crew Vehicles" static.
+pub fn object_has_cant_crew(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        super::functioning_abilities::active_static_definitions(state, obj)
+            .any(|def| def.mode == StaticMode::CantCrew)
     })
 }
 

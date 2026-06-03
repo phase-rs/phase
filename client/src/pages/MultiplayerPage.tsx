@@ -6,6 +6,7 @@ import type { GameFormat } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
 import { DiscordBadge } from "../components/chrome/DiscordBadge";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { useInShell } from "../components/chrome/ShellContext";
 import { BrokerOfflinePrompt } from "../components/lobby/BrokerOfflinePrompt";
 import { HostSetup } from "../components/lobby/HostSetup";
 import type { LobbyGame } from "../components/lobby/GameListItem";
@@ -64,6 +65,9 @@ export function MultiplayerPage() {
   useAudioContext("lobby");
   const navigate = useNavigate();
   const location = useLocation();
+  // In the shell the rail's footer owns the Discord link; the page's fixed
+  // top-left badge would collide with the left-aligned eyebrow, so drop it.
+  const embedded = useInShell();
 
   // Warm the shared card DB so host-setup deck legality checks are instant.
   // Idempotent; closes the deep-link hole when opening /multiplayer directly.
@@ -678,22 +682,32 @@ export function MultiplayerPage() {
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
-      <MenuParticles />
+      {/* Inside the shell the scene + particles are rendered once by AppShell;
+          only paint our own when standalone, matching the other embedded panes. */}
+      {!embedded && <MenuParticles />}
       <ScreenChrome
         onBack={handleBack}
         settingsOpen={showSettings}
         onSettingsOpenChange={setShowSettings}
       />
-      <div className="fixed left-20 top-[calc(env(safe-area-inset-top)+1rem)] z-20 flex h-11 items-center">
-        <DiscordBadge />
-      </div>
+      {!embedded && (
+        <div className="fixed left-20 top-[calc(env(safe-area-inset-top)+1rem)] z-20 flex h-11 items-center">
+          <DiscordBadge />
+        </div>
+      )}
       <div className="menu-scene__vignette" />
       <div className="menu-scene__sigil menu-scene__sigil--left" />
       <div className="menu-scene__sigil menu-scene__sigil--right" />
       <div className="menu-scene__haze" />
 
-      <MenuShell eyebrow={t("page.eyebrow")} title={title} description={description} layout="stacked">
-        <div className="flex w-full flex-col items-center">
+      <MenuShell
+        eyebrow={t("page.eyebrow")}
+        title={title}
+        description={description}
+        layout="stacked"
+        contentWidthClass={view === "host-setup" ? "max-w-4xl" : "max-w-3xl"}
+      >
+        <div className="flex w-full flex-col items-start">
         {/* Player identity — always available on lobby/host-setup so users
             can edit their name without hunting in Preferences. */}
         {(view === "lobby" || view === "host-setup") && <PlayerIdentityBanner />}
@@ -703,7 +717,7 @@ export function MultiplayerPage() {
             joining a table picks the deck against the host's format via
             the deck-select view. */}
         {view === "host-setup" && activeDeckName && (
-          <div className="mx-auto mb-4 flex w-full max-w-xl items-center justify-between gap-3 rounded-[16px] border border-white/8 bg-black/16 px-4 py-2.5">
+          <div className="mb-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-[16px] border border-white/8 bg-black/16 px-4 py-2.5">
             <div className="min-w-0">
               <div className="text-[0.6rem] uppercase tracking-[0.22em] text-slate-500">
                 {t("page.activeDeck")}
@@ -737,7 +751,7 @@ export function MultiplayerPage() {
 
         {/* No deck warning — host-setup only, for the same reason as above. */}
         {view === "host-setup" && !activeDeckName && (
-          <div className="mx-auto mb-4 flex w-full max-w-xl items-center justify-between gap-3 rounded-[16px] border border-amber-500/20 bg-amber-500/8 px-4 py-2.5">
+          <div className="mb-4 flex w-full max-w-3xl items-center justify-between gap-3 rounded-[16px] border border-amber-500/20 bg-amber-500/8 px-4 py-2.5">
             <span className="text-xs text-amber-200">
               {t("page.noDeckWarning")}
             </span>
@@ -807,7 +821,7 @@ export function MultiplayerPage() {
         {view === "deck-select" && (
           <>
             {pendingAction?.type === "join" && pendingAction.context && (
-              <div className="mx-auto mb-4 w-full max-w-xl rounded-[16px] border border-cyan-400/20 bg-cyan-500/[0.07] px-4 py-2.5">
+              <div className="mb-4 w-full max-w-3xl rounded-[16px] border border-cyan-400/20 bg-cyan-500/[0.07] px-4 py-2.5">
                 <div className="text-[0.6rem] uppercase tracking-[0.22em] text-cyan-300/70">
                   {t("page.joining")}
                 </div>
@@ -920,7 +934,7 @@ function DraftLobbyPanel({
   const error = useMultiplayerDraftStore((s) => s.error);
 
   return (
-    <MenuPanel className="relative z-10 mx-auto flex w-full max-w-xl flex-col gap-5 px-4 py-5">
+    <MenuPanel className="relative z-10 flex w-full max-w-3xl flex-col gap-5 px-5 py-6">
       <div className="flex items-center justify-between">
         <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
           {t("draftLobbyPanel.draftPod")}
@@ -985,7 +999,7 @@ function DeckLegalityChip({ check }: { check: LiveCheck }) {
   if (check.status === "idle") return null;
 
   const base =
-    "mx-auto mb-4 flex w-full max-w-xl items-start gap-3 rounded-[16px] border px-4 py-2.5";
+    "mb-4 flex w-full max-w-3xl items-start gap-3 rounded-[16px] border px-4 py-2.5";
 
   if (check.status === "checking") {
     return (

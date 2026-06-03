@@ -8,7 +8,7 @@ use nom::Parser;
 
 use crate::types::ability::{
     CounterMoveSelection, CounterTransferMode, DoublePTMode, DoubleTarget, Effect, MultiTargetSpec,
-    QuantityExpr, TargetFilter,
+    ObjectScope, QuantityExpr, QuantityRef, TargetFilter,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::mana::ManaColor;
@@ -57,6 +57,24 @@ fn is_it_pronoun(text: &str) -> bool {
             .parse(i)
         })
         .is_some()
+}
+
+fn starts_with_deferred_dynamic_counter_placement(input: &str) -> bool {
+    let Ok((after_type, _)) = nom_primitives::parse_counter_type_typed(input) else {
+        return false;
+    };
+    let after_type = after_type.trim_start();
+    let Ok((after_counter_word, _)) =
+        alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter"))).parse(after_type)
+    else {
+        return false;
+    };
+    let after_counter_word = after_counter_word.trim_start();
+    let Ok((after_on, _)) = tag::<_, _, OracleError<'_>>("on ").parse(after_counter_word) else {
+        return false;
+    };
+
+    nom_primitives::scan_contains(after_on, "equal to")
 }
 
 /// Output of [`try_parse_put_counter_chain`]: the ordered list of
@@ -174,7 +192,7 @@ fn resolve_counter_placement_target<'a>(
         return (TargetFilter::SelfRef, parsed_remainder, None);
     }
     if is_it_pronoun(on_rest) {
-        return (resolve_it_pronoun(ctx), "", None);
+        return (resolve_it_pronoun(ctx), parsed_remainder, None);
     }
     // CR 608.2k + CR 301.5a: "that creature" in a trigger whose subject is a
     // non-self filter (e.g. Pip-Boy 3000's "Whenever equipped creature
@@ -289,7 +307,7 @@ pub(super) fn try_parse_put_counter<'a>(
     // "a" as count=1 and "number" as the counter type. `dynamic_pending`
     // signals that the "equal to {qty}" clause is expected to appear after the
     // counter noun and must be consumed below.
-    let (count_expr, rest, dynamic_pending) =
+    let (count_expr, rest, dynamic_pending, rebind_deferred_to_placement_object) =
         if let Some(after_phrase) = try_strip_a_number_of(after_put) {
             // Two positions for "equal to {qty}":
             //   eager: "a number of counters equal to X ..." (counter type absent
@@ -298,13 +316,23 @@ pub(super) fn try_parse_put_counter<'a>(
             match nom_quantity::parse_equal_to(after_phrase) {
                 Ok((rest, qty)) => {
                     let rest = rest.strip_prefix(' ').unwrap_or(rest);
-                    (qty, rest, false)
+                    (qty, rest, false, false)
                 }
-                Err(_) => (QuantityExpr::Fixed { value: 0 }, after_phrase, true),
+                Err(_) => (QuantityExpr::Fixed { value: 0 }, after_phrase, true, false),
             }
+        } else if starts_with_deferred_dynamic_counter_placement(after_put) {
+            // CR 122.1 + CR 208.3: a counter type follows "put" directly with no
+            // leading count and no "a number of", and an "equal to {qty}" clause
+            // supplies the count after the target ("put +1/+1 counters on it
+            // equal to its power" — The Roaring Toeclaws, Experiment Twelve).
+            // The "equal to" guard distinguishes this from implicit-count puts
+            // ("put a +1/+1 counter on ~"), which have no dynamic clause. Enter
+            // the dynamic path so the deferred post-target resolution fills the
+            // count.
+            (QuantityExpr::Fixed { value: 0 }, after_put, true, true)
         } else {
             let (qty, rest) = parse_count_expr(after_put)?;
-            (qty, rest, false)
+            (qty, rest, false, false)
         };
 
     // Counter type (e.g. "+1/+1", "loyalty", "charge", "double strike").
@@ -357,7 +385,11 @@ pub(super) fn try_parse_put_counter<'a>(
     if dynamic_deferred {
         let trimmed = remainder.trim_start();
         let (after_clause, qty) = nom_quantity::parse_equal_to(trimmed).ok()?;
-        count_expr = qty;
+        count_expr = if rebind_deferred_to_placement_object {
+            rebind_post_target_counter_quantity(qty, trimmed, &target)
+        } else {
+            qty
+        };
         remainder = after_clause.trim_start();
     }
 
@@ -396,6 +428,92 @@ fn try_strip_a_number_of(input: &str) -> Option<&str> {
         .parse(input)
         .map(|(rest, _)| rest)
         .ok()
+}
+
+fn rebind_post_target_counter_quantity(
+    count: QuantityExpr,
+    clause: &str,
+    target: &TargetFilter,
+) -> QuantityExpr {
+    if !post_target_clause_uses_placement_object(clause) {
+        return count;
+    }
+    rebind_counter_quantity_scope(count, post_target_counter_quantity_scope(target))
+}
+
+fn post_target_clause_uses_placement_object(clause: &str) -> bool {
+    let Ok((after_equal, _)) = tag::<_, _, OracleError<'_>>("equal to ").parse(clause) else {
+        return false;
+    };
+    alt((
+        tag::<_, _, OracleError<'_>>("its power"),
+        tag("its toughness"),
+        tag("that creature's power"),
+        tag("that creature's toughness"),
+        tag("that permanent's power"),
+        tag("that permanent's toughness"),
+    ))
+    .parse(after_equal)
+    .is_ok()
+}
+
+fn post_target_counter_quantity_scope(target: &TargetFilter) -> ObjectScope {
+    match target {
+        TargetFilter::SelfRef => ObjectScope::Source,
+        TargetFilter::TriggeringSource => ObjectScope::EventSource,
+        _ => ObjectScope::Target,
+    }
+}
+
+fn rebind_counter_quantity_scope(count: QuantityExpr, scope: ObjectScope) -> QuantityExpr {
+    match count {
+        QuantityExpr::Ref { qty } => QuantityExpr::Ref {
+            qty: match qty {
+                QuantityRef::Power {
+                    scope: ObjectScope::Source | ObjectScope::CostPaidObject,
+                } => QuantityRef::Power { scope },
+                QuantityRef::Toughness {
+                    scope: ObjectScope::Source | ObjectScope::CostPaidObject,
+                } => QuantityRef::Toughness { scope },
+                other => other,
+            },
+        },
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => QuantityExpr::DivideRounded {
+            inner: Box::new(rebind_counter_quantity_scope(*inner, scope)),
+            divisor,
+            rounding,
+        },
+        QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
+            inner: Box::new(rebind_counter_quantity_scope(*inner, scope)),
+            offset,
+        },
+        QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
+            factor,
+            inner: Box::new(rebind_counter_quantity_scope(*inner, scope)),
+        },
+        QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
+            exprs: exprs
+                .into_iter()
+                .map(|expr| rebind_counter_quantity_scope(expr, scope))
+                .collect(),
+        },
+        QuantityExpr::UpTo { max } => QuantityExpr::UpTo {
+            max: Box::new(rebind_counter_quantity_scope(*max, scope)),
+        },
+        QuantityExpr::Difference { left, right } => QuantityExpr::Difference {
+            left: Box::new(rebind_counter_quantity_scope(*left, scope)),
+            right: Box::new(rebind_counter_quantity_scope(*right, scope)),
+        },
+        QuantityExpr::Power { base, exponent } => QuantityExpr::Power {
+            base,
+            exponent: Box::new(rebind_counter_quantity_scope(*exponent, scope)),
+        },
+        QuantityExpr::Fixed { .. } => count,
+    }
 }
 
 pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
@@ -928,6 +1046,7 @@ fn parse_mana_color_from_text(text: &str) -> Option<ManaColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::TypedFilter;
 
     fn default_ctx() -> ParseContext {
         ParseContext::default()
@@ -1228,6 +1347,99 @@ mod tests {
             .properties
             .iter()
             .any(|p| matches!(p, FilterProp::Named { name } if name.eq_ignore_ascii_case("Gruff Triplets"))));
+    }
+
+    /// CR 122.1 + CR 208.3: target-then-count ordering with NO "a number of"
+    /// and no leading count — "put +1/+1 counters on <target> equal to its
+    /// power" (The Roaring Toeclaws, Experiment Twelve). The counter type
+    /// follows "put" directly; the count is supplied by the post-target
+    /// "equal to {qty}" clause and binds to the target's power.
+    #[test]
+    fn put_counter_on_target_equal_to_power_no_leading_count() {
+        use crate::types::ability::{ObjectScope, QuantityRef};
+        let text = "put +1/+1 counters on target creature equal to its power";
+        let (effect, _, _) = try_parse_put_counter(text, text, &mut default_ctx()).expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(counter_type, CounterType::Plus1Plus1);
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target
+                    }
+                }
+            ),
+            "post-target count should bind to the target creature's power, got {count:?}"
+        );
+        assert!(matches!(target, TargetFilter::Typed { .. }));
+    }
+
+    /// CR 122.1 + CR 608.2k: The Roaring Toeclaws template — "put +1/+1
+    /// counters on it equal to its power" inside a typed trigger subject. Both
+    /// the placement target and the post-target "its power" count bind to the
+    /// triggering object, not to the ability source.
+    #[test]
+    fn put_counter_on_it_equal_to_power_keeps_dynamic_remainder() {
+        use crate::types::ability::{ObjectScope, QuantityRef};
+        let mut ctx = default_ctx();
+        ctx.subject = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let text = "put +1/+1 counters on it equal to its power";
+        let (effect, remainder, _) =
+            try_parse_put_counter(text, text, &mut ctx).expect("parse real pronoun form");
+        assert_eq!(remainder, "");
+        let Effect::PutCounter { count, target, .. } = effect else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::TriggeringSource);
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::EventSource
+                    }
+                }
+            ),
+            "post-target pronoun count should bind to the triggering object, got {count:?}"
+        );
+    }
+
+    /// CR 122.1 + CR 608.2k: Experiment Twelve template — "put +1/+1 counters
+    /// on that creature equal to its power". The explicit anaphor keeps the
+    /// dynamic suffix as parseable remainder and scopes the count to the
+    /// triggering object.
+    #[test]
+    fn put_counter_on_that_creature_equal_to_power_binds_triggering_object() {
+        use crate::types::ability::{ObjectScope, QuantityRef};
+        let mut ctx = default_ctx();
+        ctx.subject = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let text = "put +1/+1 counters on that creature equal to its power";
+        let (effect, remainder, _) =
+            try_parse_put_counter(text, text, &mut ctx).expect("parse real that-creature form");
+        assert_eq!(remainder, "");
+        let Effect::PutCounter { count, target, .. } = effect else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::TriggeringSource);
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::EventSource
+                    }
+                }
+            ),
+            "that-creature count should bind to the triggering object, got {count:?}"
+        );
     }
 
     /// CR 603.7c: Dusty Parlor — "Whenever you cast an enchantment spell,

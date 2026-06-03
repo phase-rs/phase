@@ -5,9 +5,7 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{Effect, TargetFilter, TargetRef};
-use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::ability::{Effect, TargetFilter};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -32,51 +30,6 @@ fn floating_mana(generic: usize, blue: usize) -> Vec<ManaUnit> {
         pool.push(ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]));
     }
     pool
-}
-
-fn cast_and_resolve_etb(
-    scenario: GameScenario,
-    mutineer: ObjectId,
-    prey: ObjectId,
-) -> engine::game::scenario::GameRunner {
-    let mut runner = scenario.build();
-    let card_id = runner.state().objects[&mutineer].card_id;
-
-    runner
-        .act(GameAction::CastSpell {
-            object_id: mutineer,
-            card_id,
-            targets: vec![],
-        })
-        .expect("cast Amphin Mutineer");
-
-    for _ in 0..60 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                runner
-                    .act(GameAction::SelectTargets {
-                        targets: vec![TargetRef::Object(prey)],
-                    })
-                    .expect("select exile target");
-            }
-            WaitingFor::Priority { .. } => {
-                if runner.state().stack.is_empty() {
-                    if runner.act(GameAction::PassPriority).is_err() {
-                        break;
-                    }
-                    if runner.state().stack.is_empty()
-                        && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
-                    {
-                        break;
-                    }
-                } else if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
-    runner
 }
 
 #[test]
@@ -115,8 +68,11 @@ fn amphin_mutineer_etb_exile_and_token_for_target_controller() {
     let prey = scenario.add_creature(P1, "Grizzly Bear", 2, 2).id();
     scenario.with_mana_pool(P0, floating_mana(3, 1));
 
-    let runner = cast_and_resolve_etb(scenario, mutineer, prey);
-    let state = runner.state();
+    // Cast Amphin Mutineer; the harness drives the ETB trigger's
+    // TriggerTargetSelection from the declared `prey` intent (CR 603.3d).
+    let mut runner = scenario.build();
+    let outcome = runner.cast(mutineer).target_object(prey).resolve();
+    let state = outcome.state();
 
     assert_eq!(
         state.objects.get(&prey).map(|o| o.zone),

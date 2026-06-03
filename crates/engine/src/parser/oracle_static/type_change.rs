@@ -241,11 +241,13 @@ pub(crate) fn parse_additive_type_clause_modifications(
         let lower_word = word.to_lowercase();
         // CR 105.2 + CR 613.1e: a color word ("black", "white", …) adds that
         // color (layer 5), e.g. Rise from the Grave's "black Zombie".
-        if let Ok((rest, color)) = nom_primitives::parse_color(lower_word.as_str()) {
-            if rest.is_empty() {
-                modifications.push(ContinuousModification::AddColor { color });
-                continue;
-            }
+        // `all_consuming` asserts the whole token is the color word, matching
+        // the sibling guard idiom rather than a manual `rest.is_empty()` check.
+        if let Ok((_, color)) =
+            all_consuming(nom_primitives::parse_color).parse(lower_word.as_str())
+        {
+            modifications.push(ContinuousModification::AddColor { color });
+            continue;
         }
         if let Some(core_type) = core_type_from_additive_word(lower_word.as_str()) {
             modifications.push(ContinuousModification::AddType { core_type });
