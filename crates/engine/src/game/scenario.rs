@@ -2123,15 +2123,15 @@ impl<'a> AbilityActivation<'a> {
                     );
                     break;
                 }
-                // The cost window is left for the caller to drive manually (no
-                // blind auto-tap — see report). A surfaced ManaPayment stops the
-                // begin loop just like any other unhandled prompt.
+                // CR 602.1b: pay the ability's mana cost. Finalize from the pool
+                // via PassPriority (mirrors SpellCast). Source auto-tap is not
+                // modeled, so fund the pool with GameScenario::with_mana_pool; if
+                // it can't cover the cost, PassPriority errors and the `.expect`
+                // below fails loudly.
                 WaitingFor::ManaPayment { .. } => {
-                    panic!(
-                        "AbilityActivation reached WaitingFor::ManaPayment — auto-tap is not \
-                         modeled; drive payment manually or pre-fill the pool via \
-                         GameScenario::with_mana_pool"
-                    );
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("finalizing the ability's mana payment must be accepted");
                 }
                 other => panic!(
                     "AbilityActivation driver does not handle WaitingFor::{} yet — extend the \
