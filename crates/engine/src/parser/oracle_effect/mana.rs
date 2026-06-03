@@ -745,21 +745,20 @@ pub(super) fn apply_where_x_count_expression(
     }
 }
 
+/// CR 106.1: Recognize where-X count expressions for mana effects.
 fn parse_mana_where_x_count_expression(expression: &str) -> Option<QuantityExpr> {
-    super::parse_where_x_quantity_expression(expression)
-        .or_else(|| {
-            let lower = expression.to_ascii_lowercase();
-            super::parse_where_x_quantity_expression(&lower)
-        })
-        .or_else(|| {
-            let lower = expression.to_ascii_lowercase();
+    super::parse_where_x_quantity_expression(expression).or_else(|| {
+        let lower = expression.to_ascii_lowercase();
+        super::parse_where_x_quantity_expression(&lower).or_else(|| {
             let (clause, _) = tag::<_, _, OracleError<'_>>("the number of ")
                 .parse(lower.as_str())
                 .ok()?;
             crate::parser::oracle_quantity::parse_for_each_clause_expr(clause)
         })
+    })
 }
 
+/// CR 115.1: Extract target player filters from where-X expressions.
 fn where_x_expression_target_filter(expression: &str) -> Option<TargetFilter> {
     let lower = expression.to_ascii_lowercase();
     let clause = tag::<_, _, OracleError<'_>>("the number of ")
