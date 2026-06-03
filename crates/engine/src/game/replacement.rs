@@ -3910,6 +3910,98 @@ fn effect_overrides_controller(effect: &Effect) -> bool {
     )
 }
 
+/// CR 122.1c: A shield counter is stored as `CounterType::Generic("shield")`.
+/// One or more shield counters on a permanent create a single replacement
+/// effect and a single prevention effect, both consuming exactly one counter.
+fn shield_counter_type() -> CounterType {
+    CounterType::Generic("shield".to_string())
+}
+
+/// CR 122.1c: Number of shield counters currently on `object_id`.
+fn shield_counter_count(state: &GameState, object_id: ObjectId) -> u32 {
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.counters.get(&shield_counter_type()).copied())
+        .unwrap_or(0)
+}
+
+/// CR 122.1c: Apply the shield-counter replacement/prevention to a proposed
+/// `Destroy` or `Damage` event, if the affected permanent has at least one
+/// shield counter. A shield counter creates two effects on the permanent:
+///
+///   * "If this permanent would be destroyed *as the result of an effect*,
+///     instead remove a shield counter from it." — replaces effect-based
+///     `Destroy` events only. Lethal-damage destruction is a state-based
+///     action (CR 704.5g), not an effect, so it is NOT replaced here; such a
+///     `Destroy` carries no `source` (it originates in the SBA loop), whereas
+///     every effect-based destruction supplies the resolving ability's source.
+///   * "If damage would be dealt to this permanent, prevent that damage and
+///     remove a shield counter from it." — prevents the entire `Damage` event
+///     (combat or non-combat). Because the damage is prevented before it is
+///     marked, a shielded creature never reaches the lethal-damage SBA.
+///
+/// In both cases exactly one shield counter is removed per event (CR 122.1c),
+/// and the event is fully prevented. Returns `Some(ReplacementResult::Prevented)`
+/// when the shield applies, or `None` to let the normal pipeline proceed.
+fn apply_shield_counter(
+    state: &mut GameState,
+    proposed: &ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> Option<ReplacementResult> {
+    match proposed {
+        // CR 122.1c: Only destruction "as the result of an effect" is replaced.
+        // Effect-based destruction always carries a source; the lethal-damage
+        // SBA (CR 704.5g) supplies `None` and must fall through unprotected.
+        ProposedEvent::Destroy {
+            object_id,
+            source: Some(_),
+            ..
+        } => {
+            if shield_counter_count(state, *object_id) == 0 {
+                return None;
+            }
+            super::effects::counters::apply_counter_removal(
+                state,
+                *object_id,
+                shield_counter_type(),
+                1,
+                events,
+            );
+            Some(ReplacementResult::Prevented)
+        }
+        // CR 122.1c: Any damage dealt to the permanent is prevented, consuming
+        // one shield counter. A zero-amount damage event is not "damage dealt"
+        // and does not consume a counter.
+        ProposedEvent::Damage {
+            source_id,
+            target: target @ TargetRef::Object(object_id),
+            amount,
+            ..
+        } if *amount > 0 => {
+            if shield_counter_count(state, *object_id) == 0 {
+                return None;
+            }
+            super::effects::counters::apply_counter_removal(
+                state,
+                *object_id,
+                shield_counter_type(),
+                1,
+                events,
+            );
+            // CR 615: Emit `DamagePrevented` so "when damage is prevented"
+            // observers fire and downstream consumers see the prevented amount.
+            events.push(GameEvent::DamagePrevented {
+                source_id: *source_id,
+                target: target.clone(),
+                amount: *amount,
+            });
+            Some(ReplacementResult::Prevented)
+        }
+        _ => None,
+    }
+}
+
 fn pipeline_loop(
     state: &mut GameState,
     mut proposed: ProposedEvent,
@@ -3920,6 +4012,16 @@ fn pipeline_loop(
     loop {
         if depth >= MAX_REPLACEMENT_DEPTH {
             break;
+        }
+
+        // CR 122.1c: A shield counter's replacement/prevention is a
+        // self-replacement effect on the affected permanent. It fully prevents
+        // the `Destroy`/`Damage` event (consuming one counter), so it is applied
+        // here as a terminal interception rather than as an ordinary candidate —
+        // the object carries no `ReplacementDefinition` for it (the effect is
+        // derived purely from counter presence per CR 122.1c).
+        if let Some(result) = apply_shield_counter(state, &proposed, events) {
+            return result;
         }
 
         let candidates = find_applicable_replacements(state, &proposed, registry);
@@ -7134,6 +7236,179 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::Regenerated { object_id } if *object_id == bear_id)));
+    }
+
+    // ── Shield counter tests (CR 122.1c) ──
+
+    /// Helper: a 2/2 creature on the battlefield carrying `count` shield counters.
+    fn create_creature_with_shield_counters(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        count: u32,
+    ) -> ObjectId {
+        let id = crate::game::zones::create_object(
+            state,
+            CardId(1),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.counters
+            .insert(CounterType::Generic("shield".to_string()), count);
+        id
+    }
+
+    fn shield_count(state: &GameState, id: ObjectId) -> u32 {
+        state.objects[&id]
+            .counters
+            .get(&CounterType::Generic("shield".to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// CR 122.1c: An effect-based `Destroy` is replaced — instead, one shield
+    /// counter is removed and the permanent survives.
+    #[test]
+    fn shield_counter_replaces_effect_destruction() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_shield_counters(&mut state, PlayerId(0), "Bear", 1);
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: Some(ObjectId(100)),
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        assert_eq!(result, ReplacementResult::Prevented);
+        assert!(state.battlefield.contains(&bear_id));
+        // CR 122.1c: exactly one shield counter consumed per event.
+        assert_eq!(shield_count(&state, bear_id), 0);
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::CounterRemoved { object_id, count, .. } if *object_id == bear_id && *count == 1)
+        ));
+    }
+
+    /// CR 122.1c: "can't be regenerated" does NOT defeat a shield counter — the
+    /// shield is a replacement effect, not regeneration (CR 701.19).
+    #[test]
+    fn shield_counter_replaces_destruction_even_when_cant_regenerate() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_shield_counters(&mut state, PlayerId(0), "Bear", 1);
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: Some(ObjectId(100)),
+            cant_regenerate: true,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        assert_eq!(result, ReplacementResult::Prevented);
+        assert!(state.battlefield.contains(&bear_id));
+        assert_eq!(shield_count(&state, bear_id), 0);
+    }
+
+    /// CR 122.1c: Any damage to the permanent is prevented and one shield
+    /// counter removed, so a lethal hit leaves no damage marked.
+    #[test]
+    fn shield_counter_prevents_damage() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_shield_counters(&mut state, PlayerId(0), "Bear", 1);
+
+        let proposed = ProposedEvent::Damage {
+            source_id: ObjectId(100),
+            target: TargetRef::Object(bear_id),
+            amount: 5,
+            is_combat: true,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        assert_eq!(result, ReplacementResult::Prevented);
+        assert_eq!(shield_count(&state, bear_id), 0);
+        assert_eq!(state.objects[&bear_id].damage_marked, 0);
+        // CR 615: prevention emits a DamagePrevented event for the full amount.
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::DamagePrevented { target, amount, .. } if *target == TargetRef::Object(bear_id) && *amount == 5)
+        ));
+    }
+
+    /// CR 122.1c: One counter is consumed per event — a second destruction with
+    /// no shield counters left destroys the permanent normally.
+    #[test]
+    fn shield_counter_consumed_once_then_destruction_proceeds() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_shield_counters(&mut state, PlayerId(0), "Bear", 1);
+
+        // First destruction: replaced, one counter consumed.
+        let first = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: Some(ObjectId(100)),
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        assert_eq!(
+            replace_event(&mut state, first, &mut events),
+            ReplacementResult::Prevented
+        );
+        assert_eq!(shield_count(&state, bear_id), 0);
+
+        // Second destruction: no shield counters remain, so the event passes
+        // through unchanged for the caller to apply.
+        let second = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: Some(ObjectId(100)),
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let result = replace_event(&mut state, second, &mut events);
+        assert!(
+            matches!(result, ReplacementResult::Execute(ProposedEvent::Destroy { object_id, .. }) if object_id == bear_id),
+            "with no shield counters the Destroy must pass through, got {result:?}"
+        );
+    }
+
+    /// CR 122.1c + CR 704.5g: A shield counter's *destroy* replacement only
+    /// applies to destruction "as the result of an effect". The lethal-damage
+    /// state-based action (sourceless `Destroy`) is not an effect, so the
+    /// destroy replacement does not fire and no counter is consumed.
+    #[test]
+    fn shield_counter_does_not_replace_lethal_damage_sba_destroy() {
+        let mut state = GameState::new_two_player(42);
+        let bear_id = create_creature_with_shield_counters(&mut state, PlayerId(0), "Bear", 1);
+
+        let proposed = ProposedEvent::Destroy {
+            object_id: bear_id,
+            source: None,
+            cant_regenerate: false,
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        assert!(
+            matches!(
+                result,
+                ReplacementResult::Execute(ProposedEvent::Destroy { .. })
+            ),
+            "sourceless (SBA) Destroy must not be replaced by a shield counter, got {result:?}"
+        );
+        // CR 122.1c: no counter consumed — the prevention component (not the
+        // destroy replacement) is what protects against lethal damage upstream.
+        assert_eq!(shield_count(&state, bear_id), 1);
     }
 
     #[test]
