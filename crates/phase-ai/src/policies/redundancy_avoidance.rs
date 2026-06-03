@@ -438,6 +438,7 @@ fn redundancy_delta(
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
         | Effect::Monstrosity { .. }
+        | Effect::Specialize
         | Effect::Renown { .. }
         | Effect::Bolster { .. }
         | Effect::Adapt { .. }

@@ -1133,8 +1133,6 @@ pub fn synthesize_case_solve(face: &mut CardFace) {
     );
 }
 
-/// CR 702.87a: Synthesize level up activated ability — "Pay {cost}: Put a level counter
-/// on this permanent. Activate only as a sorcery."
 /// Digital-only Specialize: `{cost}, Discard a card` activated ability at sorcery speed.
 pub fn synthesize_specialize(face: &mut CardFace) {
     let specialize_abilities: Vec<AbilityDefinition> = face
@@ -1149,7 +1147,7 @@ pub fn synthesize_specialize(face: &mut CardFace) {
                                 AbilityCost::Mana { cost: cost.clone() },
                                 AbilityCost::Discard {
                                     count: QuantityExpr::Fixed { value: 1 },
-                                    filter: None,
+                                    filter: Some(specialize_discard_filter()),
                                     random: false,
                                     self_ref: false,
                                 },
@@ -1165,7 +1163,32 @@ pub fn synthesize_specialize(face: &mut CardFace) {
     face.abilities.extend(specialize_abilities);
 }
 
+fn specialize_discard_filter() -> TargetFilter {
+    TargetFilter::Or {
+        filters: vec![
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Card).properties(vec![
+                FilterProp::ColorCount {
+                    comparator: Comparator::GE,
+                    count: 1,
+                },
+            ])),
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(
+                        ["Plains", "Island", "Swamp", "Mountain", "Forest"]
+                            .into_iter()
+                            .map(|subtype| TypeFilter::Subtype(subtype.to_string()))
+                            .collect(),
+                    ))),
+                ],
+            },
+        ],
+    }
+}
+
 /// CR 702.87a: Synthesize level up activated ability — "Pay {cost}: Put a level counter
+/// on this permanent. Activate only as a sorcery."
 pub fn synthesize_level_up(face: &mut CardFace) {
     let level_up_abilities: Vec<AbilityDefinition> = face
         .keywords

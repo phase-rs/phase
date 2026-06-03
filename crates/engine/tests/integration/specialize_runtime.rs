@@ -3,7 +3,6 @@
 use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::specialize::SpecializeFaceMap;
-use engine::types::ability::{AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::events::GameEvent;
@@ -44,27 +43,18 @@ fn specialize_back(name: &str, color: ManaColor, shard: ManaCostShard) -> BackFa
     }
 }
 
+fn add_specialize_creature(scenario: &mut GameScenario) -> engine::types::identifiers::ObjectId {
+    let mut builder = scenario.add_creature(P0, "Test Student", 1, 1);
+    builder.from_oracle_text_with_keywords(&["specialize"], "Specialize {0}");
+    builder.id()
+}
+
 #[test]
 fn specialize_applies_chosen_face_and_emits_event() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let creature = scenario
-        .add_creature(P0, "Test Student", 1, 1)
-        .with_keyword(Keyword::Specialize(ManaCost::NoCost))
-        .with_ability_definition(
-            AbilityDefinition::new(AbilityKind::Activated, Effect::Specialize)
-                .cost(AbilityCost::Composite {
-                    costs: vec![AbilityCost::Discard {
-                        count: QuantityExpr::Fixed { value: 1 },
-                        filter: None,
-                        random: false,
-                        self_ref: false,
-                    }],
-                })
-                .sorcery_speed(),
-        )
-        .id();
+    let creature = add_specialize_creature(&mut scenario);
 
     let discard = scenario
         .add_creature_to_hand(P0, "White Discard", 1, 1)
@@ -152,5 +142,122 @@ fn specialize_applies_chosen_face_and_emits_event() {
             )
         }),
         "expected Specialized event"
+    );
+}
+
+#[test]
+fn specialize_accepts_basic_land_subtype_discard() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let creature = add_specialize_creature(&mut scenario);
+    let land = scenario
+        .add_land_to_hand(P0, "Breeding Pool")
+        .with_subtypes(vec!["Forest", "Island"])
+        .id();
+
+    let mut runner = scenario.build();
+
+    {
+        let mut faces = SpecializeFaceMap::new();
+        faces.insert(
+            ManaColor::Green,
+            specialize_back(
+                "Test Student — Green",
+                ManaColor::Green,
+                ManaCostShard::Green,
+            ),
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .specialize_faces = Some(faces);
+    }
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: creature,
+            ability_index: 0,
+        })
+        .expect("activate specialize with land discard available");
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost { .. }
+    ));
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![land] })
+        .expect("pay specialize discard with land subtype");
+
+    for _ in 0..8 {
+        if runner
+            .state()
+            .objects
+            .get(&creature)
+            .is_some_and(|obj| obj.specialized_color == Some(ManaColor::Green))
+        {
+            break;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+    }
+
+    let obj = runner.state().objects.get(&creature).unwrap();
+    assert_eq!(obj.name, "Test Student — Green");
+    assert_eq!(obj.specialized_color, Some(ManaColor::Green));
+}
+
+#[test]
+fn specialize_rejects_colorless_nonland_discard_before_cost_payment() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let creature = add_specialize_creature(&mut scenario);
+    let colorless = scenario.add_card_to_hand(P0, "Colorless Bauble");
+
+    let mut runner = scenario.build();
+
+    {
+        let mut faces = SpecializeFaceMap::new();
+        faces.insert(
+            ManaColor::White,
+            specialize_back(
+                "Test Student — White",
+                ManaColor::White,
+                ManaCostShard::White,
+            ),
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .specialize_faces = Some(faces);
+    }
+
+    let err = runner
+        .act(GameAction::ActivateAbility {
+            source_id: creature,
+            ability_index: 0,
+        })
+        .expect_err("colorless nonland card must not be a legal specialize discard");
+
+    assert!(
+        err.to_string().contains("Cannot pay activation cost"),
+        "unexpected error: {err}"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(
+        runner.state().players[P0.0 as usize]
+            .hand
+            .contains(&colorless),
+        "invalid discard must remain in hand"
     );
 }
