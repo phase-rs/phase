@@ -2894,6 +2894,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::PhaseOut { .. }
         | Effect::PhaseIn { .. }
         | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
         | Effect::SolveCase
         | Effect::BecomePrepared { .. }
         | Effect::BecomeUnprepared { .. }

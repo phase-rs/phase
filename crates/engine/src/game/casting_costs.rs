@@ -8,7 +8,8 @@ use crate::types::ability::{
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CastPaymentMode, CastingVariant, ConvokeMode, CostResume, DistributionUnit, GameState,
-    PayCostKind, PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
+    PayCostKind, PendingCast, PendingDiscardForCostResume, StackEntry, StackEntryKind,
+    StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
@@ -801,20 +802,81 @@ pub(crate) fn handle_discard_for_cost(
         }
     }
 
-    // CR 601.2h: Discard each chosen card through the replacement pipeline
+    // CR 601.2h + CR 616.1: Discard each chosen card through the replacement pipeline
     // so Madness (CR 702.35) etc. can intercept.
-    for &card_id in chosen {
+    for (index, &card_id) in chosen.iter().enumerate() {
         match super::effects::discard::discard_as_cost(state, card_id, player, events) {
             super::effects::discard::DiscardOutcome::Complete => {}
-            super::effects::discard::DiscardOutcome::NeedsReplacementChoice(_) => {
-                // CR 118.3: Replacement choice during cost payment is extremely rare.
-                // TODO: Surface replacement choice to player during cost payment.
-                // For now, proceed — the discard was not completed, but the
-                // replacement pipeline has already handled the event.
+            super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                state.pending_discard_for_cost = Some(PendingDiscardForCostResume {
+                    player,
+                    pending: pending.clone(),
+                    chosen: chosen.to_vec(),
+                    paused_at_index: index,
+                });
+                super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
+                return Ok(state.waiting_for.clone());
             }
         }
     }
 
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
+/// CR 601.2h + CR 616.1: After a replacement choice during discard-for-cost payment, finish
+/// discarding any remaining cards and continue the cast/activation pipeline.
+pub(crate) fn resume_interrupted_cost_payment(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if let Some(resume) = state.pending_discard_for_cost.take() {
+        let player = resume.player;
+        let pending = resume.pending;
+        for &card_id in resume.chosen.iter().skip(resume.paused_at_index + 1) {
+            match super::effects::discard::discard_as_cost(state, card_id, player, events) {
+                super::effects::discard::DiscardOutcome::Complete => {}
+                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                    let paused_at_index = resume
+                        .chosen
+                        .iter()
+                        .position(|&id| id == card_id)
+                        .unwrap_or(resume.paused_at_index + 1);
+                    state.pending_discard_for_cost = Some(PendingDiscardForCostResume {
+                        player,
+                        pending: pending.clone(),
+                        chosen: resume.chosen.clone(),
+                        paused_at_index,
+                    });
+                    super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
+                    return Ok(state.waiting_for.clone());
+                }
+            }
+        }
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
+
+    let Some(pending) = state.pending_cast.take() else {
+        return Ok(WaitingFor::Priority {
+            player: state.active_player,
+        });
+    };
+    let pending = *pending;
+    let player = state
+        .objects
+        .get(&pending.object_id)
+        .map(|o| o.controller)
+        .unwrap_or(state.active_player);
+    if let Some(activation_ability_index) = pending.activation_ability_index {
+        return push_activated_ability_to_stack(
+            state,
+            player,
+            pending.object_id,
+            activation_ability_index,
+            pending.ability,
+            pending.activation_cost.as_ref(),
+            events,
+        );
+    }
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
@@ -975,7 +1037,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
 
     if pending.activation_ability_index.is_some() {
         if let Some(cost) = pending.activation_cost.take() {
-            // CR 118.3 + CR 602.2h: A player pays an activated ability's total
+            // CR 118.3 + CR 601.2h + CR 602.2b: A player pays an activated ability's total
             // cost before that ability becomes activated. For self-bounce costs
             // such as Maze's End, pay automatic components like {T} while the
             // source is still on the battlefield, then perform the chosen return.
@@ -1027,7 +1089,7 @@ pub(crate) fn handle_remove_counter_for_cost(
 
     if pending.activation_ability_index.is_some() {
         if let Some(cost) = pending.activation_cost.take() {
-            // CR 602.2b/h: Pay automatic activation-cost components such as
+            // CR 601.2h + CR 602.2b: Pay automatic activation-cost components such as
             // {T} before removing the chosen counter and putting the ability
             // on the stack. The targeted RemoveCounter sub-cost no-ops in
             // `pay_ability_cost` because this handler pays that choice.
@@ -1318,8 +1380,9 @@ pub(super) fn push_activated_ability_to_stack(
     remaining_cost: Option<&crate::types::ability::AbilityCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // Pay remaining sub-costs (Tap, Mana, etc.) — choice-based costs already paid
-    // by a WaitingFor flow are no-ops here, so resuming with the full cost is idempotent.
+    // Pay any activation-cost tail still outstanding. Cost-selection flows may
+    // pass the original full cost; choice-based sub-costs already paid by a
+    // WaitingFor handler are no-ops here.
     if let Some(cost) = remaining_cost {
         if super::casting::variable_speed_payment_range(
             cost,
@@ -1336,13 +1399,26 @@ pub(super) fn push_activated_ability_to_stack(
                 ability_index,
             ));
         }
-        super::casting::pay_ability_cost(state, player, source_id, cost, events)?;
+        if let super::casting::AbilityCostPaymentOutcome::Paused { remaining_cost } =
+            super::casting::pay_ability_cost_for_activation(state, player, source_id, cost, events)?
+        {
+            let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending.activation_cost = remaining_cost;
+            pending.activation_ability_index = Some(ability_index);
+            state.pending_cast = Some(Box::new(pending));
+            return Ok(state.waiting_for.clone());
+        }
     }
 
     // CR 602.2b: Check if the ability has targets that need selection.
     // This handles cases where cost payment (sacrifice, waterbend) detoured
     // before target selection in handle_activate_ability.
     let target_slots = build_target_slots(state, &resolved)?;
+    let assigned_targets = flatten_targets_in_chain(&resolved);
+    if !target_slots.is_empty() && assigned_targets.len() >= target_slots.len() {
+        emit_targeting_events(state, &assigned_targets, source_id, player, events);
+        return push_ability_entry(state, player, source_id, ability_index, resolved, events);
+    }
     if !target_slots.is_empty() {
         // CR 115.1 + CR 701.9b: Random-target activated abilities — game picks
         // uniformly via `state.rng`, no controller prompt.
@@ -1398,7 +1474,6 @@ pub(super) fn push_activated_ability_to_stack(
         });
     }
 
-    let assigned_targets = flatten_targets_in_chain(&resolved);
     emit_targeting_events(state, &assigned_targets, source_id, player, events);
 
     push_ability_entry(state, player, source_id, ability_index, resolved, events)
@@ -5106,14 +5181,18 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
-        PtStat, PtValueScope, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+        PtStat, PtValueScope, QuantityExpr, ReplacementDefinition, ReplacementMode, TargetFilter,
+        TypeFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
 
     fn make_pending(source_id: ObjectId) -> PendingCast {
@@ -5149,6 +5228,27 @@ mod tests {
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
         }
+    }
+
+    fn install_optional_discard_replacement(state: &mut GameState) -> ObjectId {
+        let replacement_source = create_object(
+            state,
+            CardId(9_002),
+            PlayerId(0),
+            "Discard Replacement".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&replacement_source)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Discard)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .description("Apply discard replacement".to_string()),
+            );
+        replacement_source
     }
 
     /// CR 603.10a + CR 701.21a + CR 601.2h: when a spell's additional cost
@@ -6755,6 +6855,76 @@ mod tests {
         assert_eq!(chosen_x, Some(2));
         assert_eq!(state.objects[&squirrel_a].zone, Zone::Graveyard);
         assert_eq!(state.objects[&squirrel_b].zone, Zone::Graveyard);
+    }
+
+    #[test]
+    fn discard_for_cost_resume_can_pause_on_each_remaining_discard() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        install_optional_discard_replacement(&mut state);
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Discard Outlet".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().abilities = Arc::new(vec![AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )]);
+        let first = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "First Card".to_string(),
+            Zone::Hand,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(0),
+            "Second Card".to_string(),
+            Zone::Hand,
+        );
+        let mut events = Vec::new();
+
+        let waiting = handle_discard_for_cost(
+            &mut state,
+            PlayerId(0),
+            make_pending(source),
+            2,
+            &[first, second],
+            &[first, second],
+            &mut events,
+        )
+        .expect("first discard should pause for replacement choice");
+
+        assert!(matches!(waiting, WaitingFor::ReplacementChoice { .. }));
+        assert_eq!(state.objects[&first].zone, Zone::Hand);
+        assert!(state.stack.is_empty());
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("first replacement choice should resume to the second discard");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert_eq!(state.objects[&first].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&second].zone, Zone::Hand);
+        assert!(state.stack.is_empty());
+
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+            .expect("second replacement choice should finish cost payment");
+        assert_eq!(state.objects[&second].zone, Zone::Graveyard);
+        assert_eq!(state.stack.len(), 1, "activation should reach the stack");
     }
 
     /// CR 603.6c + CR 118.3: Sacrificing a permanent as part of a cost is a

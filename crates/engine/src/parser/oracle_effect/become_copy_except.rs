@@ -182,6 +182,12 @@ pub(crate) fn parse_except_body<'a>(
     if let Some((rest, modification)) = parse_enters_with_additional_counter(input) {
         return Some((rest, vec![modification]));
     }
+    // CR 707.9d: the replacement form ("… and loses all other card types")
+    // must be tried before the additive form, which would otherwise leave the
+    // "and loses all other card types" tail unconsumed.
+    if let Some((rest, modification)) = parse_its_a_type_loses_others(input) {
+        return Some((rest, vec![modification]));
+    }
     if let Some((rest, subtype)) = parse_its_a_type_in_addition(input) {
         return Some((rest, vec![subtype]));
     }
@@ -571,6 +577,45 @@ fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModifica
         ContinuousModification::AddSubtype { subtype: canonical }
     };
     Some((rest, modification))
+}
+
+/// CR 205.1a + CR 613.1d + CR 707.9d: "it's a(n) {type} and loses all other
+/// card types" — REPLACES the copied card's entire core card-type set with the
+/// single named type (set-replacement, not addition). Myrkul, Lord of Bones:
+/// "create a token that's a copy of that card, except it's an enchantment and
+/// loses all other card types." Distinct from `parse_its_a_type_in_addition`
+/// (which ADDS the type, keeping the copied types); the "and loses all other
+/// card types" suffix is the replacement signal. `SetCardTypes` names only the
+/// replacement core types; supertype retention and CR 205.1a subtype
+/// correlation are applied downstream when the modification resolves. Emits
+/// [`ContinuousModification::SetCardTypes`].
+fn parse_its_a_type_loses_others(input: &str) -> Option<(&str, ContinuousModification)> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("it's an "),
+        tag("it's a "),
+        tag("it\u{2019}s an "),
+        tag("it\u{2019}s a "),
+    ))
+    .parse(input)
+    .ok()?;
+    let (type_word, rest) = nom_primitives::split_once_on(rest, " and loses all other card types")
+        .ok()
+        .map(|(_, pair)| pair)?;
+    let type_word = type_word.trim();
+    if type_word.is_empty() {
+        return None;
+    }
+    // Only a recognised core type can replace the card-type set; a subtype
+    // ("loses all other card types" is a card-type statement, CR 205.1b) would
+    // be a malformed clause, so decline rather than guess.
+    let canonical = canonicalize_subtype_name(type_word);
+    let core_type = CoreType::from_str(&canonical).ok()?;
+    Some((
+        rest,
+        ContinuousModification::SetCardTypes {
+            core_types: vec![core_type],
+        },
+    ))
 }
 
 /// "it has {keyword[, keyword, ...]}" — each keyword becomes `AddKeyword`.
@@ -1221,6 +1266,44 @@ mod tests {
             m,
             ContinuousModification::AddSubtype { subtype } if subtype == "Spider"
         )));
+    }
+
+    /// CR 205.1a + CR 613.1d + CR 707.9d: Myrkul, Lord of Bones — "it's an
+    /// enchantment and loses all other card types" REPLACES the copied core
+    /// card-type set (set-replacement), distinct from the additive "in addition
+    /// to its other types" form. Emits `SetCardTypes`, not `AddType`.
+    #[test]
+    fn its_an_enchantment_loses_others_emits_set_card_types() {
+        let (_, mods) = parse_except_clause(
+            ", except it's an enchantment and loses all other card types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::SetCardTypes {
+                core_types: vec![CoreType::Enchantment],
+            }]
+        );
+    }
+
+    /// The additive "in addition to its other types" form must still emit
+    /// `AddType` — the new replacement arm must not steal it.
+    #[test]
+    fn its_an_artifact_in_addition_still_emits_add_type() {
+        let (_, mods) = parse_except_clause(
+            ", except it's an artifact in addition to its other types",
+            "Card",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::AddType {
+                core_type: CoreType::Artifact,
+            }]
+        );
     }
 
     #[test]

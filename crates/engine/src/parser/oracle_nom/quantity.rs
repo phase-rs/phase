@@ -590,6 +590,9 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // possessive routes to `TargetZoneCardCount` (resolves against the player
         // target in scope) instead of falling back to a controller-less
         // `InZone` filter that counts every player's cards.
+        // CR 613.1: "cards in the chosen player's <zone>" — the persisted ETB
+        // choice; must precede the generic target/zone arms below.
+        parse_number_of_cards_in_chosen_player_zone,
         parse_number_of_cards_in_target_zone,
         parse_number_of_cards_in_all_players_hands,
         parse_number_of_cards_in_zone,
@@ -725,10 +728,20 @@ fn parse_controlled_by_extremum_player(input: &str) -> OracleResult<'_, Quantity
     ))
 }
 
-/// Parse "[type(s)] you control" after "the number of".
+/// Parse "[type(s)] you control" / "[type(s)] the chosen player controls" after
+/// "the number of". CR 613.1: "the chosen player" is the player persisted on the
+/// source via `ChosenAttribute::Player` (Skyshroud War Beast, Lost Order of
+/// Jarkeld), distinct from the controller ("you control").
 fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, head) = parse_type_filter_word(input)?;
-    let (rest, _) = tag(" you control").parse(rest)?;
+    let (rest, controller) = alt((
+        value(ControllerRef::You, tag(" you control")),
+        value(
+            ControllerRef::SourceChosenPlayer,
+            tag(" the chosen player controls"),
+        ),
+    ))
+    .parse(rest)?;
     // CR 205.2b: "<head> you control that are <t1> and/or <t2>" restricts the
     // controlled population to objects that have any of the listed card types.
     // CR 205.2b makes a multi-type object satisfy any of its types, so a
@@ -748,9 +761,25 @@ fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
         QuantityRef::ObjectCount {
             filter: TargetFilter::Typed(TypedFilter {
                 type_filters,
-                controller: Some(ControllerRef::You),
+                controller: Some(controller),
                 properties: Vec::new(),
             }),
+        },
+    ))
+}
+
+/// CR 613.1: Parse "cards in the chosen player's <zone>" after "the number of"
+/// into the general zone-count building block scoped to the source's persisted
+/// chosen player.
+fn parse_number_of_cards_in_chosen_player_zone(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("cards in the chosen player's ").parse(input)?;
+    let (rest, zone) = parse_zone_ref_singular(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ZoneCardCount {
+            zone,
+            card_types: Vec::new(),
+            scope: CountScope::SourceChosenPlayer,
         },
     ))
 }
@@ -3392,6 +3421,57 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 613.1: the en-Kor… no — the CDA "chosen player" cycle. "the chosen
+    /// player" is the player persisted on the source via `ChosenAttribute::Player`
+    /// (Skyshroud War Beast, Lost Order of Jarkeld, Entropic Specter, Sewer
+    /// Nemesis). Controls-counts route through `ControllerRef::SourceChosenPlayer`;
+    /// zone-counts through `CountScope::SourceChosenPlayer`.
+    #[test]
+    fn parse_quantity_ref_chosen_player_cda_forms() {
+        let (rest, q) =
+            parse_quantity_ref("the number of creatures the chosen player controls").unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::SourceChosenPlayer));
+                assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+
+        for (text, zone) in [
+            (
+                "the number of cards in the chosen player's hand",
+                ZoneRef::Hand,
+            ),
+            (
+                "the number of cards in the chosen player's graveyard",
+                ZoneRef::Graveyard,
+            ),
+            (
+                "the number of cards in the chosen player's library",
+                ZoneRef::Library,
+            ),
+            (
+                "the number of cards in the chosen player's exile",
+                ZoneRef::Exile,
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(text).unwrap();
+            assert_eq!(rest, "");
+            assert_eq!(
+                q,
+                QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types: Vec::new(),
+                    scope: CountScope::SourceChosenPlayer,
+                }
+            );
+        }
     }
 
     #[test]
