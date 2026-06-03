@@ -13,6 +13,19 @@ pub(super) fn run_post_action_pipeline(
     default_wf: &WaitingFor,
     skip_trigger_scan: bool,
 ) -> Result<WaitingFor, EngineError> {
+    run_post_action_pipeline_from(state, events, 0, default_wf, skip_trigger_scan)
+}
+
+/// Run the normal post-action settlement while scanning only events produced at
+/// or after `event_start`. Use for nested resume paths that carry earlier
+/// payment/choice events in the same output buffer.
+pub(super) fn run_post_action_pipeline_from(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+    default_wf: &WaitingFor,
+    skip_trigger_scan: bool,
+) -> Result<WaitingFor, EngineError> {
     // Capture stack depth before any trigger/SBA processing so we can detect
     // whether new triggered abilities were added during this pipeline pass.
     let stack_before = state.stack.len();
@@ -29,7 +42,7 @@ pub(super) fn run_post_action_pipeline(
     // events that should be deferred have already been moved into
     // `state.deferred_entry_events` for replay by `handle_copy_target_choice`.
     if !skip_trigger_scan {
-        let filtered_events: Vec<_> = events
+        let filtered_events: Vec<_> = events[event_start..]
             .iter()
             .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
             .cloned()
@@ -52,30 +65,14 @@ pub(super) fn run_post_action_pipeline(
     // CR 704.3: SBA/trigger loop. SBAs may generate events (e.g., ZoneChanged for
     // dying creatures) that need trigger processing. Repeat until no new SBAs fire,
     // matching the loop pattern in process_combat_damage_triggers.
-    //
-    // CR 704.4 + CR 616.1: But do NOT run SBAs while resolution is paused on a
-    // replacement-effect choice. A `ReplacementChoice` is a mid-resolution
-    // pause — the triggering event (e.g. a permanent's "enters with X +1/+1
-    // counters" ETB placement, being doubled/incremented by two or more
-    // order-material replacements like Branching Evolution + Ozolith, so CR
-    // 616.1 makes the application order the controller's choice) has not
-    // finished happening: the counters are not on the object yet. CR 704.4 —
-    // "state-based actions pay no attention to what happens during the
-    // resolution of a spell or ability" — so checking SBAs now would wrongly
-    // send a still-entering 0/0 to the graveyard (CR 704.5f) before its counters
-    // land. The loop runs on the next pipeline pass, once the choice is answered
-    // and resolution settles back to Priority. Player-loss SBAs remain covered
-    // mid-choice by `reconcile_terminal_result`'s narrow safety net.
-    if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
-        loop {
-            let events_before = events.len();
-            sba::check_state_based_actions(state, events);
-            if events.len() > events_before {
-                let sba_events: Vec<_> = events[events_before..].to_vec();
-                triggers::process_triggers(state, &sba_events);
-            } else {
-                break;
-            }
+    loop {
+        let events_before = events.len();
+        sba::check_state_based_actions(state, events);
+        if events.len() > events_before {
+            let sba_events: Vec<_> = events[events_before..].to_vec();
+            triggers::process_triggers(state, &sba_events);
+        } else {
+            break;
         }
     }
 

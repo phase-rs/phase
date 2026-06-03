@@ -3601,6 +3601,7 @@ fn static_during_your_turn_equipped_creatures_you_control_have_double_strike() {
                 .properties(vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Equipment,
                     controller: None,
+                    exclude_source: false,
                 }]),
         ))
     );
@@ -7990,7 +7991,8 @@ fn creatures_you_control_that_are_enchanted() {
                 tf.properties.as_slice(),
                 [FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
-                    controller: None
+                    controller: None,
+                    exclude_source: false
                 }]
             ));
         }
@@ -10802,6 +10804,7 @@ fn static_enchanted_creatures_you_control_uses_attachment_predicate() {
                 .properties(vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
+                    exclude_source: false,
                 }])
         ))
     );

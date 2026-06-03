@@ -97,15 +97,19 @@ pub(crate) fn parse_enchant_controller_suffix(input: &str) -> OracleResult<'_, C
 /// CR 303.4 + CR 702.5a + CR 301.5: Optional trailing attachment qualifier on an
 /// "Enchant <type>" line — "with another Aura attached to it" (Daybreak Coronet)
 /// further restricts the legal target set to objects that already carry an
-/// attachment of the named kind. The article ("another"/"an"/"a") is immaterial
-/// to the predicate: at attachment-legality time the Aura being cast is not yet
-/// attached, so "another" is automatically satisfied by any object with ≥1
-/// attachment of that kind. Returns the `HasAttachment` filter prop to fold onto
-/// the typed enchant filter. The leading space ensures the qualifier only matches
-/// after a preceding type leg (never as a standalone clause).
+/// attachment of the named kind. "Another" is material once SBA attachment
+/// legality rechecks the Aura already attached to its host, so preserve it as a
+/// source-exclusion axis on the `HasAttachment` filter prop. The leading space
+/// ensures the qualifier only matches after a preceding type leg (never as a
+/// standalone clause).
 pub(crate) fn parse_enchant_attachment_qualifier(input: &str) -> OracleResult<'_, FilterProp> {
     let (input, _) = tag(" with ").parse(input)?;
-    let (input, _) = alt((tag("another "), tag("an "), tag("a "))).parse(input)?;
+    let (input, exclude_source) = alt((
+        value(true, tag("another ")),
+        value(false, tag("an ")),
+        value(false, tag("a ")),
+    ))
+    .parse(input)?;
     let (input, kind) = alt((
         value(AttachmentKind::Aura, tag("aura")),
         value(AttachmentKind::Equipment, tag("equipment")),
@@ -117,6 +121,7 @@ pub(crate) fn parse_enchant_attachment_qualifier(input: &str) -> OracleResult<'_
         FilterProp::HasAttachment {
             kind,
             controller: None,
+            exclude_source,
         },
     ))
 }

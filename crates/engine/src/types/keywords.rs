@@ -2878,9 +2878,9 @@ mod tests {
 
     /// CR 303.4 + CR 702.5a: Daybreak Coronet — "Enchant creature with another
     /// Aura attached to it" narrows the legal host set to creatures that already
-    /// carry an Aura. The qualifier folds onto the typed filter as
-    /// `FilterProp::HasAttachment { Aura }`; the "another" article is immaterial
-    /// because the Aura being cast is not yet attached at legality-check time.
+    /// carry another Aura. The qualifier folds onto the typed filter as
+    /// `FilterProp::HasAttachment { Aura, exclude_source: true }` so SBA
+    /// legality cannot let Daybreak Coronet count itself after it resolves.
     #[test]
     fn parse_enchant_creature_with_another_aura_attached() {
         use super::super::ability::{AttachmentKind, TypeFilter};
@@ -2894,8 +2894,9 @@ mod tests {
             tf.properties.contains(&FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: None,
+                exclude_source: true,
             }),
-            "expected FilterProp::HasAttachment {{ Aura }}; got {:?}",
+            "expected FilterProp::HasAttachment {{ Aura, exclude_source }}; got {:?}",
             tf.properties
         );
     }

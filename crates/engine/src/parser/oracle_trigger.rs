@@ -6966,6 +6966,7 @@ fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<FilterProp>)
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
+                exclude_source: false,
             },
         ),
         (
@@ -6973,6 +6974,7 @@ fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<FilterProp>)
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
+                exclude_source: false,
             },
         ),
         (
@@ -6980,6 +6982,7 @@ fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<FilterProp>)
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Equipment,
                 controller: Some(ControllerRef::You),
+                exclude_source: false,
             },
         ),
         (
@@ -6987,6 +6990,7 @@ fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<FilterProp>)
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Equipment,
                 controller: Some(ControllerRef::You),
+                exclude_source: false,
             },
         ),
     ];
@@ -15132,6 +15136,7 @@ mod tests {
                         FilterProp::HasAttachment {
                             kind: AttachmentKind::Aura,
                             controller: Some(ControllerRef::You),
+                            ..
                         }
                     )
                 });
