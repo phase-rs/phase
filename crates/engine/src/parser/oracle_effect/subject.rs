@@ -2492,6 +2492,7 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
         StaticMode::CantBlock
             | StaticMode::CantAttack
             | StaticMode::CantAttackOrBlock
+            | StaticMode::CantCrew
             | StaticMode::CantBeBlocked
             | StaticMode::CantBeBlockedBy { .. }
             | StaticMode::CantBeBlockedExceptBy { .. }
@@ -2582,6 +2583,26 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // CR 508.1d + CR 509.1a: Compound "can't attack or block"
     if lower == "can't attack or block" || lower == "cannot attack or block" {
         return Some(vec![StaticMode::CantAttack, StaticMode::CantBlock]);
+    }
+    // CR 702.122c: "~ can't crew [Vehicles]"
+    if lower == "can't crew"
+        || lower == "cannot crew"
+        || lower == "can't crew vehicles"
+        || lower == "cannot crew vehicles"
+    {
+        return Some(vec![StaticMode::CantCrew]);
+    }
+    // CR 508.1d + CR 509.1a + CR 702.122c: Bound in Gold / Intercessor's Arrest
+    if lower == "can't attack, block, or crew vehicles"
+        || lower == "cannot attack, block, or crew vehicles"
+        || lower == "can't attack, block, or crew"
+        || lower == "cannot attack, block, or crew"
+    {
+        return Some(vec![
+            StaticMode::CantAttack,
+            StaticMode::CantBlock,
+            StaticMode::CantCrew,
+        ]);
     }
     // CR 509.1a + "can't be blocked": Compound "can't block or be blocked"
     if lower == "can't block or be blocked" || lower == "cannot block or be blocked" {
@@ -3902,6 +3923,30 @@ mod tests {
         assert_eq!(
             parse_restriction_modes("can't transform"),
             Some(vec![StaticMode::Other("CantTransform".to_string())])
+        );
+    }
+
+    #[test]
+    fn parse_restriction_modes_cant_crew_variants() {
+        assert_eq!(
+            parse_restriction_modes("can't crew"),
+            Some(vec![StaticMode::CantCrew])
+        );
+        assert_eq!(
+            parse_restriction_modes("cannot crew vehicles"),
+            Some(vec![StaticMode::CantCrew])
+        );
+    }
+
+    #[test]
+    fn parse_restriction_modes_cant_attack_block_or_crew_vehicles_compound() {
+        assert_eq!(
+            parse_restriction_modes("can't attack, block, or crew vehicles"),
+            Some(vec![
+                StaticMode::CantAttack,
+                StaticMode::CantBlock,
+                StaticMode::CantCrew,
+            ])
         );
     }
 

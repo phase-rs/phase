@@ -2689,6 +2689,7 @@ mod tests {
             defending_player: PlayerId(1),
             attack_target: engine::game::combat::AttackTarget::Player(PlayerId(1)),
             blocked: false,
+            band_id: None,
         });
         state.combat = Some(combat);
 

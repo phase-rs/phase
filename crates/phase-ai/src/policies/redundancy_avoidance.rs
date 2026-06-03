@@ -387,6 +387,7 @@ fn redundancy_delta(
         | Effect::PhaseOut { .. }
         | Effect::PhaseIn { .. }
         | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
         | Effect::SolveCase
         | Effect::SetClassLevel { .. }
         | Effect::CreateDelayedTrigger { .. }
@@ -783,19 +784,35 @@ fn zero_quantity_redundancy(
 
 /// `GenericEffect` redundancy: the effect's static abilities grant one or
 /// more keywords (via `ContinuousModification::AddKeyword`), and every
-/// candidate target already effectively has each granted keyword.
+/// recipient already effectively has each granted keyword.
+///
+/// Recipients are resolved by layer (CR 611.2 — a continuous effect's
+/// affected set is defined by the ability, which may or may not be a chosen
+/// target):
+/// - A chosen `target` (e.g. "target creature gains flying") drives the set
+///   directly — at decision time the legal-target *filter* stands in for the
+///   not-yet-chosen object.
+/// - A self/affected-scoped grant carries `target: None` (e.g. Prognostic
+///   Sphinx's "~ gains hexproof until end of turn", whose lowered form has
+///   `target: None` and a `StaticDefinition` with `affected: Some(SelfRef)`).
+///   The recipients are then the union of each keyword-granting static's
+///   `affected` filter. Without this fallback the policy is blind to redundant
+///   self-buffs — the AI re-pays the cost (here: discarding a card) to grant a
+///   keyword it already has (issue #1966).
 fn generic_effect_keyword_redundancy(
     state: &GameState,
     source_id: ObjectId,
     static_abilities: &[StaticDefinition],
     target: Option<&TargetFilter>,
 ) -> Option<(f64, i64, i64)> {
-    let target = target?;
     let granted = collect_keyword_grants(static_abilities);
     if granted.is_empty() {
         return None;
     }
-    let candidates = resolved_candidate_targets(state, source_id, target);
+    let candidates = match target {
+        Some(target) => resolved_candidate_targets(state, source_id, target),
+        None => resolve_affected_candidates(state, source_id, static_abilities),
+    };
     if candidates.is_empty() {
         return None;
     }
@@ -810,6 +827,38 @@ fn generic_effect_keyword_redundancy(
     } else {
         None
     }
+}
+
+/// Resolve the recipients of a keyword-granting `GenericEffect` that carries
+/// no chosen `target` — the self/affected-scoped case (Prognostic Sphinx's
+/// "~ gains hexproof until end of turn"). Returns the dedup-preserving union of
+/// objects matched by the `affected` filter of every static ability that
+/// grants at least one keyword. A static whose `affected` is `None` defines no
+/// recipient set and contributes nothing.
+fn resolve_affected_candidates(
+    state: &GameState,
+    source_id: ObjectId,
+    static_abilities: &[StaticDefinition],
+) -> Vec<ObjectId> {
+    let mut out = Vec::new();
+    for stat in static_abilities {
+        let grants_keyword = stat
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddKeyword { .. }));
+        if !grants_keyword {
+            continue;
+        }
+        let Some(affected) = stat.affected.as_ref() else {
+            continue;
+        };
+        for id in resolved_candidate_targets(state, source_id, affected) {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    out
 }
 
 /// Walk `StaticDefinition.modifications` and collect the keywords that
@@ -1207,6 +1256,90 @@ mod tests {
             panic!("expected Score verdict");
         };
         assert_eq!(delta, 0.0, "new keyword grant should not penalise");
+    }
+
+    /// Issue #1966 (Prognostic Sphinx): a self-scoped keyword grant lowers to
+    /// `GenericEffect { target: None, static_abilities: [.. affected: SelfRef ..] }`.
+    /// When the source already has the keyword, re-activating (paying the
+    /// discard cost) is redundant and must be penalised. Before the
+    /// `affected`-fallback fix the `target: None` shape returned `None`,
+    /// blinding the policy to the redundant self-buff.
+    #[test]
+    fn generic_effect_self_scoped_already_has_keyword_penalized() {
+        let mut state = GameState::new_two_player(0);
+        let stat = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof,
+            }]);
+        let obj_id = make_creature_with_ability(
+            &mut state,
+            "Prognostic Sphinx",
+            Effect::GenericEffect {
+                static_abilities: vec![stat],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+        );
+        // Hexproof already active from a prior activation this turn — re-granting
+        // is pure redundancy.
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .keywords
+            .push(Keyword::Hexproof);
+
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let candidate = activate_candidate(obj_id);
+        let ctx = mk_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        let PolicyVerdict::Score { delta, .. } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        assert_eq!(
+            delta, -2.0,
+            "redundant self-scoped keyword grant should emit -2.0 delta"
+        );
+    }
+
+    /// Companion to the issue #1966 case: the first activation, when the source
+    /// does not yet have the keyword, grants real value and must NOT be
+    /// penalised (otherwise the AI never gains hexproof at all).
+    #[test]
+    fn generic_effect_self_scoped_new_keyword_not_penalized() {
+        let mut state = GameState::new_two_player(0);
+        let stat = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof,
+            }]);
+        let obj_id = make_creature_with_ability(
+            &mut state,
+            "Prognostic Sphinx",
+            Effect::GenericEffect {
+                static_abilities: vec![stat],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+        );
+        // No pre-existing hexproof — the grant is new value.
+
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let candidate = activate_candidate(obj_id);
+        let ctx = mk_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        let PolicyVerdict::Score { delta, .. } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        assert_eq!(
+            delta, 0.0,
+            "first self-scoped keyword grant should not penalise"
+        );
     }
 
     #[test]
