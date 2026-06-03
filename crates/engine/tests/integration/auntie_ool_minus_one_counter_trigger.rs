@@ -19,26 +19,28 @@
 //! from parsed Oracle text (no hand-built AST), so they fail on the pre-fix
 //! engine and pass once the control branch is gated correctly.
 
-use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
-use engine::types::actions::GameAction;
+use engine::game::scenario::{CastOutcome, GameScenario, P0, P1};
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const AUNTIE: &str = "Whenever one or more -1/-1 counters are put on a creature, draw a card if you control that creature. If you don't control it, its controller loses 1 life.";
 const SHRINK: &str = "Put a -1/-1 counter on target creature.";
 
-struct Outcome {
-    p0_life: i32,
-    p1_life: i32,
-    p0_library: usize,
-}
+/// P0's library is stocked with this many cards before the cast (so the
+/// conditional draw never decks them out); the post-resolution `zone_count`
+/// reads against this baseline.
+const LIBRARY_BASELINE: usize = 5;
 
 /// Cast a one-shot "-1/-1 counter on target creature" sorcery at `target` while
-/// the controller (P0) has Auntie Ool on the battlefield, then drain the stack.
-fn put_minus_counter_with_auntie(target_opponent: bool, target_plus_counters: u32) -> Outcome {
+/// the controller (P0) has Auntie Ool on the battlefield, driving the cast →
+/// counter-placement → SBA → trigger pipeline through `resolve()`. Returns the
+/// resolution outcome and the targeted object for counter assertions.
+fn put_minus_counter_with_auntie(
+    target_opponent: bool,
+    target_plus_counters: u32,
+) -> (CastOutcome, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, 20);
@@ -65,123 +67,83 @@ fn put_minus_counter_with_auntie(target_opponent: bool, target_plus_counters: u3
     scenario.with_library_top(P0, &["L1", "L2", "L3", "L4", "L5"]);
 
     let mut runner = scenario.build();
-    let card_id = runner.state().objects[&shrink].card_id;
     let target = if target_opponent {
         opp_creature
     } else {
         my_creature
     };
 
-    runner
-        .act(GameAction::CastSpell {
-            object_id: shrink,
-            card_id,
-            targets: vec![target],
-        })
-        .expect("cast Shrink");
-
-    drain(&mut runner, target);
-
-    let st = runner.state();
-    let outcome = Outcome {
-        p0_life: st.players[0].life,
-        p1_life: st.players[1].life,
-        p0_library: st.players[0].library.len(),
-    };
+    let outcome = runner.cast(shrink).target_object(target).resolve();
 
     // CR 704.5q: with N +1/+1 counters present, one -1/-1 cancels one +1/+1.
     if target_plus_counters > 0 {
-        let obj = &st.objects[&target];
-        let p1p1 = obj
-            .counters
-            .get(&CounterType::Plus1Plus1)
-            .copied()
-            .unwrap_or(0);
-        let m1m1 = obj
-            .counters
-            .get(&CounterType::Minus1Minus1)
-            .copied()
-            .unwrap_or(0);
         assert_eq!(
-            p1p1,
+            outcome.counters(target, CounterType::Plus1Plus1),
             target_plus_counters - 1,
             "CR 704.5q: one +1/+1 counter should be cancelled"
         );
         assert_eq!(
-            m1m1, 0,
+            outcome.counters(target, CounterType::Minus1Minus1),
+            0,
             "CR 704.5q: the lone -1/-1 counter should be cancelled"
         );
     }
 
-    outcome
-}
-
-fn drain(runner: &mut engine::game::scenario::GameRunner, target: ObjectId) {
-    for _ in 0..120 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                if runner
-                    .act(GameAction::SelectTargets {
-                        targets: vec![TargetRef::Object(target)],
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            WaitingFor::Priority { .. } => {
-                let empty = runner.state().stack.is_empty();
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-                if empty && matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
+    (outcome, target)
 }
 
 /// CR 122.1 + control branch: you control the creature the -1/-1 counter is put
 /// on → you draw exactly one card and nobody loses life.
 #[test]
 fn counters_on_creature_you_control_draws_only() {
-    let out = put_minus_counter_with_auntie(false, 0);
-    assert_eq!(out.p0_library, 4, "you control it → draw exactly one card");
-    assert_eq!(out.p0_life, 20, "you control it → you do NOT lose life");
-    assert_eq!(out.p1_life, 20, "opponent is untouched");
+    let (out, _target) = put_minus_counter_with_auntie(false, 0);
+    assert_eq!(
+        out.zone_count(P0, Zone::Library),
+        LIBRARY_BASELINE - 1,
+        "you control it → draw exactly one card"
+    );
+    out.assert_life_delta(P0, 0); // you control it → you do NOT lose life
+    out.assert_life_delta(P1, 0); // opponent is untouched
 }
 
 /// CR 122.1 + control branch: you don't control the creature → its controller
 /// loses 1 life and you draw nothing.
 #[test]
 fn counters_on_creature_you_dont_control_drains_only() {
-    let out = put_minus_counter_with_auntie(true, 0);
-    assert_eq!(out.p0_library, 5, "you don't control it → NO draw");
+    let (out, _target) = put_minus_counter_with_auntie(true, 0);
     assert_eq!(
-        out.p1_life, 19,
-        "you don't control it → its controller loses 1 life"
+        out.zone_count(P0, Zone::Library),
+        LIBRARY_BASELINE,
+        "you don't control it → NO draw"
     );
-    assert_eq!(out.p0_life, 20, "you do not lose life");
+    out.assert_life_delta(P1, -1); // you don't control it → its controller loses 1 life
+    out.assert_life_delta(P0, 0); // you do not lose life
 }
 
 /// CR 704.5q: the -1/-1 counter cancels a pre-existing +1/+1 counter, but the
 /// trigger still fires from the counter-placement event (you control it → draw).
 #[test]
 fn annihilation_still_fires_the_trigger_when_you_control_it() {
-    let out = put_minus_counter_with_auntie(false, 1);
-    assert_eq!(out.p0_library, 4, "trigger still fires → draw one card");
-    assert_eq!(out.p0_life, 20);
-    assert_eq!(out.p1_life, 20);
+    let (out, _target) = put_minus_counter_with_auntie(false, 1);
+    assert_eq!(
+        out.zone_count(P0, Zone::Library),
+        LIBRARY_BASELINE - 1,
+        "trigger still fires → draw one card"
+    );
+    out.assert_life_delta(P0, 0);
+    out.assert_life_delta(P1, 0);
 }
 
 /// CR 704.5q + drain branch: annihilation on an opponent's +1/+1 creature still
 /// drives the life-loss branch.
 #[test]
 fn annihilation_still_fires_the_trigger_when_you_dont_control_it() {
-    let out = put_minus_counter_with_auntie(true, 1);
-    assert_eq!(out.p0_library, 5, "no draw");
-    assert_eq!(out.p1_life, 19, "controller loses 1 life");
-    assert_eq!(out.p0_life, 20);
+    let (out, _target) = put_minus_counter_with_auntie(true, 1);
+    assert_eq!(
+        out.zone_count(P0, Zone::Library),
+        LIBRARY_BASELINE,
+        "no draw"
+    );
+    out.assert_life_delta(P1, -1); // controller loses 1 life
+    out.assert_life_delta(P0, 0);
 }

@@ -1053,6 +1053,15 @@ impl GameRunner {
         SpellCast::new(self, spell)
     }
 
+    /// Begin a fluent activation of `source`'s ability at `ability_index`
+    /// through the activation pipeline (CR 602 — activating an activated
+    /// ability; CR 602.2b: the announcement-through-payment steps mirror casting
+    /// CR 601.2b–i). See [`AbilityActivation`] for the builder methods and the
+    /// driving-loop contract.
+    pub fn activate(&mut self, source: ObjectId, ability_index: usize) -> AbilityActivation<'_> {
+        AbilityActivation::new(self, source, ability_index)
+    }
+
     /// Execute a single action. Returns the `ActionResult` from the engine.
     pub fn act(&mut self, action: GameAction) -> Result<ActionResult, EngineError> {
         apply_as_current(&mut self.state, action)
@@ -1154,6 +1163,131 @@ impl GameRunner {
             }
         }
         waiting
+    }
+
+    /// Advance the turn structure until the active player reaches `phase`
+    /// (CR 500.1 — turn phases/steps proceed in a fixed order). Drives the
+    /// engine's own `auto_advance` turn machinery (CR 500.2) and passes both
+    /// players' priority (CR 117) at each step that opens a priority window,
+    /// stopping when the target phase is reached or when a non-priority prompt
+    /// the helper can't auto-pass surfaces.
+    ///
+    /// Bounded loop: a turn has 12 phases/steps (CR 500.1), so a generous cap
+    /// guards against an unexpectedly stuck transition rather than spinning.
+    pub fn advance_to_phase(&mut self, phase: Phase) {
+        let mut events = Vec::new();
+        let mut waiting = crate::game::turns::auto_advance(&mut self.state, &mut events);
+        for _ in 0..32 {
+            if self.state.phase == phase {
+                break;
+            }
+            if !matches!(waiting, WaitingFor::Priority { .. }) {
+                break;
+            }
+            let r1 = apply_as_current(&mut self.state, GameAction::PassPriority);
+            let r2 = apply_as_current(&mut self.state, GameAction::PassPriority);
+            match (r1, r2) {
+                (Ok(_), Ok(result)) => waiting = result.waiting_for,
+                _ => break,
+            }
+        }
+    }
+
+    /// Advance to the declare-attackers step (CR 508). The engine surfaces
+    /// `WaitingFor::DeclareAttackers` there as the declare-attackers turn-based
+    /// action (CR 508.1).
+    pub fn advance_to_combat(&mut self) {
+        self.advance_to_phase(Phase::DeclareAttackers);
+    }
+
+    /// Advance to the end step (CR 513).
+    pub fn advance_to_end_step(&mut self) {
+        self.advance_to_phase(Phase::End);
+    }
+
+    /// Advance to the upkeep step (CR 503).
+    pub fn advance_to_upkeep(&mut self) {
+        self.advance_to_phase(Phase::Upkeep);
+    }
+
+    /// Declare attackers (CR 508.1). Must be called when the engine is at
+    /// `WaitingFor::DeclareAttackers` (use [`GameRunner::advance_to_combat`]).
+    /// Each entry is `(attacker, defender)` where `defender` is an
+    /// [`AttackTarget`](crate::game::combat::AttackTarget) — a player,
+    /// planeswalker, or battle (CR 508.1b).
+    pub fn declare_attackers(
+        &mut self,
+        attacks: &[(ObjectId, crate::game::combat::AttackTarget)],
+    ) -> Result<ActionResult, EngineError> {
+        apply_as_current(
+            &mut self.state,
+            GameAction::DeclareAttackers {
+                attacks: attacks.to_vec(),
+            },
+        )
+    }
+
+    /// Declare blockers (CR 509.1). Must be called when the engine is at
+    /// `WaitingFor::DeclareBlockers`. Each entry is `(blocker, attacker)` —
+    /// the blocking creature and the attacker it blocks (CR 509.1a).
+    pub fn declare_blockers(
+        &mut self,
+        blocks: &[(ObjectId, ObjectId)],
+    ) -> Result<ActionResult, EngineError> {
+        apply_as_current(
+            &mut self.state,
+            GameAction::DeclareBlockers {
+                assignments: blocks.to_vec(),
+            },
+        )
+    }
+
+    /// Drive combat through the combat-damage step(s) to the end of combat,
+    /// then return an [`Outcome`]. Passes both players' priority (CR 117) so
+    /// the engine performs the combat-damage step (CR 510.1–510.2: assign then
+    /// deal) and, if any first/double strike is present, the extra combat-damage
+    /// step (CR 506.1 / CR 702.7b), draining any damage-triggered abilities
+    /// (CR 510.3a) along the way, until the end-of-combat step (CR 511) opens a
+    /// clean priority window or the stack settles.
+    ///
+    /// Life totals snapshot at the call (so `life_delta` reads the combat-damage
+    /// delta) and the hand baseline is captured at the same point.
+    pub fn combat_damage(&mut self) -> Outcome {
+        let life_before: Vec<(PlayerId, i32)> =
+            self.state.players.iter().map(|p| (p.id, p.life)).collect();
+        let hand_baseline: Vec<(PlayerId, usize)> = self
+            .state
+            .players
+            .iter()
+            .map(|p| (p.id, p.hand.len()))
+            .collect();
+
+        // Drive through the combat-damage step(s) to end of combat. The
+        // combat-damage assignment and dealing are turn-based actions
+        // (CR 510.1–510.2); the active player then gets priority (CR 510.3), and
+        // passing it advances toward the end-of-combat step. Drain ordering
+        // prompts (CR 603.3b) for damage triggers en route.
+        for _ in 0..32 {
+            if self.state.phase == Phase::EndCombat || self.state.phase == Phase::PostCombatMain {
+                break;
+            }
+            if matches!(self.state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+                super::triggers::drain_order_triggers_with_identity(&mut self.state);
+                continue;
+            }
+            if !matches!(self.state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            if apply_as_current(&mut self.state, GameAction::PassPriority).is_err() {
+                break;
+            }
+        }
+
+        Outcome {
+            state: self.state.clone(),
+            hand_baseline,
+            life_before,
+        }
     }
 
     /// Pass priority until the top of the stack resolves.
@@ -1347,6 +1481,9 @@ impl GameRunner {
                 }
                 crate::types::game_state::AlternativeCastKeyword::Impending => {
                     "AlternativeCastChoice(Impending)"
+                }
+                crate::types::game_state::AlternativeCastKeyword::Prototype => {
+                    "AlternativeCastChoice(Prototype)"
                 }
             },
             WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",
@@ -1622,17 +1759,17 @@ impl<'a> SpellCast<'a> {
                         .expect("ChooseX must be accepted");
                 }
                 // CR 702.51a / CR 601.2g–h: mana payment, possibly via convoke.
+                //
+                // Most pool-funded casts auto-pay and never surface this window.
+                // But a Convoke (CR 702.51) spell always opens a `ManaPayment
+                // { convoke_mode }` window to offer tapping creatures — even when
+                // the controller intends to pay entirely from their pool. With no
+                // convoke creatures declared, the convoke loop is a no-op and the
+                // trailing `PassPriority` finalizes the remaining cost from the
+                // pool (the engine auto-allocates pool mana, incl. the generic
+                // portion). If the pool can't cover it, `PassPriority` errors and
+                // the `.expect` below fails loudly — fund the pool in the scenario.
                 WaitingFor::ManaPayment { .. } => {
-                    if convoke_with.is_empty() {
-                        // Pool-funded casts usually auto-pay and never surface a
-                        // ManaPayment window. If one surfaces with no convoke
-                        // declared, the driver has no payment policy — fail loud.
-                        panic!(
-                            "SpellCast reached WaitingFor::ManaPayment with no .convoke_with(..) \
-                             declared — pool-funded casts should auto-pay; drive this payment \
-                             manually or declare convoke creatures"
-                        );
-                    }
                     for &creature in &convoke_with {
                         // CR 702.51b: pay one mana of the creature's color, or
                         // colorless toward the generic portion of the cost.
@@ -1699,37 +1836,22 @@ impl<'a> SpellCast<'a> {
             )
         });
 
-        // Resolution. Auto-answer ordering/scry prompts; stop at any prompt the
-        // driver is not taught to answer so the caller can assert on it via
-        // `final_waiting_for()` (e.g. a `SearchChoice` fail-to-find boundary).
-        for _ in 0..64 {
-            match &runner.state.waiting_for {
-                WaitingFor::OrderTriggers { .. } => {
-                    // CR 603.3b: drain the per-controller ordering prompt.
-                    super::triggers::drain_order_triggers_with_identity(&mut runner.state);
-                }
-                WaitingFor::ScryChoice { cards, .. } => {
-                    // CR 701.22a: default policy keeps the looked-at cards on top.
-                    let cards = cards.clone();
-                    runner
-                        .act(GameAction::SelectCards { cards })
-                        .expect("SelectCards (scry) must be accepted");
-                }
-                WaitingFor::Priority { .. } => {
-                    if runner.state.stack.is_empty() {
-                        break;
-                    }
-                    if runner.act(GameAction::PassPriority).is_err() {
-                        break;
-                    }
-                }
-                // Any other prompt (e.g. SearchChoice) is left for the caller to
-                // inspect via `final_waiting_for()`; the driver stops here.
-                _ => break,
-            }
-        }
+        // Resolution. The shared driver auto-answers ordering/scry/trigger-
+        // target/multi-target/optional prompts from the declared intent and
+        // stops at any prompt it is not taught to answer (e.g. a `SearchChoice`
+        // fail-to-find boundary) so the caller can assert on it via
+        // `final_waiting_for()`. Preserves the original `#2051` behavior: object
+        // targets are reused (declared cast-time targets may also satisfy a
+        // resolution-time trigger slot), and the default search/optional
+        // policies are `Stop`/`Decline`.
+        let policy = ResolutionPolicy {
+            targets_objects: remaining_objects,
+            targets_players: declared_players,
+            ..ResolutionPolicy::default()
+        };
+        drive_resolution(runner, &policy);
 
-        CastOutcome {
+        Outcome {
             state: runner.state.clone(),
             hand_baseline,
             life_before,
@@ -1800,12 +1922,433 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// CastOutcome (behavior/semantic delta accessors)
+// AbilityActivation (fluent activated-ability driver — H1)
+// ---------------------------------------------------------------------------
+
+/// Fluent builder that drives an activated ability through the activation
+/// pipeline (CR 602). Constructed via [`GameRunner::activate`].
+///
+/// Mirrors [`SpellCast`]: the caller declares *intent* (X value, chosen modes,
+/// targets) and the driver answers each pipeline prompt itself — X announcement
+/// (CR 601.2f via CR 602.2b), modal choice (CR 602.2b / CR 700.2), one target
+/// per slot in written order (CR 601.2c), and the cost window — then drives
+/// resolution via the shared [`drive_resolution`] with a [`ResolutionPolicy`]
+/// built from the declared targets and policy setters.
+///
+/// Like the cast driver, it panics with an extend-me message on any pipeline
+/// state it is not yet taught to handle, or when a declared intent cannot be
+/// matched to a required slot.
+pub struct AbilityActivation<'a> {
+    runner: &'a mut GameRunner,
+    source: ObjectId,
+    ability_index: usize,
+    modes: Option<Vec<usize>>,
+    x: Option<u32>,
+    target_players: Vec<PlayerId>,
+    target_objects: Vec<ObjectId>,
+    /// Mana sources the caller intends to tap to pay the activation cost. See
+    /// the blind-authoring caveat: auto-tap is NOT performed by the driver; a
+    /// surfaced `ManaPayment` falls through to the resolution driver's stop, so
+    /// this field is recorded for forward-compatibility and the caller drives
+    /// payment manually if a `ManaPayment` window opens.
+    pay_with: Vec<ObjectId>,
+    search_pick: SearchPolicy,
+    optional: OptionalPolicy,
+}
+
+impl<'a> AbilityActivation<'a> {
+    fn new(runner: &'a mut GameRunner, source: ObjectId, ability_index: usize) -> Self {
+        AbilityActivation {
+            runner,
+            source,
+            ability_index,
+            modes: None,
+            x: None,
+            target_players: Vec::new(),
+            target_objects: Vec::new(),
+            pay_with: Vec::new(),
+            search_pick: SearchPolicy::default(),
+            optional: OptionalPolicy::default(),
+        }
+    }
+
+    /// Announce the value of X for an X-cost ability (CR 601.2f / CR 602.2b).
+    pub fn x(mut self, value: u32) -> Self {
+        self.x = Some(value);
+        self
+    }
+
+    /// Declare the chosen mode indices for a modal activated ability
+    /// (CR 602.2b / CR 700.2) — answers `AbilityModeChoice`.
+    pub fn modes(mut self, modes: &[usize]) -> Self {
+        self.modes = Some(modes.to_vec());
+        self
+    }
+
+    /// Declare a player as an intended target (CR 601.2c).
+    pub fn target_player(mut self, player: PlayerId) -> Self {
+        self.target_players.push(player);
+        self
+    }
+
+    /// Declare several players as intended targets, in order.
+    pub fn target_players(mut self, players: &[PlayerId]) -> Self {
+        self.target_players.extend_from_slice(players);
+        self
+    }
+
+    /// Declare an object as an intended target (CR 601.2c).
+    pub fn target_object(mut self, object: ObjectId) -> Self {
+        self.target_objects.push(object);
+        self
+    }
+
+    /// Declare several objects as intended targets, in order.
+    pub fn target_objects(mut self, objects: &[ObjectId]) -> Self {
+        self.target_objects.extend_from_slice(objects);
+        self
+    }
+
+    /// Record mana sources to tap for the activation cost (CR 602.2b / CR
+    /// 601.2g). NOTE: auto-tap is not modeled — see the type-level caveat.
+    pub fn pay_with(mut self, sources: &[ObjectId]) -> Self {
+        self.pay_with.extend_from_slice(sources);
+        self
+    }
+
+    /// Submit the first legal candidates at any `SearchChoice` during
+    /// resolution (CR 701.23).
+    pub fn search_first_legal(mut self) -> Self {
+        self.search_pick = SearchPolicy::FirstLegal;
+        self
+    }
+
+    /// Decline optional ("you may") effects/costs during resolution
+    /// (CR 609.3 / CR 601.2f). This is already the default; provided for
+    /// explicitness at call sites.
+    pub fn decline_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Decline;
+        self
+    }
+
+    /// Drive the full activation pipeline to its conclusion and return the
+    /// outcome. See [`SpellCast::resolve`] for the shared contract.
+    pub fn resolve(self) -> Outcome {
+        let AbilityActivation {
+            runner,
+            source,
+            ability_index,
+            modes,
+            x,
+            target_players,
+            target_objects,
+            pay_with: _pay_with,
+            search_pick,
+            optional,
+        } = self;
+
+        // CR 119.3: snapshot life totals before activation for `life_delta`.
+        let life_before: Vec<(PlayerId, i32)> = runner
+            .state
+            .players
+            .iter()
+            .map(|p| (p.id, p.life))
+            .collect();
+
+        // CR 602.2a: announce the activation. The engine routes through the
+        // same announcement-to-payment steps as casting (CR 602.2b).
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index,
+            })
+            .expect("ActivateAbility must be accepted by the engine");
+
+        let mut remaining_objects: Vec<ObjectId> = target_objects;
+        let declared_players: Vec<PlayerId> = target_players;
+
+        // CR 602.2b: the ability is on the stack at the post-announcement
+        // Priority window — capture the hand baseline there (mirrors SpellCast).
+        let mut hand_at_commit: Option<Vec<(PlayerId, usize)>> = None;
+
+        for _ in 0..64 {
+            match &runner.state.waiting_for {
+                // CR 602.2b / CR 700.2: modal activated ability mode choice.
+                WaitingFor::AbilityModeChoice { .. } => {
+                    let indices = modes.clone().unwrap_or_else(|| {
+                        panic!(
+                            "AbilityActivation reached WaitingFor::AbilityModeChoice but no \
+                             .modes(..) were declared — declare its chosen mode indices"
+                        )
+                    });
+                    runner
+                        .act(GameAction::SelectModes { indices })
+                        .expect("SelectModes (ability mode) must be accepted");
+                }
+                // CR 601.2f / CR 602.2b: announce X.
+                WaitingFor::ChooseXValue { .. } => {
+                    let value = x.unwrap_or_else(|| {
+                        panic!(
+                            "AbilityActivation reached WaitingFor::ChooseXValue but no .x(..) \
+                             was declared — this ability needs X announced"
+                        )
+                    });
+                    runner
+                        .act(GameAction::ChooseX { value })
+                        .expect("ChooseX must be accepted");
+                }
+                // CR 601.2c: declare one target per slot, in written order.
+                WaitingFor::TargetSelection {
+                    target_slots,
+                    selection,
+                    ..
+                } => {
+                    let slot = &target_slots[selection.current_slot];
+                    let choice = pick_slot_target(
+                        slot,
+                        &mut remaining_objects,
+                        &declared_players,
+                        selection.current_slot,
+                    );
+                    runner
+                        .act(GameAction::ChooseTarget { target: choice })
+                        .expect("ChooseTarget must be accepted");
+                }
+                // CR 602.2b: ability is on the stack — capture the baseline.
+                WaitingFor::Priority { .. } => {
+                    hand_at_commit = Some(
+                        runner
+                            .state
+                            .players
+                            .iter()
+                            .map(|p| (p.id, p.hand.len()))
+                            .collect(),
+                    );
+                    break;
+                }
+                // CR 602.1b: pay the ability's mana cost. Finalize from the pool
+                // via PassPriority (mirrors SpellCast). Source auto-tap is not
+                // modeled, so fund the pool with GameScenario::with_mana_pool; if
+                // it can't cover the cost, PassPriority errors and the `.expect`
+                // below fails loudly.
+                WaitingFor::ManaPayment { .. } => {
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("finalizing the ability's mana payment must be accepted");
+                }
+                other => panic!(
+                    "AbilityActivation driver does not handle WaitingFor::{} yet — extend the \
+                     driver or drive this case manually",
+                    waiting_for_variant_name(other)
+                ),
+            }
+        }
+
+        let hand_baseline = hand_at_commit.unwrap_or_else(|| {
+            panic!(
+                "AbilityActivation never reached a Priority window after announcing the ability \
+                 (loop cap exceeded) — the ability did not commit to the stack"
+            )
+        });
+
+        // Resolution via the shared driver with the declared policy.
+        let policy = ResolutionPolicy {
+            targets_objects: remaining_objects,
+            targets_players: declared_players,
+            search_pick,
+            optional,
+        };
+        drive_resolution(runner, &policy);
+
+        Outcome {
+            state: runner.state.clone(),
+            hand_baseline,
+            life_before,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ResolutionPolicy + drive_resolution (shared resolution driver — H3)
+// ---------------------------------------------------------------------------
+
+/// What the resolution driver does when it reaches a `SearchChoice`
+/// (CR 701.23 — Search) prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchPolicy {
+    /// Submit the first `count` legal candidates (a deterministic tutor).
+    FirstLegal,
+    /// Submit an empty selection — fail to find (CR 701.23d permits finding
+    /// nothing for an "up to" search; for a mandatory search this exercises the
+    /// no-legal-card path).
+    None,
+    /// Leave the prompt for the caller to inspect via `final_waiting_for()`.
+    /// This is the default — it preserves the original `#2051` driver behavior
+    /// of stopping at any unhandled search boundary.
+    #[default]
+    Stop,
+}
+
+/// What the resolution driver does at an optional "you may" decision
+/// (`OptionalEffectChoice` per CR 609.3, `OptionalCostChoice` per CR 601.2f).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OptionalPolicy {
+    /// Accept the optional effect / pay the optional cost.
+    Accept,
+    /// Decline — the safe default, since many "you may" prompts default to no.
+    #[default]
+    Decline,
+}
+
+/// Declared intent reused across resolution prompts. Built once per
+/// resolve-call and threaded through [`drive_resolution`] so the driver answers
+/// trigger-target / multi-target / search / optional prompts from the same
+/// declared set, mirroring the [`SpellCast`] slot-matching discipline.
+#[derive(Debug, Clone, Default)]
+pub struct ResolutionPolicy {
+    /// Object targets the driver may assign to a slot, consumed one per slot
+    /// (CR 601.2c — each declared object satisfies at most one slot).
+    pub targets_objects: Vec<ObjectId>,
+    /// Player targets the driver may assign, reusable across slots (one player
+    /// may be targeted by several modes — see [`pick_slot_target`]).
+    pub targets_players: Vec<PlayerId>,
+    /// How to answer a `SearchChoice` (CR 701.23). Defaults to `Stop`.
+    pub search_pick: SearchPolicy,
+    /// How to answer an optional effect / cost prompt. Defaults to `Decline`.
+    pub optional: OptionalPolicy,
+}
+
+/// Drive the engine through resolution, answering the prompts the harness knows
+/// how to answer from a declared [`ResolutionPolicy`], and stopping at anything
+/// it is not taught to handle so the caller can inspect it via the final
+/// waiting state.
+///
+/// This is the shared loop extracted from the original `#2051` cast driver so
+/// [`SpellCast::resolve`], [`AbilityActivation::resolve`], and combat helpers
+/// all use one resolution policy. It panics with an extend-me message only on
+/// an *unsatisfiable required slot* — any other unhandled prompt simply breaks
+/// the loop, leaving the state for the caller.
+fn drive_resolution(runner: &mut GameRunner, policy: &ResolutionPolicy) {
+    // Object intent is consumed per slot; player intent is reusable. Mirrors
+    // the SpellCast cast-time loop.
+    let mut remaining_objects: Vec<ObjectId> = policy.targets_objects.clone();
+    let declared_players: &[PlayerId] = &policy.targets_players;
+
+    for _ in 0..64 {
+        match &runner.state.waiting_for {
+            // CR 603.3b: drain the per-controller ordering prompt.
+            WaitingFor::OrderTriggers { .. } => {
+                super::triggers::drain_order_triggers_with_identity(&mut runner.state);
+            }
+            // CR 701.22a: default scry policy keeps the looked-at cards on top.
+            WaitingFor::ScryChoice { cards, .. } => {
+                let cards = cards.clone();
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("SelectCards (scry) must be accepted");
+            }
+            // CR 603.3d: a triggered ability declares one target per slot, in
+            // written order — identical mechanics to cast-time TargetSelection.
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let slot = &target_slots[selection.current_slot];
+                let choice = pick_slot_target(
+                    slot,
+                    &mut remaining_objects,
+                    declared_players,
+                    selection.current_slot,
+                );
+                runner
+                    .act(GameAction::ChooseTarget { target: choice })
+                    .expect("ChooseTarget (trigger) must be accepted");
+            }
+            // CR 601.2c: a variable-count multi-target set is submitted as one
+            // SelectCards of the declared object targets that are legal here.
+            WaitingFor::MultiTargetSelection {
+                legal_targets,
+                min_targets,
+                max_targets,
+                ..
+            } => {
+                let legal_targets = legal_targets.clone();
+                let min = *min_targets;
+                let max = *max_targets;
+                let chosen: Vec<ObjectId> = remaining_objects
+                    .iter()
+                    .filter(|o| legal_targets.contains(o))
+                    .take(max)
+                    .copied()
+                    .collect();
+                assert!(
+                    chosen.len() >= min,
+                    "MultiTargetSelection needs at least {min} declared object targets in its \
+                     legal set, found {} — declare more via ResolutionPolicy.targets_objects.\n  \
+                     legal: {legal_targets:?}\n  declared: {remaining_objects:?}",
+                    chosen.len()
+                );
+                remaining_objects.retain(|o| !chosen.contains(o));
+                runner
+                    .act(GameAction::SelectCards { cards: chosen })
+                    .expect("SelectCards (multi-target) must be accepted");
+            }
+            // CR 701.23: search the library per the declared search policy.
+            WaitingFor::SearchChoice { cards, count, .. } => match policy.search_pick {
+                SearchPolicy::Stop => break,
+                SearchPolicy::None => {
+                    runner
+                        .act(GameAction::SelectCards { cards: vec![] })
+                        .expect("SelectCards (search fail-to-find) must be accepted");
+                }
+                SearchPolicy::FirstLegal => {
+                    let picked: Vec<ObjectId> = cards.iter().take(*count).copied().collect();
+                    runner
+                        .act(GameAction::SelectCards { cards: picked })
+                        .expect("SelectCards (search) must be accepted");
+                }
+            },
+            // CR 609.3: accept or decline an optional ("you may") effect.
+            WaitingFor::OptionalEffectChoice { .. } => {
+                let accept = matches!(policy.optional, OptionalPolicy::Accept);
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept })
+                    .expect("DecideOptionalEffect must be accepted");
+            }
+            // CR 601.2f: pay or decline an optional cost during resolution.
+            WaitingFor::OptionalCostChoice { .. } => {
+                let pay = matches!(policy.optional, OptionalPolicy::Accept);
+                runner
+                    .act(GameAction::DecideOptionalCost { pay })
+                    .expect("DecideOptionalCost must be accepted");
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state.stack.is_empty() {
+                    break;
+                }
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            // Any other prompt (e.g. a non-convoke ManaPayment, or a choice the
+            // driver does not model) is left for the caller to inspect via
+            // `final_waiting_for()`; the driver stops here. ManaPayment auto-tap
+            // is intentionally NOT modeled — a blind tap loop is fragile (see
+            // report) — so a surfaced ManaPayment falls through to this break.
+            _ => break,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Outcome (behavior/semantic delta accessors)
 // ---------------------------------------------------------------------------
 
 /// Post-cast snapshot exposing behavior/semantic deltas — never AST-internal
-/// flags. Produced by [`SpellCast::resolve`].
-pub struct CastOutcome {
+/// flags. Produced by [`SpellCast::resolve`], [`AbilityActivation::resolve`],
+/// and [`GameRunner::combat_damage`].
+pub struct Outcome {
     state: GameState,
     /// Per-player hand sizes captured at stack commit (CR 601.2a) — the clean
     /// baseline for resolution-draw deltas (foot-gun 3 fix).
@@ -1814,7 +2357,12 @@ pub struct CastOutcome {
     life_before: Vec<(PlayerId, i32)>,
 }
 
-impl CastOutcome {
+/// Backwards-compatible alias: the original `#2051` cast driver named this type
+/// `CastOutcome`. Kept so existing tests compile unchanged while new harness
+/// surfaces (activation, combat) share the single [`Outcome`] accessor set.
+pub type CastOutcome = Outcome;
+
+impl Outcome {
     fn hand_baseline_for(&self, player: PlayerId) -> usize {
         self.hand_baseline
             .iter()
@@ -1914,6 +2462,219 @@ impl CastOutcome {
             player.0,
             self.life_before_for(player),
             self.current_life(player)
+        );
+    }
+
+    // -- H0 shared read accessors (pure reads off `self.state`) --
+
+    /// Source names of the objects currently on the stack, bottom-to-top
+    /// (CR 405.1 — the stack is the zone where spells and abilities wait to
+    /// resolve). Mirrors [`GameRunner::stack_names`].
+    pub fn stack_names(&self) -> Vec<String> {
+        self.state
+            .stack
+            .iter()
+            .filter_map(|entry| self.state.objects.get(&entry.source_id))
+            .map(|obj| obj.name.clone())
+            .collect()
+    }
+
+    /// Number of objects on the stack (CR 405.1).
+    pub fn stack_size(&self) -> usize {
+        self.state.stack.len()
+    }
+
+    /// Count of a specific counter kind on an object (CR 122.1), `0` if absent.
+    pub fn counters(&self, obj: ObjectId, kind: CounterType) -> u32 {
+        self.state
+            .objects
+            .get(&obj)
+            .and_then(|o| o.counters.get(&kind).copied())
+            .unwrap_or(0)
+    }
+
+    /// Total floating mana in a player's pool (CR 106.4 — mana held in the pool
+    /// until spent or the step/phase ends).
+    pub fn mana_pool_total(&self, player: PlayerId) -> u32 {
+        self.state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.mana_pool.total() as u32)
+            .unwrap_or(0)
+    }
+
+    /// Floating mana of a single color in a player's pool (CR 106.4).
+    pub fn mana_pool_color(&self, player: PlayerId, color: ManaType) -> u32 {
+        self.state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.mana_pool.count_color(color) as u32)
+            .unwrap_or(0)
+    }
+
+    /// Whether a permanent is tapped (CR 110.5a — a permanent is either tapped
+    /// or untapped). `false` if the object no longer exists.
+    pub fn is_tapped(&self, obj: ObjectId) -> bool {
+        self.state
+            .objects
+            .get(&obj)
+            .map(|o| o.tapped)
+            .unwrap_or(false)
+    }
+
+    /// Effective power and toughness of a permanent (CR 208 / CR 209).
+    ///
+    /// **Effective, not raw:** the layer system (`game::layers`) materializes
+    /// the post-continuous-effect values back into `GameObject::power` /
+    /// `GameObject::toughness` during `apply`, so reading those fields off the
+    /// post-pipeline `self.state` yields the value after counters, Auras,
+    /// pumps, and CDAs are applied — not the printed base (which lives in
+    /// `base_power` / `base_toughness`). A creature with no P/T (e.g. a
+    /// non-creature permanent) reports `(0, 0)`.
+    pub fn power_toughness(&self, obj: ObjectId) -> (i32, i32) {
+        self.state
+            .objects
+            .get(&obj)
+            .map(|o| (o.power.unwrap_or(0), o.toughness.unwrap_or(0)))
+            .unwrap_or((0, 0))
+    }
+
+    /// The player who currently controls an object (CR 109.4).
+    pub fn controller(&self, obj: ObjectId) -> PlayerId {
+        self.state.objects[&obj].controller
+    }
+
+    /// Damage marked on a permanent this turn (CR 120.3 — damage is marked on
+    /// the creature/permanent; CR 514.2 — marked damage is removed during the
+    /// cleanup step). `0` if the object no longer exists.
+    pub fn damage_marked(&self, obj: ObjectId) -> u32 {
+        self.state
+            .objects
+            .get(&obj)
+            .map(|o| o.damage_marked)
+            .unwrap_or(0)
+    }
+
+    /// Number of objects in a given zone for a player (CR 400.1).
+    ///
+    /// Battlefield and stack are shared zones (CR 403 / CR 405), so those filter
+    /// the shared object lists by `controller`. Hand, library, and graveyard are
+    /// per-player owned zones (CR 401 / CR 402 / CR 404) read directly off the
+    /// `Player` Vecs. Exile and command (CR 406 / CR 408) are shared zones with
+    /// no per-player Vec, so they are counted by scanning `objects` for the
+    /// owner in that zone.
+    pub fn zone_count(&self, player: PlayerId, zone: Zone) -> usize {
+        match zone {
+            Zone::Battlefield => self
+                .state
+                .battlefield
+                .iter()
+                .filter(|&&id| {
+                    self.state
+                        .objects
+                        .get(&id)
+                        .map(|o| o.controller == player)
+                        .unwrap_or(false)
+                })
+                .count(),
+            Zone::Stack => self
+                .state
+                .stack
+                .iter()
+                .filter(|entry| {
+                    self.state
+                        .objects
+                        .get(&entry.source_id)
+                        .map(|o| o.controller == player)
+                        .unwrap_or(false)
+                })
+                .count(),
+            Zone::Hand | Zone::Library | Zone::Graveyard => self
+                .state
+                .players
+                .iter()
+                .find(|p| p.id == player)
+                .map(|p| match zone {
+                    Zone::Hand => p.hand.len(),
+                    Zone::Library => p.library.len(),
+                    Zone::Graveyard => p.graveyard.len(),
+                    _ => unreachable!("outer match restricts to per-player zones"),
+                })
+                .unwrap_or(0),
+            // CR 406 / CR 408: exile and command have no per-player Vec — scan
+            // the shared object map for objects this player owns in that zone.
+            Zone::Exile | Zone::Command => self
+                .state
+                .objects
+                .values()
+                .filter(|o| o.zone == zone && o.owner == player)
+                .count(),
+        }
+    }
+
+    // -- H0 high-demand assertions (expected-vs-got, mirrors existing style) --
+
+    /// Assert the count of a counter kind on an object (CR 122.1).
+    pub fn assert_counters(&self, obj: ObjectId, kind: CounterType, expected: u32) {
+        let actual = self.counters(obj, kind.clone());
+        assert_eq!(
+            actual, expected,
+            "object {} {kind:?} counters: expected {expected}, got {actual}",
+            obj.0
+        );
+    }
+
+    /// Assert a permanent's tapped state (CR 110.5a).
+    pub fn assert_tapped(&self, obj: ObjectId, expected: bool) {
+        let actual = self.is_tapped(obj);
+        assert_eq!(
+            actual, expected,
+            "object {} tapped: expected {expected}, got {actual}",
+            obj.0
+        );
+    }
+
+    /// Assert a permanent's effective power and toughness (CR 208 / CR 209).
+    pub fn assert_power_toughness(&self, obj: ObjectId, power: i32, toughness: i32) {
+        let (actual_p, actual_t) = self.power_toughness(obj);
+        assert_eq!(
+            (actual_p, actual_t),
+            (power, toughness),
+            "object {} effective P/T: expected {power}/{toughness}, got {actual_p}/{actual_t}",
+            obj.0
+        );
+    }
+
+    /// Assert that `player` controls `obj` (CR 109.4).
+    pub fn assert_controls(&self, player: PlayerId, obj: ObjectId) {
+        let actual = self.controller(obj);
+        assert_eq!(
+            actual, player,
+            "object {} controller: expected P{}, got P{}",
+            obj.0, player.0, actual.0
+        );
+    }
+
+    /// Assert the number of objects a player has in `zone` (CR 400.1).
+    pub fn assert_zone_count(&self, player: PlayerId, zone: Zone, expected: usize) {
+        let actual = self.zone_count(player, zone);
+        assert_eq!(
+            actual, expected,
+            "P{} {zone:?} count: expected {expected}, got {actual}",
+            player.0
+        );
+    }
+
+    /// Assert the number of objects on the stack (CR 405.1).
+    pub fn assert_stack_size(&self, expected: usize) {
+        let actual = self.stack_size();
+        assert_eq!(
+            actual,
+            expected,
+            "stack size: expected {expected}, got {actual} ({:?})",
+            self.stack_names()
         );
     }
 }

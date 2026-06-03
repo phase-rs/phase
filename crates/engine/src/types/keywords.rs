@@ -591,10 +591,16 @@ pub enum Keyword {
         cost: ManaCost,
     },
     Fortify(ManaCost),
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler. CR 702.160a: Prototype — alt-cast using the
-    /// secondary P/T and mana cost characteristics.
-    Prototype(ManaCost),
+    /// CR 702.160a: Prototype — a player may cast this spell prototyped; if
+    /// they do, the alternative power, toughness, and mana cost characteristics
+    /// are used.
+    Prototype {
+        cost: ManaCost,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        toughness: Option<i32>,
+    },
     Plot(ManaCost),
     Craft(ManaCost),
     Offspring(ManaCost),
@@ -1071,7 +1077,7 @@ impl Keyword {
             | Keyword::Nightbound
             | Keyword::Overload(_)
             | Keyword::Poisonous(_)
-            | Keyword::Prototype(_)
+            | Keyword::Prototype { .. }
             | Keyword::Provoke
             | Keyword::Prowl(_)
             | Keyword::Ravenous
@@ -1637,7 +1643,13 @@ impl FromStr for Keyword {
                     // Fall through to Unknown
                 }
                 "fortify" => return Ok(Keyword::Fortify(parse_keyword_mana_cost(p))),
-                "prototype" => return Ok(Keyword::Prototype(parse_keyword_mana_cost(p))),
+                "prototype" => {
+                    return Ok(Keyword::Prototype {
+                        cost: parse_keyword_mana_cost(p),
+                        power: None,
+                        toughness: None,
+                    });
+                }
                 "plot" => return Ok(Keyword::Plot(parse_keyword_mana_cost(p))),
                 "craft" => return Ok(Keyword::Craft(parse_keyword_mana_cost(p))),
                 "offspring" => return Ok(Keyword::Offspring(parse_keyword_mana_cost(p))),
@@ -2309,7 +2321,27 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
             Ok(Keyword::Awaken { count, cost })
         }
         "Fortify" => Ok(Keyword::Fortify(mana(data)?)),
-        "Prototype" => Ok(Keyword::Prototype(mana(data)?)),
+        "Prototype" => {
+            if let Some(cost_val) = data.get("cost") {
+                let cost = mana(cost_val)?;
+                let power = data.get("power").and_then(|v| v.as_i64()).map(|v| v as i32);
+                let toughness = data
+                    .get("toughness")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32);
+                Ok(Keyword::Prototype {
+                    cost,
+                    power,
+                    toughness,
+                })
+            } else {
+                Ok(Keyword::Prototype {
+                    cost: mana(data)?,
+                    power: None,
+                    toughness: None,
+                })
+            }
+        }
         "Plot" => Ok(Keyword::Plot(mana(data)?)),
         "Craft" => Ok(Keyword::Craft(mana(data)?)),
         "Offspring" => Ok(Keyword::Offspring(mana(data)?)),
