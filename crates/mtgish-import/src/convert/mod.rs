@@ -2852,6 +2852,27 @@ mod tests {
     }
 
     #[test]
+    fn breaker_of_armies_rule_effect_imports_must_be_blocked_by_all() {
+        use crate::schema::types::PermanentRule;
+        use engine::types::statics::StaticMode;
+
+        let rule = Rule::PermanentRuleEffect(
+            Box::new(Permanent::ThisPermanent),
+            vec![PermanentRule::AllCreaturesMustBlockIt(Box::new(
+                Permanents::IsCardtype(CardType::Creature),
+            ))],
+        );
+        let mut report = crate::report::ImportReport::default();
+        let mut ctx = Ctx::new("breaker of armies".to_string(), &mut report);
+
+        let converted = recurse_rules(&[rule], "main", 0, &mut ctx).unwrap();
+
+        assert_eq!(converted.statics.len(), 1);
+        assert_eq!(converted.statics[0].mode, StaticMode::MustBeBlockedByAll);
+        assert_eq!(converted.statics[0].affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
     fn host_conditioned_static_uses_attached_host_for_condition_and_affected() {
         let rule = Rule::If(
             Condition::PermanentPassesFilter(

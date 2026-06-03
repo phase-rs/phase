@@ -298,6 +298,10 @@ pub fn convert_permanent_rule(
         P::MustAttack => StaticMode::MustAttack,
         P::MustBlock => StaticMode::MustBlock,
         P::MustBeBlocked => StaticMode::MustBeBlocked,
+        // CR 509.1c: "All creatures able to block [this] do so" (Lure, Breaker of Armies).
+        // Blocker-eligibility payload (`Permanents`) is not yet modeled on
+        // `StaticMode::MustBeBlockedByAll`; combat treats every able blocker.
+        P::AllCreaturesMustBlockIt(_permanents) => StaticMode::MustBeBlockedByAll,
         P::CanBlockOnly(filter) if is_creature_with_flying_filter(filter) => {
             StaticMode::BlockRestriction
         }
@@ -989,6 +993,20 @@ mod tests {
     use super::*;
     use crate::schema::types::{LandType, PermanentRule, Permanents, Player};
     use engine::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+
+    #[test]
+    fn all_creatures_must_block_it_lowers_to_must_be_blocked_by_all() {
+        let converted = convert_permanent_rule(
+            &PermanentRule::AllCreaturesMustBlockIt(Box::new(Permanents::IsCardtype(
+                CardType::Creature,
+            ))),
+            TargetFilter::SelfRef,
+        )
+        .unwrap();
+
+        assert_eq!(converted.mode, StaticMode::MustBeBlockedByAll);
+        assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
+    }
 
     #[test]
     fn can_block_only_creatures_with_flying_lowers_to_block_restriction() {
