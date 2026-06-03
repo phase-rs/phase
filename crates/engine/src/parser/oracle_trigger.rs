@@ -7798,6 +7798,18 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some(result);
     }
 
+    // CR 119.3 + CR 118.4: "Whenever you gain or lose life" — combined life-change
+    // trigger (Moonstone Harbinger, Wax-Wane Witness). Must precede the narrower
+    // "you gain life" check to avoid a false match on the substring.
+    if scan_contains(lower, "you gain or lose life") {
+        let mut def = make_base();
+        def.mode = TriggerMode::LifeChanged;
+        def.valid_target = Some(TargetFilter::Controller);
+        if scan_contains(lower, "during your turn") {
+            def.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+        }
+        return Some((TriggerMode::LifeChanged, def));
+    }
     // CR 119.3 + CR 603.2: "Whenever you gain life" scopes the trigger event to the
     // source's controller. Without `valid_target = Controller`, `valid_player_matches`
     // accepts any player, so opponent life-gain incorrectly triggers (e.g. Vito,
@@ -15269,6 +15281,28 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::LifeLost);
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
         assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    #[test]
+    fn trigger_you_gain_or_lose_life_during_your_turn() {
+        let def = parse_trigger_line(
+            "Whenever you gain or lose life during your turn, this creature gets +1/+0 until end of turn.",
+            "Wax-Wane Witness",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeChanged);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
+    }
+
+    #[test]
+    fn trigger_you_gain_or_lose_life_no_turn_constraint() {
+        let def = parse_trigger_line(
+            "Whenever you gain or lose life, put a +1/+1 counter on this creature.",
+            "Test Card",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeChanged);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(def.constraint, None);
     }
 
     #[test]

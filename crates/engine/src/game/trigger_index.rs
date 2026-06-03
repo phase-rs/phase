@@ -236,6 +236,7 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::LifeGained
         | TriggerMode::LifeLost
         | TriggerMode::LifeLostAll
+        | TriggerMode::LifeChanged
         | TriggerMode::PayLife => push(TriggerEventKey::LifeChanged),
         // CR 702.24a (cumulative upkeep) + CR 702.30 (echo): both synthesized
         // with `def.phase = Some(Upkeep)`, both matchers dispatch on

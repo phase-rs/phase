@@ -291,6 +291,8 @@ pub enum TriggerMode {
     /// CR 119.3: Triggers when a player loses life.
     LifeLost,
     LifeLostAll,
+    /// CR 119.3 + CR 118.4: Triggers when a player gains or loses life.
+    LifeChanged,
     PayLife,
     /// CR 702.24: Cumulative upkeep trigger.
     PayCumulativeUpkeep,
@@ -611,6 +613,7 @@ impl FromStr for TriggerMode {
             "Investigated" => TriggerMode::Investigated,
             "LandPlayed" => TriggerMode::LandPlayed,
             "LeavesBattlefield" => TriggerMode::LeavesBattlefield,
+            "LifeChanged" => TriggerMode::LifeChanged,
             "LifeGained" => TriggerMode::LifeGained,
             "LifeLost" => TriggerMode::LifeLost,
             "LifeLostAll" => TriggerMode::LifeLostAll,
@@ -875,6 +878,7 @@ mod tests {
             "Investigated",
             "LandPlayed",
             "LeavesBattlefield",
+            "LifeChanged",
             "LifeGained",
             "LifeLost",
             "LifeLostAll",
@@ -954,8 +958,8 @@ mod tests {
             }
         }
         assert!(
-            known_count >= 145,
-            "Expected 145+ known trigger modes, got {known_count}"
+            known_count >= 146,
+            "Expected 146+ known trigger modes, got {known_count}"
         );
     }
 }
