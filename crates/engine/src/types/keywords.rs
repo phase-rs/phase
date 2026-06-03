@@ -1127,7 +1127,11 @@ impl Keyword {
     pub fn instances_function_separately(&self) -> bool {
         matches!(
             self,
-            Keyword::Cascade | Keyword::Storm | Keyword::Myriad | Keyword::Exalted
+            Keyword::Cascade
+                | Keyword::Storm
+                | Keyword::Myriad
+                | Keyword::Exalted
+                | Keyword::DoubleTeam
         )
     }
 }
