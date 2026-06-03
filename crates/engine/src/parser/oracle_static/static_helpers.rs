@@ -346,6 +346,8 @@ pub(crate) fn try_parse_cost_modification(text: &str, lower: &str) -> Option<Sta
             Some(ControllerRef::TargetPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::ParentTargetController) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            // CR 613.1: chosen-player scope is not emitted for cost statics.
+            Some(ControllerRef::SourceChosenPlayer) => TargetFilter::Typed(TypedFilter::card()),
             // CR 109.4: Chosen-player scope is not emitted for cost statics.
             Some(ControllerRef::ChosenPlayer { .. }) => TargetFilter::Typed(TypedFilter::card()),
             // CR 603.2 + CR 109.4: Triggering-player scope is not emitted for
