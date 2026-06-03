@@ -390,6 +390,9 @@ pub enum TriggerMode {
     // Land
     /// CR 305.1 + CR 505.6b: Triggers when a land is played.
     LandPlayed,
+    /// CR 601.1a + CR 701.18b: "Whenever you play a card" — playing a card means
+    /// playing it as a land OR casting it as a spell, so this fires on both events.
+    PlayCard,
 
     // Equipment / aura — CR 701.3 (Attach)
     /// CR 701.3: Triggers when an Aura, Equipment, or Fortification becomes attached.
@@ -610,6 +613,7 @@ impl FromStr for TriggerMode {
             "Immediate" => TriggerMode::Immediate,
             "Investigated" => TriggerMode::Investigated,
             "LandPlayed" => TriggerMode::LandPlayed,
+            "PlayCard" => TriggerMode::PlayCard,
             "LeavesBattlefield" => TriggerMode::LeavesBattlefield,
             "LifeGained" => TriggerMode::LifeGained,
             "LifeLost" => TriggerMode::LifeLost,
@@ -874,6 +878,7 @@ mod tests {
             "Immediate",
             "Investigated",
             "LandPlayed",
+            "PlayCard",
             "LeavesBattlefield",
             "LifeGained",
             "LifeLost",

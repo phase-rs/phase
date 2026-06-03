@@ -11,6 +11,7 @@ use super::identifiers::ObjectId;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost, StepEndManaAction};
 use super::phase::Phase;
+use super::player::PlayerId;
 use super::zones::Zone;
 
 /// CR 109.5 + CR 102.1: The "who" axis of a continuous prohibition static.
@@ -592,6 +593,16 @@ pub enum StaticMode {
     /// runtime-implemented; other arms are inert.
     PlayerProtection(super::keywords::ProtectionTarget),
     MustAttack,
+    /// CR 508.1d: This creature must attack a *specific* player if able ("target
+    /// creature attacks you this combat if able"; Alluring Siren, Dulcet Sirens).
+    /// Unlike the generic
+    /// [`MustAttack`] (attack any defender), this carries the `PlayerId` that must
+    /// be attacked. Data-carrying variant — not registry-registered (see
+    /// `coverage::is_data_carrying_static`); enforced by direct pattern-match in
+    /// `combat.rs` declare-attackers validation. Mirrors [`MustBlockAttacker`].
+    MustAttackPlayer {
+        player: PlayerId,
+    },
     MustBlock,
     /// CR 702.39a / CR 509.1c: This creature must block a *specific* attacker if
     /// able (Provoke; "target creature blocks ~ this turn if able"). Unlike the
@@ -1074,6 +1085,7 @@ impl Hash for StaticMode {
             }
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::MustBlockAttacker { attacker } => attacker.hash(state),
+            StaticMode::MustAttackPlayer { player } => player.hash(state),
             StaticMode::MaxAttackersEachCombat { max }
             | StaticMode::MaxBlockersEachCombat { max } => max.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
@@ -1204,6 +1216,9 @@ impl fmt::Display for StaticMode {
                 write!(f, "PlayerProtection({target:?})")
             }
             StaticMode::MustAttack => write!(f, "MustAttack"),
+            StaticMode::MustAttackPlayer { player } => {
+                write!(f, "MustAttackPlayer({player:?})")
+            }
             StaticMode::MustBlock => write!(f, "MustBlock"),
             StaticMode::MustBlockAttacker { attacker } => {
                 write!(f, "MustBlockAttacker({attacker:?})")

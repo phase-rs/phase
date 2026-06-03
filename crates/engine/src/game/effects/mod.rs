@@ -81,6 +81,7 @@ pub mod explore;
 pub mod extra_turn;
 pub mod fight;
 pub mod flip_coin;
+pub mod force_attack;
 pub mod force_block;
 pub mod gain_control;
 pub mod gift_delivery;
@@ -1731,6 +1732,7 @@ pub fn resolve_effect(
         Effect::PhaseOut { .. } => phase_out::resolve(state, ability, events),
         Effect::PhaseIn { .. } => phase_out::resolve_phase_in(state, ability, events),
         Effect::ForceBlock { .. } => force_block::resolve(state, ability, events),
+        Effect::ForceAttack { .. } => force_attack::resolve(state, ability, events),
         Effect::SolveCase => solve_case::resolve(state, ability, events),
         Effect::BecomePrepared { .. } => prepare::resolve_become_prepared(state, ability, events),
         Effect::BecomeUnprepared { .. } => {
@@ -2650,6 +2652,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target, .. }
         | Effect::ForceBlock { target, .. }
+        | Effect::ForceAttack { target, .. }
         | Effect::PutAtLibraryPosition { target, .. }
         | Effect::PutOnTopOrBottom { target, .. }
         | Effect::ChangeTargets { target, .. }

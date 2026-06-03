@@ -6,6 +6,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::{info, warn};
 
+use server_core::guard_p2p_backup;
+
 use crate::AppState;
 
 /// Validate draft code format: exactly 6 alphanumeric uppercase chars.
@@ -103,6 +105,9 @@ pub async fn p2p_backup_store(
 ) -> impl IntoResponse {
     if !is_valid_draft_code(&req.draft_code) {
         return (StatusCode::BAD_REQUEST, "Invalid draft code").into_response();
+    }
+    if let Err(reason) = guard_p2p_backup(&req.host_peer_id, &req.snapshot_json) {
+        return (StatusCode::BAD_REQUEST, reason).into_response();
     }
     match app_state
         .game_db
