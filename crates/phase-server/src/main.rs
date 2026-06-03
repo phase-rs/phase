@@ -616,8 +616,9 @@ fn guard_full_create_game_settings_inbound(
     ai_seats: &[server_core::protocol::AiSeatRequest],
 ) -> Result<u8, String> {
     let pc = fields.player_count.clamp(2, MAX_FULL_GAME_PLAYER_COUNT);
-    lobby_broker::guard_create_game_settings_inbound(fields)?;
+    lobby_broker::validate_create_game_settings_inbound_fields(&fields)?;
     guard_create_ai_seats(ai_seats, pc)?;
+    lobby_broker::validate_deck_payload("deck", fields.deck)?;
     Ok(pc)
 }
 
@@ -5232,7 +5233,7 @@ mod live_spectator_tests {
 mod full_create_guard_tests {
     use super::*;
     use lobby_broker::validation::{MAX_DRAFT_SET_CODE_LEN, MAX_TOKEN_LEN};
-    use server_core::protocol::{DeckData, DraftLobbyMetadata};
+    use server_core::protocol::{AiSeatRequest, DeckData, DraftLobbyMetadata};
 
     fn deck() -> DeckData {
         DeckData {
@@ -5301,6 +5302,24 @@ mod full_create_guard_tests {
             .unwrap_err();
 
         assert!(err.contains("draft_metadata.set_code"));
+    }
+
+    #[test]
+    fn full_create_guard_rejects_ai_seats_before_deck_payload() {
+        let mut deck = deck();
+        deck.main_deck =
+            vec!["Forest".to_string(); lobby_broker::inbound_guard::MAX_MAIN_DECK_ENTRIES + 1];
+        let ai_seats = vec![AiSeatRequest {
+            seat_index: 0,
+            difficulty: phase_ai::config::AiDifficulty::Medium,
+            deck_name: None,
+            deck: None,
+        }];
+
+        let err = guard_full_create_game_settings_inbound(fields(&deck, None, None), &ai_seats)
+            .unwrap_err();
+
+        assert!(err.contains("ai_seats[0].seat_index"));
     }
 }
 
