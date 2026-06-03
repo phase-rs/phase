@@ -45,6 +45,7 @@ use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
+use server_core::lobby_subscriber_wire_guard::guard_lobby_subscriber_capacity;
 use server_core::lookup_join_guard::guard_lookup_join_target;
 use server_core::protocol::{
     build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
@@ -1702,6 +1703,10 @@ async fn apply_outbounds(
             }
             Outbound::AddSubscriber => {
                 let mut subs = lobby_subscribers.lock().await;
+                if let Err(reason) = guard_lobby_subscriber_capacity(subs.len()) {
+                    let _ = tx.send(ServerMessage::Error { message: reason });
+                    continue;
+                }
                 subs.push(tx.clone());
             }
             Outbound::RemoveSubscriber => {
