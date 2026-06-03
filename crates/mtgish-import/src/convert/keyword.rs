@@ -10,7 +10,7 @@
 //! type-system lookup; there is no semantic translation. Cost/filter
 //! keywords need real conversion logic, so they land with their phase.
 
-use engine::types::ability::{AbilityCost, QuantityExpr};
+use engine::types::ability::{AbilityCost, CostObjectCount, QuantityExpr};
 use engine::types::keywords::{
     ActivationCadence, BloodthirstValue, BuybackCost, CyclingCost, FlashbackCost, HexproofFilter,
     ProtectionTarget, WardCost,
@@ -329,9 +329,8 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         // CR 702.81: Devour N — engine encodes only N (the "creatures you
         // sacrifice" filter is implicit).
         Rule::Devour(_perm, g) => Keyword::Devour(int_or_gap(g, "Rule::Devour", path)?),
-        // CR 702.163: Prototype — alt-cost cast for a smaller body. The
-        // engine keyword carries only the alt mana cost; the alt-PT is
-        // synthesized separately. CardManaCost is a Vec<ManaSymbolX>.
+        // CR 702.160a: Prototype — alt-cost cast that uses the secondary
+        // power/toughness and mana cost characteristics.
         // CR 702.176a: Impending N—{cost} — alternative cost. "You may
         // choose to pay [cost] rather than pay this spell's mana cost"
         // + "If you chose to pay this permanent's impending cost, it
@@ -363,15 +362,20 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
             Keyword::Specialize(pure_mana(c, "Rule::SpecializeWithModifiers", path)?)
         }
 
-        // CR 702.167a: Craft with [materials] [cost]. The engine keyword
-        // carries only the activation mana cost, matching the native parser;
-        // material requirements are not represented in `Keyword::Craft`.
+        // CR 702.167a/b: Craft with [materials] [cost]. The engine keyword now
+        // carries the materials class and count alongside the activation cost.
+        // This dormant import crate defaults materials to the creature class and
+        // count to 1 (the native Oracle-line parser supplies the precise class);
+        // the goal here is to keep the workspace compiling under the struct
+        // migration.
         Rule::CraftWithACraftable(_, cost)
         | Rule::CraftWithCraftables(_, cost)
         | Rule::CraftWithANumberOfCraftables(_, _, cost)
-        | Rule::CraftWithANumberOfGroupCraftables(_, _, _, cost) => {
-            Keyword::Craft(crate::convert::mana::convert(cost)?)
-        }
+        | Rule::CraftWithANumberOfGroupCraftables(_, _, _, cost) => Keyword::Craft {
+            cost: crate::convert::mana::convert(cost)?,
+            materials: engine::types::keywords::craft_materials_default(),
+            count: CostObjectCount::exactly(1),
+        },
 
         // CR 702.48a: "[Quality] offering" — additional-cost-on-cast
         // sacrificing a permanent of the named quality. The schema's
@@ -391,9 +395,11 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         // (`Keyword::TotemArmor`) per the documented Oracle erratum.
         Rule::UmbraArmor => Keyword::TotemArmor,
 
-        Rule::Prototype { mana_cost, .. } => {
-            Keyword::Prototype(crate::convert::mana::convert_x(mana_cost)?)
-        }
+        Rule::Prototype { mana_cost, card_pt } => Keyword::Prototype {
+            cost: crate::convert::mana::convert_x(mana_cost)?,
+            power: Some(card_pt.power),
+            toughness: Some(card_pt.toughness),
+        },
 
         // CR 702.138a: Escape — alternative casting cost from graveyard.
         // mtgish encodes the cost as `Cost::And([PayMana, ExileNumberGraveyardCards(N, ...)])`;

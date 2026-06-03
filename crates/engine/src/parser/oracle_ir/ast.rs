@@ -365,6 +365,10 @@ pub(crate) enum ImperativeFamilyAst {
     Connive,
     /// CR 509.1g: Block this turn if able.
     ForceBlock,
+    /// CR 508.1d: Attack the source controller this turn/combat if able.
+    ForceAttack {
+        duration: Duration,
+    },
     /// CR 701.15a: Goad target creature.
     Goad,
     /// CR 701.12a: Exchange control of two target permanents. Carries a distinct
