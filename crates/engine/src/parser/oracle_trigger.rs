@@ -38,7 +38,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
     TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, ZoneChangeClause,
 };
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::parse_counter_type;
 use crate::types::events::PlayerActionKind;
 use crate::types::mana::ManaColor;
@@ -7896,26 +7896,11 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // second-person "play a land" form (you — e.g. Fastbond). The optional
     // from-zone tail rides through `parse_type_phrase`, matching the existing
     // cast-spell trigger shape used by Rocco, Street Chef.
-    if let Some((valid_target, qualifier, after_land_play)) = parse_land_play_trigger_subject(lower)
-    {
+    if let Some((valid_target, land_filter)) = parse_land_play_trigger_subject(lower) {
         let mut def = make_base();
         def.mode = TriggerMode::LandPlayed;
         def.valid_target = valid_target;
-        let after_land_play = after_land_play.trim_start();
-        let clause = terminated(
-            take_until::<_, _, OracleError<'_>>(", "),
-            tag::<_, _, OracleError<'_>>(", "),
-        )
-        .parse(after_land_play)
-        .map(|(_, before)| before)
-        .unwrap_or(after_land_play);
-        let (filter, _) = parse_type_phrase(clause);
-        if qualifier.is_some() {
-            // CR 305.1: "another land" excludes the source permanent.
-            def.valid_card = Some(add_another_prop(filter));
-        } else if !matches!(filter, TargetFilter::Any) {
-            def.valid_card = Some(filter);
-        }
+        def.valid_card = land_filter;
         return Some((TriggerMode::LandPlayed, def));
     }
 
@@ -10212,7 +10197,7 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
 /// "whenever/when [subject] plays/play a land".
 fn parse_land_play_trigger_subject(
     lower: &str,
-) -> Option<(Option<TargetFilter>, Option<FilterProp>, &str)> {
+) -> Option<(Option<TargetFilter>, Option<TargetFilter>)> {
     let (after_prefix, _) = alt((
         tag::<_, _, OracleError<'_>>("whenever "),
         tag::<_, _, OracleError<'_>>("when "),
@@ -10235,21 +10220,42 @@ fn parse_land_play_trigger_subject(
     ))
     .parse(after_prefix)
     .ok()?;
-    // CR 305.1: Decompose verb ("play"/"plays") and land-qualifier ("another"/"a")
-    // into separate axes to avoid Cartesian-product enumeration.
+    // CR 305.1: Decompose verb ("play"/"plays") from the land object phrase.
+    // The object phrase itself goes through `parse_type_phrase`, the shared
+    // typed-filter grammar for supertypes, subtypes, "another", and zone
+    // suffixes. That keeps "a legendary land", "another land", "an Island",
+    // and "a land from exile" on one parser seam.
     let (after_verb, _) = alt((tag::<_, _, OracleError<'_>>("plays "), tag("play ")))
         .parse(after_subject)
         .ok()?;
-    let (after_land, qualifier) = alt((
-        value(
-            Some(FilterProp::Another),
-            tag::<_, _, OracleError<'_>>("another land"),
-        ),
-        value(None, tag("a land")),
-    ))
-    .parse(after_verb)
-    .ok()?;
-    Some((valid_target, qualifier, after_land))
+    let (filter, rest) = parse_type_phrase(after_verb);
+    if rest.len() == after_verb.len() {
+        return None;
+    }
+    let land_filter = normalize_land_play_filter(filter)?;
+    Some((valid_target, land_filter))
+}
+
+fn normalize_land_play_filter(filter: TargetFilter) -> Option<Option<TargetFilter>> {
+    match &filter {
+        TargetFilter::Typed(tf) if is_plain_land_filter(tf) => Some(None),
+        TargetFilter::Typed(tf) if is_land_play_filter(tf) => Some(Some(filter)),
+        _ => None,
+    }
+}
+
+fn is_plain_land_filter(tf: &TypedFilter) -> bool {
+    tf.controller.is_none()
+        && tf.properties.is_empty()
+        && tf.type_filters.as_slice() == [TypeFilter::Land]
+}
+
+fn is_land_play_filter(tf: &TypedFilter) -> bool {
+    tf.type_filters.iter().any(|type_filter| match type_filter {
+        TypeFilter::Land => true,
+        TypeFilter::Subtype(subtype) => is_land_subtype(subtype),
+        _ => false,
+    })
 }
 
 /// CR 725.1: Parse "whenever/when [subject] become(s) the monarch" trigger.
@@ -15468,6 +15474,7 @@ mod tests {
         );
         assert_eq!(t.mode, TriggerMode::LandPlayed);
         assert_eq!(t.valid_target, Some(TargetFilter::Controller));
+        assert_eq!(t.valid_card, None);
         assert!(
             t.condition.is_some(),
             "intervening-if condition must be extracted"
@@ -15528,6 +15535,74 @@ mod tests {
                 );
             }
             other => panic!("expected Typed filter with Another, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_shanid_play_a_legendary_land() {
+        // CR 305.1 + CR 205.4a: "Whenever you play a legendary land" must
+        // produce a LandPlayed trigger with valid_card filtering for the
+        // Legendary supertype on a Land type.
+        let t = parse_trigger_line(
+            "Whenever you play a legendary land, you draw a card and you lose 1 life.",
+            "Shanid, Sleepers' Scourge",
+        );
+        assert_eq!(t.mode, TriggerMode::LandPlayed);
+        assert_eq!(t.valid_target, Some(TargetFilter::Controller));
+        let filter = t
+            .valid_card
+            .expect("valid_card must be set for legendary land qualifier");
+        match &filter {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Land),
+                    "expected Land type filter, got {:?}",
+                    tf.type_filters
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Legendary
+                    }),
+                    "expected HasSupertype(Legendary) in {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed filter, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_land_play_object_phrase_uses_type_parser() {
+        let island = parse_trigger_line("Whenever you play an Island, draw a card.", "Test Card");
+        assert_eq!(island.mode, TriggerMode::LandPlayed);
+        let filter = island
+            .valid_card
+            .expect("land subtype qualifier must set valid_card");
+        match &filter {
+            TargetFilter::Typed(tf) => {
+                assert!(tf
+                    .type_filters
+                    .contains(&TypeFilter::Subtype("Island".to_string())));
+            }
+            other => panic!("expected Typed filter, got {:?}", other),
+        }
+
+        let from_exile = parse_trigger_line(
+            "Whenever you play a land from exile, draw a card.",
+            "Test Card",
+        );
+        assert_eq!(from_exile.mode, TriggerMode::LandPlayed);
+        let filter = from_exile
+            .valid_card
+            .expect("from-zone qualifier must set valid_card");
+        match &filter {
+            TargetFilter::Typed(tf) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert!(tf
+                    .properties
+                    .contains(&FilterProp::InZone { zone: Zone::Exile }));
+            }
+            other => panic!("expected Typed filter, got {:?}", other),
         }
     }
 
