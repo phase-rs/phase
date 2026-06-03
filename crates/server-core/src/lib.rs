@@ -38,9 +38,7 @@ pub use game_reconnect_guard::guard_game_reconnect;
 pub use legacy_deck_guard::guard_legacy_deck;
 pub use legacy_join_guard::guard_legacy_join_game;
 pub use lobby::LobbyManager;
-pub use lobby_subscriber_wire_guard::{
-    guard_lobby_subscriber_capacity, MAX_LOBBY_SUBSCRIBERS,
-};
+pub use lobby_subscriber_wire_guard::{guard_lobby_subscriber_capacity, MAX_LOBBY_SUBSCRIBERS};
 pub use lookup_join_guard::guard_lookup_join_target;
 pub use persist::{PersistedLobbyMeta, PersistedSession};
 pub use protocol::{
