@@ -103,6 +103,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ChooseRingBearer { .. }
         | WaitingFor::ChooseDungeon { .. }
         | WaitingFor::ChooseDungeonRoom { .. }
+        | WaitingFor::SpecializeColor { .. }
         | WaitingFor::PayCost { .. }
         | WaitingFor::BlightChoice { .. }
         | WaitingFor::ChooseManaColor { .. }

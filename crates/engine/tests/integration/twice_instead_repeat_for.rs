@@ -21,8 +21,6 @@ use std::sync::OnceLock;
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -93,7 +91,8 @@ fn secrets_of_the_key_from_graveyard_makes_two_clues() {
 
     let clues_before = count_clues(runner.state(), P0);
 
-    // Pay the Flashback cost {3}{U}.
+    // Pay the Flashback cost {3}{U} from the pool (auto-paid by the driver) and
+    // resolve through the canonical pipeline.
     add_mana_to(
         &mut runner,
         P0,
@@ -104,24 +103,9 @@ fn secrets_of_the_key_from_graveyard_makes_two_clues() {
             ManaType::Blue,
         ],
     );
-    let card_id = runner.state().objects[&secrets].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: secrets,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting Secrets of the Key from graveyard via flashback must succeed");
+    let outcome = runner.cast(secrets).resolve();
 
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "expected Priority after flashback cast, got {:?}",
-        runner.state().waiting_for
-    );
-
-    runner.advance_until_stack_empty();
-
-    let clues_after = count_clues(runner.state(), P0);
+    let clues_after = count_clues(outcome.state(), P0);
     assert_eq!(
         clues_after - clues_before,
         2,
@@ -146,26 +130,11 @@ fn secrets_of_the_key_from_hand_makes_one_clue() {
 
     let clues_before = count_clues(runner.state(), P0);
 
-    // Pay the printed mana cost {U}.
+    // Pay the printed mana cost {U} from the pool (auto-paid by the driver).
     add_mana_to(&mut runner, P0, &[ManaType::Blue]);
-    let card_id = runner.state().objects[&secrets].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: secrets,
-            card_id,
-            targets: vec![],
-        })
-        .expect("casting Secrets of the Key from hand must succeed");
+    let outcome = runner.cast(secrets).resolve();
 
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "expected Priority after cast, got {:?}",
-        runner.state().waiting_for
-    );
-
-    runner.advance_until_stack_empty();
-
-    let clues_after = count_clues(runner.state(), P0);
+    let clues_after = count_clues(outcome.state(), P0);
     assert_eq!(
         clues_after - clues_before,
         1,

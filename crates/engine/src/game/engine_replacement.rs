@@ -410,6 +410,14 @@ pub(super) fn handle_replacement_choice(
                 }
             }
 
+            // CR 601.2h + CR 602.2b + CR 616.1: Resume cast/activation cost payment paused for a
+            // replacement choice during discard or sacrifice cost payment.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && (state.pending_cast.is_some() || state.pending_discard_for_cost.is_some())
+            {
+                waiting_for = super::casting_costs::resume_interrupted_cost_payment(state, events)?;
+            }
+
             Ok(waiting_for)
         }
         super::replacement::ReplacementResult::NeedsChoice(player) => Ok(

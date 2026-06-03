@@ -87,8 +87,8 @@ pub struct CreateGameSettingsInbound<'a> {
 }
 
 /// Validate a settings-create frame without constructing the owned broker enum.
-pub fn guard_create_game_settings_inbound(
-    fields: CreateGameSettingsInbound<'_>,
+pub fn validate_create_game_settings_inbound_fields(
+    fields: &CreateGameSettingsInbound<'_>,
 ) -> Result<(), String> {
     validate_create_game_settings_fields(CreateGameSettingsFields {
         display_name: fields.display_name,
@@ -98,7 +98,14 @@ pub fn guard_create_game_settings_inbound(
         room_name: fields.room_name,
         host_peer_id: fields.host_peer_id,
         draft_metadata: fields.draft_metadata,
-    })?;
+    })
+}
+
+/// Validate a settings-create frame without constructing the owned broker enum.
+pub fn guard_create_game_settings_inbound(
+    fields: CreateGameSettingsInbound<'_>,
+) -> Result<(), String> {
+    validate_create_game_settings_inbound_fields(&fields)?;
     validate_deck_payload("deck", fields.deck)
 }
 

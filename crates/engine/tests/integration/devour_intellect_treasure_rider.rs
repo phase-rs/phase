@@ -28,7 +28,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use engine::database::card_db::CardDatabase;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{CastOutcome, GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
 use engine::types::card_type::CoreType;
@@ -38,7 +38,6 @@ use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
-use engine::types::GameAction;
 
 const P1: PlayerId = PlayerId(1);
 
@@ -113,11 +112,13 @@ fn add_pool_mana(
 /// Cast Devour Intellect, paying its `{1}{B}` cost from a pre-loaded pool whose
 /// two mana units carry the source object chosen by `mana_source` (called on
 /// the live state so the test can install a Treasure or a Swamp first), and
-/// advance the stack. Returns the resulting `GameRunner` for inspection.
+/// resolve. The cast driver auto-pays from the source-tagged pool, declares the
+/// sole legal "target opponent" (P1) for the discard, and resolves — stopping
+/// at the upgraded branch's `RevealChoice` boundary when it fires.
 fn cast_devour_intellect(
     db: &CardDatabase,
     mana_source: impl FnOnce(&mut engine::types::game_state::GameState) -> ObjectId,
-) -> engine::game::scenario::GameRunner {
+) -> CastOutcome {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell_id = scenario.add_real_card(P0, "Devour Intellect", Zone::Hand, db);
@@ -135,25 +136,7 @@ fn cast_devour_intellect(
         &[(ManaType::Black, source), (ManaType::Black, source)],
     );
 
-    let card_id = runner.state().objects[&spell_id].card_id;
-    let result = runner
-        .act(GameAction::CastSpell {
-            object_id: spell_id,
-            card_id,
-            targets: vec![],
-        })
-        .expect("Devour Intellect cast should be accepted");
-
-    // The opponent (P1) is the sole legal "target opponent" — auto-select if
-    // the engine prompts for the discard target.
-    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
-        runner
-            .choose_first_legal_target()
-            .expect("selecting target opponent should succeed");
-    }
-
-    runner.advance_until_stack_empty();
-    runner
+    runner.cast(spell_id).target_player(P1).resolve()
 }
 
 /// Treasure mana spent → the `ConditionInstead` rider evaluates true and the
@@ -164,14 +147,14 @@ fn devour_intellect_reveals_hand_when_treasure_mana_spent() {
         return;
     };
 
-    let runner = cast_devour_intellect(db, |state| {
+    let outcome = cast_devour_intellect(db, |state| {
         // The mana that pays for the spell comes from a Treasure.
         make_treasure(state, 9001, P0)
     });
 
     // Upgraded branch: RevealHand pauses resolution on a RevealChoice for the
     // caster, and the opponent's hand cards are marked revealed.
-    match &runner.state().waiting_for {
+    match outcome.final_waiting_for() {
         WaitingFor::RevealChoice { player, .. } => {
             assert_eq!(
                 *player, P0,
@@ -181,7 +164,7 @@ fn devour_intellect_reveals_hand_when_treasure_mana_spent() {
         other => panic!("expected WaitingFor::RevealChoice (instead branch fired), got {other:?}"),
     }
     assert!(
-        !runner.state().revealed_cards.is_empty(),
+        !outcome.state().revealed_cards.is_empty(),
         "the instead branch must reveal the opponent's hand"
     );
 }
@@ -194,7 +177,7 @@ fn devour_intellect_base_discard_when_no_treasure_mana() {
         return;
     };
 
-    let runner = cast_devour_intellect(db, |state| {
+    let outcome = cast_devour_intellect(db, |state| {
         // Mana sourced from a basic Swamp — not a Treasure.
         make_swamp(state, 9101, P0)
     });
@@ -202,13 +185,13 @@ fn devour_intellect_base_discard_when_no_treasure_mana() {
     // Base branch: no RevealHand, so resolution never stops on RevealChoice
     // and no opponent cards are revealed.
     assert!(
-        !matches!(runner.state().waiting_for, WaitingFor::RevealChoice { .. }),
+        !matches!(outcome.final_waiting_for(), WaitingFor::RevealChoice { .. }),
         "base branch must not enter a RevealChoice (instead branch must NOT fire), \
          waiting_for={:?}",
-        runner.state().waiting_for,
+        outcome.final_waiting_for(),
     );
     assert!(
-        runner.state().revealed_cards.is_empty(),
+        outcome.state().revealed_cards.is_empty(),
         "base Discard branch must not reveal the opponent's hand"
     );
 }
