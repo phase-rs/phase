@@ -5115,6 +5115,9 @@ pub struct GameState {
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
+    /// CR 309: Planechase planar deck state (None = not a planechase game).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planechase: Option<crate::game::planechase::PlanechaseState>,
 
     /// CR 510.2 + CR 615.7: Transient per-shield combat-damage prevention tally.
     /// Set to `Some(empty)` by `apply_combat_damage` for the duration of one
@@ -5495,6 +5498,7 @@ impl GameState {
             ring_bearer: HashMap::new(),
             dungeon_progress: HashMap::new(),
             initiative: None,
+            planechase: None,
             combat_prevention_tally: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),

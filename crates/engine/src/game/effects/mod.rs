@@ -9,7 +9,7 @@ use crate::types::ability::{
     PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
     MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor, ZoneChangeRecord,
@@ -1838,8 +1838,10 @@ pub fn resolve_effect(
         Effect::BlightEffect { .. } => blight::resolve(state, ability, events),
         Effect::Endure { .. } => endure::resolve(state, ability, events),
         Effect::Forage => {
-            // This keyword action is recognized by the parser but not yet implemented.
-            // It's a no-op at runtime but counts as supported for coverage.
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id: ability.controller,
+                action: PlayerActionKind::Forage,
+            });
             Ok(())
         }
         Effect::CollectEvidence { .. } => collect_evidence::resolve(state, ability, events),

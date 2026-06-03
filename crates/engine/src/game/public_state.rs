@@ -182,7 +182,8 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // CR 701.43a: exerting adds a CantUntap transient (which sets
             // layers_dirty → Gate 1); mark the exerted object directly so its
             // display reflects the exert even on the layers-clean path.
-            GameEvent::CreatureExerted { object_id } => {
+            GameEvent::CreatureExerted { object_id }
+            | GameEvent::Foretold { object_id, .. } => {
                 mark_public_state_object_dirty(state, *object_id);
             }
             GameEvent::ManaAdded { player_id, .. }
