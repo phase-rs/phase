@@ -1,4 +1,4 @@
-use crate::types::ability::{AbilityCost, AdditionalCost, BeholdCostAction};
+use crate::types::ability::{AbilityCost, AdditionalCost, BeholdCostAction, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, WaitingFor,
@@ -276,6 +276,29 @@ pub(super) fn handle_exile_for_cost(
         zone,
         pending_cast,
         count,
+        legal_cards,
+        chosen,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn handle_exile_materials_for_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    materials: TargetFilter,
+    pending_cast: PendingCast,
+    bounds: (usize, usize),
+    legal_cards: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting_costs::handle_exile_materials_for_cost(
+        state,
+        player,
+        materials,
+        pending_cast,
+        bounds,
         legal_cards,
         chosen,
         events,

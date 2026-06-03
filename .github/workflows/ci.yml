@@ -6,6 +6,7 @@ on:
     paths:
       - 'crates/**'
       - 'client/**'
+      - 'lobby-worker/**'
       - 'scripts/**'
       - 'Cargo.*'
       - '.cargo/**'
@@ -342,6 +343,29 @@ jobs:
               exit 1
             fi
           done
+
+  lobby-worker-test:
+    name: Lobby worker (pnpm test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: lobby-worker/package-lock.json
+
+      - name: Install and test
+        run: |
+          cd lobby-worker
+          npm ci
+          pnpm test
 
   frontend:
     name: Frontend (lint, type-check, test)
