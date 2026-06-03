@@ -33,6 +33,9 @@ use lobby_broker::{
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
 use server_core::client_hello_guard::guard_client_hello;
+use server_core::client_message_wire_guard::{
+    guard_broker_projection_inbound, guard_client_message_before_dispatch,
+};
 use server_core::draft_action_payload_guard::guard_draft_action_payload;
 use server_core::draft_session::DraftSessionManager;
 use server_core::draft_wire_guard::{
@@ -45,7 +48,7 @@ use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
-use server_core::lookup_join_guard::guard_lookup_join_target;
+use server_core::lookup_join_guard::{guard_lookup_join_target_inbound, LookupJoinTargetInbound};
 use server_core::protocol::{
     build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
     MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
@@ -1641,6 +1644,10 @@ async fn dispatch_broker(
     tx: &mpsc::UnboundedSender<ServerMessage>,
     identity: &mut SocketIdentity,
 ) {
+    if let Err(reason) = guard_broker_projection_inbound(msg) {
+        let _ = tx.send(ServerMessage::Error { message: reason });
+        return;
+    }
     let Some(lobby_msg) = to_lobby_client_message(msg) else {
         return;
     };
@@ -2379,6 +2386,14 @@ async fn handle_client_message(
         let msg = ServerMessage::Error {
             message: reason.to_string(),
         };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = socket.send(Message::text(json)).await;
+        }
+        return;
+    }
+
+    if let Err(reason) = guard_client_message_before_dispatch(&client_msg, mode) {
+        let msg = ServerMessage::Error { message: reason };
         if let Ok(json) = serde_json::to_string(&msg) {
             let _ = socket.send(Message::text(json)).await;
         }
@@ -3411,15 +3426,12 @@ async fn handle_client_message(
         } => {
             info!(game = %game_code, "LookupJoinTarget");
 
-            if let Err(reason) =
-                guard_lookup_join_target(&lobby_broker::LobbyClientMessage::LookupJoinTarget {
-                    game_code: game_code.clone(),
-                    password: password.clone(),
-                    reserve,
-                    display_name: display_name.clone(),
-                    release_reservation_token: release_reservation_token.clone(),
-                })
-            {
+            if let Err(reason) = guard_lookup_join_target_inbound(LookupJoinTargetInbound {
+                game_code: &game_code,
+                password: password.as_deref(),
+                display_name: display_name.as_deref(),
+                release_reservation_token: release_reservation_token.as_deref(),
+            }) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
