@@ -1729,6 +1729,12 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         // for the dispatcher — ordering invariant, not a defensive escape.
         tag("who doesn't"),
         tag("who does not"),
+        // CR 119.3 + CR 701.55a: "each opponent who lost N or more life this
+        // turn faces a villainous choice" is a restricted chooser phrase, not
+        // a normal per-player imperative. Preserve the full subject so the
+        // `ChooseOneOf` parser can emit a PlayerAttribute chooser instead of
+        // broadening the choice to every opponent.
+        tag("who lost"),
     ))
     .parse(rest_lower.as_str())
     .is_ok()
