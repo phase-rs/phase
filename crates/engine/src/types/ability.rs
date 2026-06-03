@@ -11706,6 +11706,18 @@ pub enum ContinuousModification {
     SetBasicLandType {
         land_type: BasicLandType,
     },
+    /// CR 305.7 + CR 305.6: Sets a land's subtype to the basic land type CHOSEN
+    /// by the granting source (e.g. Phantasmal Terrain, Convincing Mirage:
+    /// "As this Aura enters, choose a basic land type." + "Enchanted land is the
+    /// chosen type."). Mirrors `SetBasicLandType`'s replacement semantics —
+    /// removes the land's old land subtypes and clears the abilities generated
+    /// from its rules text — but reads the concrete subtype from the source
+    /// object's `chosen_attributes` (`ChosenSubtypeKind::BasicLandType`) at layer
+    /// evaluation time rather than carrying a fixed type. Unit variant: the kind
+    /// is implicitly `BasicLandType`. The intrinsic mana ability for the new type
+    /// is derived from the subtype in `mana_sources.rs` (CR 305.6), so no explicit
+    /// mana grant is needed here.
+    SetChosenBasicLandType,
     /// CR 707.9a: Retain a printed triggered ability from the source object's
     /// printed trigger list at the given index. Used by "becomes a copy of <X>,
     /// except it has this ability" patterns (Irma Part-Time Mutant, Cryptoplasm,

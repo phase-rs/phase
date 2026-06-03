@@ -2770,6 +2770,42 @@ fn this_land_is_the_chosen_type() {
 }
 
 #[test]
+fn enchanted_land_is_the_chosen_type() {
+    // CR 305.7 + CR 305.6: Phantasmal Terrain / Convincing Mirage. The Aura's
+    // continuous static must set the enchanted land's subtype to the chosen
+    // basic land type with replacement semantics (SetChosenBasicLandType), not
+    // additive (AddChosenSubtype) — that variant clears the land's old types and
+    // rules-text abilities, which AddChosenSubtype does not.
+    let def = parse_static_line("Enchanted land is the chosen type.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::land().properties(vec![FilterProp::EnchantedBy])
+        ))
+    );
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetChosenBasicLandType]
+    );
+
+    // Tail variants ("and loses its other land types"/"types") parse identically
+    // — CR 305.7 already removes the old land types, so the tail is cosmetic.
+    for line in [
+        "Enchanted land is the chosen type",
+        "Enchanted land is the chosen type and loses its other land types.",
+        "Enchanted land is the chosen type and loses its other types.",
+    ] {
+        let def = parse_static_line(line).unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetChosenBasicLandType],
+            "line did not parse to SetChosenBasicLandType: {line}"
+        );
+    }
+}
+
+#[test]
 fn this_creature_is_the_chosen_type() {
     let def = parse_static_line("This creature is the chosen type in addition to its other types.")
         .unwrap();

@@ -2594,6 +2594,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
         ContinuousModification::SetBasicLandType { land_type } => {
             format!("set land type {}", land_type.as_subtype_str())
         }
+        ContinuousModification::SetChosenBasicLandType => "set chosen land type".into(),
         ContinuousModification::AssignNoCombatDamage => "assign no combat damage".into(),
         ContinuousModification::RetainPrintedTriggerFromSource {
             source_trigger_index,
