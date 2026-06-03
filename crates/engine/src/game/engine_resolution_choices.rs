@@ -2318,6 +2318,12 @@ pub(super) fn handle_resolution_choice(
                                 | ChoiceType::BasicLandType
                                 | ChoiceType::Color { .. }
                                 | ChoiceType::Keyword { .. }
+                                // CR 613.1: a persisted "choose a player" gates
+                                // CDA P/T that count the chosen player's objects
+                                // or zones (Sewer Nemesis, Skyshroud War Beast) —
+                                // recompute layers immediately.
+                                | ChoiceType::Player
+                                | ChoiceType::Opponent
                         ) {
                             crate::game::layers::mark_layers_full(state);
                         }
