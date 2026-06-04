@@ -1060,6 +1060,11 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
 /// a mandatory parent does NOT imply "performed" (a lost flip is mandatory but
 /// did not "win"), so the default-true rule below must exclude them.
 fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
+    // Redundant-but-safe: coin/die win-loss riders gate on `EventOutcomeWon` /
+    // `WhenYouDo`, which are NOT in `condition_depends_on_effect_performed`, so
+    // the seed-block guard above would already skip them. Excluding the
+    // FlipCoin*/RollDie/Clash/Dig set here is defensive belt-and-suspenders — a
+    // future reader should not assume those paths depend on this exclusion.
     matches!(
         effect,
         Effect::FlipCoin { .. }
@@ -4042,6 +4047,11 @@ fn resolve_chain_body(
     // sacrifice), set the flag on the parent's context so it propagates to the
     // sub via `apply_parent_chain_context` and survives the sub's own chain-body
     // condition re-check. Covers the whole mandatory-rider class, not one card.
+    // NOTE: this seed fires for any `EffectOutcome`-gated `SequentialSibling`,
+    // including a `CurrentScopeSucceeded` gate. Seeding `optional_effect_performed`
+    // there is a harmless no-op: a `CurrentScopeSucceeded` rider resolves against
+    // `!cost_payment_failed_flag` (not this flag), and that guard already requires
+    // `!cost_payment_failed_flag` — the same condition gating this seed.
     let mandatory_rider_owned;
     let ability = if !ability.optional
         && !ability.context.optional_effect_performed
