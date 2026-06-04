@@ -40,6 +40,15 @@ export type PodPolicy = "Competitive" | "Casual";
 
 export type PairingStatus = "Pending" | "InProgress" | "Complete";
 
+/** Fields consumed by `DraftProgress` (shared by player and spectator views). */
+export interface DraftProgressFields {
+  current_pack_number: number;
+  pick_number: number;
+  cards_per_pack: number;
+  pack_count: number;
+  pass_direction: "Left" | "Right";
+}
+
 // @sync-with: crates/draft-core/src/view.rs
 export interface StandingEntry {
   seat_index: number;
@@ -65,6 +74,28 @@ export interface PairingView {
   score_a: number | null;
   /** Game wins for seat B in the current match (Bo3 tracking). */
   score_b: number | null;
+}
+
+// @sync-with: crates/draft-core/src/view.rs
+export interface SpectatorDraftView {
+  status: DraftStatus;
+  kind: "Quick" | "Premier" | "Traditional";
+  current_pack_number: number;
+  pick_number: number;
+  pass_direction: "Left" | "Right";
+  seats: SeatPublicView[];
+  cards_per_pack: number;
+  pack_count: number;
+  min_deck_size: number;
+  addable_cards: string[];
+  standings: StandingEntry[];
+  current_round: number;
+  tournament_format: TournamentFormat;
+  pod_policy: PodPolicy;
+  pairings: PairingView[];
+  /** Present only when the host enabled omniscient spectator visibility. */
+  pools?: DraftCardInstance[][];
+  current_packs?: (DraftCardInstance[] | null)[];
 }
 
 // @sync-with: crates/draft-core/src/view.rs

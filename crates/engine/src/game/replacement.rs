@@ -1,11 +1,11 @@
 use indexmap::IndexMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Effect, PostReplacementContinuation,
-    PreventionAmount, QuantityExpr, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ShieldKind, TargetFilter, TargetRef,
+    PreventionAmount, QuantityExpr, QuantityModification, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, ShieldKind, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -247,6 +247,7 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::RemoveCounter { .. }
@@ -449,6 +450,7 @@ fn discard_applier(
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            face_down_profile: None,
             applied,
         }),
         other => ApplyResult::Modified(other),
@@ -1001,6 +1003,13 @@ fn destroy_applier(
     ApplyResult::Prevented
 }
 
+// clippy::result_large_err: both arms of this Result carry a `ProposedEvent`
+// (the replacement pipeline returns the modified event on success and the
+// unmodified event in `ApplyResult::Modified` on the no-op path), so the Err
+// size is inherent to the design — boxing one arm of every applier would
+// ripple across the whole pipeline. The `ZoneChange` variant is the largest
+// `ProposedEvent` shape; see the note on `ProposedEvent::ZoneChange.face_down_profile`.
+#[allow(clippy::result_large_err)]
 fn apply_shield_counter_replacement(
     state: &mut GameState,
     event: ProposedEvent,
@@ -1713,13 +1722,12 @@ fn create_token_applier(
                 .unwrap_or(owner);
             extra.source_id = rid.source;
             extra.controller = source_controller;
-            // CR 614.1a: Mark this replacement as already-applied on the
-            // appended batch so the same Chatterfang-class replacement does
-            // not re-fire on its own output (which would be an infinite loop
-            // since the appended batch matches the same owner scope). Other
-            // replacements (Doubling Season, Parallel Lives) still see the
-            // appended batch as a fresh CreateToken event.
-            let mut applied_on_extra = HashSet::new();
+            // CR 614.5: Inherit the primary event's applied set to prevent
+            // replacements that already applied to the primary event from
+            // re-applying to the recursive extra event. Insert this
+            // Chatterfang-class replacement too so it cannot re-fire on its own
+            // appended batch.
+            let mut applied_on_extra = applied.clone();
             applied_on_extra.insert(rid);
             // CR 614.1c: The appended batch is a separate event — it does not
             // inherit an `enter_tapped` override applied to the primary batch.
@@ -1778,7 +1786,10 @@ fn create_token_applier(
                 }
                 extra.source_id = rid.source;
                 extra.controller = source_controller;
-                let mut applied_on_extra = HashSet::new();
+                // CR 614.5: Inherit the primary event's applied set to prevent
+                // replacements that already applied to the primary event from
+                // re-applying to the recursive extra event.
+                let mut applied_on_extra = applied.clone();
                 applied_on_extra.insert(rid);
                 let extra_proposed = ProposedEvent::CreateToken {
                     owner,
@@ -1933,6 +1944,9 @@ fn empty_mana_pool_applier(
 /// `Keep` (CR 614.6, `StepEndManaAction::Retain`) or `Recolor(_)`
 /// (CR 614.1a, `StepEndManaAction::Transform(_)`). Records the handler on
 /// the event's `applied` set so CR 614.5 prevents re-application.
+// clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
+// arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[allow(clippy::result_large_err)]
 fn apply_empty_mana_pool_replacement(
     state: &mut GameState,
     proposed: ProposedEvent,
@@ -3745,6 +3759,9 @@ fn optional_decline_is_noop(
     tap_already && counters_already && redirect_noop
 }
 
+// clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
+// arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[allow(clippy::result_large_err)]
 fn apply_single_replacement(
     state: &mut GameState,
     mut proposed: ProposedEvent,
@@ -4008,7 +4025,6 @@ fn apply_single_replacement(
 /// without changing the result. The auto-resolve path still iterates per the
 /// CR 616.1f repeat semantics — it only suppresses a player choice that cannot
 /// affect anything.
-///
 /// A candidate set is *material* (the prompt must be shown) iff *either*:
 /// - *any* candidate is an unconditionally order-sensitive shape — a
 ///   destination-redirecting `Effect::ChangeZone` (CR 614.6 — Rest in Peace
@@ -4047,15 +4063,17 @@ pub(crate) fn replacement_ordering_is_material(
     //    + Spelunking both write `enter_tapped`; Doubling Season + Hardened
     //    Scales both modify an `AddCounter` count). A single modifier of a field
     //    has no conflict.
-    let mut seen_fields: Vec<EventField> = Vec::new();
+    let mut seen_writes: Vec<(EventField, CommuteClass)> = Vec::new();
     for rid in candidates {
         match candidate_materiality(state, *rid, proposed_to) {
             CandidateMateriality::Unconditional => return true,
-            CandidateMateriality::Writes(field) => {
-                if seen_fields.contains(&field) {
-                    return true;
+            CandidateMateriality::Writes { field, commute } => {
+                for (seen_field, seen_commute) in &seen_writes {
+                    if *seen_field == field && !commute.commutes_with(*seen_commute) {
+                        return true;
+                    }
                 }
-                seen_fields.push(field);
+                seen_writes.push((field, commute));
             }
             CandidateMateriality::Disjoint => {}
         }
@@ -4073,17 +4091,52 @@ enum EventField {
     /// `ZoneChange::enter_tapped` — overwritten by `Effect::Tap` / `Effect::Untap`.
     EnterTapped,
     /// The count of a count-bearing event (`AddCounter`, `CreateToken`, `Draw`,
-    /// `Mill`, …) — modified by a `quantity_modification` side field
-    /// (`Double` / `Plus` / `Minus`, which do not pairwise commute).
+    /// `Mill`, ...) — modified by a `quantity_modification` side field. Same-class
+    /// arithmetic modifiers commute; mixed classes do not.
     Count,
     /// The produced mana type/amount of a `ProduceMana` event — modified by a
     /// `mana_modification` side field (`ReplaceWith` / `Multiply`).
     ManaType,
     /// The `amount` of a `ProposedEvent::Damage`, modified by a
     /// `damage_modification` side field (`Double` / `Triple` / `Plus` /
-    /// `Minus` / `SetToSourcePower` / `SetTo` — these do not pairwise
-    /// commute, e.g. Furnace of Rath `Double` + Torbran `Plus{2}`).
+    /// `Minus` / `SetToSourcePower` / `SetTo`). Same-class arithmetic modifiers
+    /// commute; mixed classes do not, e.g. Furnace of Rath `Double` + Torbran
+    /// `Plus{2}`.
     Damage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommuteClass {
+    NonCommuting,
+    Multiplicative,
+    Additive,
+    Subtractive,
+}
+
+impl CommuteClass {
+    fn commutes_with(self, other: Self) -> bool {
+        self != Self::NonCommuting && self == other
+    }
+}
+
+fn quantity_commute_class(modification: &QuantityModification) -> CommuteClass {
+    match modification {
+        QuantityModification::Double => CommuteClass::Multiplicative,
+        QuantityModification::Plus { .. } => CommuteClass::Additive,
+        QuantityModification::Minus { .. } => CommuteClass::Subtractive,
+        QuantityModification::Prevent => CommuteClass::NonCommuting,
+    }
+}
+
+fn damage_commute_class(modification: &DamageModification) -> CommuteClass {
+    match modification {
+        DamageModification::Double | DamageModification::Triple => CommuteClass::Multiplicative,
+        DamageModification::Plus { .. } => CommuteClass::Additive,
+        DamageModification::Minus { .. } => CommuteClass::Subtractive,
+        DamageModification::SetToSourcePower
+        | DamageModification::SetTo { .. }
+        | DamageModification::LifeFloor { .. } => CommuteClass::NonCommuting,
+    }
 }
 
 /// CR 616.1 classification of a single replacement candidate.
@@ -4093,7 +4146,10 @@ enum CandidateMateriality {
     Unconditional,
     /// A pure event-field modifier. Immaterial alone; material iff another
     /// candidate modifies the same field with a non-commuting modification.
-    Writes(EventField),
+    Writes {
+        field: EventField,
+        commute: CommuteClass,
+    },
     /// Touches no event field that another candidate could also touch
     /// (`Effect::Choose` post-effect, null/no-op pass-through with no side field).
     Disjoint,
@@ -4126,7 +4182,10 @@ fn candidate_materiality(
     match shield_counter_replacement_kind(rid) {
         Some(ShieldCounterReplacementKind::Destroy) => return CandidateMateriality::Unconditional,
         Some(ShieldCounterReplacementKind::Damage) => {
-            return CandidateMateriality::Writes(EventField::Damage)
+            return CandidateMateriality::Writes {
+                field: EventField::Damage,
+                commute: CommuteClass::NonCommuting,
+            }
         }
         None => {}
     }
@@ -4148,7 +4207,10 @@ fn candidate_materiality(
     // this it fell through to `Disjoint` and the CR 616.1 order choice was
     // silently skipped.
     if matches!(repl_def.shield_kind, ShieldKind::Prevention { .. }) {
-        return CandidateMateriality::Writes(EventField::Damage);
+        return CandidateMateriality::Writes {
+            field: EventField::Damage,
+            commute: CommuteClass::NonCommuting,
+        };
     }
     let Some(execute) = repl_def.execute.as_deref() else {
         // CR 616.1: a `null` `execute` is not a guaranteed no-op. A count-event
@@ -4160,14 +4222,23 @@ fn candidate_materiality(
         // one event are order-material — `Double` and `Plus` do not commute
         // ((x*2)+2 vs (x+2)*2). A `null` `execute` with no side field is a
         // genuine pass-through (test fixtures, structural placeholders).
-        if repl_def.quantity_modification.is_some() {
-            return CandidateMateriality::Writes(EventField::Count);
+        if let Some(modification) = repl_def.quantity_modification.as_ref() {
+            return CandidateMateriality::Writes {
+                field: EventField::Count,
+                commute: quantity_commute_class(modification),
+            };
         }
         if repl_def.mana_modification.is_some() {
-            return CandidateMateriality::Writes(EventField::ManaType);
+            return CandidateMateriality::Writes {
+                field: EventField::ManaType,
+                commute: CommuteClass::NonCommuting,
+            };
         }
-        if repl_def.damage_modification.is_some() {
-            return CandidateMateriality::Writes(EventField::Damage);
+        if let Some(modification) = repl_def.damage_modification.as_ref() {
+            return CandidateMateriality::Writes {
+                field: EventField::Damage,
+                commute: damage_commute_class(modification),
+            };
         }
         return CandidateMateriality::Disjoint;
     };
@@ -4209,7 +4280,10 @@ fn candidate_materiality(
         current = def.sub_ability.as_deref();
     }
     match field {
-        Some(field) => CandidateMateriality::Writes(field),
+        Some(field) => CandidateMateriality::Writes {
+            field,
+            commute: CommuteClass::NonCommuting,
+        },
         None => CandidateMateriality::Disjoint,
     }
 }
@@ -4827,6 +4901,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(event) = result else {
@@ -4856,6 +4931,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                face_down_profile: None,
             },
         ))
     }
@@ -5913,6 +5989,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
 
         let result = replace_event(&mut state, proposed.clone(), &mut events);
@@ -6118,6 +6195,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ))
             .destination_zone(Zone::Graveyard)
@@ -6871,6 +6949,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
 
         let replaced = apply_single_replacement(
@@ -7255,20 +7334,19 @@ mod tests {
 
     #[test]
     fn damage_double_chaining_two_doublers() {
-        // Two Double replacements → 3 * 2 * 2 = 12
+        // CR 616.1: Two pure damage doublers commute just like two pure token
+        // doublers, so the replacement pipeline can auto-resolve without a
+        // player ordering prompt.
         let repl1 = damage_repl(DamageModification::Double);
         let repl2 = damage_repl(DamageModification::Double);
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl1, repl2]);
         let mut events = Vec::new();
         let proposed = damage_event(3);
-        let initial_result = replace_event(&mut state, proposed, &mut events);
-        let result = resolve_first_replacement_choice(&mut state, initial_result, &mut events);
-        match result {
-            ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) => {
-                assert_eq!(amount, 12, "Two doublers should quadruple: 3 * 2 * 2 = 12");
-            }
-            other => panic!("Expected Execute with Damage, got {other:?}"),
-        }
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) = result else {
+            panic!("expected auto-resolved Damage with no CR 616.1 prompt, got {result:?}");
+        };
+        assert_eq!(amount, 12, "Two doublers should quadruple: 3 * 2 * 2 = 12");
     }
 
     // ── Damage pipeline filter tests ──
@@ -8851,6 +8929,409 @@ mod tests {
             1,
             "missing Food emitted by ensure-all"
         );
+    }
+
+    /// CR 616.1: Multiple pure `Double` token doublers commute and should not
+    /// trigger a CR 616.1 ordering prompt. Three doublers (Doubling Season,
+    /// Adrix and Nev, Primal Vigor) on a single token creation should auto-resolve
+    /// and multiply correctly: 1 * 2 * 2 * 2 = 8.
+    #[test]
+    fn multiple_pure_token_doublers_commute_no_prompt() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::proposed_event::TokenCharacteristics;
+
+        let doubling_season = ObjectId(10);
+        let adrix_nev = ObjectId(20);
+        let primal_vigor = ObjectId(30);
+
+        let doubler_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .quantity_modification(QuantityModification::Double);
+
+        let mut state = GameState::new_two_player(42);
+        let mut ds = GameObject::new(
+            doubling_season,
+            CardId(1),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        ds.replacement_definitions = vec![doubler_repl.clone()].into();
+        let mut an = GameObject::new(
+            adrix_nev,
+            CardId(2),
+            PlayerId(0),
+            "Adrix and Nev".to_string(),
+            Zone::Battlefield,
+        );
+        an.replacement_definitions = vec![doubler_repl.clone()].into();
+        let mut pv = GameObject::new(
+            primal_vigor,
+            CardId(3),
+            PlayerId(0),
+            "Primal Vigor".to_string(),
+            Zone::Battlefield,
+        );
+        pv.replacement_definitions = vec![doubler_repl].into();
+
+        state.objects.insert(doubling_season, ds);
+        state.objects.insert(adrix_nev, an);
+        state.objects.insert(primal_vigor, pv);
+        state.battlefield.push_back(doubling_season);
+        state.battlefield.push_back(adrix_nev);
+        state.battlefield.push_back(primal_vigor);
+
+        let food_spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Food".to_string(),
+                power: None,
+                toughness: None,
+                core_types: vec![crate::types::card_type::CoreType::Artifact],
+                subtypes: vec!["Food".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "Food".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(0),
+            controller: PlayerId(0),
+            attach_to: None,
+        };
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(food_spec),
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // Should auto-resolve without a prompt since all doublers commute
+        let ReplacementResult::Execute(primary) = result else {
+            panic!("expected Execute (auto-resolve), got {:?}", result);
+        };
+
+        let ProposedEvent::CreateToken { count, .. } = primary else {
+            panic!("expected CreateToken event");
+        };
+
+        assert_eq!(
+            count, 8,
+            "Three doublers should multiply: 1 * 2 * 2 * 2 = 8"
+        );
+    }
+
+    /// CR 616.1: Mixed `Double` and `Plus` quantity modifications do NOT commute
+    /// and should trigger a CR 616.1 ordering prompt. Doubling Season (`Double`)
+    /// and Hardened Scales (`Plus{1}`) on a counter placement must prompt the player.
+    #[test]
+    fn mixed_double_and_plus_do_not_commute_prompt_required() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::counter::CounterType;
+
+        let doubling_season = ObjectId(10);
+        let hardened_scales = ObjectId(20);
+
+        let doubler_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Double);
+        let plus_repl = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .quantity_modification(QuantityModification::Plus { value: 1 });
+
+        let mut state = GameState::new_two_player(42);
+        let mut ds = GameObject::new(
+            doubling_season,
+            CardId(1),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        ds.replacement_definitions = vec![doubler_repl].into();
+        let mut hs = GameObject::new(
+            hardened_scales,
+            CardId(2),
+            PlayerId(0),
+            "Hardened Scales".to_string(),
+            Zone::Battlefield,
+        );
+        hs.replacement_definitions = vec![plus_repl].into();
+
+        state.objects.insert(doubling_season, ds);
+        state.objects.insert(hardened_scales, hs);
+        state.battlefield.push_back(doubling_season);
+        state.battlefield.push_back(hardened_scales);
+
+        let target = GameObject::new(
+            ObjectId(30),
+            CardId(3),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.insert(ObjectId(30), target);
+
+        let proposed = ProposedEvent::AddCounter {
+            actor: PlayerId(0),
+            object_id: ObjectId(30),
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // Should trigger a prompt since Double and Plus do not commute
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!(
+                "expected NeedsChoice for non-commuting Double+Plus, got {:?}",
+                result
+            );
+        };
+        assert_eq!(player, PlayerId(0));
+    }
+
+    /// CR 614.5 + CR 614.1a: Academy Manufactor's recursive token events should
+    /// inherit the primary event's `applied` set to prevent Doubling Season from
+    /// re-applying to the recursive batches. With Manufactor + Doubling Season,
+    /// creating 1 Food should result in exactly 2 Foods, 2 Clues, and 2 Treasures
+    /// (not 4 of each, which would indicate incorrect re-application).
+    #[test]
+    fn academy_manufactor_plus_doubling_season_correct_stacking() {
+        use crate::types::ability::QuantityModification;
+        use crate::types::proposed_event::TokenCharacteristics;
+
+        fn artifact_spec(name: &str) -> TokenSpec {
+            TokenSpec {
+                characteristics: TokenCharacteristics {
+                    display_name: name.to_string(),
+                    power: None,
+                    toughness: None,
+                    core_types: vec![crate::types::card_type::CoreType::Artifact],
+                    subtypes: vec![name.to_string()],
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
+                script_name: name.to_string(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: PlayerId(0),
+                attach_to: None,
+            }
+        }
+
+        let manufactor = ObjectId(700);
+        let doubling_season = ObjectId(10);
+
+        let manufactor_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .condition(ReplacementCondition::TokenSubtypeMatches {
+                subtypes: vec![
+                    "Clue".to_string(),
+                    "Food".to_string(),
+                    "Treasure".to_string(),
+                ],
+            })
+            .ensure_token_specs(vec![
+                artifact_spec("Clue"),
+                artifact_spec("Food"),
+                artifact_spec("Treasure"),
+            ]);
+
+        let doubler_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .quantity_modification(QuantityModification::Double);
+
+        let mut state = GameState::new_two_player(42);
+        let mut m = GameObject::new(
+            manufactor,
+            CardId(1),
+            PlayerId(0),
+            "Academy Manufactor".to_string(),
+            Zone::Battlefield,
+        );
+        m.replacement_definitions = vec![manufactor_repl].into();
+        let mut ds = GameObject::new(
+            doubling_season,
+            CardId(2),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        ds.replacement_definitions = vec![doubler_repl].into();
+
+        state.objects.insert(manufactor, m);
+        state.objects.insert(doubling_season, ds);
+        state.battlefield.push_back(manufactor);
+        state.battlefield.push_back(doubling_season);
+
+        let mut treasure = artifact_spec("Treasure");
+        treasure.source_id = manufactor;
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(treasure),
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(primary) = result else {
+            panic!("expected Execute; got {:?}", result);
+        };
+        crate::game::effects::token::apply_create_token_after_replacement(
+            &mut state,
+            primary,
+            &mut events,
+        );
+
+        let count_subtype = |sub: &str| {
+            state
+                .objects
+                .values()
+                .filter(|o| o.is_token && o.card_types.subtypes.iter().any(|s| s == sub))
+                .count()
+        };
+
+        // With correct applied set inheritance, Doubling Season applies once
+        // to the primary event (1 → 2) and does NOT re-apply to the recursive
+        // Manufactor batches. Result: 2 of each subtype.
+        assert_eq!(
+            count_subtype("Treasure"),
+            2,
+            "primary Treasure doubled once"
+        );
+        assert_eq!(count_subtype("Clue"), 2, "Clue batch doubled once");
+        assert_eq!(count_subtype("Food"), 2, "Food batch doubled once");
+    }
+
+    /// CR 616.1: When candidates have both commuting Count modifications
+    /// AND non-commutative EnterTapped modifications, the set must still
+    /// be material and trigger a prompt. This catches the early-return bug
+    /// where commuting Count would incorrectly return false before checking
+    /// other candidates.
+    #[test]
+    fn commuting_count_plus_non_commuting_entertapped_material() {
+        use crate::types::ability::{AbilityKind, Effect, QuantityModification};
+
+        let doubler1 = ObjectId(10);
+        let doubler2 = ObjectId(15);
+        let tap_effect1 = ObjectId(20);
+        let tap_effect2 = ObjectId(25);
+
+        let doubler_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .quantity_modification(QuantityModification::Double);
+
+        let tap_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ),
+        );
+
+        let untap_repl = ReplacementDefinition::new(ReplacementEvent::CreateToken).execute(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Untap {
+                    target: TargetFilter::SelfRef,
+                },
+            ),
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let mut ds1 = GameObject::new(
+            doubler1,
+            CardId(1),
+            PlayerId(0),
+            "Doubling Season".to_string(),
+            Zone::Battlefield,
+        );
+        ds1.replacement_definitions = vec![doubler_repl.clone()].into();
+        let mut ds2 = GameObject::new(
+            doubler2,
+            CardId(2),
+            PlayerId(0),
+            "Adrix and Nev".to_string(),
+            Zone::Battlefield,
+        );
+        ds2.replacement_definitions = vec![doubler_repl].into();
+        let mut te1 = GameObject::new(
+            tap_effect1,
+            CardId(3),
+            PlayerId(0),
+            "Tap Effect".to_string(),
+            Zone::Battlefield,
+        );
+        te1.replacement_definitions = vec![tap_repl].into();
+        let mut te2 = GameObject::new(
+            tap_effect2,
+            CardId(4),
+            PlayerId(0),
+            "Untap Effect".to_string(),
+            Zone::Battlefield,
+        );
+        te2.replacement_definitions = vec![untap_repl].into();
+
+        state.objects.insert(doubler1, ds1);
+        state.objects.insert(doubler2, ds2);
+        state.objects.insert(tap_effect1, te1);
+        state.objects.insert(tap_effect2, te2);
+        state.battlefield.push_back(doubler1);
+        state.battlefield.push_back(doubler2);
+        state.battlefield.push_back(tap_effect1);
+        state.battlefield.push_back(tap_effect2);
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(TokenSpec {
+                characteristics: crate::types::proposed_event::TokenCharacteristics {
+                    display_name: "Token".to_string(),
+                    power: None,
+                    toughness: None,
+                    core_types: vec![crate::types::card_type::CoreType::Creature],
+                    subtypes: Vec::new(),
+                    supertypes: Vec::new(),
+                    colors: Vec::new(),
+                    keywords: Vec::new(),
+                },
+                script_name: "Token".to_string(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+                tapped: false,
+                enters_attacking: false,
+                sacrifice_at: None,
+                source_id: ObjectId(0),
+                controller: PlayerId(0),
+                attach_to: None,
+            }),
+            enter_tapped: EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = Vec::new();
+        let result = replace_event(&mut state, proposed, &mut events);
+
+        // Should trigger a prompt since EnterTapped is non-commutative
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!(
+                "expected NeedsChoice for non-commutative EnterTapped, got {:?}",
+                result
+            );
+        };
+        assert_eq!(player, PlayerId(0));
     }
 
     /// CR 121.1 + CR 504.1 + CR 614.6 — Alhammarret's Archive's

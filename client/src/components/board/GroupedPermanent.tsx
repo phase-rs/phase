@@ -39,6 +39,7 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
     case "EquipTarget":
     case "CopyTargetChoice":
     case "ExploreChoice":
+    case "PopulateChoice":
     case "ReturnAsAuraTarget":
     case "TriggerTargetSelection":
     case "RetargetChoice":

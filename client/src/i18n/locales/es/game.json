@@ -409,6 +409,7 @@
     "chooseNewTargetForCopy": "Elige un nuevo objetivo para la copia",
     "chooseTargetForCopy": "Elige objetivo para la copia",
     "chooseCreatureToExplore": "Elige qué criatura explora a continuación",
+    "chooseCreatureTokenToPopulate": "Elige una ficha de criatura para poblar",
     "chooseReturnAsAuraTarget": "Elige un permanente para encantar",
     "tapUntappedCreatures_one": "Gira {{count}} criatura sin girar",
     "tapUntappedCreatures_other": "Gira {{count}} criaturas sin girar",
@@ -480,7 +481,26 @@
     "companionRevealed": "{{player}} reveló al compañero: {{cardName}}",
     "companionMovedToHand": "{{player}} puso al compañero {{cardName}} en la mano",
     "powerToughnessChanged": "El objeto {{objectId}} ahora es {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Evento: {{type}}"
+    "genericEvent": "Evento: {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Herramientas del motor",
@@ -1019,6 +1039,12 @@
       "subtitle_one": "Exilia {{count}} carta de {{source}}",
       "subtitle_other": "Exilia {{count}} cartas de {{source}}"
     },
+    "craft": {
+      "title": "Fabricar",
+      "subtitle_one": "Exilia {{count}} material para fabricar",
+      "subtitle_other": "Exilia {{count}} materiales para fabricar",
+      "subtitleRange": "Exilia de {{min}} a {{count}} materiales para fabricar"
+    },
     "behold": {
       "title": "Contemplar",
       "subtitleExile": "Exilia un permanente o carta que coincida",
@@ -1136,6 +1162,10 @@
     "adventureTag": "(Aventura)"
   },
   "alternativeCost": {
+    "mutateEyebrow": "Mutate",
+    "mutateNormalLabel": "Cast Normally",
+    "mutateAltLabel": "Mutate",
+    "mutateSubtitle": "Cast {{name}} normally, or pay its Mutate cost to merge it with a non-Human creature you own.",
     "title": "Elegir coste de lanzamiento",
     "warpEyebrow": "Distorsión",
     "warpNormalLabel": "Lanzar normalmente",
@@ -1358,6 +1388,15 @@
     "top": "Superior de la biblioteca",
     "bottom": "Inferior de la biblioteca"
   },
+  "mutateMerge": {
+    "cardFallback": "the mutating creature",
+    "title": "Mutate: {{name}}",
+    "subtitle": "Put the mutating creature on top of or under the target creature.",
+    "top": "On top",
+    "topDesc": "The merged creature uses the mutating creature's name, types, and power/toughness.",
+    "bottom": "On bottom",
+    "bottomDesc": "The merged creature keeps the target creature's name, types, and power/toughness."
+  },
   "permanentTypeSlot": {
     "eyebrow": "Tipo de permanente",
     "title": "Elegir ranura de tipo",
@@ -1483,5 +1522,10 @@
     "buttons": {
       "keep": "Keep this"
     }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }

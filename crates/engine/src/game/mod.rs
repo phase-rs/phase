@@ -44,6 +44,12 @@ pub mod mana_abilities;
 pub mod mana_payment;
 pub mod mana_sources;
 pub mod match_flow;
+pub mod merge;
+// Tests for `merge` live in a sibling file (declared here, not in `merge.rs`,
+// so `merge.rs` stays implementation-only).
+#[cfg(test)]
+#[path = "merge_tests.rs"]
+mod merge_tests;
 pub mod morph;
 pub mod mulligan;
 pub(crate) mod off_zone_characteristics;

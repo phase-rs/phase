@@ -25,6 +25,40 @@ pub(crate) fn parse_self_chosen_type_static(input: &str) -> OracleResult<'_, Cho
     Ok((input, kind))
 }
 
+pub(crate) fn parse_enchanted_land_chosen_type_static(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let ((), _) = nom_on_lower(
+        tp.original,
+        tp.lower,
+        parse_enchanted_land_chosen_type_static_sentence,
+    )?;
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
+            ))
+            .modifications(vec![ContinuousModification::SetChosenBasicLandType])
+            .description(description.to_string()),
+    )
+}
+
+pub(crate) fn parse_enchanted_land_chosen_type_static_sentence(
+    input: &str,
+) -> OracleResult<'_, ()> {
+    let (input, _) = tag("enchanted land is the chosen type").parse(input)?;
+    let (input, _) = opt(alt((
+        tag(" and loses its other land types"),
+        tag(" and loses its other types"),
+    )))
+    .parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof.parse(input)?;
+    Ok((input, ()))
+}
+
 pub(crate) fn parse_arcane_adaptation_chosen_type_static(
     tp: &TextPair<'_>,
     description: &str,
@@ -1170,6 +1204,63 @@ pub(crate) fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<St
     }
 
     None
+}
+
+/// CR 613.1d (Layer 4) + CR 613.4b (Layer 7b) + CR 205.1b: Parse a continuous
+/// static that animates a population of lands into creatures while they remain
+/// lands — "All lands are 1/1 creatures that are still lands" (Living Plane,
+/// Nature's Revolt), "Lands you control are X/X creatures that are still lands".
+///
+/// The land subject is shared with [`parse_land_type_change`]; the
+/// "[P/T] creature[s] ..." remainder is delegated to the animation building
+/// block (`parse_animation_spec` + `animation_modifications`), so power/
+/// toughness (Layer 7b), color, keyword, and creature-subtype grants all
+/// compose for free. `animation_modifications` adds the creature type
+/// additively (CR 613.1d), and card types stay additive, so the land keeps its
+/// land type — the "that are still lands" tail (CR 205.1b) merely confirms that
+/// reading and is consumed by `split_type_retention_clause`.
+///
+/// Dispatched before `parse_land_type_change`; the `"creature"` guard makes
+/// land *type* lines ("Lands you control are Plains") fall through unclaimed.
+pub(crate) fn parse_land_animation(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    let (subject_tp, rest_tp) = tp
+        .split_around(" are ")
+        .or_else(|| tp.split_around(" is a "))
+        .or_else(|| tp.split_around(" is an "))?;
+    let affected = parse_land_type_change_subject(subject_tp.original)?;
+
+    let rest = rest_tp.original.trim().trim_end_matches('.');
+    let lower_rest = rest.to_lowercase();
+    // Only claim creature-animation remainders so land type-change lines
+    // ("Lands you control are Plains") fall through to parse_land_type_change.
+    if !nom_primitives::scan_contains(&lower_rest, "creature") {
+        return None;
+    }
+
+    // CR 205.1b: strip the "that are still land(s)" / "that's still a land"
+    // retention tail. The creature type is added additively, so retention is
+    // the default behavior; the clause is confirmatory. Split on the lowercased
+    // text and reuse the byte offset on the original to preserve subtype casing.
+    let animation_text = match super::grammar::split_type_retention_clause(&lower_rest) {
+        Some((descriptor_lower, _retained)) => &rest[..descriptor_lower.len()],
+        None => rest,
+    }
+    .trim();
+
+    let spec = super::oracle_effect::animation::parse_animation_spec(
+        animation_text,
+        &mut ParseContext::default(),
+    )?;
+    let modifications = super::oracle_effect::animation::animation_modifications(&spec);
+    if modifications.is_empty() {
+        return None;
+    }
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(text.to_string()),
+    )
 }
 
 /// Parse the subject of a land type-change line into a TargetFilter.

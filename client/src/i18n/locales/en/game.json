@@ -411,6 +411,7 @@
     "chooseNewTarget": "Choose the spell's new target",
     "chooseNewTargetForSpell": "Choose a new target for {{spell}}",
     "chooseCreatureToExplore": "Choose which creature explores next",
+    "chooseCreatureTokenToPopulate": "Choose a creature token to populate",
     "chooseReturnAsAuraTarget": "Choose a permanent to enchant",
     "tapUntappedCreatures_one": "Tap {{count}} untapped creature",
     "tapUntappedCreatures_other": "Tap {{count}} untapped creatures",
@@ -437,6 +438,25 @@
     "verbosityFull": "full",
     "verbosityCompact": "compact",
     "verbosityMinimal": "minimal",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug",
     "gameStarted": "Game started",
     "turnStarted": "Turn {{turn}} -- {{player}}",
     "phaseChanged": "Phase: {{phase}}",
@@ -709,6 +729,11 @@
     "debug": {
       "modeBanner": "DEBUG MODE - Click any card"
     }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   },
   "gameProvider": {
     "passwordPrompt": "This room requires a password:",
@@ -1019,6 +1044,12 @@
       "subtitle_one": "Exile {{count}} card from {{source}}",
       "subtitle_other": "Exile {{count}} cards from {{source}}"
     },
+    "craft": {
+      "title": "Craft",
+      "subtitle_one": "Exile {{count}} material to craft",
+      "subtitle_other": "Exile {{count}} materials to craft",
+      "subtitleRange": "Exile {{min}} to {{count}} materials to craft"
+    },
     "behold": {
       "title": "Behold",
       "subtitleExile": "Exile a matching permanent or card",
@@ -1136,6 +1167,10 @@
     "adventureTag": "(Adventure)"
   },
   "alternativeCost": {
+    "mutateEyebrow": "Mutate",
+    "mutateNormalLabel": "Cast Normally",
+    "mutateAltLabel": "Mutate",
+    "mutateSubtitle": "Cast {{name}} normally, or pay its Mutate cost to merge it with a non-Human creature you own.",
     "title": "Choose Casting Cost",
     "warpEyebrow": "Warp",
     "warpNormalLabel": "Cast Normally",
@@ -1357,6 +1392,15 @@
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
     "bottom": "Bottom of library"
+  },
+  "mutateMerge": {
+    "cardFallback": "the mutating creature",
+    "title": "Mutate: {{name}}",
+    "subtitle": "Put the mutating creature on top of or under the target creature.",
+    "top": "On top",
+    "topDesc": "The merged creature uses the mutating creature's name, types, and power/toughness.",
+    "bottom": "On bottom",
+    "bottomDesc": "The merged creature keeps the target creature's name, types, and power/toughness."
   },
   "permanentTypeSlot": {
     "eyebrow": "Permanent Type",

@@ -357,6 +357,12 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 305.7 + CR 305.6: "Enchanted land is the chosen type" — Aura sets the
+    // enchanted land's subtype to the basic land type chosen as the Aura entered.
+    if let Some(def) = parse_enchanted_land_chosen_type_static(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 305.7: "Enchanted land is a [type]" — must be before general "enchanted land" handler.
     if let Some(rest) = nom_tag_tp(&tp, "enchanted land is a ") {
         let rest = rest.trim_end_matches('.');
@@ -701,6 +707,15 @@ pub(crate) fn parse_static_line_inner(
         if let Some(result) = parse_typed_you_control(tp.original, tp.lower, false) {
             return Some(result);
         }
+    }
+
+    // CR 613.1d + CR 613.4b: "[Subject] lands are [P/T] creatures that are still
+    // lands" — continuous land animation (Living Plane, Nature's Revolt). Must
+    // come before parse_land_type_change: both split on "are", but the land
+    // animation form carries a creature descriptor the type-change parser can't
+    // claim. The "creature" guard lets land *type* lines fall through.
+    if let Some(def) = parse_land_animation(&tp, &text) {
+        return Some(def);
     }
 
     // CR 305.7: "[Subject] lands are [type]" — land type-changing statics.
@@ -1176,6 +1191,15 @@ pub(crate) fn parse_static_line_inner(
     // NOT on the activator scope (`who = AllPlayers`) — per CR 602.5, the prohibition is
     // on the ability itself, not a specific activator.
     if let Some(def) = parse_filter_scoped_cant_be_activated(&tp, &text) {
+        return Some(def);
+    }
+
+    // --- "~ can be attached only to {filter}" ---
+    // CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction on an
+    // Aura/Equipment — the source can only attach to a host matching the parsed
+    // `TargetFilter` (Strata Scythe, Brass Knuckles, Konda's Banner). Enforced in
+    // game/effects/attach.rs::attachment_illegality.
+    if let Some(def) = parse_attach_only_restriction(&tp, &text) {
         return Some(def);
     }
 

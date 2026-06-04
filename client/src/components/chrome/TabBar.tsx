@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Link, useLocation } from "react-router";
 
+import { BuildBadge } from "./BuildBadge";
 import { activeNavKey, NAV_ITEMS } from "./navItems";
 
 /**
@@ -16,6 +17,11 @@ export function TabBar() {
       className="fixed inset-x-0 bottom-0 z-50 flex items-stretch justify-around gap-0.5 border-t border-hairline-strong bg-[rgba(6,10,22,0.92)] px-1.5 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur-xl min-[820px]:hidden"
       aria-label={t("nav.label")}
     >
+      {/* Version/update chip, anchored just above the bar's real top edge
+          (`bottom-full`) — no magic viewport offset to keep in sync with the
+          bar's height. Absolutely positioned so it stays out of the nav's flex
+          flow. */}
+      <BuildBadge inline className="absolute bottom-full left-2 mb-2" />
       {NAV_ITEMS.map(({ key, path, labelKey, Icon }) => {
         const on = active === key;
         return (

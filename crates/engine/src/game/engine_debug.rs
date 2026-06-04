@@ -91,6 +91,28 @@ pub fn apply_debug_action(
             crate::game::layers::mark_layers_full(state);
         }
 
+        DebugAction::Sacrifice { object_id } => {
+            validate_object(state, object_id)?;
+            // CR 701.21: A player sacrifices a permanent they control. Route
+            // through the single sacrifice authority so the replacement pipeline
+            // (e.g. Rest in Peace → exile) and dies/leaves-the-battlefield
+            // triggers fire — unlike `RemoveObject`, which deletes the object
+            // outright with no triggers.
+            let controller = state.objects[&object_id].controller;
+            match super::sacrifice::sacrifice_permanent(state, object_id, controller, events)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?
+            {
+                super::sacrifice::SacrificeOutcome::Complete => {
+                    super::triggers::process_triggers(state, events); // CR 603: dies/LTB triggers
+                    super::sba::check_state_based_actions(state, events); // CR 704
+                }
+                super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(player) => {
+                    state.waiting_for =
+                        super::replacement::replacement_choice_waiting_for(player, state);
+                }
+            }
+        }
+
         DebugAction::DrawCards { player_id, count } => {
             validate_player(state, player_id)?;
             // CR 614.6 + CR 614.11 + CR 704.3: route through the single-authority
@@ -117,6 +139,26 @@ pub fn apply_debug_action(
             for id in top_ids {
                 zones::move_to_zone(state, id, Zone::Graveyard, events);
             }
+        }
+
+        DebugAction::Reveal { player_id, count } => {
+            validate_player(state, player_id)?;
+            // CR 701.20a/b: Reveal the top `count` cards of the player's library
+            // via the real `Effect::RevealTop` resolver — marks them revealed and
+            // emits `CardsRevealed` without moving the cards. `TargetFilter::Any`
+            // + an explicit `TargetRef::Player` makes the resolver reveal exactly
+            // the requested library (see `reveal_top::resolve`).
+            let ability = ResolvedAbility::new(
+                Effect::RevealTop {
+                    player: TargetFilter::Any,
+                    count,
+                },
+                vec![TargetRef::Player(player_id)],
+                ObjectId(0),
+                player_id,
+            );
+            super::effects::reveal_top::resolve(state, &ability, events)
+                .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
         }
 
         DebugAction::ShuffleLibrary { player_id } => {
@@ -349,7 +391,7 @@ pub fn apply_debug_action(
             super::triggers::process_triggers(state, events);
         }
 
-        DebugAction::CreateToken { request } => {
+        DebugAction::CreateToken { request, run_etb } => {
             let (owner, characteristics, enter_with_counters, preset_image_ref) = match request {
                 DebugTokenRequest::Preset {
                     preset_id,
@@ -415,8 +457,14 @@ pub fn apply_debug_action(
                             }
                         }
                     }
-                    super::triggers::process_triggers(state, events); // CR 603: Process triggers
-                    super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
+                    // "Run ETB effects" unchecked: the token is still created
+                    // (with its replacement-window counters) but its ETB triggers
+                    // and the SBA pass are skipped — mirrors the raw placement of
+                    // `MoveToZone { simulate: false }`.
+                    if run_etb {
+                        super::triggers::process_triggers(state, events); // CR 603: Process triggers
+                        super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
+                    }
                 }
                 super::replacement::ReplacementResult::Prevented => {}
                 super::replacement::ReplacementResult::NeedsChoice(player) => {
@@ -533,10 +581,27 @@ fn apply_energy_delta(
 pub fn route_debug_create_to_battlefield(
     state: &mut GameState,
     object_id: ObjectId,
+    run_etb: bool,
 ) -> ActionResult {
     use super::replacement::{self, ReplacementResult};
 
     let mut events: Vec<GameEvent> = vec![];
+
+    // "Run ETB effects" unchecked: place the staged object on the battlefield
+    // raw — no replacement window, no ETB triggers, no SBA pass. This mirrors
+    // `MoveToZone { simulate: false }`, letting a board position be staged
+    // without the entering permanent's "when ~ enters" abilities going on the
+    // stack.
+    if !run_etb {
+        zones::move_to_zone(state, object_id, Zone::Battlefield, &mut events);
+        crate::game::layers::mark_layers_full(state);
+        return ActionResult {
+            events,
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        };
+    }
+
     let from = state
         .objects
         .get(&object_id)
@@ -553,6 +618,7 @@ pub fn route_debug_create_to_battlefield(
         enter_with_counters: vec![],
         controller_override: None,
         enter_transformed: false,
+        face_down_profile: None,
         applied: HashSet::new(),
     };
 
@@ -693,6 +759,7 @@ mod tests {
                 characteristics: zero_zero_creature(),
                 enter_with_counters: vec![(CounterType::Plus1Plus1, 2)],
             },
+            run_etb: true,
         });
         let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
             .expect("debug CreateToken should succeed");
@@ -1222,6 +1289,7 @@ mod tests {
                 characteristics: zero_zero_creature(),
                 enter_with_counters: Vec::new(),
             },
+            run_etb: true,
         });
         let result = crate::game::engine::apply(&mut state, PlayerId(0), action)
             .expect("debug CreateToken should succeed");

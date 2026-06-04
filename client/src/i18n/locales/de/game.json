@@ -409,6 +409,7 @@
     "chooseNewTargetForCopy": "Wähle ein neues Ziel für die Kopie",
     "chooseTargetForCopy": "Wähle ein Ziel für die Kopie",
     "chooseCreatureToExplore": "Wähle, welche Kreatur als Nächstes erkundet",
+    "chooseCreatureTokenToPopulate": "Wähle einen Kreaturspielstein zum Populieren",
     "chooseReturnAsAuraTarget": "Wähle eine bleibende Karte zum Verzaubern",
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
     "tapUntappedCreatures_other": "Tappe {{count}} ungetappte Kreaturen",
@@ -480,7 +481,26 @@
     "companionRevealed": "{{player}} hat den Gefährten aufgedeckt: {{cardName}}",
     "companionMovedToHand": "{{player}} hat den Gefährten {{cardName}} auf die Hand genommen",
     "powerToughnessChanged": "Objekt {{objectId}} ist jetzt {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Ereignis: {{type}}"
+    "genericEvent": "Ereignis: {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Engine-Werkzeuge",
@@ -1019,6 +1039,12 @@
       "subtitle_one": "Schicke {{count}} Karte aus {{source}} ins Exil",
       "subtitle_other": "Schicke {{count}} Karten aus {{source}} ins Exil"
     },
+    "craft": {
+      "title": "Herstellen",
+      "subtitle_one": "Schicke {{count}} Material zum Herstellen ins Exil",
+      "subtitle_other": "Schicke {{count}} Materialien zum Herstellen ins Exil",
+      "subtitleRange": "Schicke {{min}} bis {{count}} Materialien zum Herstellen ins Exil"
+    },
     "behold": {
       "title": "Erblicken",
       "subtitleExile": "Schicke eine passende bleibende Karte oder Karte ins Exil",
@@ -1136,6 +1162,10 @@
     "adventureTag": "(Abenteuer)"
   },
   "alternativeCost": {
+    "mutateEyebrow": "Mutate",
+    "mutateNormalLabel": "Cast Normally",
+    "mutateAltLabel": "Mutate",
+    "mutateSubtitle": "Cast {{name}} normally, or pay its Mutate cost to merge it with a non-Human creature you own.",
     "title": "Wirkkosten wählen",
     "warpEyebrow": "Warp",
     "warpNormalLabel": "Normal wirken",
@@ -1358,6 +1388,15 @@
     "top": "Top of library",
     "bottom": "Bottom of library"
   },
+  "mutateMerge": {
+    "cardFallback": "the mutating creature",
+    "title": "Mutate: {{name}}",
+    "subtitle": "Put the mutating creature on top of or under the target creature.",
+    "top": "On top",
+    "topDesc": "The merged creature uses the mutating creature's name, types, and power/toughness.",
+    "bottom": "On bottom",
+    "bottomDesc": "The merged creature keeps the target creature's name, types, and power/toughness."
+  },
   "permanentTypeSlot": {
     "eyebrow": "Permanenttyp",
     "title": "Typ-Slot wählen",
@@ -1483,5 +1522,10 @@
     "buttons": {
       "keep": "Keep this"
     }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }

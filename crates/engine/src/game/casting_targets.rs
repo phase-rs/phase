@@ -17,7 +17,10 @@ use super::ability_utils::{
     validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
 use super::casting::{emit_targeting_events, pay_ability_cost_for_activation};
-use super::casting_costs::{cost_has_x, enter_payment_step, finish_pending_cast_cost_or_pay};
+use super::casting_costs::{
+    cost_has_x, drain_deferred_triggers_after_stack_object_announcement, enter_payment_step,
+    finish_pending_cast_cost_or_pay,
+};
 use super::engine::EngineError;
 use super::restrictions;
 use super::stack;
@@ -439,7 +442,11 @@ pub(crate) fn handle_choose_target(
                 );
                 state.priority_passes.clear();
                 state.priority_pass_count = 0;
-                return Ok(WaitingFor::Priority { player });
+                return Ok(drain_deferred_triggers_after_stack_object_announcement(
+                    state,
+                    events,
+                    WaitingFor::Priority { player },
+                ));
             }
 
             let cost = pending.cost.clone();

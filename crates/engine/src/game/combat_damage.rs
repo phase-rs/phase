@@ -125,6 +125,28 @@ pub fn resolve_combat_damage(
         if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
             return Some(state.waiting_for.clone());
         }
+
+        // CR 510.3 + CR 510.3a + CR 510.4: The first-strike combat-damage step is a
+        // complete step. Abilities that triggered on first-strike damage (or on SBAs
+        // taken afterward) are put on the stack, and THEN the active player receives
+        // priority — players must finish with the stack before the second (regular)
+        // combat-damage sub-step begins. If the first-strike sub-step placed anything
+        // on the stack (e.g. No Mercy's "destroy that creature", a damage trigger that
+        // bounces/exiles the attacker), grant priority now so that object resolves
+        // first. Skipping this would let a now-doomed double-strike attacker deal its
+        // regular-sub-step damage before the trigger that removes it resolves (#692).
+        // Returning here leaves `regular_damage_done == false`; the mandatory regular
+        // sub-step is resumed once the stack drains and all players pass, via the
+        // empty-stack completeness gate in priority.rs.
+        if !state.stack.is_empty() {
+            // reset_priority here is defensive — unlike the sibling regular-substep entry in
+            // turns.rs, this returns mid-step after the first-strike substep, so we explicitly
+            // clear any stale passes before the CR 510.3 priority window (harmless if already clear).
+            crate::game::priority::reset_priority(state);
+            return Some(WaitingFor::Priority {
+                player: state.active_player,
+            });
+        }
     }
 
     // --- Regular damage sub-step ---
@@ -2022,16 +2044,57 @@ mod tests {
             .push(Keyword::DoubleStrike);
         setup_combat(&mut state, vec![attacker], vec![]);
 
-        let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        // Stock P0's library so the per-step draw trigger never draws from empty.
+        for _ in 0..2 {
+            let card_id = CardId(state.next_object_id);
+            create_object(
+                &mut state,
+                card_id,
+                PlayerId(0),
+                "Lib".to_string(),
+                Zone::Library,
+            );
+        }
 
-        assert_eq!(state.stack.len(), 2);
+        let mut events = Vec::new();
+        // CR 510.4: First-strike sub-step. The double striker deals its 2 damage,
+        // the DamageDone trigger fires (stack len 1), and CR 510.3 grants priority
+        // before the regular sub-step — so resolve_combat_damage pauses here.
+        let waiting = resolve_combat_damage(&mut state, &mut events);
+        assert!(
+            matches!(waiting, Some(WaitingFor::Priority { .. })),
+            "CR 510.3: priority is granted after the first-strike sub-step's trigger is stacked"
+        );
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "CR 510.3a: only the first-strike sub-step's trigger is on the stack so far"
+        );
         assert_eq!(
             events
                 .iter()
                 .filter(|event| matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }))
                 .count(),
-            2
+            1,
+            "CR 510.4: the double striker dealt damage once in the first-strike sub-step"
+        );
+
+        // CR 510.3 + CR 510.4: resolve the first-strike trigger, then re-enter the
+        // turn-based action for the mandatory regular (second) combat-damage sub-step.
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert!(state.stack.is_empty(), "first-strike trigger resolved");
+        resolve_combat_damage(&mut state, &mut events);
+
+        // CR 510.4: The double striker deals damage AGAIN in the regular sub-step,
+        // so the DamageDone trigger fires a second time (now on the stack).
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::CombatDamageDealtToPlayer { .. }))
+                .count(),
+            2,
+            "CR 510.4: the double striker dealt combat damage in both sub-steps"
         );
     }
 

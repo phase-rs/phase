@@ -95,6 +95,7 @@ mod tests {
                 defending_player: PlayerId(1),
                 attack_target: AttackTarget::Player(PlayerId(1)),
                 blocked: false,
+                band_id: None,
             }],
             ..Default::default()
         });
