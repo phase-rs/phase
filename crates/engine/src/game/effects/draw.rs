@@ -497,8 +497,7 @@ mod tests {
 
         // Drive through the full pipeline via resolve_ability_chain
         let mut events = Vec::new();
-        crate::game::effects::resolve_ability_chain(&mut state, &resolved, &mut events, 0)
-            .unwrap();
+        crate::game::effects::resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
 
         // Should have drawn 2 cards (Teferi replacement) then discarded 1
         assert_eq!(

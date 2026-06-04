@@ -3906,9 +3906,15 @@ fn apply_single_replacement(
                 // For Draw→Draw, preserve the continuation if the draw count was modified
                 // (indicating a count modifier). This handles the case where the original
                 // ability has a sub_ability but the replacement doesn't.
-                if matches!((&proposed, &*def.effect), (ProposedEvent::Draw { .. }, Effect::Draw { .. })) {
+                if matches!(
+                    (&proposed, &*def.effect),
+                    (ProposedEvent::Draw { .. }, Effect::Draw { .. })
+                ) {
                     if let Some(original) = original_draw_count {
-                        if let ProposedEvent::Draw { count: new_count, .. } = proposed {
+                        if let ProposedEvent::Draw {
+                            count: new_count, ..
+                        } = proposed
+                        {
                             if new_count > original {
                                 return true;
                             }
