@@ -25,6 +25,40 @@ pub(crate) fn parse_self_chosen_type_static(input: &str) -> OracleResult<'_, Cho
     Ok((input, kind))
 }
 
+pub(crate) fn parse_enchanted_land_chosen_type_static(
+    tp: &TextPair<'_>,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let ((), _) = nom_on_lower(
+        tp.original,
+        tp.lower,
+        parse_enchanted_land_chosen_type_static_sentence,
+    )?;
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
+            ))
+            .modifications(vec![ContinuousModification::SetChosenBasicLandType])
+            .description(description.to_string()),
+    )
+}
+
+pub(crate) fn parse_enchanted_land_chosen_type_static_sentence(
+    input: &str,
+) -> OracleResult<'_, ()> {
+    let (input, _) = tag("enchanted land is the chosen type").parse(input)?;
+    let (input, _) = opt(alt((
+        tag(" and loses its other land types"),
+        tag(" and loses its other types"),
+    )))
+    .parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof.parse(input)?;
+    Ok((input, ()))
+}
+
 pub(crate) fn parse_arcane_adaptation_chosen_type_static(
     tp: &TextPair<'_>,
     description: &str,

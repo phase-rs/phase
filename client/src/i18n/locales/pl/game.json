@@ -1019,6 +1019,12 @@
       "subtitle_one": "Wygnaj {{count}} kartę z {{source}}",
       "subtitle_other": "Wygnaj {{count}} kart z {{source}}"
     },
+    "craft": {
+      "title": "Wytwórz",
+      "subtitle_one": "Wygnaj {{count}} materiał, aby wytworzyć",
+      "subtitle_other": "Wygnaj {{count}} materiały, aby wytworzyć",
+      "subtitleRange": "Wygnaj od {{min}} do {{count}} materiałów, aby wytworzyć"
+    },
     "behold": {
       "title": "Behold",
       "subtitleExile": "Wygnaj pasującego trwałego lub kartę",
