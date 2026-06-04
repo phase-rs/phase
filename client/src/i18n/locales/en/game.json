@@ -87,6 +87,13 @@
     "clickOpponent": "Click an opponent to view their board",
     "undo": "Undo"
   },
+  "replay": {
+    "viewHistory": "View history",
+    "exitReplay": "Exit replay",
+    "turnLabel": "Turn {{turn}}",
+    "replayBanner": "Replaying turn {{turn}} — actions disabled",
+    "noHistory": "No turn history yet"
+  },
   "permanent": {
     "expandGroup": "Expand {{name}} group",
     "collapseGroup": "Collapse {{name}} group",

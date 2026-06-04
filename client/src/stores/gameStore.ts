@@ -90,6 +90,16 @@ interface GameStoreState {
   stateHistory: GameState[];
   turnCheckpoints: GameState[];
   /**
+   * Replay mode: true while the player is scrubbing through turnCheckpoints.
+   * While active, game actions are blocked and `gameState` reflects the
+   * selected checkpoint rather than the live engine state.
+   */
+  replayMode: boolean;
+  /** Index into turnCheckpoints currently being previewed. Null when not in replay mode. */
+  replayIndex: number | null;
+  /** Live engine state saved before entering replay; restored on exit. */
+  liveGameState: GameState | null;
+  /**
    * Pre-game P2P lobby fill state, populated by the `lobbyProgress` adapter
    * event and cleared when `game_setup` arrives (game starts). `null` when
    * not in a pre-game P2P lobby (i.e. during AI/online games or after the
@@ -145,6 +155,16 @@ interface GameStoreActions {
   setResolutionProgress: (progress: { resolved: number; total: number } | null) => void;
   /** Clear the starting-player contest after the overlay has consumed it. */
   clearStartingContest: () => void;
+  /**
+   * Enter turn-replay mode. Saves the live gameState and replaces it with the
+   * checkpoint at `index` (defaults to the latest checkpoint). While in replay
+   * mode all game dispatches are blocked — the board is read-only.
+   */
+  enterReplay: (index?: number) => void;
+  /** Exit replay mode and restore the live game state. */
+  exitReplay: () => void;
+  /** Navigate to a specific checkpoint while already in replay mode. */
+  replayTo: (index: number) => void;
 }
 
 export type GameStore = GameStoreState & GameStoreActions;
@@ -165,6 +185,9 @@ const initialState: GameStoreState = {
   legalActionsByObject: {},
   stateHistory: [],
   turnCheckpoints: [],
+  replayMode: false,
+  replayIndex: null,
+  liveGameState: null,
   lobbyProgress: null,
   resolutionProgress: null,
   startingContest: null,
@@ -263,10 +286,12 @@ export const useGameStore = create<GameStore>()(
 
     dispatch: async (action) => {
       const submittedAction = applySpellPaymentPreference(action);
-      const { adapter, gameState, gameId, gameMode } = get();
+      const { adapter, gameState, gameId, gameMode, replayMode } = get();
       if (!adapter || !gameState) {
         throw new Error("Game not initialized");
       }
+      // Block all game actions while replaying history — the board is read-only.
+      if (replayMode) return [];
 
       // Save current state for undo. Three conditions must hold:
       // 1. Action type is in UNDOABLE_ACTIONS (no hidden-info leaks).
@@ -375,6 +400,45 @@ export const useGameStore = create<GameStore>()(
 
     clearStartingContest: () => {
       set({ startingContest: null });
+    },
+
+    enterReplay: (index) => {
+      const { turnCheckpoints, gameState, replayMode } = get();
+      if (replayMode || turnCheckpoints.length === 0 || !gameState) return;
+      const targetIndex = index ?? turnCheckpoints.length - 1;
+      const clamped = Math.max(0, Math.min(targetIndex, turnCheckpoints.length - 1));
+      set({
+        replayMode: true,
+        replayIndex: clamped,
+        liveGameState: gameState,
+        gameState: turnCheckpoints[clamped],
+        waitingFor: turnCheckpoints[clamped].waiting_for,
+        legalActions: [],
+        legalActionsByObject: {},
+      });
+    },
+
+    exitReplay: () => {
+      const { replayMode, liveGameState } = get();
+      if (!replayMode || !liveGameState) return;
+      set({
+        replayMode: false,
+        replayIndex: null,
+        liveGameState: null,
+        gameState: liveGameState,
+        waitingFor: liveGameState.waiting_for,
+      });
+    },
+
+    replayTo: (index) => {
+      const { replayMode, turnCheckpoints } = get();
+      if (!replayMode || turnCheckpoints.length === 0) return;
+      const clamped = Math.max(0, Math.min(index, turnCheckpoints.length - 1));
+      set({
+        replayIndex: clamped,
+        gameState: turnCheckpoints[clamped],
+        waitingFor: turnCheckpoints[clamped].waiting_for,
+      });
     },
   })),
 );

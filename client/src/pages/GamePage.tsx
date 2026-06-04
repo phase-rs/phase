@@ -92,6 +92,7 @@ import {
   type SettingsTabId,
 } from "../components/settings/PreferencesModal.tsx";
 import { DebugPanel } from "../components/chrome/DebugPanel.tsx";
+import { ReplayControls } from "../components/chrome/ReplayControls.tsx";
 import { GameMenu } from "../components/chrome/GameMenu.tsx";
 import { ConcedeDialog } from "../components/multiplayer/ConcedeDialog.tsx";
 import { ConnectionToast } from "../components/multiplayer/ConnectionToast.tsx";
@@ -1166,6 +1167,17 @@ function GamePageContent({
       </div>
 
       <GameLogPanel />
+
+      {/* Replay controls — bottom-center, above action buttons */}
+      <div
+        className="pointer-events-none fixed bottom-0 left-0 right-0 z-30 flex items-end justify-center pb-2 px-4"
+        style={{ paddingBottom: "calc(env(safe-area-inset-bottom) + 0.5rem)" }}
+      >
+        <div className="pointer-events-none w-full max-w-xl">
+          <ReplayControls />
+        </div>
+      </div>
+
       <MobileHandDrawer />
 
       {/* Game menu — top-left hamburger */}
