@@ -142,12 +142,13 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::PhaseIn => match_phase_in,
         // CR 702.26b: Phasing triggers fire when a permanent phases out.
         TriggerMode::PhaseOut => match_phase_out,
+        // CR 107.14: "Whenever you get one or more {E}" — batched player-counter trigger.
+        TriggerMode::CounterPlayerAddedAll => match_counter_player_added_all,
         TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
         | TriggerMode::AbilityTriggered
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
-        | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll
         | TriggerMode::PayLife
         | TriggerMode::PhaseOutAll
@@ -394,6 +395,12 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 702.26b: Phasing triggers fire when a permanent phases out.
     r.insert(TriggerMode::PhaseOut, match_phase_out);
 
+    // CR 107.14: "Whenever you get one or more {E}" — batched player-counter trigger.
+    r.insert(
+        TriggerMode::CounterPlayerAddedAll,
+        match_counter_player_added_all,
+    );
+
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
         TriggerMode::DamagePreventedOnce,
@@ -402,7 +409,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::AbilityTriggered,
         TriggerMode::SpellAbilityCast,
         TriggerMode::SpellAbilityCopy,
-        TriggerMode::CounterPlayerAddedAll,
+        // TriggerMode::CounterPlayerAddedAll — moved to real matcher above
         TriggerMode::CounterTypeAddedAll,
         TriggerMode::PayLife,
         // TriggerMode::PhaseOut — moved to real matcher above
@@ -1736,6 +1743,26 @@ pub(super) fn match_life_changed(
     }
 }
 
+/// CR 107.14: Match energy-counter (or other player-counter) gain events.
+/// Fires on `GameEvent::EnergyChanged { delta > 0 }` or
+/// `GameEvent::PlayerCounterChanged { delta > 0 }` when the triggering player
+/// matches `valid_target` (typically `Controller`).
+pub(super) fn match_counter_player_added_all(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match event {
+        GameEvent::EnergyChanged { player, delta } if *delta > 0 => {
+            valid_player_matches(trigger, state, *player, source_id)
+        }
+        GameEvent::PlayerCounterChanged { player, delta, .. } if *delta > 0 => {
+            valid_player_matches(trigger, state, *player, source_id)
+        }
+        _ => false,
+    }
+}
 pub(super) fn match_drawn(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -6914,6 +6941,56 @@ mod tests {
                 indirect: false,
             },
             &self_ref_trigger,
+            source,
+            &state
+        ));
+    }
+
+    #[test]
+    fn counter_player_added_all_matcher_matches_energy_gain() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fabrication Module".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = make_trigger(TriggerMode::CounterPlayerAddedAll);
+        let registry = build_trigger_registry();
+
+        assert!(trigger_matcher(TriggerMode::CounterPlayerAddedAll).is_some());
+        assert!(registry.contains_key(&TriggerMode::CounterPlayerAddedAll));
+
+        // Should fire on energy gain for the controller
+        assert!(match_counter_player_added_all(
+            &GameEvent::EnergyChanged {
+                player: PlayerId(0),
+                delta: 2,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+
+        // Should NOT fire on energy loss (delta <= 0)
+        assert!(!match_counter_player_added_all(
+            &GameEvent::EnergyChanged {
+                player: PlayerId(0),
+                delta: -1,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+
+        // Should NOT fire for a different player
+        assert!(!match_counter_player_added_all(
+            &GameEvent::EnergyChanged {
+                player: PlayerId(1),
+                delta: 3,
+            },
+            &trigger,
             source,
             &state
         ));

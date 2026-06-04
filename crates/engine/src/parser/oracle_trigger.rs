@@ -8278,6 +8278,15 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::LifeLost, def));
     }
 
+    // CR 107.14: "Whenever you get one or more {E}" — batched energy-counter trigger.
+    if scan_contains(lower, "you get one or more {e}") {
+        let mut def = make_base();
+        def.mode = TriggerMode::CounterPlayerAddedAll;
+        def.valid_target = Some(TargetFilter::Controller);
+        def.batched = true;
+        return Some((TriggerMode::CounterPlayerAddedAll, def));
+    }
+
     fn parse_countering_spell_or_ability_line(i: &str) -> OracleResult<'_, ControllerRef> {
         preceded(
             alt((tag("whenever "), tag("when "))),
@@ -15622,6 +15631,17 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::LifeChanged);
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
         assert_eq!(def.condition, None);
+    }
+
+    #[test]
+    fn trigger_you_get_one_or_more_energy() {
+        let def = parse_trigger_line(
+            "Whenever you get one or more {E}, you get an additional {E}.",
+            "Fabrication Module",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterPlayerAddedAll);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert!(def.batched);
     }
 
     #[test]
