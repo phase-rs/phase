@@ -3663,9 +3663,12 @@ fn stack_entry_targets_only(
     let ctx = super::filter::FilterContext::from_source(state, source_id);
     ability.targets.iter().all(|t| match t {
         TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
-        TargetRef::Player(pid) => {
-            super::filter::player_matches_target_filter(constraint, *pid, source_controller)
-        }
+        TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
+            state,
+            constraint,
+            *pid,
+            source_controller,
+        ),
     })
 }
 
@@ -3691,9 +3694,12 @@ fn stack_entry_targets_any(
     let ctx = super::filter::FilterContext::from_source(state, source_id);
     ability.targets.iter().any(|t| match t {
         TargetRef::Object(id) => super::filter::matches_target_filter(state, *id, constraint, &ctx),
-        TargetRef::Player(pid) => {
-            super::filter::player_matches_target_filter(constraint, *pid, source_controller)
-        }
+        TargetRef::Player(pid) => super::filter::player_matches_target_filter_in_state(
+            state,
+            constraint,
+            *pid,
+            source_controller,
+        ),
     })
 }
 
