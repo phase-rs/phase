@@ -27,6 +27,7 @@ use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{BloodthirstValue, BuybackCost, CyclingCost, Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
+use crate::types::player::PlayerCounterKind;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
@@ -260,6 +261,12 @@ impl KeywordTriggerInstaller {
                 build_suspend_upkeep_removal_trigger(),
                 build_suspend_last_counter_cast_trigger(),
             ],
+            // CR 702.130a/b: Afflict N — one becomes-blocked trigger per instance.
+            Keyword::Afflict(n) => vec![build_afflict_trigger(*n)],
+            // CR 702.149a/b: Training — one attacks trigger per instance.
+            Keyword::Training => vec![build_training_trigger()],
+            // CR 702.70a/b: Poisonous N — one combat-damage-to-player trigger per instance.
+            Keyword::Poisonous(n) => vec![build_poisonous_trigger(*n)],
             _ => Vec::new(),
         }
     }
@@ -298,6 +305,13 @@ impl KeywordTriggerInstaller {
             Keyword::Suspend { .. } => {
                 is_suspend_upkeep_trigger(trigger) || is_suspend_last_counter_trigger(trigger)
             }
+            // CR 702.130a + CR 604.1: symmetric removal — `RemoveKeyword` strips
+            // the Afflict becomes-blocked trigger when the granted keyword is removed.
+            Keyword::Afflict(n) => is_afflict_trigger(trigger, *n),
+            // CR 702.149a + CR 604.1: symmetric removal for granted Training.
+            Keyword::Training => is_training_trigger(trigger),
+            // CR 702.70a + CR 604.1: symmetric removal for granted Poisonous.
+            Keyword::Poisonous(n) => is_poisonous_trigger(trigger, *n),
             _ => false,
         }
     }
@@ -3540,7 +3554,10 @@ fn build_exalted_trigger() -> TriggerDefinition {
             TypedFilter::creature().controller(ControllerRef::You),
         ))
         .condition(TriggerCondition::Not {
-            condition: Box::new(TriggerCondition::MinCoAttackers { minimum: 1 }),
+            condition: Box::new(TriggerCondition::MinCoAttackers {
+                minimum: 1,
+                filter: None,
+            }),
         })
         .execute(execute)
         .description(
@@ -3615,6 +3632,176 @@ fn build_mentor_trigger() -> TriggerDefinition {
              +1/+1 counter on target attacking creature with power less than \
              this creature's power."
                 .to_string(),
+        )
+}
+
+/// CR 702.130a: Afflict N — "Whenever this creature becomes blocked, defending
+/// player loses N life." Each instance triggers separately (CR 702.130b), so one
+/// trigger is synthesized per `Keyword::Afflict` instance. Self-scoped via
+/// `valid_card` (the field block matchers read) exactly like Bushido; the life
+/// loss is directed at `DefendingPlayer`, which routes through
+/// `combat::defending_player_for_attacker` for the source attacking creature.
+fn build_afflict_trigger(n: u32) -> TriggerDefinition {
+    // CR 702.130a: "defending player loses N life."
+    let lose_life = Effect::LoseLife {
+        amount: QuantityExpr::Fixed { value: n as i32 },
+        target: Some(TargetFilter::DefendingPlayer),
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, lose_life).description(format!(
+        "CR 702.130a: Afflict {n} — defending player loses {n} life"
+    ));
+    TriggerDefinition::new(TriggerMode::BecomesBlocked)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(format!(
+            "CR 702.130a: Afflict {n} — whenever this creature becomes blocked, \
+             the defending player loses {n} life."
+        ))
+}
+
+/// CR 702.130a: An Afflict `n` trigger — a self-scoped (`valid_card: SelfRef`)
+/// `BecomesBlocked` trigger whose effect makes the `DefendingPlayer` lose `n`
+/// life. Parameterized by `n` (and asserting `valid_card`) so `RemoveKeyword`
+/// symmetric removal strips exactly its own trigger without matching a different
+/// Afflict level or a coincidental printed becomes-blocked life-loss.
+fn is_afflict_trigger(t: &TriggerDefinition, n: u32) -> bool {
+    matches!(t.mode, TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value },
+                target: Some(TargetFilter::DefendingPlayer),
+            }) if *value == n as i32
+        )
+}
+
+/// CR 702.149a + CR 208.1: Training's co-attacker gate — a creature whose current
+/// power is strictly greater than the source creature's current power. Reuses the
+/// same `PtComparison` building block Mentor uses (inverted comparator: `GT`
+/// instead of `LT`), resolved with the source creature as the filter's source so
+/// the comparison reads the Training creature's power.
+fn training_higher_power_coattacker_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GT,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+        }]),
+    )
+}
+
+/// CR 702.149a: Training — "Whenever this creature and at least one other
+/// creature with power greater than this creature's power attack, put a +1/+1
+/// counter on this creature." Each instance triggers separately (CR 702.149b),
+/// so one trigger is synthesized per `Keyword::Training` instance.
+///
+/// Mirrors the self-scoped `Attacks` shape of Exalted but pumps itself with a
+/// +1/+1 counter (not until-end-of-turn) and gates on a higher-power co-attacker
+/// via a `MinCoAttackers { minimum: 1, filter }` intervening condition — the
+/// existing co-attacker counter parameterized with the power filter, so no new
+/// condition variant is introduced.
+fn build_training_trigger() -> TriggerDefinition {
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("CR 702.149a: Training — put a +1/+1 counter on this creature".to_string());
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::MinCoAttackers {
+            minimum: 1,
+            filter: Some(training_higher_power_coattacker_filter()),
+        })
+        .execute(execute)
+        .description(
+            "CR 702.149a: Training — whenever this creature and at least one other \
+             creature with power greater than this creature's power attack, put a \
+             +1/+1 counter on this creature."
+                .to_string(),
+        )
+}
+
+/// CR 702.149a: A Training trigger — a self-scoped (`valid_card: SelfRef`)
+/// `Attacks` trigger gated on a filtered `MinCoAttackers` higher-power co-attacker
+/// that puts a single +1/+1 counter on the source. Used by `RemoveKeyword`
+/// symmetric removal so a granted-then-removed Training strips exactly its own
+/// trigger.
+fn is_training_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Attacks)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.condition.as_ref(),
+            Some(TriggerCondition::MinCoAttackers {
+                minimum: 1,
+                filter: Some(_),
+            })
+        )
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            })
+        )
+}
+
+/// CR 702.70a: Poisonous N — "Whenever this creature deals combat damage to a
+/// player, that player gets N poison counters." Each instance triggers separately
+/// (CR 702.70b), so one trigger is synthesized per `Keyword::Poisonous` instance.
+///
+/// Modeled as a source-led combat-damage trigger (`DamageDone` +
+/// `DamageKindFilter::CombatOnly`, `valid_source: SelfRef`, `valid_target:
+/// Player`), mirroring the parser's "deals combat damage to a player" shape. The
+/// poison routes to the damaged player (`TriggeringPlayer`) via
+/// `GivePlayerCounter`, which sends `PlayerCounterKind::Poison` to the dedicated
+/// poison field (CR 104.3d).
+fn build_poisonous_trigger(n: u32) -> TriggerDefinition {
+    let give_poison = Effect::GivePlayerCounter {
+        counter_kind: PlayerCounterKind::Poison,
+        count: QuantityExpr::Fixed { value: n as i32 },
+        target: TargetFilter::TriggeringPlayer,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, give_poison).description(format!(
+        "CR 702.70a: Poisonous {n} — that player gets {n} poison counters"
+    ));
+    TriggerDefinition::new(TriggerMode::DamageDone)
+        .damage_kind(DamageKindFilter::CombatOnly)
+        .valid_source(TargetFilter::SelfRef)
+        .valid_target(TargetFilter::Player)
+        .execute(execute)
+        .description(format!(
+            "CR 702.70a: Poisonous {n} — whenever this creature deals combat \
+             damage to a player, that player gets {n} poison counters."
+        ))
+}
+
+/// CR 702.70a: A Poisonous `n` trigger — a source-scoped combat-damage-to-player
+/// trigger that gives the damaged player `n` poison counters. Parameterized by
+/// `n` so `RemoveKeyword` symmetric removal strips exactly its own trigger.
+fn is_poisonous_trigger(t: &TriggerDefinition, n: u32) -> bool {
+    matches!(t.mode, TriggerMode::DamageDone)
+        && matches!(t.damage_kind, DamageKindFilter::CombatOnly)
+        && matches!(t.valid_source, Some(TargetFilter::SelfRef))
+        && matches!(t.valid_target, Some(TargetFilter::Player))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::GivePlayerCounter {
+                counter_kind: PlayerCounterKind::Poison,
+                count: QuantityExpr::Fixed { value },
+                target: TargetFilter::TriggeringPlayer,
+            }) if *value == n as i32
         )
 }
 
@@ -16726,5 +16913,195 @@ mod sunburst_runtime_tests {
             0,
             "a noncreature Sunburst must not place +1/+1 counters (CR 702.44a)"
         );
+    }
+}
+
+#[cfg(test)]
+mod afflict_training_poisonous_synthesis_tests {
+    //! CR 702.130a (Afflict), CR 702.149a (Training), CR 702.70a (Poisonous)
+    //! shape + matcher-roundtrip tests. These three keywords were previously
+    //! parsed/typed but fell through `triggers_for` to `_ => Vec::new()` (silent
+    //! no-ops). Each is now synthesized into exactly one trigger per instance
+    //! (CR 702.130b / 702.149b / 702.70b) and recognized by
+    //! `trigger_matches_keyword_kind` for runtime grant + symmetric removal
+    //! (CR 604.1).
+    use super::*;
+
+    // ---- Afflict (CR 702.130a) ----
+
+    #[test]
+    fn afflict_synthesizes_becomes_blocked_life_loss() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Afflict(3));
+        assert_eq!(triggers.len(), 1, "CR 702.130b: one trigger per Afflict");
+        let t = &triggers[0];
+        assert!(matches!(t.mode, TriggerMode::BecomesBlocked));
+        assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
+        let effect = &*t.execute.as_deref().expect("execute body").effect;
+        let Effect::LoseLife { amount, target } = effect else {
+            panic!("Afflict must lose life, got {effect:?}");
+        };
+        assert!(matches!(amount, QuantityExpr::Fixed { value: 3 }));
+        assert!(
+            matches!(target, Some(TargetFilter::DefendingPlayer)),
+            "CR 702.130a: the defending player loses the life"
+        );
+    }
+
+    #[test]
+    fn afflict_matcher_roundtrips_and_distinguishes_n() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Afflict(2));
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Afflict(2)
+        ));
+        // Different N must not match (symmetric removal correctness).
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Afflict(1)
+        ));
+        // Must not be mistaken for another becomes-blocked keyword.
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Flanking
+        ));
+    }
+
+    // ---- Training (CR 702.149a) ----
+
+    #[test]
+    fn training_synthesizes_gated_self_counter() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Training);
+        assert_eq!(triggers.len(), 1, "CR 702.149b: one trigger per Training");
+        let t = &triggers[0];
+        assert!(matches!(t.mode, TriggerMode::Attacks));
+        assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
+
+        // CR 702.149a: gated on at least one higher-power co-attacker.
+        let Some(TriggerCondition::MinCoAttackers { minimum, filter }) = t.condition.as_ref()
+        else {
+            panic!(
+                "Training must gate on MinCoAttackers, got {:?}",
+                t.condition
+            );
+        };
+        assert_eq!(*minimum, 1);
+        let Some(TargetFilter::Typed(tf)) = filter.as_ref() else {
+            panic!("Training co-attacker filter must be a typed creature filter");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    comparator: Comparator::GT,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source
+                        }
+                    },
+                    ..
+                }
+            )),
+            "CR 702.149a: co-attacker power must be strictly greater than the source's power"
+        );
+
+        // CR 702.149a: puts a +1/+1 counter on this creature.
+        let effect = &*t.execute.as_deref().expect("execute body").effect;
+        assert!(matches!(
+            effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            }
+        ));
+    }
+
+    #[test]
+    fn training_matcher_roundtrips_and_is_distinct_from_mentor() {
+        let training = KeywordTriggerInstaller::triggers_for(&Keyword::Training);
+        let mentor = KeywordTriggerInstaller::triggers_for(&Keyword::Mentor);
+
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &training[0],
+            &Keyword::Training
+        ));
+        // Both are self-scoped Attacks/+1+1 triggers, but Mentor targets a
+        // lesser-power attacker (no co-attacker gate) — the matchers must not
+        // cross-match, or RemoveKeyword would strip the wrong trigger.
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &training[0],
+            &Keyword::Mentor
+        ));
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &mentor[0],
+            &Keyword::Training
+        ));
+    }
+
+    // ---- Poisonous (CR 702.70a) ----
+
+    #[test]
+    fn poisonous_synthesizes_combat_damage_poison() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Poisonous(2));
+        assert_eq!(triggers.len(), 1, "CR 702.70b: one trigger per Poisonous");
+        let t = &triggers[0];
+        assert!(matches!(t.mode, TriggerMode::DamageDone));
+        assert!(
+            matches!(t.damage_kind, DamageKindFilter::CombatOnly),
+            "CR 702.70a: only combat damage triggers Poisonous"
+        );
+        assert!(matches!(t.valid_source, Some(TargetFilter::SelfRef)));
+        assert!(
+            matches!(t.valid_target, Some(TargetFilter::Player)),
+            "CR 702.70a: combat damage must be dealt to a player"
+        );
+        let effect = &*t.execute.as_deref().expect("execute body").effect;
+        let Effect::GivePlayerCounter {
+            counter_kind,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("Poisonous must give player counters, got {effect:?}");
+        };
+        assert!(matches!(counter_kind, PlayerCounterKind::Poison));
+        assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+        assert!(
+            matches!(target, TargetFilter::TriggeringPlayer),
+            "CR 702.70a: the player dealt damage gets the poison counters"
+        );
+    }
+
+    #[test]
+    fn poisonous_matcher_roundtrips_and_distinguishes_n() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Poisonous(2));
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Poisonous(2)
+        ));
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Poisonous(1)
+        ));
+    }
+
+    // ---- cross-keyword regression guard ----
+
+    #[test]
+    fn previously_dead_keywords_now_synthesize_triggers() {
+        // Regression: these three keywords used to fall through `triggers_for`
+        // to `_ => Vec::new()`. Each must now yield exactly one trigger.
+        for kw in [
+            Keyword::Afflict(1),
+            Keyword::Training,
+            Keyword::Poisonous(1),
+        ] {
+            assert_eq!(
+                KeywordTriggerInstaller::triggers_for(&kw).len(),
+                1,
+                "{kw:?} must synthesize one trigger (was a silent no-op)"
+            );
+        }
     }
 }

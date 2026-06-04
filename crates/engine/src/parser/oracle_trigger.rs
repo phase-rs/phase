@@ -5649,7 +5649,10 @@ fn try_parse_event(
                 def.valid_card = Some(subject.clone());
                 // CR 508.1a: Battalion/Pack Tactics counts any N *other* creatures
                 // (untyped head noun) → no condition-level type axis.
-                def.condition = Some(TriggerCondition::MinCoAttackers { minimum: n });
+                def.condition = Some(TriggerCondition::MinCoAttackers {
+                    minimum: n,
+                    filter: None,
+                });
                 return Some((TriggerMode::Attacks, def));
             }
         }
@@ -12081,8 +12084,9 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
         assert!(def.condition.is_some());
-        if let Some(TriggerCondition::MinCoAttackers { minimum }) = &def.condition {
+        if let Some(TriggerCondition::MinCoAttackers { minimum, filter }) = &def.condition {
             assert_eq!(*minimum, 2);
+            assert_eq!(*filter, None);
         } else {
             panic!("Expected MinCoAttackers");
         }

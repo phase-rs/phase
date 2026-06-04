@@ -3829,7 +3829,11 @@ pub(crate) fn check_trigger_condition(
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.echo_due),
         // CR 508.1a + CR 603.2c: Count co-attackers excluding the source creature.
-        TriggerCondition::MinCoAttackers { minimum } => {
+        // CR 702.149a: when `filter` is present, only co-attackers matching it
+        // count (e.g. Training's "another creature with power greater than this
+        // creature's power"); the filter is resolved with the source creature as
+        // its source object so power-relative comparisons read the source.
+        TriggerCondition::MinCoAttackers { minimum, filter } => {
             state.combat.as_ref().is_some_and(|combat| {
                 let co_attacker_count = combat
                     .attackers
@@ -3840,6 +3844,14 @@ pub(crate) fn check_trigger_condition(
                                 .objects
                                 .get(&a.object_id)
                                 .is_some_and(|obj| obj.controller == controller)
+                            && filter.as_ref().is_none_or(|f| {
+                                crate::game::trigger_matchers::target_filter_matches_object(
+                                    state,
+                                    a.object_id,
+                                    f,
+                                    source_id.unwrap_or(ObjectId(0)),
+                                )
+                            })
                     })
                     .count();
                 co_attacker_count >= *minimum as usize
@@ -4825,6 +4837,74 @@ pub mod tests {
         obj.power = Some(power);
         obj.toughness = Some(toughness);
         id
+    }
+
+    /// CR 702.149a + CR 508.1a: the synthesized Training condition is a filtered
+    /// `MinCoAttackers { minimum: 1, filter: Some(power > source) }`. This drives
+    /// the *real* synthesized condition through `check_trigger_condition` to prove
+    /// the new co-attacker filter path counts only strictly-higher-power
+    /// co-attackers — the source is excluded, an equal-power co-attacker does not
+    /// count (strict `>`), and a same-controller higher-power co-attacker does.
+    #[test]
+    fn training_condition_counts_only_higher_power_coattackers() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+        // The real synthesized Training intervening-if condition.
+        let training =
+            crate::database::synthesis::KeywordTriggerInstaller::triggers_for(&Keyword::Training);
+        let condition = training[0]
+            .condition
+            .clone()
+            .expect("Training synthesizes a MinCoAttackers condition");
+
+        // Evaluate the condition with `trainee` (power 2) as the trigger source,
+        // varying the co-attacker declared alongside it.
+        let eval = |co_power: Option<i32>, co_controller: PlayerId| -> bool {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            let trainee = make_creature(&mut state, PlayerId(0), "Trainee", 2, 2);
+
+            let mut attackers = vec![AttackerInfo::new(
+                trainee,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )];
+            if let Some(p) = co_power {
+                let co = make_creature(&mut state, co_controller, "Co-Attacker", p, p);
+                attackers.push(AttackerInfo::new(
+                    co,
+                    AttackTarget::Player(PlayerId(1)),
+                    PlayerId(1),
+                ));
+            }
+            state.combat = Some(CombatState {
+                attackers,
+                ..CombatState::default()
+            });
+
+            check_trigger_condition(&state, &condition, PlayerId(0), Some(trainee), None)
+        };
+
+        // Higher-power co-attacker you control → Training fires.
+        assert!(
+            eval(Some(3), PlayerId(0)),
+            "CR 702.149a: a power-3 co-attacker exceeds the power-2 source"
+        );
+        // Equal power is NOT greater (strict comparison).
+        assert!(
+            !eval(Some(2), PlayerId(0)),
+            "CR 702.149a: an equal-power co-attacker must not satisfy 'greater than'"
+        );
+        // Lower power does not count.
+        assert!(
+            !eval(Some(1), PlayerId(0)),
+            "CR 702.149a: a lower-power co-attacker does not satisfy the gate"
+        );
+        // Attacking alone (source excluded) → no qualifying co-attacker.
+        assert!(
+            !eval(None, PlayerId(0)),
+            "CR 702.149a/CR 603.2c: the source itself is excluded from the co-attacker count"
+        );
     }
 
     #[test]

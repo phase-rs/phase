@@ -10184,7 +10184,20 @@ pub enum TriggerCondition {
     /// CR 508.1a: "Whenever ~ and at least N other creatures attack".
     /// True when combat is active and at least `minimum` other creatures
     /// controlled by the same player are also attacking.
-    MinCoAttackers { minimum: u32 },
+    ///
+    /// `filter` optionally narrows which co-attackers count toward `minimum`
+    /// (the source creature is always excluded). `None` counts every
+    /// same-controller co-attacker (Exalted's "attacks alone" check); `Some(f)`
+    /// counts only co-attackers matching `f`, resolved via
+    /// `target_filter_matches_object` with the source creature as the filter's
+    /// source object. CR 702.149a (Training) uses
+    /// `Some(creature with power > source power)` so only a higher-power
+    /// co-attacker satisfies the trigger.
+    MinCoAttackers {
+        minimum: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// CR 719.2: Intervening-if for Case auto-solve.
     /// True when the source Case is unsolved AND its solve condition is met.
     SolveConditionMet,
