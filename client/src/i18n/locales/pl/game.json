@@ -411,6 +411,7 @@
     "chooseNewTarget": "Wybierz nowy cel czaru",
     "chooseNewTargetForSpell": "Wybierz nowy cel dla {{spell}}",
     "chooseCreatureToExplore": "Wybierz, który stwór eksploruje jako następny",
+    "chooseCreatureTokenToPopulate": "Wybierz żeton stwora do populacji",
     "chooseReturnAsAuraTarget": "Wybierz permanent do zaczarowania",
     "tapUntappedCreatures_one": "Obróć {{count}} nieobróconego stwora",
     "tapUntappedCreatures_other": "Obróć {{count}} nieobróconych stworów",
@@ -480,7 +481,26 @@
     "companionRevealed": "{{player}} ujawnił towarzysza: {{cardName}}",
     "companionMovedToHand": "{{player}} wziął towarzysza {{cardName}} do ręki",
     "powerToughnessChanged": "Obiekt {{objectId}} ma teraz {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Zdarzenie: {{type}}"
+    "genericEvent": "Zdarzenie: {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Narzędzia silnika",
@@ -1019,6 +1039,12 @@
       "subtitle_one": "Wygnaj {{count}} kartę z {{source}}",
       "subtitle_other": "Wygnaj {{count}} kart z {{source}}"
     },
+    "craft": {
+      "title": "Wytwórz",
+      "subtitle_one": "Wygnaj {{count}} materiał, aby wytworzyć",
+      "subtitle_other": "Wygnaj {{count}} materiały, aby wytworzyć",
+      "subtitleRange": "Wygnaj od {{min}} do {{count}} materiałów, aby wytworzyć"
+    },
     "behold": {
       "title": "Behold",
       "subtitleExile": "Wygnaj pasującego trwałego lub kartę",
@@ -1483,5 +1509,10 @@
     "buttons": {
       "keep": "Keep this"
     }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }

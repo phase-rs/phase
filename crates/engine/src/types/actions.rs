@@ -662,6 +662,13 @@ pub enum LearnOption {
     Skip,
 }
 
+/// Serde default for debug spawn `run_etb` flags: omitting the field means
+/// "run the ETB pipeline", preserving the historical always-ETB behavior for
+/// any payload that predates the toggle.
+fn default_true() -> bool {
+    true
+}
+
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
 /// the current prompt. Gated on `GameState::debug_mode`.
@@ -693,14 +700,30 @@ pub enum DebugAction {
         zone: Zone,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attach_to: Option<AttachTarget>,
+        /// When `true`, route a `Battlefield` spawn through the real ETB pipeline
+        /// (replacements → ETB triggers → SBAs). When `false`, place the card raw
+        /// with no entry effects — mirrors `MoveToZone { simulate: false }`. Only
+        /// consulted for `zone == Battlefield`; ignored for other destinations.
+        #[serde(default = "default_true")]
+        run_etb: bool,
     },
     /// Remove an object from the game entirely.
     RemoveObject { object_id: ObjectId },
+    /// CR 701.21: Sacrifice a permanent — route through the single sacrifice
+    /// authority so the replacement pipeline and dies/leaves-the-battlefield
+    /// triggers fire. Distinct from `RemoveObject`, which deletes the object
+    /// outright with no triggers. The sacrificing player is the permanent's
+    /// controller.
+    Sacrifice { object_id: ObjectId },
     /// Draw N cards using the real draw pipeline (CR 121.1).
     /// Routes through replacement effects and emits CardDrawn events.
     DrawCards { player_id: PlayerId, count: u32 },
     /// Mill N cards from library to graveyard.
     Mill { player_id: PlayerId, count: u32 },
+    /// CR 701.20a: Reveal the top N card(s) of a player's library using the real
+    /// `Effect::RevealTop` resolver — marks them revealed and emits
+    /// `CardsRevealed` without moving the cards (CR 701.20b).
+    Reveal { player_id: PlayerId, count: u32 },
     /// Shuffle a player's library.
     ShuffleLibrary { player_id: PlayerId },
     /// Start a proliferate choice for a player using the real proliferate
@@ -801,7 +824,16 @@ pub enum DebugAction {
     /// `TokenSpec::enter_with_counters` — same semantics, real pipeline.
     /// CR 122.6a (counters placed at ETB), CR 614.1 (replacement window),
     /// CR 704.5f (0-toughness SBA — why this field exists).
-    CreateToken { request: DebugTokenRequest },
+    ///
+    /// When `run_etb` is `true`, the created token's ETB triggers are placed on
+    /// the stack and SBAs run; when `false`, the token is still created (with its
+    /// replacement-window counters) but its "when ~ enters" triggers and the SBA
+    /// pass are skipped — mirrors `MoveToZone { simulate: false }`.
+    CreateToken {
+        request: DebugTokenRequest,
+        #[serde(default = "default_true")]
+        run_etb: bool,
+    },
     /// Create a token copy of an existing object using the real copy-token
     /// resolver (CR 707.2).
     CreateTokenCopy {
@@ -896,6 +928,7 @@ impl DebugAction {
                 owner,
                 zone,
                 attach_to,
+                run_etb,
             } => {
                 let attach_suffix = match attach_to {
                     Some(AttachTarget::Object(id)) => format!(" attached to {}", obj(*id)),
@@ -904,16 +937,24 @@ impl DebugAction {
                     }
                     None => String::new(),
                 };
+                let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 format!(
-                    "CreateCard ({} for {} in {:?}{})",
+                    "CreateCard ({} for {} in {:?}{}{})",
                     card_name,
                     player_label(*owner),
                     zone,
                     attach_suffix,
+                    etb_suffix,
                 )
             }
             DebugAction::RemoveObject { object_id } => {
                 format!("RemoveObject ({})", obj(*object_id))
+            }
+            DebugAction::Sacrifice { object_id } => {
+                format!("Sacrifice ({})", obj(*object_id))
+            }
+            DebugAction::Reveal { player_id, count } => {
+                format!("Reveal (top {} of {})", count, player_label(*player_id))
             }
             DebugAction::DrawCards { player_id, count } => {
                 format!("DrawCards ({} draws {})", player_label(*player_id), count)
@@ -1029,7 +1070,7 @@ impl DebugAction {
                 player_label(*active_player)
             ),
             DebugAction::RunStateBasedActions => "RunStateBasedActions".to_string(),
-            DebugAction::CreateToken { request } => {
+            DebugAction::CreateToken { request, run_etb } => {
                 let counters = if request.enter_with_counters().is_empty() {
                     String::new()
                 } else {
@@ -1046,11 +1087,13 @@ impl DebugAction {
                         characteristics, ..
                     } => characteristics.display_name.as_str(),
                 };
+                let etb_suffix = if *run_etb { "" } else { " (no ETB)" };
                 format!(
-                    "CreateToken ({} for {}{})",
+                    "CreateToken ({} for {}{}{})",
                     token_label,
                     player_label(request.owner()),
-                    counters
+                    counters,
+                    etb_suffix
                 )
             }
             DebugAction::CreateTokenCopy { source_id, owner } => format!(

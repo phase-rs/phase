@@ -838,9 +838,24 @@ pub enum StaticMode {
     CantBeBlockedByMoreThan {
         max: u32,
     },
-    /// CR 301.5b / CR 303.4j: This Equipment or Aura can be attached only to
-    /// permanents matching `filter` (positive restriction on the attachment).
-    CanBeAttachedOnlyTo {
+    /// CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction — this
+    /// Aura/Equipment "can be attached only to" a permanent matching `filter`.
+    /// The complement of the negative `Other("CantBeEquipped" | "CantBeEnchanted"
+    /// | "CantBeAttached")` host-prohibition family: those live on the *host* and
+    /// refuse any attachment, whereas this lives on the *attachment* and whitelists
+    /// the legal hosts it may attach to. CR 701.3a folds equip/enchant legality
+    /// into one attach gate, so a single typed variant covers both Equipment
+    /// (CR 301.5) and Aura (CR 303.4) — the `filter` (a reused `TargetFilter`)
+    /// expresses "a creature with power N or greater", "a legendary creature",
+    /// "an {type}", etc. Corpus: Strata Scythe, Brass Knuckles ("a creature with
+    /// power/toughness N or greater"), Konda's Banner ("a legendary creature").
+    ///
+    /// Data-carrying variant (holds `TargetFilter`) — not registry-registered
+    /// (see `coverage::is_data_carrying_static`); enforced via the attachment's
+    /// active static definitions in `game/effects/attach.rs::attachment_illegality`.
+    /// A candidate host that does not match `filter` is an illegal attach/equip
+    /// target (CR 301.5b / CR 303.4j: the attachment doesn't move).
+    AttachmentRestriction {
         filter: TargetFilter,
     },
     /// CR 702.16: Protection prevents targeting, blocking, damage, and attachment.
@@ -1100,8 +1115,8 @@ impl Hash for StaticMode {
                 BlockExceptionKind::MinBlockers { min } => min.hash(state),
             },
             StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
+            StaticMode::AttachmentRestriction { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::CantBeBlockedByMoreThan { max } => max.hash(state),
-            StaticMode::CanBeAttachedOnlyTo { .. } => {}
             StaticMode::AdditionalLandDrop { count } => count.hash(state),
             StaticMode::StepEndUnspentMana { filter, action } => {
                 filter.hash(state);
@@ -1316,11 +1331,14 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeBlockedBy { filter } => {
                 write!(f, "CantBeBlockedBy({filter:?})")
             }
+            // CR 301.5 + CR 303.4: TargetFilter has no parseable string form —
+            // Debug format, one-way (mirrors CantBeBlockedBy). No from_str
+            // reconstruction; the variant is data-carrying.
+            StaticMode::AttachmentRestriction { filter } => {
+                write!(f, "AttachmentRestriction({filter:?})")
+            }
             StaticMode::CantBeBlockedByMoreThan { max } => {
                 write!(f, "CantBeBlockedByMoreThan({max})")
-            }
-            StaticMode::CanBeAttachedOnlyTo { filter } => {
-                write!(f, "CanBeAttachedOnlyTo({filter:?})")
             }
             StaticMode::Protection => write!(f, "Protection"),
             StaticMode::Indestructible => write!(f, "Indestructible"),

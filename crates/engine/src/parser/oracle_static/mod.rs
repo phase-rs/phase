@@ -67,7 +67,6 @@ pub(super) use super::{
 };
 
 mod anthem;
-mod attach_restriction;
 mod cda;
 mod cost_mod;
 mod dispatch;
@@ -80,6 +79,8 @@ mod restriction;
 mod shared;
 mod static_helpers;
 mod type_change;
+
+pub(crate) use shared::parse_commander_subject_filter_prefix;
 
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
 use prelude::StaticIr;

@@ -2726,10 +2726,18 @@ fn matches_filter_prop(
             let referent = source.recipient_id.unwrap_or(source.id);
             obj.attached_to.and_then(|t| t.as_object()) == Some(referent)
         }
-        // CR 303.4 + CR 301.5: Non-source-relative attachment predicate.
-        // Matches objects that have at least one attachment of the given kind whose
-        // controller satisfies the optional `ControllerRef`.
-        FilterProp::HasAttachment { kind, controller } => obj.attachments.iter().any(|att_id| {
+        // CR 303.4 + CR 301.5: Attachment predicate. Matches objects that have
+        // at least one attachment of the given kind whose controller satisfies
+        // the optional `ControllerRef`. `exclude_source` preserves "another
+        // Aura/Equipment" legality after the source becomes attached.
+        FilterProp::HasAttachment {
+            kind,
+            controller,
+            exclude_source,
+        } => obj.attachments.iter().any(|att_id| {
+            if *exclude_source && *att_id == source.id {
+                return false;
+            }
             let Some(att) = state.objects.get(att_id) else {
                 return false;
             };
@@ -3207,8 +3215,13 @@ fn zone_change_record_matches_property(
         FilterProp::Unblocked => {
             record.combat_status.attacking && !record.combat_status.blocked
         }
-        FilterProp::HasAttachment { kind, controller } => record.attachments.iter().any(|att| {
-            att.kind == *kind
+        FilterProp::HasAttachment {
+            kind,
+            controller,
+            exclude_source,
+        } => record.attachments.iter().any(|att| {
+            (!*exclude_source || att.object_id != source.id)
+                && att.kind == *kind
                 && attachment_controller_matches(
                     controller.as_ref(),
                     att.controller,
@@ -5086,6 +5099,79 @@ mod tests {
     }
 
     #[test]
+    fn typed_exiled_by_source_matches_only_linked_exiled_cards() {
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let linked_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Linked Creature".into(),
+            Zone::Exile,
+        );
+        let unlinked_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Unlinked Creature".into(),
+            Zone::Exile,
+        );
+        let battlefield_creature = add_creature(&mut state, PlayerId(1), "Battlefield Creature");
+
+        for id in [linked_creature, unlinked_creature] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // CR 607.2a: "exiled this way" targets are linked to cards exiled by
+        // the same source, not every object matching the typed phrase.
+        state.exile_links.push(ExileLink {
+            exiled_id: linked_creature,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::ExiledBySource,
+            ],
+        };
+
+        assert!(matches_target_filter(
+            &state,
+            linked_creature,
+            &filter,
+            source
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            unlinked_creature,
+            &filter,
+            source
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            battlefield_creature,
+            &filter,
+            source
+        ));
+    }
+
+    #[test]
     fn shares_quality_creature_type_passes_with_shared_subtype() {
         let mut state = setup();
         state.all_creature_types = vec!["Elf".to_string()];
@@ -6478,6 +6564,7 @@ mod tests {
             FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
+                exclude_source: false,
             },
         ]));
         assert!(
@@ -7520,6 +7607,7 @@ mod tests {
             &FilterProp::HasAttachment {
                 kind: AttachmentKind::Aura,
                 controller: Some(ControllerRef::You),
+                exclude_source: false,
             },
             &state,
             &enchanted_record,
@@ -7529,6 +7617,7 @@ mod tests {
             &FilterProp::HasAttachment {
                 kind: AttachmentKind::Equipment,
                 controller: None,
+                exclude_source: false,
             },
             &state,
             &enchanted_record,

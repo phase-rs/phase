@@ -414,6 +414,11 @@ fn parse_animation_core_type(input: &str) -> OracleResult<'_, AnimationTypeToken
         value("Planeswalker", tag_no_case("planeswalker")),
     ))
     .parse(input)?;
+    // CR 205.2a: accept an optional plural "s" so a plural-subject animation
+    // ("All lands are 1/1 creatures that are still lands") recognizes the same
+    // core type as the singular "becomes a creature" form. The trailing word
+    // boundary still rejects longer words ("landwalk", "creatured").
+    let (rest, _) = opt(tag_no_case::<_, _, OracleError<'_>>("s")).parse(rest)?;
     let (rest, _) = alpha_word_boundary(rest)?;
     Ok((rest, AnimationTypeToken::CoreType(core)))
 }

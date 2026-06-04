@@ -343,12 +343,9 @@ pub fn convert_permanent_rule(
         P::CantBeBlockedByDefenders(p) => StaticMode::CantBeBlockedBy {
             filter: filter::convert(p)?,
         },
-        P::CanBeAttachedOnlyToAPermanent(p) => {
-            return Ok(StaticDefinition::new(StaticMode::CanBeAttachedOnlyTo {
-                filter: filter::convert(p)?,
-            })
-            .affected(affected));
-        }
+        P::CanBeAttachedOnlyToAPermanent(p) => StaticMode::AttachmentRestriction {
+            filter: filter::convert(p)?,
+        },
 
         // CR 602.5 + CR 603.2a: "[This permanent's] activated abilities can't
         // be activated." Mirrors the parser's self-ref form (oracle_static.rs
@@ -1030,7 +1027,7 @@ mod tests {
         assert!(
             matches!(
                 converted.mode,
-                StaticMode::CanBeAttachedOnlyTo { filter: TargetFilter::Typed(ref tf) }
+                StaticMode::AttachmentRestriction { filter: TargetFilter::Typed(ref tf) }
                 if tf.type_filters.contains(&TypeFilter::Creature)
                     && tf.properties.iter().any(|p| matches!(p, FilterProp::HasSupertype { value: EngineSupertype::Legendary }))
             ),

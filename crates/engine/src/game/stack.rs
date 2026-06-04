@@ -633,14 +633,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     }
                                 }
                             }
-                            // CR 702.162a + CR 712.11a + CR 712.13: MTMTE
-                            // puts the converted spell on the stack with its
-                            // back face up. A resolving DFC spell becomes a
-                            // permanent with the same face up; mark the
-                            // battlefield object transformed without swapping
-                            // faces again.
-                            if casting_variant == CastingVariant::MoreThanMeetsTheEye
-                                && to == Zone::Battlefield
+                            // CR 702.146b / CR 702.162a + CR 712.11a + CR
+                            // 712.13: Disturb and MTMTE put the spell on the
+                            // stack with its back face up. A resolving DFC
+                            // spell becomes a permanent with the same face up;
+                            // mark the battlefield object transformed without
+                            // swapping faces again.
+                            if matches!(
+                                casting_variant,
+                                CastingVariant::MoreThanMeetsTheEye | CastingVariant::Disturb
+                            ) && to == Zone::Battlefield
                             {
                                 let mut marked = false;
                                 if let Some(obj) = state.objects.get_mut(&object_id) {
@@ -1825,6 +1827,7 @@ pub(crate) fn create_warp_delayed_trigger(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
     )
     .sub_ability(AbilityDefinition::new(
@@ -3248,6 +3251,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             spell_id,
@@ -3295,6 +3299,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(target_id)],
             spell_id,

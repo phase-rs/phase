@@ -409,6 +409,7 @@
     "chooseNewTargetForCopy": "Escolha um novo alvo para a cópia",
     "chooseTargetForCopy": "Escolha o alvo da cópia",
     "chooseCreatureToExplore": "Escolha qual criatura explora em seguida",
+    "chooseCreatureTokenToPopulate": "Escolha uma ficha de criatura para popular",
     "chooseReturnAsAuraTarget": "Escolha um permanente para encantar",
     "tapUntappedCreatures_one": "Vire {{count}} criatura desvirada",
     "tapUntappedCreatures_other": "Vire {{count}} criaturas desviradas",
@@ -480,7 +481,26 @@
     "companionRevealed": "{{player}} revelou o companheiro: {{cardName}}",
     "companionMovedToHand": "{{player}} colocou o companheiro {{cardName}} na mão",
     "powerToughnessChanged": "Objeto {{objectId}} agora é {{power}}/{{toughness}} ({{powerDelta}}/{{toughnessDelta}})",
-    "genericEvent": "Evento: {{type}}"
+    "genericEvent": "Evento: {{type}}",
+    "searchPlaceholder": "Search log…",
+    "allTurns": "All turns",
+    "turnChip": "T{{turn}}",
+    "entryCount": "{{count}} entries",
+    "copy": "Copy",
+    "export": "Export",
+    "categoryGame": "Game",
+    "categoryTurn": "Turn",
+    "categoryStack": "Stack",
+    "categoryCombat": "Combat",
+    "categoryZone": "Zone",
+    "categoryLife": "Life",
+    "categoryMana": "Mana",
+    "categoryState": "State",
+    "categoryToken": "Token",
+    "categoryTrigger": "Trigger",
+    "categorySpecial": "Special",
+    "categoryDestroy": "Destroy",
+    "categoryDebug": "Debug"
   },
   "coverage": {
     "engineTools": "Ferramentas do Motor",
@@ -1019,6 +1039,12 @@
       "subtitle_one": "Exile {{count}} carta de {{source}}",
       "subtitle_other": "Exile {{count}} cartas de {{source}}"
     },
+    "craft": {
+      "title": "Criar",
+      "subtitle_one": "Exile {{count}} material para criar",
+      "subtitle_other": "Exile {{count}} materiais para criar",
+      "subtitleRange": "Exile de {{min}} a {{count}} materiais para criar"
+    },
     "behold": {
       "title": "Contemplar",
       "subtitleExile": "Exile um permanente ou carta correspondente",
@@ -1483,5 +1509,10 @@
     "buttons": {
       "keep": "Keep this"
     }
+  },
+  "spectator": {
+    "banner": "Spectating — read only",
+    "leave": "Leave",
+    "watchingWith": "Also watching: {{names}}"
   }
 }
