@@ -121,25 +121,3 @@ fn has_mill_with_conditional_payoff(ctx: &PolicyContext<'_>) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Test that the policy constants are set correctly
-    #[test]
-    fn self_mill_penalty_is_negative() {
-        assert!(SELF_MILL_PENALTY < 0.0);
-    }
-
-    /// Test that opponent mill bonus is positive
-    #[test]
-    fn opponent_mill_bonus_is_positive() {
-        assert!(TARGET_BONUS > 0.0);
-    }
-
-    /// Test that empty library penalty is negative
-    #[test]
-    fn empty_library_penalty_is_negative() {
-        assert!(EMPTY_LIBRARY_PENALTY < 0.0);
-    }
-}

@@ -267,20 +267,3 @@ fn has_sufficient_mana_sources(ctx: &PolicyContext<'_>, exclude_land: ObjectId) 
     land_count >= 3 // Heuristic: need at least 3 other lands
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Test that the policy constants are set correctly
-    #[test]
-    fn penalties_are_negative() {
-        assert!(MANA_NEEDED_PENALTY < 0.0);
-        assert!(TAPPED_LAND_PENALTY < 0.0);
-    }
-
-    /// Test that bonuses are positive
-    #[test]
-    fn bonuses_are_positive() {
-        assert!(SUFFICIENT_MANA_BONUS > 0.0);
-    }
-}

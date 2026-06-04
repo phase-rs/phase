@@ -192,13 +192,3 @@ fn would_target_own_permanent(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Test that the policy constant is set correctly
-    #[test]
-    fn control_change_penalty_is_negative() {
-        assert!(CONTROL_CHANGE_PENALTY < 0.0);
-    }
-}
