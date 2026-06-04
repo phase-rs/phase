@@ -5239,6 +5239,95 @@ mod tests {
         }
     }
 
+    /// CR 205.2a + CR 701.17c + CR 608.2c: Szarekh, the Silent King (#1537).
+    /// "Mill three cards. You may put an artifact creature card or Vehicle card
+    /// from among the cards milled this way into your hand." The disjunction
+    /// "artifact creature card or Vehicle card" must parse into a
+    /// `TrackedSetFiltered` whose inner filter ANDs `Artifact` with `Creature`
+    /// on the left branch — dropping the trailing `Creature` would let any
+    /// milled artifact (e.g. an Equipment, an artifact land) be moved to hand.
+    ///
+    /// End-to-end guard: the building-block fix lives in
+    /// `parse_type_phrase_with_ctx` (`oracle_target.rs`); this test pins the
+    /// full Oracle-text → typed-AST contract for the milled-card retrieval
+    /// path so future refactors to the dig-from-among lowering can't silently
+    /// regress the AND-of-types semantics.
+    #[test]
+    fn szarekh_mill_artifact_creature_or_vehicle_filter() {
+        use super::super::parse_effect_chain;
+        use crate::types::ability::{TypeFilter, TypedFilter};
+
+        let def = parse_effect_chain(
+            "Mill three cards. You may put an artifact creature card or Vehicle card from among the cards milled this way into your hand.",
+            AbilityKind::Spell,
+        );
+
+        let mut effects: Vec<&AbilityDefinition> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d);
+            node = d.sub_ability.as_deref();
+        }
+        assert!(
+            matches!(&*effects[0].effect, Effect::Mill { .. }),
+            "first effect should be Mill, got {:?}",
+            effects[0].effect
+        );
+        let Effect::ChangeZone {
+            destination,
+            target,
+            up_to,
+            ..
+        } = &*effects[1].effect
+        else {
+            panic!("expected ChangeZone retrieval, got {:?}", effects[1].effect);
+        };
+        assert_eq!(*destination, Zone::Hand);
+        assert!(*up_to, "\"you may put\" → up_to (optional)");
+        let TargetFilter::TrackedSetFiltered { id, filter } = target else {
+            panic!("expected TrackedSetFiltered target, got {target:?}");
+        };
+        assert_eq!(id.0, 0, "sentinel TrackedSetId(0)");
+        let TargetFilter::Or { filters } = filter.as_ref() else {
+            panic!("expected Or filter for milled set, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected two disjuncts, got {filters:?}");
+
+        // Left: artifact creature card → Typed must contain BOTH Artifact and Creature.
+        let TargetFilter::Typed(left) = &filters[0] else {
+            panic!("expected left Typed, got {:?}", filters[0]);
+        };
+        assert!(
+            left.type_filters.contains(&TypeFilter::Artifact),
+            "left branch missing Artifact: {left:?}",
+        );
+        assert!(
+            left.type_filters.contains(&TypeFilter::Creature),
+            "left branch missing Creature — Szarekh regression (#1537): {left:?}",
+        );
+
+        // Right: Vehicle card → subtype Vehicle (inferred core type may also
+        // be added by normalization; only the subtype is load-bearing).
+        let TargetFilter::Typed(right) = &filters[1] else {
+            panic!("expected right Typed, got {:?}", filters[1]);
+        };
+        assert!(
+            right
+                .type_filters
+                .contains(&TypeFilter::Subtype("Vehicle".into())),
+            "right branch missing Vehicle subtype: {right:?}",
+        );
+
+        // Sanity: the left branch is strictly stricter than `Typed{Artifact}`.
+        // Construct the buggy filter and confirm we don't match it.
+        let buggy_left = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
+        assert_ne!(
+            &filters[0], &buggy_left,
+            "left branch parsed to the buggy filter shape (just Artifact) — \
+             this is the exact #1537 regression",
+        );
+    }
+
     /// CR 708.2a + CR 205.1a: `parse_theyre_face_down_profile` building-block
     /// tests — Cyberman and a non-Cyberman sibling form must parse from parts.
     #[test]
