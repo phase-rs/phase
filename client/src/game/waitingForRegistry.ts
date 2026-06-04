@@ -71,6 +71,9 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "DeclareAttackers",
     "DeclareBlockers",
     "AssignCombatDamage",
+    // CR 702.22k: active player divides a banded blocker's combat damage
+    // (BlockerDamageAssignmentModal, rendered via CardChoiceModal).
+    "AssignBlockerDamage",
     "CombatTaxPayment",
     // Triggers / resolution-time choices
     "OrderTriggers",

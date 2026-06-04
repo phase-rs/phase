@@ -354,6 +354,8 @@
     "statOther": "Other"
   },
   "combat": {
+    "band": "Band",
+    "banded": "Banded ✓",
     "attackAll": "Attack All",
     "skip": "Skip",
     "confirmAttackers": "Confirm Attackers ({{count}})",

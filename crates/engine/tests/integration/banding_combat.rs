@@ -81,10 +81,11 @@ fn drive_to_first_damage_prompt(
 }
 
 /// CR 702.22k: A blocker blocking a banding attacker has its combat damage
-/// divided by the ACTIVE player. X(2/2, Banding) + Y(2/2, no banding) both
-/// attack D(P1); D's single 4/4 blocker Z blocks BOTH X and Y. Because Z blocks
-/// two attackers and one of them (X) has banding, the active player A(P0) — not
-/// the defending player — chooses how Z's 4 damage is divided.
+/// divided by the ACTIVE player. X(2/2, Banding) + Y(2/2, no banding) attack
+/// D(P1) as a BAND; D blocks one band member (X) with a single 4/4 blocker Z,
+/// and CR 702.22h propagates the block to the whole band, so Z ends up blocking
+/// both X and Y. Because Z blocks two attackers and one of them (X) has banding,
+/// the active player A(P0) — not the defending player — divides Z's 4 damage.
 #[test]
 fn b2_active_player_divides_blocker_damage_into_banded_attacker() {
     let mut scenario = GameScenario::new();
@@ -98,11 +99,13 @@ fn b2_active_player_divides_blocker_damage_into_banded_attacker() {
     let z = scenario.add_creature(P1, "Blocker", 4, 4).id();
 
     let mut runner = scenario.build();
+    // CR 702.22c: X (banding) + Y (non-banding) is a legal band. CR 702.22h:
+    // blocking X with Z propagates the block to Y, so Z blocks both.
     drive_to_first_damage_prompt(
         &mut runner,
         vec![(x, AttackTarget::Player(P1)), (y, AttackTarget::Player(P1))],
-        vec![],
-        vec![(z, x), (z, y)],
+        vec![vec![x, y]],
+        vec![(z, x)],
     );
 
     // CR 702.22k: the active player (P0) divides Z's damage among [X, Y].
@@ -171,8 +174,8 @@ fn b2_blocker_division_must_equal_power() {
     drive_to_first_damage_prompt(
         &mut runner,
         vec![(x, AttackTarget::Player(P1)), (y, AttackTarget::Player(P1))],
-        vec![],
-        vec![(z, x), (z, y)],
+        vec![vec![x, y]],
+        vec![(z, x)],
     );
     assert!(matches!(
         runner.state().waiting_for,
@@ -209,6 +212,8 @@ fn b2_blocker_division_target_must_be_blocked_attacker() {
     let w = scenario.add_creature(P0, "Unblocked Attacker", 2, 2).id();
 
     let mut runner = scenario.build();
+    // X + Y attack as a band (Z blocks the band via X, CR 702.22h); W attacks
+    // outside the band and is left unblocked.
     drive_to_first_damage_prompt(
         &mut runner,
         vec![
@@ -216,8 +221,8 @@ fn b2_blocker_division_target_must_be_blocked_attacker() {
             (y, AttackTarget::Player(P1)),
             (w, AttackTarget::Player(P1)),
         ],
-        vec![],
-        vec![(z, x), (z, y)],
+        vec![vec![x, y]],
+        vec![(z, x)],
     );
     assert!(matches!(
         runner.state().waiting_for,
@@ -236,24 +241,30 @@ fn b2_blocker_division_target_must_be_blocked_attacker() {
     );
 }
 
-/// Control for B2: with NO banding on either attacker, a blocker blocking two
-/// attackers auto-splits its damage (CR 510.1d) and the engine never raises a
-/// `AssignBlockerDamage` prompt — the flip is conditional on banding.
+/// Control for B2: the `AssignBlockerDamage` flip requires the blocker to be
+/// blocking 2+ attackers (CR 510.1d only gives a division *choice* with 2+
+/// targets). A banding attacker that is single-blocked assigns all the blocker's
+/// damage to the lone attacker (CR 510.1c), so no prompt is raised — proving the
+/// flip is gated on multi-block, not on banding presence alone. (With vanilla
+/// creatures a blocker can only block 2+ attackers via a band, so the
+/// no-multi-block case is the meaningful control.)
 #[test]
-fn b2_control_no_banding_auto_splits_blocker_damage() {
+fn b2_control_single_blocked_banded_attacker_no_prompt() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let x = scenario.add_creature(P0, "Attacker One", 2, 2).id();
-    let y = scenario.add_creature(P0, "Attacker Two", 2, 2).id();
+    let x = scenario
+        .add_creature(P0, "Banded Attacker", 2, 2)
+        .with_keyword(Keyword::Banding)
+        .id();
     let z = scenario.add_creature(P1, "Blocker", 4, 4).id();
 
     let mut runner = scenario.build();
     drive_to_first_damage_prompt(
         &mut runner,
-        vec![(x, AttackTarget::Player(P1)), (y, AttackTarget::Player(P1))],
+        vec![(x, AttackTarget::Player(P1))],
         vec![],
-        vec![(z, x), (z, y)],
+        vec![(z, x)],
     );
 
     assert!(
@@ -261,7 +272,7 @@ fn b2_control_no_banding_auto_splits_blocker_damage() {
             runner.state().waiting_for,
             WaitingFor::AssignBlockerDamage { .. }
         ),
-        "no banding on any attacker → blocker damage must auto-split, no prompt"
+        "banded attacker single-blocked → blocker assigns all damage to it, no division prompt"
     );
 }
 
@@ -366,11 +377,12 @@ fn double_strike_blocker_reprompts_in_regular_substep() {
         .id();
 
     let mut runner = scenario.build();
+    // X + Y attack as a band; Z blocks the band via X (CR 702.22h propagation).
     drive_to_first_damage_prompt(
         &mut runner,
         vec![(x, AttackTarget::Player(P1)), (y, AttackTarget::Player(P1))],
-        vec![],
-        vec![(z, x), (z, y)],
+        vec![vec![x, y]],
+        vec![(z, x)],
     );
 
     // First-strike sub-step: the active player divides Z's first-strike damage.
