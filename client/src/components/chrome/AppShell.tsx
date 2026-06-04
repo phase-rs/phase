@@ -2,7 +2,6 @@ import { Suspense, useState } from "react";
 import { Outlet } from "react-router";
 
 import { SceneParticles } from "../menu/MenuParticles";
-import { BuildBadge } from "./BuildBadge";
 import { CardDataLoadingBar } from "./CardDataLoadingBar";
 import { ChromeControls } from "./ChromeControls";
 import { Rail } from "./Rail";
@@ -32,7 +31,12 @@ export function AppShell() {
           keep it the relative container and let children position within it. The
           single scene here replaces every page's own (neutralized via
           `.shell-content .menu-scene` in index.css). */}
-      <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
+      {/* `overflow-x-clip` (not `-hidden`): the scene's only off-edge bleed is
+          horizontal (moon at left:82-96%, sigils at ±12rem), so x-clip contains
+          it — but unlike `overflow-hidden` it does NOT establish a scroll
+          container, so the document stays the scroll container and the sticky
+          rail/top row below pin correctly. */}
+      <div className="menu-scene relative flex min-h-screen flex-col overflow-x-clip">
         <SceneParticles />
         <div className="menu-scene__vignette" />
         <div className="menu-scene__sigil menu-scene__sigil--left" />
@@ -40,44 +44,40 @@ export function AppShell() {
         <div className="menu-scene__haze" />
 
         <CardDataLoadingBar />
-        <Rail onSettings={() => setSettingsOpen(true)} />
-        <SocialBar />
 
-        {/* Reserve the top-left SocialBar's zone on every breakpoint so page
-            titles (which sit at the top-left of each pane) clear the badge row:
-            44px below the mobile strip, 56px below the desktop strip that aligns
-            with ChromeControls at top:1rem. */}
-        <main className="shell-content relative z-10 min-h-screen min-[820px]:ml-[92px] min-[820px]:pt-[calc(env(safe-area-inset-top)+56px)] max-[820px]:pt-[calc(env(safe-area-inset-top)+44px)] max-[820px]:pb-[76px]">
-          {/* Inner Suspense so a lazy route's load swaps ONLY the content area —
-              the rail/scene persist (true SPA feel). Without this, the App-level
-              Suspense fallback would replace the whole shell, flashing like a
-              full-page refresh on each first navigation to a route. */}
-          <Suspense
-            fallback={
-              <div className="flex min-h-screen items-center justify-center">
-                <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-600 border-t-white" />
-              </div>
-            }
-          >
-            <Outlet />
-          </Suspense>
-        </main>
+        {/* Rail (≥820px) + body column. Both the rail and the top chrome row
+            occupy real layout space (sticky), so page content can never slide
+            under them — no ml/pt reserves, no z-index races for in-flow chrome. */}
+        <div className="relative z-10 flex min-h-screen">
+          <Rail onSettings={() => setSettingsOpen(true)} />
+          <div className="flex min-w-0 flex-1 flex-col">
+            {/* Sticky top chrome row: hosts the social strip and reserves the
+                vertical band the fixed top-right ChromeControls occupy (44px
+                mobile / 56px desktop), so page content clears both. */}
+            <div className="sticky top-0 z-30 flex items-center px-2 pb-1 pt-[calc(env(safe-area-inset-top)+0.5rem)] min-h-[calc(env(safe-area-inset-top)+44px)] min-[820px]:px-4 min-[820px]:pt-[calc(env(safe-area-inset-top)+0.75rem)] min-[820px]:min-h-[calc(env(safe-area-inset-top)+56px)]">
+              <SocialBar />
+            </div>
+            {/* Inner Suspense so a lazy route's load swaps ONLY the content area —
+                the rail/scene persist (true SPA feel). */}
+            <main className="shell-content min-w-0 flex-1 max-[820px]:pb-[76px]">
+              <Suspense
+                fallback={
+                  <div className="flex min-h-full items-center justify-center py-24">
+                    <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-600 border-t-white" />
+                  </div>
+                }
+              >
+                <Outlet />
+              </Suspense>
+            </main>
+          </div>
+        </div>
 
         <TabBar />
         <ChromeControls
           settingsOpen={settingsOpen}
           onSettingsOpenChange={setSettingsOpen}
         />
-
-        {/* The rail carries the version/update chip on desktop; below 820px the
-            rail is hidden, so float it above the tab bar to keep the manual
-            update check reachable on mobile/PWA. */}
-        <div className="min-[820px]:hidden">
-          <BuildBadge
-            inline
-            className="fixed bottom-[calc(env(safe-area-inset-bottom)+84px)] left-2 z-40"
-          />
-        </div>
       </div>
     </ShellProvider>
   );

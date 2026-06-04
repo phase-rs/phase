@@ -11,7 +11,6 @@ interface DeckBuilderTabBarProps {
 const TABS: { id: DeckBuilderSurface; labelKey: string }[] = [
   { id: "deck", labelKey: "tabs.deck" },
   { id: "info", labelKey: "tabs.info" },
-  { id: "playtest", labelKey: "tabs.playtest" },
 ];
 
 export function DeckBuilderTabBar({

@@ -204,7 +204,7 @@ export function GamePage() {
   );
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate" | "playtest" =
+  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate" =
     rawMode === "p2p-host"
       ? "p2p-host"
       : rawMode === "p2p-join"
@@ -213,13 +213,11 @@ export function GamePage() {
           ? "draft-match"
           : rawMode === "spectate"
             ? "spectate"
-            : rawMode === "playtest"
-              ? "playtest"
-              : rawMode === "host" || rawMode === "join"
-                ? "online"
-                : rawMode === "ai"
-                  ? "ai"
-                  : "local";
+            : rawMode === "host" || rawMode === "join"
+              ? "online"
+              : rawMode === "ai"
+                ? "ai"
+                : "local";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
