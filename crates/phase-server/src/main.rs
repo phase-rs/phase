@@ -45,7 +45,6 @@ use server_core::game_reconnect_guard::guard_game_reconnect;
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
-use server_core::lookup_join_guard::guard_lookup_join_target;
 use server_core::protocol::{
     build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
     MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
@@ -3411,15 +3410,14 @@ async fn handle_client_message(
         } => {
             info!(game = %game_code, "LookupJoinTarget");
 
-            if let Err(reason) =
-                guard_lookup_join_target(&lobby_broker::LobbyClientMessage::LookupJoinTarget {
-                    game_code: game_code.clone(),
-                    password: password.clone(),
-                    reserve,
-                    display_name: display_name.clone(),
-                    release_reservation_token: release_reservation_token.clone(),
-                })
-            {
+            if let Err(reason) = lobby_broker::guard_lookup_join_target_inbound(
+                lobby_broker::LookupJoinTargetInbound {
+                    game_code: &game_code,
+                    password: password.as_deref(),
+                    display_name: display_name.as_deref(),
+                    release_reservation_token: release_reservation_token.as_deref(),
+                },
+            ) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;

@@ -1019,6 +1019,12 @@
       "subtitle_one": "Exilia {{count}} carta de {{source}}",
       "subtitle_other": "Exilia {{count}} cartas de {{source}}"
     },
+    "craft": {
+      "title": "Fabricar",
+      "subtitle_one": "Exilia {{count}} material para fabricar",
+      "subtitle_other": "Exilia {{count}} materiales para fabricar",
+      "subtitleRange": "Exilia de {{min}} a {{count}} materiales para fabricar"
+    },
     "behold": {
       "title": "Contemplar",
       "subtitleExile": "Exilia un permanente o carta que coincida",

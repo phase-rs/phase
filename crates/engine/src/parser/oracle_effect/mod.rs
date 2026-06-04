@@ -23892,6 +23892,63 @@ mod tests {
     }
 
     #[test]
+    fn distribute_x_counters_among_any_number_allows_zero_targets() {
+        let clause = parse_effect_clause(
+            "distribute X +1/+1 counters among any number of target creatures you control",
+            &mut ParseContext::default(),
+        );
+        let x = QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::bounded_expr(
+                QuantityExpr::Fixed { value: 0 },
+                x.clone(),
+            ))
+        );
+        assert_eq!(
+            clause.distribute,
+            Some(DistributionUnit::Counters("P1P1".to_string()))
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    ref count,
+                    target: TargetFilter::Typed(_),
+                } if *count == x
+            ),
+            "Expected X-count targeted PutCounter with multi_target, got {:?}",
+            clause.effect
+        );
+    }
+
+    #[test]
+    fn distribute_fixed_counters_among_any_number_requires_one_target() {
+        let clause = parse_effect_clause(
+            "distribute two +1/+1 counters among any number of target creatures you control",
+            &mut ParseContext::default(),
+        );
+
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec::bounded_expr(
+                QuantityExpr::Fixed { value: 1 },
+                QuantityExpr::Fixed { value: 2 },
+            ))
+        );
+        assert_eq!(
+            clause.distribute,
+            Some(DistributionUnit::Counters("P1P1".to_string()))
+        );
+    }
+
+    #[test]
     fn distribute_counters_among_up_to_two_target_creatures_is_multi_targeted() {
         let clause = parse_effect_clause(
             "distribute two +1/+1 counters among up to two target creatures",

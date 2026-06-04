@@ -1019,6 +1019,12 @@
       "subtitle_one": "Exilez {{count}} carte depuis {{source}}",
       "subtitle_other": "Exilez {{count}} cartes depuis {{source}}"
     },
+    "craft": {
+      "title": "Façonner",
+      "subtitle_one": "Exilez {{count}} matériau pour façonner",
+      "subtitle_other": "Exilez {{count}} matériaux pour façonner",
+      "subtitleRange": "Exilez de {{min}} à {{count}} matériaux pour façonner"
+    },
     "behold": {
       "title": "Contempler",
       "subtitleExile": "Exilez un permanent ou une carte correspondant",

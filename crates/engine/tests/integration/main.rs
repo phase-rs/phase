@@ -34,6 +34,7 @@ mod combat_damage_order_triggers_no_hang;
 mod consuming_vapors_rebound;
 mod council_of_four_nth_per_turn;
 mod cr_annotations;
+mod craft_tithing_blade_transform;
 mod crossway_troublemakers_attacking_keywords;
 mod cultivate_split_destination;
 mod dalkovan_encampment_attack_trigger;

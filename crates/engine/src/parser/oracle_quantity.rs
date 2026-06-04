@@ -29,7 +29,7 @@ use crate::parser::oracle_util::merge_or_filters;
 use crate::types::ability::{
     AggregateFunction, Comparator, ControllerRef, CountScope, DevotionColors, FilterProp,
     ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
-    QuantityRef, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -534,6 +534,42 @@ pub(crate) fn parse_cda_quantity_with_context(
     if let Ok((rest, expr)) = nom_quantity::parse_fraction_rounded(text) {
         if rest.is_empty() {
             return Some(expr);
+        }
+    }
+
+    // CR 107.1a: Fraction over a CDA-recursive inner — "half/third/tenth <inner>,
+    // rounded up/down" where <inner> is any quantity THIS function recognizes but
+    // the general nom grammar above does not (notably the cross-player aggregate
+    // "the highest life total among your opponents" — Malignus). Reuse the shared
+    // divisor / rounding combinators, then recurse on the inner so the fraction
+    // composes over the full CDA quantity grammar (mirrors the "twice [inner]"
+    // recursion below).
+    if let Ok((after_divisor, divisor)) = nom_quantity::parse_fraction_divisor(text) {
+        // Optional "of " ("half of ~"), consumed via the nom combinator per the
+        // parser mandate.
+        let (after_divisor, _) = opt(tag::<_, _, OracleError<'_>>("of "))
+            .parse(after_divisor)
+            .ok()?;
+
+        // `parse_cda_quantity_with_context` returns an `Option` without a nom
+        // remainder, so split the explicit rounding suffix first and recurse on
+        // only the inner CDA grammar. With no suffix, keep the shared
+        // parse_rounding_suffix default of Down.
+        let rounded_inner = pair(
+            take_until::<_, _, OracleError<'_>>(", round"),
+            nom_quantity::parse_explicit_rounding_suffix,
+        )
+        .parse(after_divisor);
+        let (inner_text, rounding) = match rounded_inner {
+            Ok(("", (inner, rounding))) => (inner, rounding),
+            _ => (after_divisor, RoundingMode::Down),
+        };
+        if let Some(inner) = parse_cda_quantity_with_context(inner_text.trim(), ctx) {
+            return Some(QuantityExpr::DivideRounded {
+                inner: Box::new(inner),
+                divisor,
+                rounding,
+            });
         }
     }
 
@@ -2320,6 +2356,30 @@ mod tests {
                 })
             ),
             "expected DivideRounded with Up rounding, got {expr:?}"
+        );
+    }
+
+    #[test]
+    fn cda_half_highest_opponent_life_rounded_up() {
+        // Malignus: "half the highest life total among your opponents, rounded up".
+        // The inner is a cross-player life aggregate the general nom grammar does
+        // not reach, so the fraction must recurse into the CDA quantity parser.
+        let expr =
+            parse_cda_quantity("half the highest life total among your opponents, rounded up");
+        assert!(
+            matches!(
+                expr,
+                Some(QuantityExpr::DivideRounded { ref inner, divisor: 2, rounding: RoundingMode::Up })
+                    if matches!(
+                        **inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::Opponent { aggregate: AggregateFunction::Max },
+                            },
+                        },
+                    )
+            ),
+            "expected DivideRounded(LifeTotal(Opponent Max), 2, Up), got {expr:?}"
         );
     }
 
