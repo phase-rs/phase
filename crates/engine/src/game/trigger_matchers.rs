@@ -6956,7 +6956,8 @@ mod tests {
             "Fabrication Module".to_string(),
             Zone::Battlefield,
         );
-        let trigger = make_trigger(TriggerMode::CounterPlayerAddedAll);
+        let mut trigger = make_trigger(TriggerMode::CounterPlayerAddedAll);
+        trigger.valid_target = Some(TargetFilter::Controller);
         let registry = build_trigger_registry();
 
         assert!(trigger_matcher(TriggerMode::CounterPlayerAddedAll).is_some());
