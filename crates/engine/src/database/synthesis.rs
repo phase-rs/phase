@@ -10,15 +10,15 @@ use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, Bracke
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
-    CardPlayMode, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
-    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
-    CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp, KickerVariant,
-    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
-    NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    RuntimeHandler, SearchSelectionConstraint, StaticCondition, StaticDefinition,
-    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    AttackScope, AttackSubject, CardPlayMode, CastManaObjectScope, CastManaSpentMetric,
+    CastVariantPaid, ChoiceType, Comparator, ContinuousModification, ControllerRef,
+    CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp,
+    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
+    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -247,6 +247,14 @@ impl KeywordTriggerInstaller {
             // end of turn. CR 702.25b: each instance triggers separately; one
             // trigger per `Flanking`.
             Keyword::Flanking => vec![build_flanking_trigger()],
+            // CR 702.23a: Rampage N — becomes-blocked self pump of +N/+N per
+            // blocker beyond the first. CR 702.23c: each instance triggers
+            // separately; one trigger per `Rampage`.
+            Keyword::Rampage(n) => vec![build_rampage_trigger(*n)],
+            // CR 702.121a: Melee — attack-trigger self pump of +1/+1 per opponent
+            // you attacked this combat. CR 702.121b: each instance triggers
+            // separately; one trigger per `Melee`.
+            Keyword::Melee => vec![build_melee_trigger()],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
@@ -290,6 +298,8 @@ impl KeywordTriggerInstaller {
             Keyword::Bushido(n) => is_bushido_trigger(trigger, *n),
             Keyword::Battlecry => is_battlecry_trigger(trigger),
             Keyword::Flanking => is_flanking_trigger(trigger),
+            Keyword::Rampage(n) => is_rampage_trigger(trigger, *n),
+            Keyword::Melee => is_melee_trigger(trigger),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
@@ -2674,6 +2684,22 @@ pub fn synthesize_flanking(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Flanking));
 }
 
+/// CR 702.23a: Rampage N — "whenever this creature becomes blocked, it gets +N/+N
+/// until end of turn for each creature blocking it beyond the first." CR 702.23c:
+/// each instance triggers separately, so one trigger is synthesized per
+/// `Keyword::Rampage` instance.
+pub fn synthesize_rampage(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Rampage(_)));
+}
+
+/// CR 702.121a: Melee — "whenever this creature attacks, it gets +1/+1 until end
+/// of turn for each opponent you attacked with a creature this combat." CR
+/// 702.121b: each instance triggers separately, so one trigger is synthesized per
+/// `Keyword::Melee` instance.
+pub fn synthesize_melee(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Melee));
+}
+
 /// CR 702.101a: Extort — a spell-cast trigger that lets you pay {W/B} to drain
 /// each opponent for 1 life. CR 702.101b: each instance triggers separately,
 /// so one trigger is synthesized per `Keyword::Extort` instance.
@@ -3350,6 +3376,115 @@ fn is_flanking_trigger(t: &TriggerDefinition) -> bool {
                 toughness: PtValue::Fixed(-1),
                 target: TargetFilter::Typed(tf),
             }) if *tf == flanking_target_filter()
+        )
+}
+
+/// CR 702.23a: Rampage N magnitude — N per blocker beyond the first =
+/// N × (blockerCount − 1). Mirrors the parser's "for each creature blocking it
+/// beyond the first" shape: `ObjectCount` over creatures blocking the source,
+/// offset by −1, scaled by N. Resolved at trigger resolution when all blockers
+/// are locked (CR 509).
+fn rampage_beyond_first_expr(factor: i32) -> QuantityExpr {
+    let mut blockers = TypedFilter::creature();
+    blockers.properties = vec![FilterProp::BlockingSource];
+    QuantityExpr::Multiply {
+        factor,
+        inner: Box::new(QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(blockers),
+                },
+            }),
+            offset: -1,
+        }),
+    }
+}
+
+/// CR 702.23a: Build the Rampage N becomes-blocked trigger — a self `Pump` of
+/// +N/+N for each creature blocking it beyond the first (dynamic `PtValue::Quantity`).
+fn build_rampage_trigger(n: u32) -> TriggerDefinition {
+    let amount = PtValue::Quantity(rampage_beyond_first_expr(n as i32));
+    let pump = Effect::Pump {
+        power: amount.clone(),
+        toughness: amount,
+        target: TargetFilter::SelfRef,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, pump).description(format!(
+        "CR 702.23a: Rampage {n} — +{n}/+{n} for each creature blocking it beyond the first"
+    ));
+    TriggerDefinition::new(TriggerMode::BecomesBlocked)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(format!(
+            "CR 702.23a: Rampage {n} — whenever this creature becomes blocked, it gets \
+             +{n}/+{n} until end of turn for each creature blocking it beyond the first."
+        ))
+}
+
+/// CR 702.23a/b: A Rampage `n` trigger — a self-scoped `BecomesBlocked` trigger
+/// whose execute is the canonical per-blocker `Pump`. Parameterized by `n` (and
+/// asserting `valid_card`) so `RemoveKeyword` strips exactly its own level.
+fn is_rampage_trigger(t: &TriggerDefinition, n: u32) -> bool {
+    matches!(t.mode, TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                power: PtValue::Quantity(expr),
+                target: TargetFilter::SelfRef,
+                ..
+            }) if *expr == rampage_beyond_first_expr(n as i32)
+        )
+}
+
+/// CR 702.121a: Melee magnitude — +1/+1 for each opponent you attacked with a
+/// creature THIS COMBAT. Counts the combat-scoped opponent set via the existing
+/// `PlayerCount` building block over `OpponentAttacked { You, ThisCombat }`.
+fn melee_attacked_opponents_expr() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::PlayerCount {
+            filter: PlayerFilter::OpponentAttacked {
+                subject: AttackSubject::You,
+                scope: AttackScope::ThisCombat,
+            },
+        },
+    }
+}
+
+/// CR 702.121a: Build the Melee attack trigger — a self `Pump` of +1/+1 per
+/// opponent attacked this combat (dynamic `PtValue::Quantity`).
+fn build_melee_trigger() -> TriggerDefinition {
+    let amount = PtValue::Quantity(melee_attacked_opponents_expr());
+    let pump = Effect::Pump {
+        power: amount.clone(),
+        toughness: amount,
+        target: TargetFilter::SelfRef,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, pump).description(
+        "CR 702.121a: Melee — +1/+1 for each opponent you attacked this combat".to_string(),
+    );
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(
+            "CR 702.121a: Melee — whenever this creature attacks, it gets +1/+1 until \
+             end of turn for each opponent you attacked with a creature this combat."
+                .to_string(),
+        )
+}
+
+/// CR 702.121a/b: A Melee trigger — a self-scoped `Attacks` trigger whose execute
+/// is the canonical per-opponent `Pump`. Used by `RemoveKeyword` symmetric removal.
+fn is_melee_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::Attacks)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                power: PtValue::Quantity(expr),
+                target: TargetFilter::SelfRef,
+                ..
+            }) if *expr == melee_attacked_opponents_expr()
         )
 }
 
@@ -5460,6 +5595,12 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.25a: Flanking — becomes-blocked trigger giving each non-flanking
     // blocker -1/-1 until end of turn.
     synthesize_flanking(face);
+    // CR 702.23a: Rampage N — becomes-blocked self pump scaling +N/+N per blocker
+    // beyond the first.
+    synthesize_rampage(face);
+    // CR 702.121a: Melee — attack-trigger self pump +1/+1 per opponent attacked
+    // this combat.
+    synthesize_melee(face);
     // CR 702.95a: Soulbond — two optional ETB triggers that create pair
     // relationships under the resolution checks in CR 702.95c-d.
     synthesize_soulbond(face);
@@ -8859,6 +9000,161 @@ mod flanking_synthesis_tests {
         assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
             &triggers[0],
             &Keyword::Flanking
+        ));
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Battlecry
+        ));
+    }
+}
+
+#[cfg(test)]
+mod rampage_synthesis_tests {
+    //! CR 702.23a shape tests: one self-scoped `BecomesBlocked` trigger whose
+    //! execute is a dynamic `Effect::Pump` of N × (blockers − 1).
+    use super::*;
+
+    #[test]
+    fn synthesize_rampage_adds_becomes_blocked_dynamic_pump() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Rampage(2));
+        synthesize_rampage(&mut face);
+
+        let triggers: Vec<_> = face
+            .triggers
+            .iter()
+            .filter(|t| is_rampage_trigger(t, 2))
+            .collect();
+        assert_eq!(triggers.len(), 1);
+        let t = triggers[0];
+        assert!(matches!(t.mode, TriggerMode::BecomesBlocked));
+        assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
+        let Some(Effect::Pump {
+            power,
+            toughness,
+            target,
+        }) = t.execute.as_deref().map(|a| &*a.effect)
+        else {
+            panic!("rampage execute must be Effect::Pump");
+        };
+        assert!(matches!(target, TargetFilter::SelfRef));
+        // CR 702.23a: +N/+N per blocker beyond the first — N × (blockers − 1).
+        let expected = PtValue::Quantity(rampage_beyond_first_expr(2));
+        assert_eq!(power, &expected);
+        assert_eq!(toughness, &expected);
+    }
+
+    #[test]
+    fn synthesize_rampage_is_idempotent_and_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Rampage(1));
+        synthesize_rampage(&mut face);
+        synthesize_rampage(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_rampage_trigger(t, 1))
+                .count(),
+            1
+        );
+
+        let mut bare = CardFace::default();
+        synthesize_rampage(&mut bare);
+        assert!(bare.triggers.iter().all(|t| !is_rampage_trigger(t, 1)));
+    }
+
+    #[test]
+    fn rampage_triggers_for_and_matcher_roundtrip() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Rampage(3));
+        assert_eq!(triggers.len(), 1);
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Rampage(3)
+        ));
+        // CR 702.23c: a different Rampage level is a distinct trigger.
+        assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Rampage(2)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod melee_synthesis_tests {
+    //! CR 702.121a shape tests: one self-scoped `Attacks` trigger whose execute
+    //! is a `Pump` of +1/+1 per opponent attacked this combat.
+    use super::*;
+
+    #[test]
+    fn synthesize_melee_adds_attack_per_opponent_pump() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Melee);
+        synthesize_melee(&mut face);
+
+        let triggers: Vec<_> = face
+            .triggers
+            .iter()
+            .filter(|t| is_melee_trigger(t))
+            .collect();
+        assert_eq!(triggers.len(), 1);
+        let t = triggers[0];
+        assert!(matches!(t.mode, TriggerMode::Attacks));
+        assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
+        let Some(Effect::Pump {
+            power,
+            toughness,
+            target,
+        }) = t.execute.as_deref().map(|a| &*a.effect)
+        else {
+            panic!("melee execute must be Effect::Pump");
+        };
+        assert!(matches!(target, TargetFilter::SelfRef));
+        // CR 702.121a: +1/+1 for each opponent you attacked this combat.
+        let expected = PtValue::Quantity(melee_attacked_opponents_expr());
+        assert_eq!(power, &expected);
+        assert_eq!(toughness, &expected);
+    }
+
+    #[test]
+    fn melee_count_uses_combat_scoped_opponent_filter() {
+        // CR 702.121a: the magnitude must count opponents attacked THIS COMBAT,
+        // not this turn — guards against reusing the turn-scoped filter.
+        assert_eq!(
+            melee_attacked_opponents_expr(),
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::OpponentAttacked {
+                        subject: AttackSubject::You,
+                        scope: AttackScope::ThisCombat,
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn synthesize_melee_is_idempotent_and_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Melee);
+        synthesize_melee(&mut face);
+        synthesize_melee(&mut face);
+        assert_eq!(
+            face.triggers.iter().filter(|t| is_melee_trigger(t)).count(),
+            1
+        );
+
+        let mut bare = CardFace::default();
+        synthesize_melee(&mut bare);
+        assert!(bare.triggers.iter().all(|t| !is_melee_trigger(t)));
+    }
+
+    #[test]
+    fn melee_triggers_for_and_matcher_roundtrip() {
+        let triggers = KeywordTriggerInstaller::triggers_for(&Keyword::Melee);
+        assert_eq!(triggers.len(), 1);
+        assert!(KeywordTriggerInstaller::trigger_matches_keyword_kind(
+            &triggers[0],
+            &Keyword::Melee
         ));
         assert!(!KeywordTriggerInstaller::trigger_matches_keyword_kind(
             &triggers[0],

@@ -9,6 +9,8 @@ use crate::types::ability::{
     PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
+#[cfg(test)]
+use crate::types::ability::{AttackScope, AttackSubject};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
@@ -233,14 +235,11 @@ pub(crate) fn matches_player_scope(
                             state, p.id, controller, source, source_id,
                         )
                     }
-                    // CR 508.6: opponent this player attacked this turn.
-                    PlayerFilter::OpponentAttackedThisTurn => {
-                        p.id != controller && state.has_attacked(controller, p.id)
-                    }
-                    // CR 508.6: opponent this source creature attacked this turn.
-                    PlayerFilter::OpponentAttackedBySourceThisTurn => {
+                    // CR 508.6: opponent the subject attacked within scope.
+                    PlayerFilter::OpponentAttacked { subject, scope } => {
                         p.id != controller
-                            && state.creature_attacked_player_this_turn(source_id, p.id)
+                            && state
+                                .opponent_attacked(*subject, *scope, controller, source_id, p.id)
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -4892,8 +4891,7 @@ fn scoped_player_matches_filter(
         // game/triggers.rs:3703-3723).
         PlayerFilter::DefendingPlayer
         | PlayerFilter::OpponentDealtCombatDamage { .. }
-        | PlayerFilter::OpponentAttackedThisTurn
-        | PlayerFilter::OpponentAttackedBySourceThisTurn
+        | PlayerFilter::OpponentAttacked { .. }
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
@@ -5263,7 +5261,10 @@ mod tests {
             matches_player_scope(
                 &state,
                 PlayerId(2),
-                &PlayerFilter::OpponentAttackedThisTurn,
+                &PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisTurn,
+                },
                 PlayerId(0),
                 angel,
             ),
@@ -5273,7 +5274,10 @@ mod tests {
             !matches_player_scope(
                 &state,
                 PlayerId(2),
-                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                &PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::Source,
+                    scope: AttackScope::ThisTurn,
+                },
                 PlayerId(0),
                 angel,
             ),
@@ -5283,7 +5287,10 @@ mod tests {
             matches_player_scope(
                 &state,
                 PlayerId(1),
-                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                &PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::Source,
+                    scope: AttackScope::ThisTurn,
+                },
                 PlayerId(0),
                 angel,
             ),

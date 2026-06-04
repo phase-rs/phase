@@ -3316,14 +3316,12 @@ pub(crate) fn resolve_player_count(
                                 state, p.id, controller, source, source_id,
                             )
                         }
-                        // CR 508.6: opponent this player attacked this turn.
-                        PlayerFilter::OpponentAttackedThisTurn => {
-                            p.id != controller && state.has_attacked(controller, p.id)
-                        }
-                        // CR 508.6: opponent this source creature attacked this turn.
-                        PlayerFilter::OpponentAttackedBySourceThisTurn => {
+                        // CR 508.6: opponent the subject attacked within scope.
+                        PlayerFilter::OpponentAttacked { subject, scope } => {
                             p.id != controller
-                                && state.creature_attacked_player_this_turn(source_id, p.id)
+                                && state.opponent_attacked(
+                                    *subject, *scope, controller, source_id, p.id,
+                                )
                         }
                         PlayerFilter::All => true,
                         PlayerFilter::HighestSpeed => {

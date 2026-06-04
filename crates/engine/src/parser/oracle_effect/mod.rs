@@ -94,6 +94,8 @@ use crate::types::ability::{
     SubAbilityLink, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
     TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
+#[cfg(test)]
+use crate::types::ability::{AttackScope, AttackSubject};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{NextSpellModifier, RetargetScope};
@@ -30121,7 +30123,7 @@ mod tests {
     }
 
     /// CR 508.6 + CR 104.3e: An "[source] attacked this turn" relative clause
-    /// narrows the player set to `OpponentAttackedBySourceThisTurn` (Angel of Destiny,
+    /// narrows the player set to `OpponentAttacked { Source, ThisTurn }` (Angel of Destiny,
     /// issue #1599). General over the predicate verb and over the self-ref
     /// spelling ("this creature" / "~" / "it"). The controller is excluded by
     /// the scope, so an attack trigger never eliminates its own controller.
@@ -30133,8 +30135,11 @@ mod tests {
                 let (scope, result) = strip_each_player_subject(&text);
                 assert_eq!(
                     scope,
-                    Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
-                    "scope must narrow to OpponentAttackedBySourceThisTurn for {text:?}",
+                    Some(PlayerFilter::OpponentAttacked {
+                        subject: AttackSubject::Source,
+                        scope: AttackScope::ThisTurn,
+                    }),
+                    "scope must narrow to OpponentAttacked{{Source, ThisTurn}} for {text:?}",
                 );
                 assert_eq!(result, "lose the game", "predicate for {text:?}");
             }
@@ -30143,7 +30148,13 @@ mod tests {
         // General over the predicate verb (not just "loses the game").
         let (scope, result) =
             strip_each_player_subject("each player this creature attacked this turn loses 2 life");
-        assert_eq!(scope, Some(PlayerFilter::OpponentAttackedBySourceThisTurn));
+        assert_eq!(
+            scope,
+            Some(PlayerFilter::OpponentAttacked {
+                subject: AttackSubject::Source,
+                scope: AttackScope::ThisTurn,
+            })
+        );
         assert_eq!(result, "lose 2 life");
     }
 

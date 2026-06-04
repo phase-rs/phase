@@ -4690,8 +4690,8 @@ pub struct GameState {
     /// players they attacked this turn, accumulated across every combat's
     /// declare-attackers step (CR 508.5 "defending player": planeswalker/battle
     /// attacks resolve to controller/protector). Counted by
-    /// `PlayerFilter::OpponentAttackedThisTurn` for "opponents you attacked this
-    /// turn" (Militant Angel).
+    /// `PlayerFilter::OpponentAttacked { You, ThisTurn }` for "opponents you
+    /// attacked this turn" (Militant Angel).
     #[serde(default)]
     pub attacked_defenders_this_turn: HashMap<PlayerId, HashSet<PlayerId>>,
     /// CR 508.6 + CR 508.1b: For each creature declared as an attacker this
@@ -5297,6 +5297,67 @@ impl GameState {
         self.creature_attacked_defenders_this_turn
             .get(&attacker)
             .is_some_and(|defenders| defenders.contains(&defender))
+    }
+
+    /// CR 508.6: Did `subject` attack player `target` within `scope`? Centralizes
+    /// the turn- vs combat-scoped lookup behind `PlayerFilter::OpponentAttacked`.
+    pub fn opponent_attacked(
+        &self,
+        subject: crate::types::ability::AttackSubject,
+        scope: crate::types::ability::AttackScope,
+        controller: PlayerId,
+        source_id: ObjectId,
+        target: PlayerId,
+    ) -> bool {
+        use crate::types::ability::{AttackScope, AttackSubject};
+        match (subject, scope) {
+            (AttackSubject::You, AttackScope::ThisTurn) => self.has_attacked(controller, target),
+            (AttackSubject::Source, AttackScope::ThisTurn) => {
+                self.creature_attacked_player_this_turn(source_id, target)
+            }
+            (AttackSubject::You, AttackScope::ThisCombat) => {
+                self.player_attacked_player_this_combat(controller, target)
+            }
+            (AttackSubject::Source, AttackScope::ThisCombat) => {
+                self.creature_attacked_player_this_combat(source_id, target)
+            }
+        }
+    }
+
+    /// CR 508.6 + CR 506.1: Within the CURRENT combat, did `attacker_controller`
+    /// declare any creature attacking `defender`? Read from the live combat
+    /// attacker set, so it reflects only this combat (CR 509: attackers locked at
+    /// declaration). `defending_player` already resolves planeswalker/battle
+    /// attacks to the defending player (CR 508.5).
+    pub fn player_attacked_player_this_combat(
+        &self,
+        attacker_controller: PlayerId,
+        defender: PlayerId,
+    ) -> bool {
+        self.combat.as_ref().is_some_and(|combat| {
+            combat.attackers.iter().any(|info| {
+                info.defending_player == defender
+                    && self
+                        .objects
+                        .get(&info.object_id)
+                        .is_some_and(|obj| obj.controller == attacker_controller)
+            })
+        })
+    }
+
+    /// CR 508.6: Within the CURRENT combat, did creature `source_id` attack
+    /// `defender`?
+    pub fn creature_attacked_player_this_combat(
+        &self,
+        source_id: ObjectId,
+        defender: PlayerId,
+    ) -> bool {
+        self.combat.as_ref().is_some_and(|combat| {
+            combat
+                .attackers
+                .iter()
+                .any(|info| info.object_id == source_id && info.defending_player == defender)
+        })
     }
 
     /// Create a new game with the given format configuration and player count.

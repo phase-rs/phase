@@ -62,22 +62,14 @@ fn players_for_filter(
             })
             .map(|player| player.id)
             .collect(),
-        // CR 508.6: each opponent this player attacked this turn.
-        PlayerFilter::OpponentAttackedThisTurn => state
-            .players
-            .iter()
-            .filter(|player| !player.is_eliminated)
-            .filter(|player| player.id != controller && state.has_attacked(controller, player.id))
-            .map(|player| player.id)
-            .collect(),
-        // CR 508.6: each opponent this source creature attacked this turn.
-        PlayerFilter::OpponentAttackedBySourceThisTurn => state
+        // CR 508.6: each opponent the subject attacked within scope.
+        PlayerFilter::OpponentAttacked { subject, scope } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
                 player.id != controller
-                    && state.creature_attacked_player_this_turn(source_id, player.id)
+                    && state.opponent_attacked(*subject, *scope, controller, source_id, player.id)
             })
             .map(|player| player.id)
             .collect(),
