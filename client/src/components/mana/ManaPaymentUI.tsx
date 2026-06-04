@@ -15,6 +15,9 @@ import {
   SHARD_ABBREVIATION,
 } from "../../viewmodel/costLabel.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
+import { useIsNarrowViewport } from "../modal/DialogHost.tsx";
+import { PeekTab } from "../modal/DialogShell.tsx";
+import { useOptionalDialogPeek } from "../modal/dialogPeekContext.ts";
 import { ManaBadge } from "./ManaBadge.tsx";
 import { ManaSymbol } from "./ManaSymbol.tsx";
 
@@ -45,6 +48,13 @@ export function ManaPaymentUI() {
       : null;
   const convokeMode = isManaPayment ? waitingFor.data.convoke_mode : undefined;
   const player = playerId != null ? gameState?.players[playerId] : null;
+
+  // CR 702.51a: the bottom-anchored convoke panel can sit on top of the very
+  // creatures the player must tap to pay. The DialogHost peek affordance lets
+  // them slide it out of the way and back (a no-op for plain mana payment, which
+  // needs no board interaction). `useOptionalDialogPeek` is null outside a host.
+  const peek = useOptionalDialogPeek();
+  const isNarrow = useIsNarrowViewport();
 
   // CR 107.4f + CR 601.2f: Engine-provided per-shard options for Phyrexian payment.
   // The UI maps shard_index → PhyrexianShard so it can disable toggles for trivial
@@ -232,7 +242,17 @@ export function ManaPaymentUI() {
             DialogHost wrapper is `pointer-events: none` so board taps reach the
             artifacts/creatures, but the Pay/Cancel controls must still respond.
             The surrounding full-width strip stays pass-through. */}
-        <div className="pointer-events-auto rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
+        <div className="pointer-events-auto relative rounded-xl bg-gray-900/95 p-4 shadow-2xl ring-1 ring-gray-700 min-w-[280px] max-w-[420px]">
+          {/* CR 702.51a: collapse cue for convoke/improvise payment — slides this
+              panel off any creature it overlaps so the player can tap it. Only
+              shown while the panel is in place (peeked state surfaces the
+              DialogHost restore tab instead). */}
+          {convokeMode && peek && !peek.peeked && (
+            <PeekTab
+              direction={isNarrow ? "bottom" : "right"}
+              onClick={peek.togglePeek}
+            />
+          )}
           <h3 className="mb-3 text-center text-sm font-semibold text-gray-300">
             {t("mana.payMana")}
             {cardName && (

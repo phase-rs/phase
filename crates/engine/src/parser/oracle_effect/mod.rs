@@ -13637,7 +13637,7 @@ pub(crate) fn parse_effect_chain_ir(
     // chain; the anchor is reset at each top-level call.
     let mut anchor_subject: Option<TargetFilter> = None;
     let mut chunk_diagnostics: Vec<OracleDiagnostic> = Vec::new();
-    // CR 609.3: "Repeat the following process N times." appears as its own
+    // CR 608.2c: "Repeat the following process N times." appears as its own
     // sentence before the body clause. The count is stashed here and applied
     // to the immediately-following clause so the body executes N times.
     let mut pending_repeat_for: Option<QuantityExpr> = None;
@@ -13646,6 +13646,11 @@ pub(crate) fn parse_effect_chain_ir(
     // when that chunk is consumed standalone, so the next chunk (which holds
     // the actual `player_scope: All` payload) can stamp `starting_with`.
     let mut pending_starting_with: Option<ControllerRef> = None;
+    // CR 101.4 + CR 608.2c + CR 608.2f: "Repeat the following process for
+    // each {opponent,player} [in turn order]." — forward-carry the
+    // per-player iteration scope to the next clause. Sibling of
+    // `pending_repeat_for` / `pending_starting_with`; identical lifecycle.
+    let mut pending_player_scope: Option<PlayerFilter> = None;
     // CR 608.2c + CR 107.1c: Chain-level "repeat this process" loop predicate.
     // A back-reference recognized as its own trailing sentence; applied to the
     // root `AbilityDefinition` during lowering.
@@ -14031,18 +14036,42 @@ pub(crate) fn parse_effect_chain_ir(
             continue;
         }
 
-        // CR 609.3: "Repeat the following process N times." — forward-carry
-        // repeat directive. Unlike "repeat this process" (back-reference),
-        // this announces that the NEXT clause executes N times. The count is
-        // stashed in `pending_repeat_for` and applied to the next clause's
-        // `repeat_for` field; the directive itself produces no clause.
-        if nom_on_lower(normalized_text, &lower_check, |i| {
-            value((), tag("repeat the following process")).parse(i)
-        })
-        .is_some()
-        {
-            let (count, _) = strip_repeat_count_suffix(normalized_text);
-            pending_repeat_for = count;
+        // CR 608.2f + CR 101.4 + CR 608.2c: "Repeat the following process …" —
+        // forward-carry repeat directive. Unlike "repeat this process"
+        // (back-reference), this announces that the NEXT clause executes
+        // some number of times or once per matching player.
+        //   - "… N times" → numeric repeat into `pending_repeat_for`.
+        //   - "… for each {opponent,player} [in turn order]" → per-player
+        //     iteration into `pending_player_scope` (CR 101.4 APNAP from
+        //     the active player when no explicit "starting with <player>"
+        //     prefix is present). The directive itself produces no clause.
+        if let Some((player_scope_opt, _)) = nom_on_lower(normalized_text, &lower_check, |i| {
+            let (i, _) = tag("repeat the following process").parse(i)?;
+            let (i, player_scope) = opt(|i| {
+                let (i, _) = tag(" for each ").parse(i)?;
+                let (i, scope) = alt((
+                    value(PlayerFilter::Opponent, tag("opponents")),
+                    value(PlayerFilter::Opponent, tag("opponent")),
+                    value(PlayerFilter::All, tag("players")),
+                    value(PlayerFilter::All, tag("player")),
+                ))
+                .parse(i)?;
+                // CR 101.4: optional "in turn order" — with no explicit
+                // "starting with <player>" prefix, this is APNAP from the
+                // active player.
+                let (i, _) = opt(tag(" in turn order")).parse(i)?;
+                Ok((i, scope))
+            })
+            .parse(i)?;
+            let (i, _) = opt(tag(".")).parse(i)?;
+            Ok((i, player_scope))
+        }) {
+            if let Some(scope) = player_scope_opt {
+                pending_player_scope = Some(scope);
+            } else {
+                let (count, _) = strip_repeat_count_suffix(normalized_text);
+                pending_repeat_for = count;
+            }
             continue;
         }
 
@@ -14321,7 +14350,7 @@ pub(crate) fn parse_effect_chain_ir(
             (None, text)
         };
         let condition = condition.or(leading_cond);
-        // CR 609.3: "[effect] a number of times equal to the difference" — when
+        // CR 608.2c: "[effect] a number of times equal to the difference" — when
         // a leading comparison condition was just stripped, a trailing
         // difference-repeat suffix repeats the effect by the unsigned magnitude
         // gap between the condition's operands (Expand the Sphere's "If you put
@@ -14564,7 +14593,7 @@ pub(crate) fn parse_effect_chain_ir(
                 strip_trailing_where_x(TextPair::new(&text, &text_where_x_lower));
             (without_where_x.original.to_string(), where_x_expression)
         };
-        // CR 609.3: "twice" / "N times" suffix — same mechanism as "for each" prefix.
+        // CR 608.2c: "twice" / "N times" suffix — same mechanism as "for each" prefix.
         let (repeat_count, text) = if repeat_for.is_none() {
             let (repeat_count, stripped_text) = strip_repeat_count_suffix(&text_without_where_x);
             if repeat_count.is_some() {
@@ -14577,11 +14606,12 @@ pub(crate) fn parse_effect_chain_ir(
         };
         let repeat_for = repeat_for
             .or(repeat_count)
-            // CR 609.3: difference-repeat count detected after the leading
+            // CR 608.2c: difference-repeat count detected after the leading
             // conditional strip ("a number of times equal to the difference").
             .or(difference_repeat)
             .or_else(|| pending_repeat_for.take());
         let (player_scope, text) = strip_player_scope_subject(&text);
+        let pending_player_scope_for_clause = pending_player_scope.take();
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
             && sequence::starts_clause_text_or_conjugated(&text)
@@ -14599,7 +14629,10 @@ pub(crate) fn parse_effect_chain_ir(
         // OptionalEffectChoice is emitted once per matching player.
         let mut player_scope = player_scope
             .or(implicit_player_scope)
-            .or(carried_player_scope);
+            .or(carried_player_scope)
+            // CR 101.4 + CR 608.2f: forward-carry from a preceding
+            // "Repeat the following process for each <scope> [in turn order]."
+            .or(pending_player_scope_for_clause);
 
         // CR 608.2e + CR 608.2c + CR 101.3: A decline-tail strips one of four
         // shapes (prepositional vs subject-only × optional `doesn't` vs
@@ -40681,6 +40714,100 @@ mod tests {
             sub.effect
         );
         assert_eq!(sub.player_scope, Some(PlayerFilter::All));
+    }
+
+    /// CR 101.4 + CR 608.2f: "Repeat the following process for each opponent
+    /// in turn order. <body>" stamps `player_scope = Opponent` on the
+    /// produced clause and leaves `starting_with` unset (APNAP from active
+    /// player is the default iteration order). Protection Racket [NCC] is
+    /// the prototype; the parser must handle the class, not the card.
+    #[test]
+    fn parse_repeat_for_each_opponent_in_turn_order_emits_player_scope_opponent() {
+        let def = parse_effect_chain(
+            "Repeat the following process for each opponent in turn order. Reveal the top card of your library.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+        assert_eq!(def.starting_with, None);
+    }
+
+    /// CR 101.4 + CR 608.2f: "for each player" variant stamps
+    /// `player_scope = All` so every player iterates in APNAP order. The body
+    /// deliberately has no explicit player subject ("Reveal …" not "Each
+    /// player reveals …") so the scope can only arrive via the new
+    /// `pending_player_scope` carry-forward, not the explicit-subject path.
+    #[test]
+    fn parse_repeat_for_each_player_in_turn_order_emits_player_scope_all() {
+        let def = parse_effect_chain(
+            "Repeat the following process for each player in turn order. Reveal the top card of their library.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    }
+
+    /// CR 608.2f: an explicit player subject on the body clause outranks the
+    /// carried directive scope. "Repeat the following process for each player.
+    /// Each opponent draws a card." must resolve to `Opponent` (the explicit
+    /// subject), not the carried `All` — pinning the `.or()` precedence of
+    /// explicit > implicit > carried > `pending_player_scope`.
+    #[test]
+    fn parse_repeat_for_each_explicit_body_subject_outranks_carried_scope() {
+        let def = parse_effect_chain(
+            "Repeat the following process for each player. Each opponent draws a card.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+    }
+
+    /// CR 608.2f: the carried directive scope is consumed by the next body
+    /// clause even when that body has its own explicit player subject. A later
+    /// independent sentence must not inherit stale pending scope.
+    #[test]
+    fn parse_repeat_for_each_explicit_body_subject_does_not_leak_to_later_clause() {
+        let def = parse_effect_chain(
+            "Repeat the following process for each player. Each opponent draws a card. Draw a card.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+
+        let tail = def
+            .sub_ability
+            .as_ref()
+            .expect("expected trailing Draw clause");
+        assert_eq!(tail.player_scope, None);
+        assert!(matches!(
+            &*tail.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+    }
+
+    /// CR 608.2f: the "in turn order" suffix is optional — bare
+    /// "for each opponent" still maps to `player_scope = Opponent`.
+    /// Iteration order falls back to APNAP from the active player per
+    /// CR 101.4 default when no explicit "starting with" is given.
+    #[test]
+    fn parse_repeat_for_each_opponent_without_turn_order_emits_player_scope_opponent() {
+        let def = parse_effect_chain(
+            "Repeat the following process for each opponent. Reveal the top card of your library.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+    }
+
+    /// CR 608.2f regression: the numeric "N times" branch must keep working
+    /// after the per-player extension. `pending_player_scope` must remain
+    /// `None` and `repeat_for` must carry the fixed count.
+    #[test]
+    fn parse_repeat_the_following_process_twice_still_emits_numeric_repeat_for() {
+        let def = parse_effect_chain(
+            "Repeat the following process twice. Draw a card.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.repeat_for, Some(QuantityExpr::Fixed { value: 2 }));
+        assert_eq!(def.player_scope, None);
     }
 
     /// Alliance of Arms — same preamble, token body. `player_scope = All` on
