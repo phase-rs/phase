@@ -108,8 +108,8 @@ impl TacticalPolicy for LandAnimationPolicy {
         let mut delta = 0.0;
 
         // Penalize if the land is tapped (can't animate tapped lands)
-        // CR 302.6: A creature can't attack or block unless it's been under its controller's
-        // control continuously since the most recent turn began. Tapped lands can't animate.
+        // CR 302.5: A permanent that’s tapped can’t activate abilities unless the ability
+        // or another effect specifically allows it.
         if obj.tapped {
             return PolicyVerdict::Score {
                 delta: TAPPED_LAND_PENALTY,
@@ -265,4 +265,144 @@ fn has_sufficient_mana_sources(ctx: &PolicyContext<'_>, exclude_land: ObjectId) 
         .count();
 
     land_count >= 3 // Heuristic: need at least 3 other lands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::game::zones::create_object;
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ContinuousModification, Effect, StaticDefinition,
+        StaticMode,
+    };
+    use engine::types::card_type::CoreType;
+    use engine::types::game_state::{GameState, WaitingFor};
+    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::player::PlayerId;
+    use engine::types::zones::Zone;
+
+    use crate::config::AiConfig;
+    use crate::context::AiContext;
+
+    const AI: PlayerId = PlayerId(0);
+
+    /// Test that the policy only applies to actual animation abilities, not all land abilities
+    #[test]
+    fn only_applies_to_animation_abilities() {
+        let mut state = GameState::default();
+        let mut context = AiContext::default();
+        let config = AiConfig::default();
+
+        // Create a land controlled by AI
+        let land_id = ObjectId(1);
+        let mut land_obj = create_object(
+            land_id,
+            CardId(100),
+            AI,
+            "Test Land".to_string(),
+            Zone::Battlefield,
+        );
+        land_obj.card_types.core_types.insert(CoreType::Land);
+        state.objects.insert(land_id, land_obj);
+
+        // Create a mana-producing ability (not animation)
+        let mana_ability = AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Box::new(Effect::Mana {
+                produced: engine::types::ability::ManaProduction::Fixed {
+                    colors: vec![engine::types::mana::ManaColor::Green],
+                },
+            }),
+            ..Default::default()
+        };
+        state
+            .objects
+            .get_mut(&land_id)
+            .unwrap()
+            .abilities
+            .push(mana_ability);
+
+        let action = GameAction::ActivateAbility {
+            source_id: land_id,
+            ability_index: 0,
+        };
+
+        let ctx = PolicyContext {
+            state: &state,
+            action: &action,
+            ai_player: AI,
+            context: &context,
+            config: &config,
+        };
+
+        let policy = LandAnimationPolicy;
+        let verdict = policy.verdict(&ctx);
+
+        // Should return 0 delta for non-animation abilities
+        assert!(matches!(verdict, PolicyVerdict::Score { delta, .. } if delta == 0.0));
+    }
+
+    /// Test that the policy applies penalties to actual animation abilities
+    #[test]
+    fn applies_penalties_to_animation_abilities() {
+        let mut state = GameState::default();
+        let mut context = AiContext::default();
+        let config = AiConfig::default();
+
+        // Create a land controlled by AI
+        let land_id = ObjectId(1);
+        let mut land_obj = create_object(
+            land_id,
+            CardId(100),
+            AI,
+            "Test Land".to_string(),
+            Zone::Battlefield,
+        );
+        land_obj.card_types.core_types.insert(CoreType::Land);
+        state.objects.insert(land_id, land_obj);
+
+        // Create an animation ability via AddType
+        let animation_ability = AbilityDefinition {
+            kind: AbilityKind::Activated,
+            effect: Box::new(Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition {
+                    mode: StaticMode::Continuous,
+                    affected: Default::default(),
+                    condition: None,
+                    modifications: vec![ContinuousModification::AddType {
+                        core_type: CoreType::Creature,
+                    }],
+                }],
+                duration: None,
+                target: None,
+            }),
+            ..Default::default()
+        };
+        state
+            .objects
+            .get_mut(&land_id)
+            .unwrap()
+            .abilities
+            .push(animation_ability);
+
+        let action = GameAction::ActivateAbility {
+            source_id: land_id,
+            ability_index: 0,
+        };
+
+        let ctx = PolicyContext {
+            state: &state,
+            action: &action,
+            ai_player: AI,
+            context: &context,
+            config: &config,
+        };
+
+        let policy = LandAnimationPolicy;
+        let verdict = policy.verdict(&ctx);
+
+        // Should apply some penalty (not 0) for animation abilities
+        assert!(matches!(verdict, PolicyVerdict::Score { delta, .. } if delta != 0.0));
+    }
 }
