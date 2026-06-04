@@ -92,7 +92,11 @@ export function MenuPage() {
           </button>
         )}
 
-        <p className="text-[11px] tracking-wide text-slate-600">matt evans :: 2026</p>
+        <p className="max-w-2xl text-balance text-center text-[0.68rem] leading-5 text-slate-500/70">
+          {t("shell.disclaimer")}
+        </p>
+
+        <p className="text-[11px] tracking-wide text-slate-600">made with ❤️ by matt evans :: 2026</p>
       </div>
 
       <LoadGameStateModal
