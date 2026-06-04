@@ -464,7 +464,7 @@ fn finish_pending_cost_or_cast(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if let Some(ability_index) = pending.activation_ability_index {
-        return push_activated_ability_to_stack(
+        let waiting_for = push_activated_ability_to_stack(
             state,
             player,
             pending.object_id,
@@ -472,7 +472,12 @@ fn finish_pending_cost_or_cast(
             pending.ability,
             pending.activation_cost.as_ref(),
             events,
-        );
+        )?;
+        return Ok(drain_deferred_triggers_after_stack_object_announcement(
+            state,
+            events,
+            waiting_for,
+        ));
     }
 
     if matches!(
@@ -641,7 +646,7 @@ fn finish_pending_cost_or_cast(
     }
 
     let base_cost = pending.base_cost.clone();
-    pay_and_push(
+    let waiting_for = pay_and_push(
         state,
         player,
         pending.object_id,
@@ -655,7 +660,24 @@ fn finish_pending_cost_or_cast(
         pending.origin_zone,
         pending.payment_mode,
         events,
-    )
+    )?;
+    Ok(drain_deferred_triggers_after_stack_object_announcement(
+        state,
+        events,
+        waiting_for,
+    ))
+}
+
+pub(super) fn drain_deferred_triggers_after_stack_object_announcement(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    waiting_for: WaitingFor,
+) -> WaitingFor {
+    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+        return waiting_for;
+    }
+    crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
+        .unwrap_or(waiting_for)
 }
 
 fn begin_deferred_target_selection(
@@ -2413,7 +2435,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         });
     }
 
-    pay_and_push(
+    let waiting_for = pay_and_push(
         state,
         player,
         object_id,
@@ -2427,7 +2449,12 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         origin_zone,
         payment_mode,
         events,
-    )
+    )?;
+    Ok(drain_deferred_triggers_after_stack_object_announcement(
+        state,
+        events,
+        waiting_for,
+    ))
 }
 
 fn flash_timing_non_mana_additional_cost(
@@ -5971,11 +5998,12 @@ mod tests {
         // `handle_sacrifice_for_cost` now parks their observer triggers into
         // `deferred_triggers` because the cast paused on a non-`Priority`
         // `WaitingFor` (so `run_post_action_pipeline` will not scan this
-        // action's `events`). The parked triggers are NOT drained while the
-        // announced spell remains on the stack, so they fire after the cast
-        // completes. Drive the rest of the cast (choose a damage target, then
-        // resolve the stack) and confirm the co-departing observer fired once
-        // per co-sacrificed creature (itself + the plain bear) — life 20 + 2 = 22.
+        // action's `events`). The parked triggers drain when the cast finishes
+        // and the player would receive priority, while the announced spell still
+        // remains on the stack. Drive the rest of the cast (choose a damage
+        // target, then resolve the stack) and confirm the co-departing observer
+        // fired once per co-sacrificed creature (itself + the plain bear) — life
+        // 20 + 2 = 22.
         if let WaitingFor::TargetSelection { target_slots, .. } = state.waiting_for.clone() {
             // Pick the first legal damage target to land the cast on the stack.
             let target = target_slots
@@ -5997,9 +6025,35 @@ mod tests {
             );
         }
 
-        // Order any same-controller co-departed observer triggers and resolve
-        // the stack (observer triggers + the spell itself).
-        crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+        if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+            crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+        }
+        assert_eq!(
+            state.deferred_triggers.len(),
+            0,
+            "cost-sacrifice triggers must be drained at cast completion, not left \
+             parked behind the spell"
+        );
+        assert_eq!(
+            state.stack.len(),
+            3,
+            "the two cost-sacrifice triggers must be on the stack above the spell \
+             before priority is offered"
+        );
+        assert!(
+            matches!(state.stack[0].kind, StackEntryKind::Spell { .. }),
+            "the announced spell must remain below the cost-triggered abilities"
+        );
+        assert!(
+            state
+                .stack
+                .iter()
+                .skip(1)
+                .all(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+            "cost-sacrifice triggers must sit above the announced spell before it resolves"
+        );
+
+        // Resolve the stack (observer triggers + the spell itself).
         for _ in 0..30 {
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) || state.stack.is_empty() {
                 break;

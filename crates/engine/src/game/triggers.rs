@@ -3155,7 +3155,7 @@ fn dispatch_pending_trigger_context(
 /// `deferred_triggers`. Mid-resolution `Priority` from player-scope iteration,
 /// `repeat_for`, or replacement continuations must not drain (or offer CR
 /// 603.3b ordering) until those continuations finish.
-pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
+fn can_drain_deferred_triggers(state: &GameState, allow_spell_on_stack: bool) -> bool {
     if state.deferred_triggers.is_empty() {
         return false;
     }
@@ -3177,14 +3177,19 @@ pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
     // CR 603.3b + issue #1793: observer triggers parked during a spell's
     // resolution must wait until that spell leaves the stack — draining while
     // a `Spell` entry remains would offer ordering mid player_scope iteration.
-    if state
-        .stack
-        .iter()
-        .any(|entry| matches!(entry.kind, StackEntryKind::Spell { .. }))
+    if !allow_spell_on_stack
+        && state
+            .stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::Spell { .. }))
     {
         return false;
     }
     true
+}
+
+pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
+    can_drain_deferred_triggers(state, false)
 }
 
 /// CR 113.2c + CR 603.2 + CR 603.3b: Drain the deferred-trigger queue after
@@ -3207,6 +3212,30 @@ pub(crate) fn drain_deferred_trigger_queue(
         return None;
     }
 
+    drain_deferred_trigger_queue_unchecked(state, events_out)
+}
+
+/// CR 601.2h + CR 602.2b + CR 603.3: Cost-payment triggers collected while a
+/// spell or ability announcement was paused go on the stack at the first
+/// priority point after that stack object is fully announced, even though that
+/// spell or ability itself is still on the stack. Resolution-time callers must
+/// keep using `drain_deferred_trigger_queue`, whose spell-on-stack guard
+/// prevents mid-resolution drains.
+pub(crate) fn drain_deferred_triggers_after_stack_object_announcement(
+    state: &mut GameState,
+    events_out: &mut Vec<GameEvent>,
+) -> Option<crate::types::game_state::WaitingFor> {
+    if !can_drain_deferred_triggers(state, true) {
+        return None;
+    }
+
+    drain_deferred_trigger_queue_unchecked(state, events_out)
+}
+
+fn drain_deferred_trigger_queue_unchecked(
+    state: &mut GameState,
+    events_out: &mut Vec<GameEvent>,
+) -> Option<crate::types::game_state::WaitingFor> {
     let pending = std::mem::take(&mut state.deferred_triggers);
     match begin_trigger_ordering(state, pending) {
         TriggerOrderingDisposition::PromptForChoice(wf) => {
