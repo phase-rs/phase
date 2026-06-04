@@ -911,13 +911,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     def.unless_pay = modifiers.unless_pay.clone();
 
     // CR 603.4: Compose intervening-if with existing condition via And.
-    def.condition = match (&modifiers.intervening_if, def.condition.take()) {
-        (Some(if_cond), Some(existing)) => Some(TriggerCondition::And {
-            conditions: vec![existing, if_cond.clone()],
-        }),
-        (Some(c), None) => Some(c.clone()),
-        (None, Some(c)) => Some(c),
-        (None, None) => None,
+    def.condition = match modifiers.intervening_if.clone() {
+        Some(if_cond) => Some(and_trigger_conditions(def.condition.take(), if_cond)),
+        None => def.condition.take(),
     };
 
     // CR 603.4: Intervening-if life-gain triggers check the gained-life
@@ -4444,6 +4440,24 @@ fn make_base() -> TriggerDefinition {
         .trigger_zones(vec![Zone::Battlefield])
 }
 
+/// CR 603.4: AND-compose a newly extracted trigger condition onto any existing
+/// one. When the trigger already carries a condition (e.g. a parsed
+/// intervening-`if`), both must hold, so they are combined under
+/// `TriggerCondition::And`; otherwise the new condition stands alone. Shared by
+/// the intervening-`if` composition and the `"while ~ is attacking"` state-gate
+/// composition so both sites compose conditions identically.
+fn and_trigger_conditions(
+    existing: Option<TriggerCondition>,
+    new: TriggerCondition,
+) -> TriggerCondition {
+    match existing {
+        Some(existing) => TriggerCondition::And {
+            conditions: vec![existing, new],
+        },
+        None => new,
+    }
+}
+
 /// CR 603.4 + CR 508.1: Strip a trailing `"while [self-ref] is [combat
 /// state]"` gate from a trigger-event clause and convert it to a
 /// `TriggerCondition`.
@@ -4468,12 +4482,20 @@ fn make_base() -> TriggerDefinition {
 /// gate is present.
 fn strip_while_state_clause(condition: &str) -> Option<(String, TriggerCondition)> {
     let lower = condition.to_lowercase();
-    let tp = TextPair::new(condition, &lower);
     // The gate is introduced by " while " and runs to the end of the event
     // clause (the effect was already split off at the first ", " boundary).
-    let pos = tp.find(" while ")?;
-    let fragment = lower[pos + " while ".len()..].trim();
-    let (rest, sc) = parse_inner_condition(fragment).ok()?;
+    // `take_until` consumes the pre-`while` prefix and `tag(" while ")` discards
+    // the delimiter, leaving the gate fragment as the remainder. The prefix
+    // length is the byte boundary used to slice the original-case `condition`
+    // for the returned event clause.
+    let (fragment, before) = terminated(
+        take_until(" while "),
+        tag::<_, _, OracleError<'_>>(" while "),
+    )
+    .parse(lower.as_str())
+    .ok()?;
+    let pos = before.len();
+    let (rest, sc) = parse_inner_condition(fragment.trim()).ok()?;
     // CR 603.4: only accept when the whole "while ..." tail is the condition —
     // a dangling remainder means this isn't a clean state gate.
     if !rest.trim().is_empty() {
@@ -4501,12 +4523,7 @@ pub(crate) fn parse_trigger_condition(
     // clause parses exactly as it would unqualified.
     if let Some((stripped, while_cond)) = strip_while_state_clause(condition) {
         let (mode, mut def) = parse_trigger_condition(&stripped, ctx);
-        def.condition = match def.condition.take() {
-            Some(existing) => Some(TriggerCondition::And {
-                conditions: vec![existing, while_cond],
-            }),
-            None => Some(while_cond),
-        };
+        def.condition = Some(and_trigger_conditions(def.condition.take(), while_cond));
         return (mode, def);
     }
 
