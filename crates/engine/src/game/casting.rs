@@ -3598,9 +3598,12 @@ fn target_ref_matches_cost_filter(
             );
             super::filter::matches_target_filter(state, *object_id, filter, &ctx)
         }
-        TargetRef::Player(player_id) => {
-            super::filter::player_matches_target_filter(filter, *player_id, Some(source_controller))
-        }
+        TargetRef::Player(player_id) => super::filter::player_matches_target_filter_in_state(
+            state,
+            filter,
+            *player_id,
+            Some(source_controller),
+        ),
     }
 }
 

@@ -203,7 +203,8 @@ fn legal_aura_attachment_targets(
         if player.is_eliminated || player.is_phased_out() {
             return None;
         }
-        if crate::game::filter::player_matches_target_filter(
+        if crate::game::filter::player_matches_target_filter_in_state(
+            state,
             enchant_filter,
             player.id,
             Some(controller),

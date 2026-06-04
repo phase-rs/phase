@@ -606,6 +606,14 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         return defs;
     }
 
+    // CR 509.1b: "<predicate> and can't be blocked[ by/except by … | by more
+    // than N creatures]" pairs a keyword/continuous grant with an evasion grant
+    // under one subject (Madcap Skills). Split so the evasion clause is not
+    // dropped.
+    if let Some(defs) = try_split_and_cant_be_blocked(&stripped) {
+        return defs;
+    }
+
     // CR 509.1b + CR 604.1 + CR 611.3a + CR 613.1f: Attached-subject grant lines
     // ("enchanted creature ...", "equipped creature ...") may decompose into more
     // than one StaticDefinition (e.g. CantBeBlocked + Continuous{AddKeyword}).
