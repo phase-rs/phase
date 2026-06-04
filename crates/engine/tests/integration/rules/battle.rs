@@ -212,6 +212,7 @@ fn battle_attack_defending_player_is_protector() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Battle(siege_id))],
+            bands: vec![],
         })
         .expect("attacking a battle controlled by you but protected by an opponent is legal");
 
@@ -420,6 +421,7 @@ fn battle_protector_cannot_attack_own_battle() {
 
     let result = runner.act(GameAction::DeclareAttackers {
         attacks: vec![(attacker, AttackTarget::Battle(siege_id))],
+        bands: vec![],
     });
     assert!(
         result.is_err(),

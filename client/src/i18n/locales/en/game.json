@@ -354,6 +354,8 @@
     "statOther": "Other"
   },
   "combat": {
+    "band": "Band",
+    "banded": "Banded ✓",
     "attackAll": "Attack All",
     "skip": "Skip",
     "confirmAttackers": "Confirm Attackers ({{count}})",
@@ -1401,6 +1403,15 @@
     "topDesc": "The merged creature uses the mutating creature's name, types, and power/toughness.",
     "bottom": "On bottom",
     "bottomDesc": "The merged creature keeps the target creature's name, types, and power/toughness."
+  },
+  "cipher": {
+    "cardFallback": "this card",
+    "creatureFallback": "a creature",
+    "title": "Cipher: {{name}}",
+    "subtitle": "Exile this card encoded on a creature you control, or decline.",
+    "encodeDesc": "Encode here. Whenever this creature deals combat damage to a player, you may cast a copy of the encoded card without paying its mana cost.",
+    "decline": "Don't encode",
+    "declineDesc": "Put this card into its owner's graveyard."
   },
   "permanentTypeSlot": {
     "eyebrow": "Permanent Type",

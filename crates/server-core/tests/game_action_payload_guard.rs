@@ -1,12 +1,17 @@
 //! Wire-payload bounds for in-game `GameAction` bodies (see
 //! `server_core::game_action_payload_guard`).
 
-use engine::types::actions::DebugAction;
+use engine::types::actions::{DebugAction, DebugTokenRequest};
+use engine::types::counter::CounterType;
 use engine::types::game_state::{ManaChoice, ShardChoice};
+use engine::types::keywords::Keyword;
 use engine::types::mana::ManaType;
+use engine::types::match_config::DeckCardCount;
+use engine::types::player::PlayerId;
+use engine::types::proposed_event::TokenCharacteristics;
 use engine::types::{GameAction, ObjectId};
 use server_core::game_action_payload_guard::{
-    guard_game_action_payload, MAX_ACTION_LIST_LEN, MAX_CHOICE_LEN,
+    guard_game_action_payload, MAX_ACTION_LIST_LEN, MAX_CHOICE_LEN, MAX_DEBUG_AST_JSON_LEN,
 };
 
 #[test]
@@ -88,4 +93,80 @@ fn rejects_oversized_debug_payload() {
         mana: vec![ManaType::Blue; MAX_ACTION_LIST_LEN + 1],
     });
     assert!(guard_game_action_payload(&action).is_err());
+}
+
+#[test]
+fn rejects_oversized_nested_sideboard_card_name() {
+    let action = GameAction::SubmitSideboard {
+        main: vec![DeckCardCount {
+            name: "x".repeat(MAX_CHOICE_LEN + 1),
+            count: 1,
+        }],
+        sideboard: Vec::new(),
+    };
+
+    let err = guard_game_action_payload(&action).unwrap_err();
+    assert!(err.contains("SubmitSideboard.main[0].name"));
+}
+
+#[test]
+fn rejects_oversized_debug_counter_name() {
+    let action = GameAction::Debug(DebugAction::ModifyCounters {
+        object_id: ObjectId(1),
+        counter_type: CounterType::Generic("x".repeat(MAX_CHOICE_LEN + 1)),
+        delta: 1,
+    });
+
+    let err = guard_game_action_payload(&action).unwrap_err();
+    assert!(err.contains("Debug.ModifyCounters.counter_type.Generic"));
+}
+
+#[test]
+fn rejects_oversized_debug_keyword_ast_payload() {
+    let action = GameAction::Debug(DebugAction::GrantKeyword {
+        object_id: ObjectId(1),
+        keyword: Keyword::Unknown("x".repeat(MAX_DEBUG_AST_JSON_LEN + 1)),
+    });
+
+    let err = guard_game_action_payload(&action).unwrap_err();
+    assert!(err.contains("Debug.GrantKeyword.keyword"));
+}
+
+#[test]
+fn rejects_oversized_debug_token_counter_name() {
+    let action = GameAction::Debug(DebugAction::CreateToken {
+        request: DebugTokenRequest::Preset {
+            preset_id: "soldier".to_string(),
+            owner: PlayerId(0),
+            enter_with_counters: vec![(CounterType::Generic("x".repeat(MAX_CHOICE_LEN + 1)), 1)],
+        },
+        run_etb: true,
+    });
+
+    let err = guard_game_action_payload(&action).unwrap_err();
+    assert!(err.contains("Debug.CreateToken.request.enter_with_counters[0].counter_type.Generic"));
+}
+
+#[test]
+fn rejects_oversized_debug_token_keyword_ast_payload() {
+    let action = GameAction::Debug(DebugAction::CreateToken {
+        request: DebugTokenRequest::Custom {
+            owner: PlayerId(0),
+            characteristics: TokenCharacteristics {
+                display_name: "Test Token".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                core_types: Vec::new(),
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: vec![Keyword::Unknown("x".repeat(MAX_DEBUG_AST_JSON_LEN + 1))],
+            },
+            enter_with_counters: Vec::new(),
+        },
+        run_etb: true,
+    });
+
+    let err = guard_game_action_payload(&action).unwrap_err();
+    assert!(err.contains("Debug.CreateToken.request.characteristics.keywords[0]"));
 }

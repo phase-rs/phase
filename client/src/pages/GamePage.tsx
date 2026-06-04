@@ -74,6 +74,7 @@ import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
 import { MutateMergeChoiceModalContent } from "../components/modal/MutateMergeChoiceModal.tsx";
+import { CipherEncodeChoiceModalContent } from "../components/modal/CipherEncodeChoiceModal.tsx";
 import { DialogHost, isClickThroughWaitingFor } from "../components/modal/DialogHost.tsx";
 import { PermanentTypeSlotModal } from "../components/modal/PermanentTypeSlotModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
@@ -1434,6 +1435,12 @@ function GamePageContent({
             <MutateMergeModal />
           )}
 
+        {/* CR 702.99a: cipher spell controller chooses a creature to encode on */}
+        {waitingFor?.type === "CipherEncodeChoice" &&
+          canActForWaitingState && (
+            <CipherEncodeModal />
+          )}
+
         {waitingFor?.type === "UntapChoice" &&
           canActForWaitingState && (
             <UntapChoiceModal />
@@ -2536,6 +2543,16 @@ function MutateMergeModal() {
   if (waitingFor?.type !== "MutateMergeChoice") return null;
 
   return <MutateMergeChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
+}
+
+function CipherEncodeModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "CipherEncodeChoice") return null;
+
+  return <CipherEncodeChoiceModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
 }
 
 // ── Untap Choice Modal ─────────────────────────────────────────────────

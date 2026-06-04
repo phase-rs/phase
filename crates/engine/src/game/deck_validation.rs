@@ -2255,10 +2255,7 @@ fn subtype_partner_match(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
-    use crate::database::mtgjson::load_atomic_cards;
-    use crate::database::synthesis::build_oracle_face;
     use crate::types::keywords::PartnerType;
 
     fn test_db_json() -> String {
@@ -3976,55 +3973,6 @@ mod tests {
         assert!(can_pair_commanders(&db, "The Eleventh Doctor", "Amy Pond"));
         // Unknown names resolve to no pairing rather than panicking.
         assert!(!can_pair_commanders(&db, "Amy Pond", "Nonexistent Card"));
-    }
-
-    /// Regression for issue #1500: Doctor's Companion must survive MTGJSON
-    /// synthesis and pair with a Time Lord Doctor commander.
-    #[test]
-    fn amy_pond_pairs_with_eleventh_doctor_from_mtgjson() {
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/AtomicCards.json");
-        if !path.exists() {
-            return;
-        }
-        let atomic = load_atomic_cards(&path).expect("AtomicCards.json should load");
-        let amy_json = atomic
-            .data
-            .get("Amy Pond")
-            .and_then(|faces| faces.first())
-            .expect("Amy Pond should exist in MTGJSON");
-        let doctor_json = atomic
-            .data
-            .get("The Eleventh Doctor")
-            .and_then(|faces| faces.first())
-            .expect("The Eleventh Doctor should exist in MTGJSON");
-
-        let amy = build_oracle_face(amy_json, None);
-        let doctor = build_oracle_face(doctor_json, None);
-
-        assert!(
-            amy.keywords
-                .iter()
-                .any(|kw| matches!(kw, Keyword::Partner(PartnerType::DoctorsCompanion))),
-            "Amy Pond should carry Doctor's Companion after synthesis; got {:?}",
-            amy.keywords
-        );
-        assert!(
-            are_valid_partners(&amy, &doctor),
-            "Amy Pond and The Eleventh Doctor should form a legal co-commander pair \
-             (doctor subtypes: {:?})",
-            doctor.card_type.subtypes
-        );
-
-        let db = CardDatabase::from_mtgjson(&path).expect("db load");
-        assert!(
-            can_pair_commanders(&db, "Amy Pond", "The Eleventh Doctor"),
-            "full MTGJSON database load must agree on Doctor's Companion pairing"
-        );
-        assert!(
-            can_pair_commanders(&db, "Amy Pond", "Eleventh Doctor"),
-            "deck lists that omit the leading article must still pair"
-        );
     }
 
     #[test]

@@ -5152,7 +5152,10 @@ mod tests {
                         assert_eq!(*factor, expected_power_factor);
                         assert!(matches!(
                             inner.as_ref(),
-                            QuantityExpr::Offset { offset: -1, .. }
+                            QuantityExpr::ClampMin {
+                                inner,
+                                minimum: 0,
+                            } if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
                         ));
                     }
                     other => panic!("expected dynamic power multiplier, got {other:?}"),

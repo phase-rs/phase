@@ -509,7 +509,8 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
-        | ContinuousModification::AddCounterOnEnter { .. } => {}
+        | ContinuousModification::AddCounterOnEnter { .. }
+        | ContinuousModification::RemoveManaCost => {}
     }
 }
 

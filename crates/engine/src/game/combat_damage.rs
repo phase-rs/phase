@@ -110,6 +110,12 @@ pub fn resolve_combat_damage(
         if let Some(c) = &mut state.combat {
             c.first_strike_done = true;
             c.damage_step_index = None;
+            // CR 510.4: The regular combat-damage sub-step is a fresh assignment.
+            // `damage_assignments` is the per-sub-step blocker resume-skip key
+            // (CR 702.22k / CR 510.1d), so it MUST be reset between sub-steps —
+            // otherwise a double-strike blocker that divided its first-strike
+            // damage would be wrongly skipped in the regular sub-step.
+            c.damage_assignments.clear();
         }
 
         // CR 510.4: SBAs and triggers run between first-strike and regular damage sub-steps.
@@ -271,12 +277,32 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
                 trample,
             );
 
-            // The player who assigns damage is the attacker's controller.
-            let controller = state
+            // The player who assigns damage is normally the attacker's controller.
+            let mut controller = state
                 .objects
                 .get(&attacker_info.object_id)
                 .map(|o| o.controller)
                 .unwrap_or(state.active_player);
+
+            // CR 702.22j: During the combat damage step, if an attacking creature
+            // is being blocked by a creature with banding, the DEFENDING player
+            // (rather than the active player) chooses how the attacking
+            // creature's damage is assigned. We reach this branch whenever an
+            // interactive assignment is required — both the multi-blocker case
+            // (2+ blockers, a genuine division per CR 510.1c) and the single
+            // banded-blocker-with-trample case (the attacker must still choose
+            // how much excess tramples through past the blocker). Keyed on LIVE
+            // banding at damage time (CR 702.22a static ability).
+            // CR 702.22j: bands-with-other arm deferred (no Keyword::BandsWithOther).
+            let blocked_by_banding = combat
+                .blocker_assignments
+                .get(&attacker_info.object_id)
+                .into_iter()
+                .flatten()
+                .any(|&bid| crate::game::combat::has_banding(state, bid));
+            if blocked_by_banding {
+                controller = attacker_info.defending_player;
+            }
 
             // CR 702.19c: Compute PW loyalty threshold for trample-over-PW spillover
             let (pw_loyalty, pw_controller) = if trample == Some(TrampleKind::OverPlaneswalkers) {
@@ -315,11 +341,50 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
         }
     }
 
+    // CR 510.1c/d: The attacker loop has fully processed every attacker for this
+    // sub-step. Advance the cursor past the end so that a later re-entry (e.g.
+    // after an interactive CR 702.22k blocker-division prompt below) skips the
+    // attacker loop and does NOT re-push attacker auto-assignments — which would
+    // double-count attacker damage. Without an interactive blocker this is a
+    // no-op (the function returns `None` at the bottom and the sub-step applies).
+    if let Some(c) = &mut state.combat {
+        c.damage_step_index = Some(c.attackers.len());
+    }
+
     // --- Blockers ---
-    // CR 510.1d: Blocker damage division among multiple blocked attackers.
-    // Currently auto-assigned with even split (known simplification — multi-block is rare).
-    for (blocker_id, attacker_ids) in &combat.blocker_to_attacker {
-        let obj = match state.objects.get(blocker_id) {
+    // CR 510.1d: A blocking creature assigns its combat damage to the creatures
+    // it's blocking, divided as its controller chooses (CR 702.22k re-routes the
+    // chooser to the active player when a blocked attacker has banding).
+    //
+    // Re-entrancy: unlike attackers (a `Vec` indexed by `damage_step_index`),
+    // blockers live in a `HashMap` with no positional cursor. The resume-skip key
+    // is membership in `combat.damage_assignments` (keyed by blocker id), which is
+    // recorded for EVERY processed blocker — both the auto-even-split path and the
+    // interactive CR 702.22k path. This keeps an already-divided blocker from being
+    // re-pushed when we re-enter after an interactive prompt resolves. The
+    // skip-key set is reset per sub-step (see `resolve_combat_damage`), so a
+    // double-strike blocker is correctly re-processed in the regular sub-step.
+    //
+    // Deterministic order: `ObjectId(pub u64)` is not `Ord`, so we sort the
+    // blocker ids by their inner `u64` to guarantee a stable prompt sequence
+    // across AI clones and save/reload.
+    let mut blocker_ids: Vec<ObjectId> = combat.blocker_to_attacker.keys().copied().collect();
+    blocker_ids.sort_by_key(|id| id.0);
+
+    for blocker_id in blocker_ids {
+        // Resume-skip: this blocker's division was already recorded this sub-step.
+        if combat
+            .damage_assignments
+            .get(&blocker_id)
+            .is_some_and(|v| !v.is_empty())
+        {
+            continue;
+        }
+        let attacker_ids = match combat.blocker_to_attacker.get(&blocker_id) {
+            Some(ids) => ids,
+            None => continue,
+        };
+        let obj = match state.objects.get(&blocker_id) {
             Some(o) if o.zone == crate::types::zones::Zone::Battlefield => o,
             _ => continue,
         };
@@ -346,9 +411,42 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
         if power == 0 {
             continue;
         }
-        let blocker_assignments = distribute_blocker_damage(*blocker_id, power, attacker_ids);
+
+        // CR 702.22k: During the combat damage step, if a blocking creature is
+        // blocking a creature with banding, the ACTIVE player (rather than the
+        // defending player) chooses how the blocking creature's damage is
+        // divided among the attackers it's blocking. This only matters when the
+        // blocker is blocking 2+ attackers (a sole blocked attacker leaves no
+        // choice — CR 510.1d). Keyed on the ATTACKER's LIVE banding, NOT the
+        // blocker's own banding.
+        // CR 702.22k: bands-with-other arm deferred (no Keyword::BandsWithOther).
+        let active_player_divides = attacker_ids.len() >= 2
+            && attacker_ids
+                .iter()
+                .any(|&aid| crate::game::combat::has_banding(state, aid));
+
+        if active_player_divides {
+            return Some(WaitingFor::AssignBlockerDamage {
+                player: state.active_player,
+                blocker_id,
+                total_damage: power,
+                attackers: attacker_ids.clone(),
+            });
+        }
+
+        // CR 510.1d: default — controller's blocker divides evenly (auto-split).
+        let blocker_assignments = distribute_blocker_damage(blocker_id, power, attacker_ids);
         if let Some(c) = &mut state.combat {
             c.pending_damage.extend(blocker_assignments);
+            // Record into the resume-skip key so re-entry after an interactive
+            // CR 702.22k prompt does not re-push this blocker's division.
+            c.damage_assignments.insert(
+                blocker_id,
+                vec![DamageAssignment {
+                    target: DamageTarget::Object(attacker_ids[0]),
+                    amount: power,
+                }],
+            );
         }
     }
 

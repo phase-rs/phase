@@ -74,6 +74,7 @@ fn attack_with_emissary() -> (GameRunner, ObjectId, ObjectId) {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(emissary, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("declaring Emissary Green as attacker should succeed");
     (runner, emissary, bear)

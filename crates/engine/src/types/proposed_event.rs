@@ -526,8 +526,23 @@ impl ProposedEvent {
 
     pub fn affected_player(&self, state: &crate::types::game_state::GameState) -> PlayerId {
         match self {
-            ProposedEvent::ZoneChange { object_id, .. }
-            | ProposedEvent::Tap { object_id, .. }
+            // CR 614.12 + CR 109.4: A permanent entering under another player's
+            // control (Tergrid's "onto the battlefield under your control",
+            // reanimation "under your control", etc.) carries a
+            // `controller_override`. The object itself is still in its origin
+            // zone — typically a graveyard, where CR 109.4 gives it no controller
+            // so `o.controller` defaults to the owner. "As-it-enters" replacement
+            // effects (Mirrormade's "enter as a copy", CR 707.9) must be offered
+            // to the controller the permanent WOULD have on the battlefield, so
+            // honor the override before falling back to the object's controller.
+            ProposedEvent::ZoneChange {
+                object_id,
+                controller_override,
+                ..
+            } => controller_override
+                .or_else(|| state.objects.get(object_id).map(|o| o.controller))
+                .unwrap_or(PlayerId(0)),
+            ProposedEvent::Tap { object_id, .. }
             | ProposedEvent::Untap { object_id, .. }
             | ProposedEvent::Destroy { object_id, .. }
             | ProposedEvent::AddCounter { object_id, .. }

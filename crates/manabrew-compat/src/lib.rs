@@ -748,6 +748,28 @@ pub fn build_prompt(
             );
             "chooseCombatDamageAssignment"
         }
+        // CR 510.1d + CR 702.22k: a blocker is blocking a banding attacker, so the
+        // active player divides the blocker's damage among the attackers it
+        // blocks. Mirrors `AssignCombatDamage`, minus the lethal/trample/PW axes
+        // that don't apply to a blocker's outgoing damage.
+        WaitingFor::AssignBlockerDamage {
+            blocker_id,
+            total_damage,
+            attackers,
+            ..
+        } => {
+            insert_json(&mut fields, "blockerId", encode_object_id(*blocker_id));
+            insert_json(&mut fields, "totalDamage", *total_damage as i32);
+            insert_json(
+                &mut fields,
+                "attackerIds",
+                attackers
+                    .iter()
+                    .map(|id| encode_object_id(*id))
+                    .collect::<Vec<_>>(),
+            );
+            "chooseBlockerDamageAssignment"
+        }
         WaitingFor::CombatTaxPayment {
             per_creature,
             total_cost,
@@ -1621,6 +1643,7 @@ fn waiting_for_type(waiting_for: &WaitingFor) -> &'static str {
         WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
         WaitingFor::NamedChoice { .. } => "NamedChoice",
         WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
+        WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
         WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
         WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
         WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
@@ -2327,7 +2350,10 @@ mod tests {
                     context: engine::types::game_state::CombatTaxContext::Attacking,
                     total_cost: ManaCost::NoCost,
                     per_creature: vec![],
-                    pending: CombatTaxPending::Attack { attacks: vec![] },
+                    pending: CombatTaxPending::Attack {
+                        attacks: vec![],
+                        bands: vec![],
+                    },
                 },
             ),
             ("gameOver", WaitingFor::GameOver { winner: None }),
