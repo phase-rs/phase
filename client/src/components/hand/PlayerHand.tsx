@@ -255,8 +255,19 @@ export function PlayerHand() {
         setSelectedCardId(null);
       }}
     >
-      <AnimatePresence>
-        {handObjects.map((obj, i) => {
+      {/* The whole hand lifts as one unit on hover. Keeping this uniform -50px
+          lift on a container — rather than baking `expanded` into each card's
+          animate target — lets the memoized HandCards skip re-rendering when the
+          hand expands/collapses. The lift lives on an inner wrapper so the outer
+          container (which owns onMouseLeave) stays put and its collapse hit-area
+          doesn't move under the cursor. */}
+      <motion.div
+        className="flex items-end justify-center"
+        animate={{ y: expanded ? -50 : 0 }}
+        transition={{ duration: 0.25 }}
+      >
+        <AnimatePresence>
+          {handObjects.map((obj, i) => {
           const rotation = getCardRotation(i, handObjects.length);
           const isPlayable = hasPriority && playableObjectIds.has(Number(obj.id));
 
@@ -270,7 +281,6 @@ export function PlayerHand() {
               index={i}
               handSize={handObjects.length}
               rotation={rotation}
-              expanded={expanded}
               isPlayable={isPlayable}
               isSelected={selectedCardId === obj.id}
               hasPriority={hasPriority}
@@ -287,7 +297,8 @@ export function PlayerHand() {
             />
           );
         })}
-      </AnimatePresence>
+        </AnimatePresence>
+      </motion.div>
     </div>
   );
 }
@@ -300,7 +311,6 @@ interface HandCardProps {
   index: number;
   handSize: number;
   rotation: number;
-  expanded: boolean;
   isPlayable: boolean;
   isSelected: boolean;
   isDragging: boolean;
@@ -324,7 +334,6 @@ const HandCard = memo(function HandCard({
   index,
   handSize,
   rotation,
-  expanded,
   isPlayable,
   isSelected,
   isDragging,
@@ -376,11 +385,11 @@ const HandCard = memo(function HandCard({
       initial={{ opacity: 0, y: 40 }}
       animate={{
         opacity: 1,
-        y: (expanded ? -20 : 30) + arcOffset,
+        y: 30 + arcOffset,
         rotate: rotation,
       }}
       exit={{ opacity: 0, scale: 0.8 }}
-      whileHover={{ y: -30 + arcOffset, scale: 1.08, zIndex: 30 }}
+      whileHover={{ y: 20 + arcOffset, scale: 1.08, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 9999 }}
       transition={{
         delay: index * 0.03,

@@ -112,7 +112,8 @@ impl ContinuousModification {
             | ContinuousModification::AddAllBasicLandTypes
             | ContinuousModification::AddAllLandTypes
             | ContinuousModification::AddChosenSubtype { .. }
-            | ContinuousModification::SetBasicLandType { .. } => Layer::Type, // CR 613.1d + CR 205.4b
+            | ContinuousModification::SetBasicLandType { .. }
+            | ContinuousModification::SetChosenBasicLandType => Layer::Type, // CR 613.1d + CR 205.4b
             // CR 122.1 + CR 614.1c: One-shot counter placement at copy
             // resolution. Consumed by the BecomeCopy / CopyTokenOf resolvers
             // before any continuous-effect machinery is reached. Reaching this

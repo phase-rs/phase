@@ -49,6 +49,8 @@
     "volume": "Volume"
   },
   "hostControl": {
+    "collapse": "Collapse",
+    "expand": "Expand host panel",
     "seatHost": "Host",
     "seatPlayer": "Player",
     "seatOpen": "Open",

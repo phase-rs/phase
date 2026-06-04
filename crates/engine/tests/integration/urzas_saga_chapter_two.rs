@@ -15,7 +15,6 @@ use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
     PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
-use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
@@ -132,23 +131,13 @@ fn chapter_two_construct_survives_sba_via_self_count_boost() {
 
     add_mana(&mut runner, P0, ManaType::Colorless, 2);
 
-    // Activate the granted {2}, {T} ability.
+    // Activate the granted {2}, {T} ability and drive it to resolution — this
+    // should create the Construct token on the battlefield.
     let pre_count = runner.state().objects.len();
-    let result = runner.act(GameAction::ActivateAbility {
-        source_id: saga_id,
-        ability_index: 0,
-    });
-    assert!(
-        result.is_ok(),
-        "chapter II ability activation must succeed: {:?}",
-        result.err()
-    );
-
-    // Resolve the ability on the stack — this should create the Construct.
-    runner.resolve_top();
+    let outcome = runner.activate(saga_id, 0).resolve();
 
     // Find the newly-created Construct token.
-    let state = runner.state();
+    let state = outcome.state();
     assert!(
         state.objects.len() > pre_count,
         "a new token object must exist after resolving chapter II's activated ability \
@@ -161,23 +150,11 @@ fn chapter_two_construct_survives_sba_via_self_count_boost() {
         .values()
         .find(|o| o.is_token && o.name == "Construct")
         .expect("Construct token must be on the battlefield after resolution");
+    let construct_id = construct.id;
 
-    assert_eq!(
-        construct.zone,
-        Zone::Battlefield,
-        "Construct must enter the battlefield, not be sent straight to the graveyard"
-    );
+    outcome.assert_zone(&[construct_id], Zone::Battlefield);
 
     // The Construct counts itself as the only artifact P0 controls, so its
-    // effective P/T after layer 7c is 1/1 — enough to survive SBAs.
-    assert_eq!(
-        construct.power,
-        Some(1),
-        "Construct must have +1 power from the self-counted artifact static (it itself is an artifact)"
-    );
-    assert_eq!(
-        construct.toughness,
-        Some(1),
-        "Construct must have +1 toughness — without this it dies to CR 704.5f as a 0/0"
-    );
+    // effective P/T after layer 7c is 1/1 — enough to survive SBAs (CR 704.5f).
+    outcome.assert_power_toughness(construct_id, 1, 1);
 }

@@ -16,6 +16,7 @@ import { DraftProgress } from "../components/draft/DraftProgress";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { menuButtonClass } from "../components/menu/buttonStyles";
+import { MenuShell } from "../components/menu/MenuShell";
 import { runLimits } from "../services/quickDraftPersistence";
 import type { DraftRunFormat, DraftRunState } from "../services/quickDraftPersistence";
 
@@ -47,17 +48,17 @@ function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
             key={opt.value}
             type="button"
             onClick={() => setRunFormat(opt.value)}
-            className={`group flex w-full cursor-pointer items-start gap-4 rounded-[18px] border p-4 text-left transition-colors ${
+            className={`group flex w-full cursor-pointer items-start gap-4 rounded-card border surface-card p-4 text-left transition-all duration-150 ${
               runFormat === opt.value
-                ? "border-emerald-400/30 bg-emerald-500/[0.08]"
-                : "border-white/10 bg-white/[0.02] hover:border-white/18 hover:bg-white/[0.05]"
+                ? "border-jade/45 ring-1 ring-jade/20 shadow-panel"
+                : "border-hairline hover:-translate-y-[3px] hover:border-hairline-hover hover:shadow-panel"
             }`}
           >
             <div
               className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 transition-colors ${
                 runFormat === opt.value
-                  ? "border-emerald-400 bg-emerald-400"
-                  : "border-white/25"
+                  ? "border-jade bg-jade"
+                  : "border-fg-muted/50"
               }`}
             >
               {runFormat === opt.value && (
@@ -65,10 +66,10 @@ function FormatPicker({ onLaunch }: { onLaunch: () => void }) {
               )}
             </div>
             <div className="min-w-0 flex-1">
-              <div className={`text-base font-semibold ${runFormat === opt.value ? "text-emerald-100" : "text-white"}`}>
+              <div className={`font-display text-base font-semibold ${runFormat === opt.value ? "text-jade-text" : "text-fg"}`}>
                 {t(opt.labelKey)}
               </div>
-              <p className="mt-1 text-sm text-white/40">{t(opt.descKey)}</p>
+              <p className="mt-1 text-sm text-fg-card-body">{t(opt.descKey)}</p>
             </div>
           </button>
         ))}
@@ -373,7 +374,12 @@ export function DraftPage() {
         <CardPreview cardName={hoveredCard?.name ?? null} sourcePrinting={hoveredCard?.sourcePrinting} />
       )}
 
-      <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col px-6 py-16">
+      {/* Centered MenuShell column — identical framing to home/setup/online so
+          the draft flow sits in the same responsive, centered container. The
+          per-phase blocks below render their own headings, so no MenuShell
+          title is passed. */}
+      <MenuShell layout="stacked">
+        <div className="flex w-full flex-col">
         {resumeLoading ? (
           <div className="flex items-center justify-center py-24">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-500 border-t-white" />
@@ -449,7 +455,8 @@ export function DraftPage() {
         {!resumeLoading && phase === "complete" && (
           <RunComplete onDone={handleEndRun} />
         )}
-      </div>
+        </div>
+      </MenuShell>
     </div>
   );
 }

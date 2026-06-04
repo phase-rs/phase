@@ -1,6 +1,6 @@
 use crate::game::filter;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, Effect, EffectKind, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -14,9 +14,10 @@ use crate::types::zones::Zone;
 use super::casting;
 use super::effects;
 use super::engine::{
-    check_exile_returns, handle_tap_land_for_mana, handle_untap_land_for_mana,
-    resume_pending_continuation_if_priority, EngineError,
+    handle_tap_land_for_mana, handle_untap_land_for_mana, resume_pending_continuation_if_priority,
+    EngineError,
 };
+use super::engine_priority;
 use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use super::mana_abilities;
 use super::restrictions;
@@ -365,6 +366,7 @@ pub(super) fn handle_unless_payment(
     let poll_cost = cost.clone();
 
     let mut payment_failed = !pay;
+    let mut post_action_event_start = None;
     if pay {
         match cost {
             // CR 118.12: Pay the static mana component of the unless cost.
@@ -626,6 +628,7 @@ pub(super) fn handle_unless_payment(
             | AbilityCost::Loyalty { .. }
             | AbilityCost::PaySpeed { .. }
             | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
             | AbilityCost::CollectEvidence { .. }
             | AbilityCost::TapCreatures { .. }
             | AbilityCost::RemoveCounter { .. }
@@ -677,11 +680,12 @@ pub(super) fn handle_unless_payment(
                 }
                 sub_resolved.context = pending_effect.context.clone();
                 sub_resolved.context.optional_effect_performed = true;
-                let previous_trigger_event = state.current_trigger_event.clone();
-                state.current_trigger_event = trigger_event.clone();
-                let result = effects::resolve_ability_chain(state, &sub_resolved, events, 0);
-                state.current_trigger_event = previous_trigger_event;
-                result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                post_action_event_start = Some(resolve_ability_chain_for_unless_payment(
+                    state,
+                    &sub_resolved,
+                    events,
+                    &trigger_event,
+                )?);
             }
         }
     }
@@ -711,44 +715,45 @@ pub(super) fn handle_unless_payment(
         // when the unless prompt was first surfaced (`effects::mod` strips
         // it before sending the pending effect into `WaitingFor`), so no
         // further stripping is needed here.
-        let previous_trigger_event = state.current_trigger_event.clone();
-        state.current_trigger_event = trigger_event.clone();
-        let events_before = events.len();
-        let result = effects::resolve_ability_chain(state, &ability, events, 0);
-        state.current_trigger_event = previous_trigger_event;
-        result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-
-        // CR 603.2 + CR 603.6 + CR 700.4: The unpaid unless-effect can move a
-        // permanent off the battlefield — echo / cumulative-upkeep sacrifice
-        // (#1981, Mogg War Marshal), Static Prison's self-sacrifice, or a
-        // destroy/damage unless-effect. Those battlefield → graveyard moves are
-        // "dies" / leaves-the-battlefield events whose triggers ("when this
-        // creature dies, create a 1/1 Goblin") must trigger. This branch returns
-        // directly without flowing through `run_post_action_pipeline` (the inline
-        // note in engine.rs), so the standard trigger scan never runs — scan the
-        // events this resolution just emitted explicitly, mirroring the inline
-        // `process_triggers` after `handle_tap_land_for_mana` (engine.rs). Scoped
-        // to the new events and a no-op when none fire.
-        if events.len() > events_before {
-            let unless_effect_events: Vec<_> = events[events_before..].to_vec();
-            super::triggers::process_triggers(state, &unless_effect_events);
-        }
-
-        // CR 610.3 + #783: The unless-payment resume bypasses
-        // `run_post_action_pipeline` (see the inline-scan note in
-        // engine.rs), so the standard exile-return scan never runs. When the
-        // resolved effect makes a source leave the battlefield — e.g. Static
-        // Prison sacrificing itself via "sacrifice unless you pay {E}" — the
-        // permanent it exiled "until it leaves the battlefield" must return.
-        // Idempotent and event-scoped: a no-op when no source left this way.
-        check_exile_returns(state, events);
+        post_action_event_start = Some(resolve_ability_chain_for_unless_payment(
+            state,
+            &ability,
+            events,
+            &trigger_event,
+        )?);
     }
 
     if matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }) {
         set_active_priority(state);
     }
     resume_pending_continuation_if_priority(state, events)?;
+    if let Some(event_start) = post_action_event_start {
+        let default_wf = state.waiting_for.clone();
+        let wf = engine_priority::run_post_action_pipeline_from(
+            state,
+            events,
+            event_start,
+            &default_wf,
+            false,
+        )?;
+        state.waiting_for = wf;
+    }
     Ok(action_result(events, state.waiting_for.clone()))
+}
+
+fn resolve_ability_chain_for_unless_payment(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    trigger_event: &Option<GameEvent>,
+) -> Result<usize, EngineError> {
+    let events_before = events.len();
+    let previous_trigger_event = state.current_trigger_event.clone();
+    state.current_trigger_event = trigger_event.clone();
+    let result = effects::resolve_ability_chain(state, ability, events, 0);
+    state.current_trigger_event = previous_trigger_event;
+    result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+    Ok(events_before)
 }
 
 fn clear_echo_due_for_echo_payment(
