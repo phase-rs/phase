@@ -32447,20 +32447,48 @@ mod tests {
 
     #[test]
     fn strip_suffix_conditional_parses_lki_combat_status() {
-        let (cond, text) = strip_suffix_conditional(
-            "draw a card if it was attacking",
-            &mut ParseContext::default(),
-        );
-        assert_eq!(text, "draw a card");
-        let cond = cond.expect("should parse 'it was attacking' as LKI combat status");
-        match cond {
-            AbilityCondition::TargetMatchesFilter {
-                filter: TargetFilter::Typed(ref tf),
-                use_lki: true,
-            } => {
-                assert_eq!(tf.properties, vec![FilterProp::Attacking]);
+        for (input, expected_prop, expected_negated) in [
+            (
+                "draw a card if it was attacking",
+                FilterProp::Attacking,
+                false,
+            ),
+            (
+                "draw a card if it was blocking",
+                FilterProp::Blocking,
+                false,
+            ),
+            (
+                "draw a card if it wasn't attacking",
+                FilterProp::Attacking,
+                true,
+            ),
+            (
+                "draw a card if it was not blocking",
+                FilterProp::Blocking,
+                true,
+            ),
+        ] {
+            let (cond, text) = strip_suffix_conditional(input, &mut ParseContext::default());
+            assert_eq!(text, "draw a card");
+            let cond =
+                cond.unwrap_or_else(|| panic!("should parse {input:?} as LKI combat status"));
+            let (cond, negated) = match cond {
+                AbilityCondition::Not { condition } => (*condition, true),
+                condition => (condition, false),
+            };
+            assert_eq!(negated, expected_negated);
+            match cond {
+                AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(ref tf),
+                    use_lki: true,
+                } => {
+                    assert_eq!(tf.properties, vec![expected_prop]);
+                }
+                other => panic!(
+                    "expected TargetMatchesFilter({expected_prop:?}, lki=true), got {other:?}"
+                ),
             }
-            other => panic!("expected TargetMatchesFilter(Attacking, lki=true), got {other:?}"),
         }
     }
 
