@@ -58,10 +58,8 @@ pub(crate) struct TriggerModifiers {
     pub(crate) intervening_if: Option<TriggerCondition>,
     /// CR 608.2k: Trigger subject for pronoun resolution in effect text.
     pub(crate) trigger_subject: TargetFilter,
-    /// Whether "for the first time each turn" was stripped from condition text.
-    pub(crate) first_time_each_turn: bool,
-    /// Whether "for the first time during each of their turns" was stripped from condition text.
-    pub(crate) first_time_each_turn_per_opponent: bool,
+    /// The limit on how many times this trigger can fire (e.g., once per turn, once per opponent per turn).
+    pub(crate) first_time_limit: Option<FirstTimeLimit>,
     /// Constraint parsed from full trigger text.
     pub(crate) constraint: Option<TriggerConstraint>,
     /// Whether effect text contains "up to one".
