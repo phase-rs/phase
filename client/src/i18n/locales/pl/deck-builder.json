@@ -33,7 +33,8 @@
   "tabs": {
     "ariaLabel": "Powierzchnia kreatora talii",
     "deck": "Talia",
-    "info": "Informacje"
+    "info": "Informacje",
+    "playtest": "Playtest"
   },
   "toolbar": {
     "menu": "Menu",
@@ -229,5 +230,19 @@
     "minimumCount": "Talia ma {{count}} kart (minimum 60)",
     "maxCopies": "{{name}}: {{count}} kopii (maks. 4)",
     "companionInMain": "{{name}} jest twoim towarzyszem, ale znajduje się też w talii głównej — to narusza jego warunek budowy talii. Usuń go z talii głównej, aby użyć go jako towarzysza."
+  },
+  "playtest": {
+    "title": "Goldfish playtest",
+    "subtitle": "Sample opening hands or launch a solo game against the AI with this list — no deck save required.",
+    "sampleHand": "Sample opening hand",
+    "sampleHandHint": "Random seven from your main deck (display preview only).",
+    "reshuffle": "Reshuffle",
+    "goldfish": "Launch goldfish game",
+    "goldfishHint": "Starts a local {{count}}-card game vs AI using your current list and format.",
+    "difficulty": "AI difficulty",
+    "difficultyEasy": "Easy",
+    "difficultyMedium": "Medium",
+    "difficultyHard": "Hard",
+    "launch": "Launch game"
   }
 }

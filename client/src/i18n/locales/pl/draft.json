@@ -334,5 +334,22 @@
     "leave": "Opuść",
     "startDraft": "Rozpocznij draft",
     "waitingForHost": "Oczekiwanie, aż gospodarz rozpocznie draft..."
+  },
+  "spectator": {
+    "eyebrow": "Draft spectator",
+    "title": "Watching draft {{code}}",
+    "missingCode": "Enter a draft code",
+    "connecting": "Connecting to draft…",
+    "errorGeneric": "Could not connect as spectator",
+    "backToLobby": "Back to lobby",
+    "banner": "Spectating this draft pod",
+    "omniscient": "Omniscient view",
+    "seats": "Seats",
+    "deckSubmitted": "deck in",
+    "standings": "Standings",
+    "pairings": "Pairings",
+    "pools": "Pools (omniscient)",
+    "poolSize": "{{count}} cards picked",
+    "seat": "Seat {{index}}"
   }
 }

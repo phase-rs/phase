@@ -997,7 +997,16 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
             }
 
             if is_face_down_battlefield {
-                apply_face_down_creature_characteristics(obj);
+                // CR 708.2a: This reload path only runs while `printed_ref` is
+                // still set (see the `obj.printed_ref.clone()` guard above);
+                // effect-driven face-down entries (Cyber-Controller) clear
+                // `printed_ref` and carry their `FaceDownProfile` characteristics
+                // directly, so they never reach here. The vanilla 2/2 default
+                // reproduces the morph/manifest reload behavior.
+                apply_face_down_creature_characteristics(
+                    obj,
+                    &crate::types::ability::FaceDownProfile::vanilla_2_2(),
+                );
                 changed_any = true;
                 changed_battlefield = true;
                 continue;

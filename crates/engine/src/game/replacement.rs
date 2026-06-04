@@ -450,6 +450,7 @@ fn discard_applier(
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            face_down_profile: None,
             applied,
         }),
         other => ApplyResult::Modified(other),
@@ -1002,6 +1003,13 @@ fn destroy_applier(
     ApplyResult::Prevented
 }
 
+// clippy::result_large_err: both arms of this Result carry a `ProposedEvent`
+// (the replacement pipeline returns the modified event on success and the
+// unmodified event in `ApplyResult::Modified` on the no-op path), so the Err
+// size is inherent to the design — boxing one arm of every applier would
+// ripple across the whole pipeline. The `ZoneChange` variant is the largest
+// `ProposedEvent` shape; see the note on `ProposedEvent::ZoneChange.face_down_profile`.
+#[allow(clippy::result_large_err)]
 fn apply_shield_counter_replacement(
     state: &mut GameState,
     event: ProposedEvent,
@@ -1936,6 +1944,9 @@ fn empty_mana_pool_applier(
 /// `Keep` (CR 614.6, `StepEndManaAction::Retain`) or `Recolor(_)`
 /// (CR 614.1a, `StepEndManaAction::Transform(_)`). Records the handler on
 /// the event's `applied` set so CR 614.5 prevents re-application.
+// clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
+// arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[allow(clippy::result_large_err)]
 fn apply_empty_mana_pool_replacement(
     state: &mut GameState,
     proposed: ProposedEvent,
@@ -3748,6 +3759,9 @@ fn optional_decline_is_noop(
     tap_already && counters_already && redirect_noop
 }
 
+// clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
+// arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[allow(clippy::result_large_err)]
 fn apply_single_replacement(
     state: &mut GameState,
     mut proposed: ProposedEvent,
@@ -4887,6 +4901,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(event) = result else {
@@ -4916,6 +4931,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                face_down_profile: None,
             },
         ))
     }
@@ -5973,6 +5989,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
 
         let result = replace_event(&mut state, proposed.clone(), &mut events);
@@ -6178,6 +6195,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ))
             .destination_zone(Zone::Graveyard)
@@ -6931,6 +6949,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
 
         let replaced = apply_single_replacement(

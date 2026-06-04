@@ -643,6 +643,10 @@ pub fn handle_foretell(
             turn_foretold: state.turn_number,
         });
     }
+    events.push(GameEvent::Foretold {
+        player_id: player,
+        object_id,
+    });
 
     Ok(WaitingFor::Priority { player })
 }
@@ -6660,6 +6664,33 @@ fn continue_with_prepared(
                 prepared.mana_cost,
                 Some(prepared.base_mana_cost.clone()),
                 casualty_cost,
+                SpellCostSource::Other,
+                prepared.casting_variant,
+                prepared.cast_timing_permission,
+                prepared
+                    .ability_def
+                    .as_ref()
+                    .and_then(|a| a.distribute.clone()),
+                prepared.origin_zone,
+                prepared.payment_mode,
+                events,
+            );
+        }
+
+        // CR 702.56a: Replicate is a repeatable optional additional cost, so it
+        // must be declared before targets are chosen just like Casualty.
+        if let Some(replicate_cost) =
+            casting_costs::effective_replicate_additional_cost(state, player, prepared.object_id)
+        {
+            return casting_costs::begin_optional_cost_before_targets(
+                state,
+                player,
+                prepared.object_id,
+                prepared.card_id,
+                resolved,
+                prepared.mana_cost,
+                Some(prepared.base_mana_cost.clone()),
+                replicate_cost,
                 SpellCostSource::Other,
                 prepared.casting_variant,
                 prepared.cast_timing_permission,
@@ -17838,6 +17869,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         ));
         spell.casting_options.push(
@@ -22026,6 +22058,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 )
                 .sub_ability(
@@ -22042,6 +22075,7 @@ mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            face_down_profile: None,
                         },
                     )
                     .condition(AbilityCondition::AdditionalCostPaidInstead),
@@ -22784,6 +22818,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ));
             obj.modal = Some(crate::types::ability::ModalChoice {
@@ -22947,6 +22982,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ));
             // Mode 1: return target creature with mana value X or less to its owner's hand.
@@ -22972,6 +23008,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ));
             obj.modal = Some(crate::types::ability::ModalChoice {
@@ -23354,6 +23391,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             let mode1 = AbilityDefinition::new(
@@ -23369,6 +23407,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             Arc::make_mut(&mut obj.abilities).push(
@@ -31462,6 +31501,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));

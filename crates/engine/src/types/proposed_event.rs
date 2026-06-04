@@ -6,7 +6,7 @@ use crate::game::game_object::AttachTarget;
 
 use super::counter::CounterType;
 
-use super::ability::{Duration, StaticDefinition, TargetRef};
+use super::ability::{Duration, FaceDownProfile, StaticDefinition, TargetRef};
 use super::card_type::{CoreType, Supertype};
 use super::identifiers::ObjectId;
 use super::keywords::Keyword;
@@ -157,6 +157,14 @@ pub enum ProposedEvent {
         /// Set by "return ... transformed" effects.
         #[serde(default)]
         enter_transformed: bool,
+        /// CR 708.2a + CR 708.3: When `Some`, the object is turned face down
+        /// (before entering, CR 708.3) with these characteristics as it enters
+        /// the battlefield. Carried through the replacement pipeline so the
+        /// face-down state is established before ETB triggers would fire.
+        /// Boxed so this rarely-set field doesn't inflate the size of every
+        /// `ProposedEvent` (and the `Result<_, ProposedEvent>` pipeline).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face_down_profile: Option<Box<FaceDownProfile>>,
         applied: HashSet<ReplacementId>,
     },
     Damage {
@@ -361,6 +369,7 @@ impl ProposedEvent {
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            face_down_profile: None,
             applied: HashSet::new(),
         }
     }

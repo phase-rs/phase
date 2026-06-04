@@ -1750,6 +1750,7 @@ fn lander_ability() -> AbilityDefinition {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )
         // CR 111.10u: then shuffle the controller's library.

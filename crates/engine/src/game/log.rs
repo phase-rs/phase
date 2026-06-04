@@ -129,7 +129,8 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::CardsDrawn { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Cycled { .. }
-        | GameEvent::CardsRevealed { .. } => LogCategory::Zone,
+        | GameEvent::CardsRevealed { .. }
+        | GameEvent::Foretold { .. } => LogCategory::Zone,
 
         GameEvent::LifeChanged { .. } => LogCategory::Life,
 
@@ -1075,6 +1076,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *host),
             text(" revoked debug actions from "),
             player_seg(state, *player_id),
+        ],
+        GameEvent::Foretold {
+            player_id,
+            object_id,
+        } => vec![
+            player_seg(state, *player_id),
+            text(" foretold "),
+            card_seg(state, *object_id),
         ],
         // CR 106.12a: `TappedForMana` is the per-resolution trigger event for
         // `TapsForMana` matchers. The per-unit `ManaAdded` events already

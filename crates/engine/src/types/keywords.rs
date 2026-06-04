@@ -741,7 +741,12 @@ pub enum Keyword {
     /// CR 702.166a: Bargain — you may sacrifice an artifact, enchantment, or token
     /// as an additional cost to cast this spell.
     Bargain,
-    /// CR 702.43a: Sunburst — enters with a counter for each color of mana spent to cast it.
+    /// CR 702.44a: Sunburst — as an object enters the battlefield as a resolving
+    /// spell, it enters with a +1/+1 counter (if entering as a creature) or a
+    /// charge counter (otherwise) for each color of mana spent to cast it. Wired
+    /// at runtime by `synthesize_sunburst` as an ETB-counter replacement whose
+    /// count is the distinct-colors-spent metric. Per CR 702.44d each instance
+    /// works separately.
     Sunburst,
     /// CR 702.72a: Champion a [type] — exile a creature of the specified type you control
     /// when this enters; return it when this leaves.
@@ -795,16 +800,18 @@ pub enum Keyword {
     /// the generic activated-ability dispatch.
     Station,
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (no copy-on-cast hook reads it).
+    /// RUNTIME: `database::synthesis::synthesize_replicate` — repeatable
+    /// optional additional cost (`AdditionalCost::Optional { repeatable: true }`)
+    /// plus a `SpellCast` trigger whose execute is
+    /// `replicate_copy_ability_definition()` (a `CopySpell` with
+    /// `repeat_for = AdditionalCostPaymentCount`).
     /// CR 702.56a: Replicate {cost} — additional-cost-on-cast copy
     /// mechanic. "As an additional cost to cast this spell, you may pay
     /// [cost] any number of times" + "When you cast this spell, if a
     /// replicate cost was paid for it, copy it for each time its
     /// replicate cost was paid. If the spell has any targets, you may
     /// choose new targets for any of the copies." Carries the per-copy
-    /// mana cost; runtime semantics are not yet implemented (no
-    /// copy-on-cast hook reads this keyword).
+    /// mana cost.
     Replicate(ManaCost),
 
     /// RUNTIME: TODO — converter accepts this keyword but engine has no
@@ -842,14 +849,8 @@ pub enum Keyword {
     /// (combat-damage-this-turn predicate) is not yet wired.
     Freerunning(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (spell-cast trigger not wired).
-    /// CR 702.191a: Increment — triggered ability. "Whenever you cast a
-    /// spell, if this permanent is a creature and the amount of mana
-    /// spent to cast that spell is greater than this creature's power
-    /// or this creature's toughness, put a +1/+1 counter on this
-    /// creature." Bare keyword; ETB / spell-cast trigger is not yet
-    /// wired.
+    /// CR 702.191a: Increment — spell-cast trigger synthesized in
+    /// `database::synthesis::synthesize_increment`.
     Increment,
 
     /// RUNTIME: TODO — converter accepts this keyword but engine has no
@@ -1123,16 +1124,20 @@ impl Keyword {
     ///   triggered abilities whose instance count is consumed by `for _ in 0..count`
     ///   loops in `game/triggers.rs`.
     /// - Myriad (CR 702.116a: a triggered ability; CR 702.116b: each instance
-    ///   triggers separately) / Exalted (CR 702.83a: a triggered ability;
+    ///   triggers separately) / Increment (CR 702.191a: a triggered ability;
+    ///   CR 702.191b: each instance triggers separately) / Exalted (CR 702.83a:
+    ///   a triggered ability;
     ///   per-instance multiplicity grounded in the general CR 113.2c rule, since
     ///   CR 702.83 has no card-specific multiplicity clause) — one trigger is
     ///   installed per face `Keyword` instance by
     ///   `KeywordTriggerInstaller::install_matching`, invoked from `synthesize_all`.
     ///
     /// Returns `false` for everything else, including:
-    /// - CR 702.44d Sunburst — also "works separately" per instance, but is a
-    ///   STATIC ability never printed as a repeated bare word and not
-    ///   instance-counted, so it is out of this class.
+    /// - CR 702.44d Sunburst — also "works separately" per instance, but it is
+    ///   an as-enters STATIC ability, so its per-instance multiplicity is
+    ///   realized by `synthesize_sunburst` (one ETB-counter replacement per
+    ///   `Keyword::Sunburst`), not by the runtime trigger installer this
+    ///   predicate gates. Out of this class for that reason.
     /// - Prowess — runtime presence is a boolean `has_prowess` check, so counting
     ///   instances would be inert (separate deeper bug, not addressed here).
     pub fn instances_function_separately(&self) -> bool {
@@ -1141,6 +1146,7 @@ impl Keyword {
             Keyword::Cascade
                 | Keyword::Storm
                 | Keyword::Myriad
+                | Keyword::Increment
                 | Keyword::Exalted
                 | Keyword::DoubleTeam
         )
@@ -1740,6 +1746,9 @@ impl FromStr for Keyword {
                 "backup" => return Ok(Keyword::Backup(p.parse().unwrap_or(1))),
                 // CR 702.157
                 "squad" => return Ok(Keyword::Squad(parse_keyword_mana_cost(p))),
+                // CR 702.56a: Replicate {cost} — repeatable optional additional
+                // cost paid at cast; copy the spell once per payment.
+                "replicate" => return Ok(Keyword::Replicate(parse_keyword_mana_cost(p))),
                 // CR 702.29: Typecycling — "typecycling:{subtype}:{cost}"
                 "typecycling" => {
                     if let Some(colon_pos) = p.find(':') {
@@ -1876,6 +1885,7 @@ impl FromStr for Keyword {
             "totemarmor" => Ok(Keyword::TotemArmor),
             "evolve" => Ok(Keyword::Evolve),
             "extort" => Ok(Keyword::Extort),
+            "increment" => Ok(Keyword::Increment),
             "exploit" => Ok(Keyword::Exploit),
             "explore" => Ok(Keyword::Explore),
             "ascend" => Ok(Keyword::Ascend),
@@ -2157,6 +2167,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Flanking" => Ok(Keyword::Flanking),
         "Evolve" => Ok(Keyword::Evolve),
         "Extort" => Ok(Keyword::Extort),
+        "Increment" => Ok(Keyword::Increment),
         "Exploit" => Ok(Keyword::Exploit),
         "Explore" => Ok(Keyword::Explore),
         "Ascend" => Ok(Keyword::Ascend),
@@ -2508,6 +2519,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         }
         // CR 702.157
         "Squad" => Ok(Keyword::Squad(mana(data)?)),
+        // CR 702.56a: Replicate {cost}
+        "Replicate" => Ok(Keyword::Replicate(mana(data)?)),
         // CR 702.29
         "Typecycling" => {
             let obj = data.as_object().ok_or("Typecycling: expected object")?;
@@ -3204,6 +3217,15 @@ mod tests {
         ));
     }
 
+    /// CR 702.191: MTGJSON keyword ingestion must parse Increment, not Unknown.
+    #[test]
+    fn increment_from_str_and_keyword_from_tagged() {
+        assert_eq!(Keyword::from_str("Increment").unwrap(), Keyword::Increment);
+        assert_eq!(Keyword::from_str("increment").unwrap(), Keyword::Increment);
+        let kw = keyword_from_tagged("Increment", &serde_json::Value::Null).unwrap();
+        assert_eq!(kw, Keyword::Increment);
+    }
+
     #[test]
     fn parse_hexproof_from_keywords() {
         // CR 702.11d: "hexproof from [quality]" variants
@@ -3351,6 +3373,7 @@ mod tests {
             "Totem Armor",
             "Evolve",
             "Extort",
+            "Increment",
             "Exploit",
             "Explore",
             "Ascend",

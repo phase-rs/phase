@@ -235,6 +235,16 @@ pub(crate) fn attachment_illegality(
         return Some(AttachIllegality::Prohibited);
     }
 
+    // CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction. An
+    // Aura/Equipment that "can be attached only to {filter}" may only attach to a
+    // host matching that filter. Unlike the `CantBe*` host prohibitions above
+    // (read from the HOST's statics), this restriction is carried by the
+    // ATTACHMENT itself, so a candidate host failing the filter makes the attach
+    // illegal (CR 301.5b / CR 303.4j: the attachment doesn't move).
+    if !attachment_satisfies_restrictions(state, attachment_id, host_id) {
+        return Some(AttachIllegality::Prohibited);
+    }
+
     // CR 702.16c: Protection from a quality prevents Auras of that quality from
     // being attached to the protected permanent.
     // CR 702.16d: Protection from a quality prevents Equipment or Fortifications
@@ -249,6 +259,35 @@ pub(crate) fn attachment_illegality(
     }
 
     None
+}
+
+/// CR 301.5 + CR 303.4 + CR 701.3a: True unless `host_id` is forbidden by a
+/// positive "can be attached only to {filter}" restriction on `attachment_id`.
+///
+/// The restriction is a `StaticMode::AttachmentRestriction { filter }` carried by
+/// the attachment's own `static_definitions`. By analogy to CR 702.5c (an Aura
+/// with multiple enchant instances must satisfy ALL of them), every active
+/// restriction must match: the host is legal only if it matches the `filter` of
+/// every `AttachmentRestriction` the attachment has. An attachment with no such
+/// restriction is unconstrained here and returns `true`.
+fn attachment_satisfies_restrictions(
+    state: &GameState,
+    attachment_id: ObjectId,
+    host_id: ObjectId,
+) -> bool {
+    let Some(attachment) = state.objects.get(&attachment_id) else {
+        return true;
+    };
+    let ctx = FilterContext::from_source(state, attachment_id);
+    crate::game::functioning_abilities::active_static_definitions(state, attachment).all(|def| {
+        match &def.mode {
+            crate::types::statics::StaticMode::AttachmentRestriction { filter } => {
+                matches_target_filter(state, host_id, filter, &ctx)
+            }
+            // Any other static imposes no positive attachment constraint.
+            _ => true,
+        }
+    })
 }
 
 /// Returns `Some(reason)` when a player host forbids `attachment` via
@@ -1054,5 +1093,116 @@ mod tests {
         attach_to(&mut state, equipment2, cant_be_attached);
         assert_eq!(state.objects.get(&aura2).unwrap().attached_to, None);
         assert_eq!(state.objects.get(&equipment2).unwrap().attached_to, None);
+    }
+
+    /// Add a positive `AttachmentRestriction` static to an attachment, carrying
+    /// the given legal-host `TargetFilter`.
+    fn apply_attach_restriction(state: &mut GameState, id: ObjectId, filter: TargetFilter) {
+        state.objects.get_mut(&id).unwrap().static_definitions.push(
+            StaticDefinition::new(StaticMode::AttachmentRestriction { filter })
+                .affected(TargetFilter::SelfRef),
+        );
+    }
+
+    /// Build a creature with the given power on the battlefield.
+    fn spawn_creature_with_power(state: &mut GameState, name: &str, power: i32) -> ObjectId {
+        let id = spawn_creature(state, name);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.power = Some(power);
+        obj.toughness = Some(power.max(1));
+        crate::game::layers::mark_layers_full(state);
+        id
+    }
+
+    #[test]
+    fn attachment_restriction_power_ge_blocks_weak_host_allows_strong_host() {
+        // CR 301.5b + CR 701.3a: Strata Scythe class — Equipment that "can be
+        // attached only to a creature with power 3 or greater" may not attach to a
+        // power-2 creature, but may attach to a power-3 creature. The restriction
+        // lives on the ATTACHMENT, not the host (contrast CantBeEquipped).
+        let mut state = setup();
+        let equipment = spawn_with_subtype(&mut state, "Strata Scythe", "Equipment");
+        let power_filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature().properties(vec![
+                crate::types::ability::FilterProp::PtComparison {
+                    stat: crate::types::ability::PtStat::Power,
+                    scope: crate::types::ability::PtValueScope::Current,
+                    comparator: crate::types::ability::Comparator::GE,
+                    value: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                },
+            ]),
+        );
+        apply_attach_restriction(&mut state, equipment, power_filter);
+
+        let weak = spawn_creature_with_power(&mut state, "Grizzly Bears", 2);
+        let strong = spawn_creature_with_power(&mut state, "Hill Giant", 3);
+
+        // Non-matching host (power 2) is an illegal attach target — attach is a no-op.
+        assert_eq!(
+            attachment_illegality(&state, equipment, weak),
+            Some(AttachIllegality::Prohibited),
+            "power-2 host must fail the power>=3 attachment restriction"
+        );
+        assert!(!can_attach_to_object(&state, equipment, weak));
+        attach_to(&mut state, equipment, weak);
+        assert_eq!(
+            state.objects.get(&equipment).unwrap().attached_to,
+            None,
+            "Equipment must not move onto a non-matching host (CR 701.3b)"
+        );
+
+        // Matching host (power 3) is a legal attach target.
+        assert_eq!(attachment_illegality(&state, equipment, strong), None);
+        assert!(can_attach_to_object(&state, equipment, strong));
+        attach_to(&mut state, equipment, strong);
+        assert_eq!(
+            state.objects.get(&equipment).unwrap().attached_to,
+            Some(AttachTarget::Object(strong)),
+            "Equipment must attach onto a host matching the restriction filter"
+        );
+        assert!(state
+            .objects
+            .get(&strong)
+            .unwrap()
+            .attachments
+            .contains(&equipment));
+    }
+
+    #[test]
+    fn attachment_restriction_legendary_gates_aura_host() {
+        // CR 303.4j + CR 701.3a: Konda's Banner class — an attachment restricted
+        // to "a legendary creature" may not attach to a nonlegendary host.
+        let mut state = setup();
+        let aura = spawn_with_subtype(&mut state, "Konda's Banner", "Aura");
+        let legendary_filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature().properties(vec![
+                crate::types::ability::FilterProp::HasSupertype {
+                    value: crate::types::card_type::Supertype::Legendary,
+                },
+            ]),
+        );
+        apply_attach_restriction(&mut state, aura, legendary_filter);
+
+        let nonlegendary = spawn_creature(&mut state, "Bear");
+        let legendary = spawn_creature(&mut state, "Konda, Lord of Eiganjo");
+        state
+            .objects
+            .get_mut(&legendary)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(crate::types::card_type::Supertype::Legendary);
+        crate::game::layers::mark_layers_full(&mut state);
+
+        assert!(!can_attach_to_object(&state, aura, nonlegendary));
+        attach_to(&mut state, aura, nonlegendary);
+        assert_eq!(state.objects.get(&aura).unwrap().attached_to, None);
+
+        assert!(can_attach_to_object(&state, aura, legendary));
+        attach_to(&mut state, aura, legendary);
+        assert_eq!(
+            state.objects.get(&aura).unwrap().attached_to,
+            Some(AttachTarget::Object(legendary))
+        );
     }
 }

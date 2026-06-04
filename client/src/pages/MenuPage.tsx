@@ -4,6 +4,7 @@ import { useNavigate } from "react-router";
 
 import type { GameState } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
+import { PreviewBadge } from "../components/chrome/PreviewBadge";
 import { LoadGameStateModal } from "../components/menu/LoadGameStateModal";
 import { HomeDashboard } from "../components/menu/home/HomeDashboard";
 import { isTauri } from "../services/sidecar";
@@ -61,6 +62,7 @@ export function MenuPage() {
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
+      <PreviewBadge />
       <HomeDashboard />
 
       <div className="mx-auto flex w-full max-w-[1180px] flex-col items-center gap-4 px-7 pb-12">
@@ -90,7 +92,11 @@ export function MenuPage() {
           </button>
         )}
 
-        <p className="text-[11px] tracking-wide text-slate-600">matt evans :: 2026</p>
+        <p className="max-w-2xl text-balance text-center text-[0.68rem] leading-5 text-slate-500/70">
+          {t("shell.disclaimer")}
+        </p>
+
+        <p className="text-[11px] tracking-wide text-slate-600">made with ❤️ by matt evans :: 2026</p>
       </div>
 
       <LoadGameStateModal

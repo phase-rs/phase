@@ -12446,6 +12446,7 @@ mod trigger_target_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             Vec::new(),
             trigger_creature,
@@ -12560,6 +12561,7 @@ mod trigger_target_tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(1),
@@ -13518,6 +13520,7 @@ mod exile_return_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(victim_id)],
             source_id,
@@ -14409,6 +14412,7 @@ mod phase_trigger_regression_tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source_id,
@@ -17798,6 +17802,7 @@ When this creature enters or dies, create a 1/1 red Goblin creature token.";
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             let reflexive = crate::types::ability::AbilityDefinition {
@@ -17988,6 +17993,7 @@ When this creature enters or dies, create a 1/1 red Goblin creature token.";
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 )
             };
