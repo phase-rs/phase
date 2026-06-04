@@ -241,6 +241,7 @@ fn flying_cannot_be_blocked_by_ground_creature() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker_id, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
 
@@ -352,6 +353,7 @@ fn vigilance_attacker_does_not_tap() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker_id, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("Vigilance creature should be able to attack");
 

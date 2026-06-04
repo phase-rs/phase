@@ -192,6 +192,12 @@ pub fn resolve(
                     obj.controller == chooser
                         && !obj.is_emblem
                         && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
+                        && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                            state,
+                            ability,
+                            *id,
+                            chooser,
+                        )
                 })
             })
             .collect();
@@ -305,6 +311,12 @@ pub fn resolve(
         }
 
         let player_id = obj.controller;
+
+        if crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+            state, ability, obj_id, player_id,
+        ) {
+            continue;
+        }
 
         match sacrifice::sacrifice_permanent(state, obj_id, player_id, events) {
             Ok(SacrificeOutcome::Complete) => {}

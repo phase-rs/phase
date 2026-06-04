@@ -27,9 +27,10 @@ use crate::parser::oracle_effect::parse_controls_permanent_object;
 use crate::parser::oracle_target::{parse_target, parse_type_phrase, parse_type_phrase_with_ctx};
 use crate::parser::oracle_util::merge_or_filters;
 use crate::types::ability::{
-    AggregateFunction, Comparator, ControllerRef, CountScope, DevotionColors, FilterProp,
-    ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
-    QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    AggregateFunction, AttackScope, AttackSubject, Comparator, ControllerRef, CountScope,
+    DevotionColors, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
+    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 #[cfg(test)]
 use crate::types::counter::CounterType;
@@ -329,7 +330,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         // CR 508.6: "opponents you attacked [this turn]" (Militant Angel).
         if parse_opponents_attacked_clause(rest).is_ok() {
             return Some(QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentAttackedThisTurn,
+                filter: PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisTurn,
+                },
             });
         }
         // CR 109.4 + CR 109.5: "opponents who control <filter>" / "opponents who
@@ -1693,10 +1697,10 @@ fn parse_for_each_clause_expr_with_parser(
     Some(QuantityExpr::Sum { exprs })
 }
 
-/// CR 702.23a: "for each [object] beyond the first" composes a
-/// normal object-count quantity with an offset of -1. This preserves the
-/// shared `for each` grammar and keeps "beyond the first" as an expression
-/// modifier rather than adding a leaf-level `QuantityRef` variant.
+/// CR 702.23a + CR 107.1b: "for each [object] beyond the first" composes a
+/// normal object-count quantity with an offset of -1, clamped at zero. This
+/// preserves the shared `for each` grammar and keeps "beyond the first" as an
+/// expression modifier rather than adding a leaf-level `QuantityRef` variant.
 fn parse_for_each_beyond_first_clause_expr_with_parser(
     input: &str,
     parse_clause: impl Fn(&str) -> Option<QuantityRef>,
@@ -1708,11 +1712,15 @@ fn parse_for_each_beyond_first_clause_expr_with_parser(
     .parse(input)
     .ok()?;
     let qty = parse_clause(base_clause)?;
+    let count_minus_one = QuantityExpr::Offset {
+        inner: Box::new(QuantityExpr::Ref { qty }),
+        offset: -1,
+    };
     Some((
         input,
-        QuantityExpr::Offset {
-            inner: Box::new(QuantityExpr::Ref { qty }),
-            offset: -1,
+        QuantityExpr::ClampMin {
+            inner: Box::new(count_minus_one),
+            minimum: 0,
         },
     ))
 }
@@ -1953,7 +1961,10 @@ fn parse_for_each_clause_with_they_controller(
     // CR 508.6: "opponent you attacked this turn".
     if parse_opponents_attacked_clause(clause).is_ok() {
         return Some(QuantityRef::PlayerCount {
-            filter: PlayerFilter::OpponentAttackedThisTurn,
+            filter: PlayerFilter::OpponentAttacked {
+                subject: AttackSubject::You,
+                scope: AttackScope::ThisTurn,
+            },
         });
     }
 
@@ -2548,7 +2559,7 @@ mod tests {
     }
 
     /// CR 508.6: "the number of opponents you attacked [this turn]" (Militant
-    /// Angel) routes to the dedicated `PlayerCount { OpponentAttackedThisTurn }`.
+    /// Angel) routes to `PlayerCount { OpponentAttacked { You, ThisTurn } }`.
     /// The trailing " this turn" is optional (durations may be stripped
     /// upstream), and the singular "opponent" form hits the same arm.
     #[test]
@@ -2561,21 +2572,27 @@ mod tests {
             assert_eq!(
                 parse_quantity_ref(phrase),
                 Some(QuantityRef::PlayerCount {
-                    filter: PlayerFilter::OpponentAttackedThisTurn,
+                    filter: PlayerFilter::OpponentAttacked {
+                        subject: AttackSubject::You,
+                        scope: AttackScope::ThisTurn,
+                    },
                 }),
-                "phrase {phrase:?} must route to OpponentAttackedThisTurn"
+                "phrase {phrase:?} must route to OpponentAttacked {{ You, ThisTurn }}"
             );
         }
     }
 
     /// CR 508.6: the for-each clause form ("opponent you attacked this turn")
-    /// reaches the same `PlayerCount { OpponentAttackedThisTurn }`.
+    /// reaches the same `PlayerCount { OpponentAttacked { You, ThisTurn } }`.
     #[test]
     fn for_each_opponent_you_attacked_is_player_count() {
         assert_eq!(
             parse_for_each_clause("opponent you attacked this turn"),
             Some(QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentAttackedThisTurn,
+                filter: PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisTurn,
+                },
             }),
         );
     }
@@ -4584,10 +4601,14 @@ mod tests {
     }
 
     #[test]
-    fn for_each_beyond_the_first_offsets_base_count() {
+    fn for_each_beyond_the_first_clamps_offset_base_count() {
         let result = parse_for_each_clause_expr("creature blocking it beyond the first");
-        let Some(QuantityExpr::Offset { inner, offset }) = result else {
-            panic!("expected Offset, got {result:?}");
+        let Some(QuantityExpr::ClampMin { inner, minimum }) = result else {
+            panic!("expected ClampMin, got {result:?}");
+        };
+        assert_eq!(minimum, 0);
+        let QuantityExpr::Offset { inner, offset } = *inner else {
+            panic!("expected clamped Offset, got {inner:?}");
         };
         assert_eq!(offset, -1);
         match inner.as_ref() {

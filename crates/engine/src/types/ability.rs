@@ -3502,6 +3502,25 @@ pub enum PlayerRelation {
     All,
 }
 
+/// CR 506.2 + CR 508.1b: Whose attacks the "opponents attacked" player set is
+/// measured over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttackSubject {
+    /// The ability's controller — "opponents you attacked".
+    You,
+    /// The ability's source creature — "opponents this creature attacked".
+    Source,
+}
+
+/// CR 508.6: The time window over which "attacked [a player]" is measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttackScope {
+    /// Across the whole turn, accumulated over every combat (CR 508.5).
+    ThisTurn,
+    /// Within the current combat only (CR 702.121a Melee).
+    ThisCombat,
+}
+
 /// A filter matching players by game-state conditions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3531,17 +3550,20 @@ pub enum PlayerFilter {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<Box<TargetFilter>>,
     },
-    /// CR 508.6: A player has "attacked [a player]" if they declared one or more
-    /// creatures attacking that player. Each opponent the controller attacked this
-    /// turn, resolved against `state.attacked_defenders_this_turn[controller]`.
-    /// Used by "the number of opponents you attacked this turn" (Militant Angel).
-    /// (CR 508.1b: declare-attackers announcement; CR 506.2: active = attacking player.)
-    OpponentAttackedThisTurn,
-    /// CR 508.6: Each opponent the ability's source creature attacked this turn.
-    /// Uses `state.creature_attacked_defenders_this_turn[source_id]` for
-    /// source-specific text like "each player this creature attacked this turn"
-    /// (Angel of Destiny).
-    OpponentAttackedBySourceThisTurn,
+    /// CR 508.6: Each opponent that `subject` attacked (declared one or more
+    /// creatures attacking, per CR 508.1b; CR 508.5 resolves planeswalker/battle
+    /// attacks to the controller/protector) within `scope`. Resolved via
+    /// `GameState::opponent_attacked`: turn scope reads
+    /// `attacked_defenders_this_turn` / `creature_attacked_defenders_this_turn`;
+    /// combat scope reads the current combat's declaration ledgers.
+    ///
+    /// Subsumes the former `OpponentAttackedThisTurn` (`subject: You` — Militant
+    /// Angel) and `OpponentAttackedBySourceThisTurn` (`subject: Source` — Angel of
+    /// Destiny), and adds the combat-scoped form used by Melee (CR 702.121a).
+    OpponentAttacked {
+        subject: AttackSubject,
+        scope: AttackScope,
+    },
     /// All players.
     All,
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
@@ -3673,6 +3695,15 @@ pub enum QuantityExpr {
         inner: Box<QuantityExpr>,
         offset: i32,
     },
+    /// CR 107.1b: If a calculation that determines an effect result would be
+    /// negative, zero is used instead. Generalized as a lower-bound clamp so
+    /// phrases like "for each [object] beyond the first" can compose
+    /// `ObjectCount - 1` without producing a negative count when the live set
+    /// has shrunk before resolution.
+    ClampMin {
+        inner: Box<QuantityExpr>,
+        minimum: i32,
+    },
     /// "Twice the number of X" / "N times X" / negation via factor: -1.
     Multiply {
         factor: i32,
@@ -3768,6 +3799,7 @@ impl QuantityExpr {
                 qty: QuantityRef::Variable { name },
             } => name == "X",
             QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::UpTo { max: inner }
@@ -3844,6 +3876,31 @@ impl Comparator {
             Comparator::NE => Comparator::EQ,
         }
     }
+}
+
+/// CR 508.1 / CR 508.1b: Subject axis for counting members of a triggering
+/// `AttackersDeclared` event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AttackersDeclaredCountSubject {
+    /// Count attackers whose controller matches `scope` relative to the trigger
+    /// controller. `filter` is the optional condition-level type axis (CR
+    /// 508.1): when `Some(f)`, only attackers whose object matches `f` are
+    /// counted, so "you attack with two or more Dinosaurs" fires only on ≥2
+    /// Dinosaurs — not on one Dinosaur plus an unrelated attacker. When `None`,
+    /// every attacker in the scoped batch is counted (the untyped "attack with
+    /// two or more creatures" behavior).
+    Controller {
+        scope: ControllerRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
+    /// Count attackers whose announced attack target matches a scoped player,
+    /// planeswalker, battle, or combined attack-target class.
+    AttackTarget {
+        controller: ControllerRef,
+        attacked: crate::types::triggers::AttackTargetFilter,
+    },
 }
 
 /// CR 208: Selects which creature P/T metric a `FilterProp::PtComparison`
@@ -10417,35 +10474,23 @@ pub enum TriggerCondition {
     /// resolution-time per CR 603.4.
     ChosenLabelIs { label: String },
 
-    /// CR 508.1 + CR 603.2c + CR 603.4: Intervening-if for "attacks with N or more creatures"
-    /// triggers. Reads the triggering `AttackersDeclared` event and counts attackers whose
-    /// controller matches `scope` relative to the trigger's controller:
-    ///   - `ControllerRef::You` → attackers controlled by the trigger controller.
-    ///   - `ControllerRef::Opponent` → attackers controlled by a player other than the
-    ///     trigger controller. "Another player attacks with 2+" uses this scope; all
-    ///     attackers in the batch share one attacking player (the active player per
-    ///     CR 506.2), so counting "≠ trigger controller" is equivalent to counting the
-    ///     triggering player's creatures.
+    /// CR 506.2 + CR 508.1 + CR 508.1b + CR 603.4: Intervening-if comparison
+    /// over the current attack declaration. Handles "attacks with N or more
+    /// creatures", "none of those creatures attacked you", and attack-target
+    /// count gates such as "two or more of those creatures are attacking you
+    /// and/or planeswalkers you control."
     ///
-    /// `filter` is the condition-level type axis (CR 508.1): when `Some(f)`,
-    /// only attackers whose object matches `f` are counted, so "you attack with
-    /// two or more Dinosaurs" fires only on ≥2 Dinosaurs — not on one Dinosaur
-    /// plus an unrelated attacker. When `None`, every attacker in the scoped
-    /// batch is counted (the untyped "attack with two or more creatures"
-    /// behavior, preserved byte-for-byte).
-    ///
-    /// True when the count meets or exceeds `minimum`.
-    AttackersDeclaredMin {
-        scope: ControllerRef,
-        minimum: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        filter: Option<TargetFilter>,
+    /// The `subject` axis selects what is counted (attackers by controller, or
+    /// attacks by their announced target); the `Controller` subject also carries
+    /// the optional condition-level type filter (CR 508.1) so "you attack with
+    /// two or more Dinosaurs" counts only Dinosaur attackers. `comparator` and
+    /// `count` express the threshold (`GE 2` for "two or more", `EQ 0` for
+    /// "none of those creatures").
+    AttackersDeclaredCount {
+        subject: AttackersDeclaredCountSubject,
+        comparator: Comparator,
+        count: u32,
     },
-    /// CR 506.2 + CR 603.4: Intervening-if "if none of those creatures attacked you".
-    /// Reads the triggering `AttackersDeclared` event's per-attacker `AttackTarget` tuples
-    /// (CR 508.1b) and returns true iff no attacker in the batch targeted the trigger's
-    /// controller directly (`AttackTarget::Player(trigger_controller)`).
-    NoneOfAttackersTargetedYou,
 
     /// CR 121.1 + CR 504.1 + CR 603.4: "except the first one [you|they] draw in
     /// each of [your|their] draw steps" — the trigger fires for every card-draw
@@ -10693,6 +10738,10 @@ pub enum TriggerConstraint {
     /// CR 603.4: "This ability triggers only the first N times each turn." — generalizes
     /// OncePerTurn to arbitrary limits. OncePerTurn remains for backward compatibility.
     MaxTimesPerTurn { max: u32 },
+    /// CR 603.2: "for the first time during each of their turns" — fires once
+    /// per opponent per turn. Used by Valgavoth, Harrower of Souls: "Whenever
+    /// an opponent loses life for the first time during each of their turns, ..."
+    OncePerOpponentPerTurn,
 }
 
 /// CR 603.6c: source-zone constraint for one clause of a zone-change trigger.

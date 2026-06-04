@@ -166,14 +166,24 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::SelectTargets { targets } => {
             bound_list("SelectTargets.targets", targets.len())?;
         }
-        GameAction::DeclareAttackers { attacks } => {
+        GameAction::DeclareAttackers { attacks, bands } => {
             bound_list("DeclareAttackers.attacks", attacks.len())?;
+            // CR 702.22c: bound both the number of declared bands and the size
+            // of each individual band so a malicious client cannot send an
+            // unbounded nested payload.
+            bound_list("DeclareAttackers.bands", bands.len())?;
+            for (index, band) in bands.iter().enumerate() {
+                bound_list(&format!("DeclareAttackers.bands[{index}]"), band.len())?;
+            }
         }
         GameAction::DeclareBlockers { assignments } => {
             bound_list("DeclareBlockers.assignments", assignments.len())?;
         }
         GameAction::AssignCombatDamage { assignments, .. } => {
             bound_list("AssignCombatDamage.assignments", assignments.len())?;
+        }
+        GameAction::AssignBlockerDamage { assignments } => {
+            bound_list("AssignBlockerDamage.assignments", assignments.len())?;
         }
         GameAction::ReorderHand { order } => {
             bound_list("ReorderHand.order", order.len())?;

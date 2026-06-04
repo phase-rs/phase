@@ -306,6 +306,46 @@ impl FromStr for CastFrequency {
     }
 }
 
+/// CR 601.2a + CR 903.8: Which origin zones a continuous free-cast permission
+/// may replace the mana cost from.
+///
+/// The axis is separate from `CastFrequency`: Omniscience/Zaffai explicitly say
+/// "from your hand", while Dracogenesis omits a zone qualifier and therefore
+/// also reaches command-zone roles that are already authorized by CR 903.8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum CastFreeOrigin {
+    /// Explicit "from your hand" permissions.
+    #[default]
+    Hand,
+    /// No explicit origin qualifier. This does not create a new zone permission;
+    /// runtime casting still has to prove the object is in a built-in cast zone
+    /// (hand, or an already-authorized command-zone role).
+    DefaultCastPermission,
+}
+
+impl fmt::Display for CastFreeOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CastFreeOrigin::Hand => write!(f, "hand"),
+            CastFreeOrigin::DefaultCastPermission => write!(f, "default_cast_permission"),
+        }
+    }
+}
+
+impl FromStr for CastFreeOrigin {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "hand" => Ok(CastFreeOrigin::Hand),
+            "default_cast_permission" | "implicit_cast_zone" | "otherwise_castable" => {
+                Ok(CastFreeOrigin::DefaultCastPermission)
+            }
+            other => Err(format!("unknown CastFreeOrigin: {other}")),
+        }
+    }
+}
+
 /// CR 118.9 + CR 601.2a: The cost axis for `StaticMode::ExileCastPermission`.
 ///
 /// Sibling to `CastFrequency` and `CardPlayMode` — each axis of the exile-cast
@@ -577,6 +617,16 @@ pub enum StaticMode {
     CantSearchLibrary {
         cause: ProhibitionScope,
     },
+    /// CR 603.2 + CR 609.3: "Triggered abilities <scope> can't cause you to
+    /// sacrifice or exile <affected>." E.g., The Master, Multiplied — triggered
+    /// abilities you control can't cause you to sacrifice or exile creature
+    /// tokens you control. When a muzzled trigger would move an affected object
+    /// to exile or its controller's graveyard via sacrifice, that object is
+    /// skipped (CR 609.3: do as much as possible). Scope of muzzled abilities
+    /// rides on `cause`; scope of protected objects rides on `affected`.
+    CantCauseSacrificeOrExile {
+        cause: ProhibitionScope,
+    },
     CastWithFlash,
     /// CR 701.38d: While voting, the controller of this permanent may vote an
     /// additional time. Each active source grants +1 to the controller's
@@ -765,11 +815,15 @@ pub enum StaticMode {
         alt_cost: Option<AbilityCost>,
     },
     /// CR 601.2b + CR 118.9a: Static ability granting permission to cast matching
-    /// spells from hand without paying their mana costs. `Unlimited` = Omniscience,
-    /// Tamiyo emblem. `OncePerTurn` = Zaffai and the Tempests.
+    /// spells without paying their mana costs. `Unlimited` = Omniscience,
+    /// Tamiyo emblem, Dracogenesis. `OncePerTurn` = Zaffai and the Tempests.
     CastFromHandFree {
         /// CR 601.2b: Per-turn cast frequency.
         frequency: CastFrequency,
+        /// CR 601.2a + CR 903.8: Whether the permission is explicitly hand-only
+        /// or applies to built-in cast zones that already authorize the spell.
+        #[serde(default)]
+        origin: CastFreeOrigin,
     },
     /// CR 601.2a + CR 113.6b + CR 118.9: Static ability granting permission to
     /// cast cards exiled with this source — restricted to cards exiled *this
@@ -1233,8 +1287,9 @@ impl Hash for StaticMode {
                 // alt_cost contains AbilityCost which lacks Hash; discriminant + play_mode only.
                 play_mode.hash(state);
             }
-            StaticMode::CastFromHandFree { frequency } => {
+            StaticMode::CastFromHandFree { frequency, origin } => {
                 frequency.hash(state);
+                origin.hash(state);
             }
             StaticMode::ExileCastPermission {
                 frequency,
@@ -1268,6 +1323,7 @@ impl Hash for StaticMode {
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::CantCauseSacrificeOrExile { .. }
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
             | StaticMode::EntersWithAdditionalCounters { .. }
@@ -1295,6 +1351,9 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeCast { who } => write!(f, "CantBeCast({who})"),
             StaticMode::CantBeActivated { who, .. } => write!(f, "CantBeActivated({who})"),
             StaticMode::CantSearchLibrary { cause } => write!(f, "CantSearchLibrary({cause})"),
+            StaticMode::CantCauseSacrificeOrExile { cause } => {
+                write!(f, "CantCauseSacrificeOrExile({cause})")
+            }
             StaticMode::SuppressTriggers { events, .. } => {
                 let parts: Vec<String> = events.iter().map(|e| e.to_string()).collect();
                 write!(f, "SuppressTriggers({})", parts.join("+"))
@@ -1371,8 +1430,12 @@ impl fmt::Display for StaticMode {
                     write!(f, "TopOfLibraryCastPermission({play_mode})")
                 }
             }
-            StaticMode::CastFromHandFree { frequency } => {
-                write!(f, "CastFromHandFree({frequency})")
+            StaticMode::CastFromHandFree { frequency, origin } => {
+                if matches!(origin, CastFreeOrigin::Hand) {
+                    write!(f, "CastFromHandFree({frequency})")
+                } else {
+                    write!(f, "CastFromHandFree({frequency},{origin})")
+                }
             }
             StaticMode::ExileCastPermission {
                 frequency,
@@ -1713,14 +1776,22 @@ impl FromStr for StaticMode {
             }
             "CastFromHandFree" => StaticMode::CastFromHandFree {
                 frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::Hand,
             },
             s if s.starts_with("CastFromHandFree(") => {
-                let freq = s
+                let inner = s
                     .strip_prefix("CastFromHandFree(")
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("unlimited");
+                let mut parts = inner.split(',');
+                let freq = parts.next().unwrap_or("unlimited");
+                let origin = parts
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(CastFreeOrigin::Hand);
                 StaticMode::CastFromHandFree {
                     frequency: freq.parse().unwrap_or(CastFrequency::Unlimited),
+                    origin,
                 }
             }
             "ExileCastPermission" => StaticMode::ExileCastPermission {
@@ -1872,6 +1943,15 @@ impl FromStr for StaticMode {
                     // CR 701.23: Round-trip of the scope identifier.
                     if let Ok(cause) = ProhibitionScope::from_str(inner) {
                         return Ok(StaticMode::CantSearchLibrary { cause });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("CantCauseSacrificeOrExile(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 603.2 + CR 609.3: Round-trip of the scope identifier.
+                    if let Ok(cause) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::CantCauseSacrificeOrExile { cause });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if other.starts_with("SuppressTriggers(") {
@@ -2236,9 +2316,15 @@ mod tests {
             // Cast-from-hand-free permissions (Omniscience; Zaffai).
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::Hand,
             },
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
+                origin: CastFreeOrigin::Hand,
+            },
+            StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::DefaultCastPermission,
             },
             // Exile-cast permission (Maralen, Fae Ascendant).
             StaticMode::ExileCastPermission {

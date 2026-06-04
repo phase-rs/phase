@@ -23,10 +23,11 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, Comparator, ControllerRef, DamageSource,
-    DelayedTriggerCondition, Duration, Effect, FilterProp, MultiTargetSpec, PaymentCost,
-    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, RoundingMode, StaticCondition,
-    StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, AttackScope, AttackSubject, Comparator,
+    ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
+    MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -1677,7 +1678,7 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
     // "each player" / "each opponent" restricts the affected set to the players
     // the ability source creature attacked this turn — Angel of Destiny: "each
     // player this creature attacked this turn loses the game". Resolved as the
-    // source-specific `OpponentAttackedBySourceThisTurn`, which excludes the
+    // source-specific `OpponentAttacked { Source, ThisTurn }`, which excludes the
     // controller and avoids widening to players attacked by other creatures.
     // Like the "who controls" clause above, the relative clause MUST be consumed
     // and reflected in the scope; dropping it would over-apply the loss to every
@@ -1690,7 +1691,10 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
     }) {
         let deconjugated = subject::deconjugate_verb(after_clause);
         return (
-            Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
+            Some(PlayerFilter::OpponentAttacked {
+                subject: AttackSubject::Source,
+                scope: AttackScope::ThisTurn,
+            }),
             deconjugated,
         );
     }
@@ -4425,6 +4429,13 @@ pub(super) fn apply_where_x_quantity_expression(
                 where_x_expression,
             )),
             offset,
+        },
+        QuantityExpr::ClampMin { inner, minimum } => QuantityExpr::ClampMin {
+            inner: Box::new(apply_where_x_quantity_expression(
+                *inner,
+                where_x_expression,
+            )),
+            minimum,
         },
         QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
             factor,

@@ -1514,6 +1514,7 @@ fn quantity_expr_has_unresolved_variable(
             qty: QuantityRef::Variable { .. },
         } => state.last_named_choice.is_none(),
         QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::UpTo { max: inner }
@@ -1983,6 +1984,7 @@ fn quantity_expr_references_target_creature(expr: &QuantityExpr) -> bool {
     match expr {
         QuantityExpr::Ref { qty } => quantity_ref_references_target_creature(qty),
         QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::UpTo { max: inner }

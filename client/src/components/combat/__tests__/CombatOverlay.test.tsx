@@ -147,7 +147,7 @@ describe("CombatOverlay", () => {
 
     expect(mockDispatch).toHaveBeenCalledWith({
       type: "DeclareAttackers",
-      data: { attacks: [[100, { type: "Player", data: 1 }]] },
+      data: { attacks: [[100, { type: "Player", data: 1 }]], bands: [] },
     });
   });
 });
