@@ -1,6 +1,7 @@
 use engine::game::combat;
 use engine::game::keywords;
 use engine::game::mana_abilities;
+use engine::game::quantity::resolve_quantity;
 use engine::game::targeting::find_legal_targets;
 use engine::game::turn_control;
 use engine::types::ability::{
@@ -16,6 +17,7 @@ use engine::types::keywords::{Keyword, WardCost};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
+use crate::cast_facts::collect_definition_effects;
 use crate::damage_reflection::{
     is_event_context_damage_to_player, opponent_creature_reflection_penalty,
 };
@@ -92,7 +94,12 @@ impl TacticalPolicy for AntiSelfHarmPolicy {
 /// - Harmful spell (destroy) but opponents have no creatures → would kill own.
 fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     // CR 704.5j: Penalise casting a legendary permanent when we already control one
-    // with the same name — the legend rule SBA will force us to sacrifice one.
+    // with the same name — the legend rule SBA will force us to put one into the
+    // graveyard. Skip same-name copies that the engine's legend-rule SBA would
+    // exclude under a "legend rule doesn't apply" exemption (Mirror Gallery /
+    // Sakashima / Sliver Gravemother class).
+    // Reuse the engine's own legend-rule predicate (`engine::game::sba::legend_rule_exempt`)
+    // rather than re-deriving the exemption logic in the AI — the engine owns the rule.
     let legend_penalty = ctx
         .source_object()
         .filter(|source| source.card_types.supertypes.contains(&Supertype::Legendary))
@@ -105,7 +112,7 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
                         o.controller == ctx.ai_player
                             && o.card_types.supertypes.contains(&Supertype::Legendary)
                             && o.name == source.name
-                    })
+                    }) && !engine::game::sba::legend_rule_exempt(ctx.state, id)
                 })
                 .then_some(-8.0)
         })
@@ -247,26 +254,34 @@ fn score_optional_effect_accept(ctx: &PolicyContext<'_>) -> f64 {
     }
 }
 
-/// Walk a source object's optional replacement definitions to find a fixed LoseLife cost.
+/// Worst-case life payment across every reachable branch of a source object's optional
+/// replacement definitions.
+///
+/// CR 119.6 / CR 704.5a: a player at 0 or less life loses the game as a state-based
+/// action, so accepting an optional "pay N life" effect that brings the AI to 0 or
+/// below is self-lethal. The life cost can live in any branch of the ability tree
+/// (`sub_ability` / `else_ability` / modal modes), so we collect *all* reachable
+/// `LoseLife` effects via [`collect_definition_effects`] (the shared comprehensive
+/// walker) rather than only descending the `sub_ability` chain, and take the MAX
+/// payment as the worst case.
+///
+/// Non-`Fixed` amounts are resolved against live game state via the engine's
+/// `resolve_quantity`; a value that resolves non-positive is treated as a 0-life
+/// payment (no self-harm) rather than silently dropped.
 fn optional_effect_life_cost(ctx: &PolicyContext<'_>, source_id: ObjectId) -> Option<i32> {
     let obj = ctx.state.objects.get(&source_id)?;
     obj.replacement_definitions
         .iter_unchecked()
         .filter(|r| matches!(r.mode, ReplacementMode::Optional { .. }))
-        .find_map(|r| {
-            let mut node = r.execute.as_deref();
-            while let Some(def) = node {
-                if let Effect::LoseLife {
-                    amount: QuantityExpr::Fixed { value },
-                    ..
-                } = &*def.effect
-                {
-                    return Some(*value);
-                }
-                node = def.sub_ability.as_deref();
+        .filter_map(|r| r.execute.as_deref())
+        .flat_map(collect_definition_effects)
+        .filter_map(|effect| match effect {
+            Effect::LoseLife { amount, .. } => {
+                Some(resolve_quantity(ctx.state, amount, ctx.ai_player, source_id).max(0))
             }
-            None
+            _ => None,
         })
+        .max()
 }
 
 /// Check if any ETB trigger on the permanent has a valid target on the battlefield.
@@ -1663,6 +1678,102 @@ mod tests {
         assert!(
             score >= -1.0,
             "Casting first copy of a legendary should not be penalised, got {score}"
+        );
+    }
+
+    /// CR 704.5j: A "legend rule doesn't apply" exemption (Mirror Gallery's
+    /// global static, Sakashima/Sliver Gravemother's scoped variants) means a
+    /// second same-name legendary is legal and will NOT be put into the
+    /// graveyard. The anti-self-harm legend penalty must defer to the engine's
+    /// exemption predicate and apply no penalty when an exemption covers the
+    /// controlled copy.
+    #[test]
+    fn pre_cast_does_not_penalise_duplicate_legendary_under_global_exemption() {
+        let mut state = make_state();
+
+        // AI already controls a legendary creature on the battlefield.
+        let existing = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Thalia".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&existing).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.supertypes.push(Supertype::Legendary);
+        obj.power = Some(2);
+        obj.toughness = Some(1);
+
+        // A Mirror-Gallery-class permanent grants a GLOBAL legend-rule exemption
+        // (affected = None => applies to every legendary permanent).
+        let gallery = create_object(
+            &mut state,
+            CardId(210),
+            PlayerId(0),
+            "Mirror Gallery".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&gallery)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::LegendRuleDoesntApply));
+
+        // AI tries to cast a second copy from hand.
+        let spell_id = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Thalia".to_string(),
+            Zone::Hand,
+        );
+        let obj2 = state.objects.get_mut(&spell_id).unwrap();
+        obj2.card_types.core_types.push(CoreType::Creature);
+        obj2.card_types.supertypes.push(Supertype::Legendary);
+        obj2.power = Some(2);
+        obj2.toughness = Some(1);
+        obj2.abilities = Arc::new(vec![engine::types::ability::AbilityDefinition::new(
+            engine::types::ability::AbilityKind::Spell,
+            Effect::Draw {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 0 },
+                target: engine::types::ability::TargetFilter::Controller,
+            },
+        )]);
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id: CardId(201),
+                targets: Vec::new(),
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Spell,
+            },
+        };
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+
+        let score = AntiSelfHarmPolicy.score(&ctx);
+        assert_eq!(
+            score, 0.0,
+            "Legend-rule exemption must zero the duplicate-legendary penalty, got {score}"
         );
     }
 
@@ -3468,6 +3579,260 @@ mod tests {
         assert!(
             score > -8.0,
             "White removal with a legal unprotected target should not be penalized, got {score}"
+        );
+    }
+
+    // --- Optional-effect life-cost self-harm guard ---------------------------
+
+    use engine::types::ability::ReplacementDefinition;
+    use engine::types::replacements::ReplacementEvent;
+
+    /// Build an object on the battlefield carrying an Optional replacement whose
+    /// life payment lives in the given branch of the execute ability tree.
+    fn make_optional_lose_life_source(
+        state: &mut GameState,
+        amount: QuantityExpr,
+        branch: LifeCostBranch,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Painful Passage".to_string(),
+            Zone::Battlefield,
+        );
+
+        let lose_life = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount,
+                target: None,
+            },
+        );
+        // A benign primary effect; the life cost sits in a non-primary branch so
+        // the test exercises the full tree walk, not just the root effect.
+        let benign = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+            )
+        };
+        let mut execute = benign();
+        match branch {
+            LifeCostBranch::Sub => execute = execute.sub_ability(lose_life),
+            LifeCostBranch::Else => execute.else_ability = Some(Box::new(lose_life)),
+            LifeCostBranch::Modal => execute.mode_abilities = vec![benign(), lose_life],
+        }
+
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(execute),
+            );
+        id
+    }
+
+    #[derive(Clone, Copy)]
+    enum LifeCostBranch {
+        Sub,
+        Else,
+        Modal,
+    }
+
+    fn optional_effect_accept_score(state: &GameState) -> f64 {
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::DecideOptionalEffect { accept: true },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Replacement,
+            },
+        };
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+        AntiSelfHarmPolicy.score(&ctx)
+    }
+
+    /// `OptionalEffectChoice` routes through `DecisionKind::ActivateAbility`, so
+    /// the registry must still invoke `AntiSelfHarmPolicy` for the production
+    /// candidate path rather than only when tests call `score()` directly.
+    #[test]
+    fn optional_life_cost_accept_is_scored_by_policy_registry() {
+        let mut state = make_state();
+        let source_id = make_optional_lose_life_source(
+            &mut state,
+            QuantityExpr::Fixed { value: 5 },
+            LifeCostBranch::Else,
+        );
+        state.players[0].life = 5;
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id,
+            description: None,
+            may_trigger_key: None,
+        };
+
+        let config = AiConfig::default();
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::DecideOptionalEffect { accept: true },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Replacement,
+            },
+        };
+        let context = crate::context::AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &context,
+            cast_facts: None,
+        };
+
+        let verdicts = crate::policies::registry::PolicyRegistry::shared().verdicts(&ctx);
+        let anti_self_harm_delta = verdicts
+            .into_iter()
+            .find_map(|(id, verdict)| match verdict {
+                PolicyVerdict::Score { delta, reason: _ } if id == PolicyId::AntiSelfHarm => {
+                    Some(delta)
+                }
+                _ => None,
+            });
+
+        assert!(
+            anti_self_harm_delta.is_some_and(|delta| delta <= -100.0),
+            "OptionalEffectChoice accept must be routed through AntiSelfHarmPolicy"
+        );
+    }
+
+    /// CR 119.6 / CR 704.5a: accepting an optional life payment that brings the AI
+    /// to 0 or less is self-lethal. The guard must fire even when the `LoseLife`
+    /// sits in a non-`sub_ability` branch (else / modal mode).
+    #[test]
+    fn optional_life_cost_in_else_branch_penalises_lethal_accept() {
+        let mut state = make_state();
+        let source_id = make_optional_lose_life_source(
+            &mut state,
+            QuantityExpr::Fixed { value: 5 },
+            LifeCostBranch::Else,
+        );
+        state.players[0].life = 5;
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id,
+            description: None,
+            may_trigger_key: None,
+        };
+        let score = optional_effect_accept_score(&state);
+        assert!(
+            score <= -100.0,
+            "Lethal life payment in else branch must hit the self-loss penalty, got {score}"
+        );
+    }
+
+    #[test]
+    fn optional_life_cost_in_modal_branch_penalises_lethal_accept() {
+        let mut state = make_state();
+        let source_id = make_optional_lose_life_source(
+            &mut state,
+            QuantityExpr::Fixed { value: 3 },
+            LifeCostBranch::Modal,
+        );
+        state.players[0].life = 3;
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id,
+            description: None,
+            may_trigger_key: None,
+        };
+        let score = optional_effect_accept_score(&state);
+        assert!(
+            score <= -100.0,
+            "Lethal life payment in modal branch must hit the self-loss penalty, got {score}"
+        );
+    }
+
+    #[test]
+    fn optional_life_cost_with_ample_life_is_accepted() {
+        let mut state = make_state();
+        let source_id = make_optional_lose_life_source(
+            &mut state,
+            QuantityExpr::Fixed { value: 2 },
+            LifeCostBranch::Else,
+        );
+        state.players[0].life = 20;
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id,
+            description: None,
+            may_trigger_key: None,
+        };
+        let score = optional_effect_accept_score(&state);
+        assert_eq!(
+            score, 0.0,
+            "Paying 2 life at 20 life is safe -- accept should not be penalised, got {score}"
+        );
+    }
+
+    /// Non-`Fixed` amount: "lose life equal to the number of creatures you control".
+    /// Resolved against live game state via `resolve_quantity`; with N creatures and
+    /// N life the payment is lethal and must trigger the guard even though the amount
+    /// is not a literal constant.
+    #[test]
+    fn optional_life_cost_non_fixed_amount_resolves_and_penalises() {
+        let mut state = make_state();
+        // Three AI creatures makes "for each creature you control" resolve to 3.
+        add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+
+        let mut creature_filter = TypedFilter::creature();
+        creature_filter.controller = Some(ControllerRef::You);
+        let amount = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(creature_filter),
+            },
+        };
+        let source_id = make_optional_lose_life_source(&mut state, amount, LifeCostBranch::Sub);
+        state.players[0].life = 3;
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id,
+            description: None,
+            may_trigger_key: None,
+        };
+        let score = optional_effect_accept_score(&state);
+        assert!(
+            score <= -100.0,
+            "Dynamic life payment (3 creatures = 3 life) at 3 life must penalise accept, got {score}"
         );
     }
 }

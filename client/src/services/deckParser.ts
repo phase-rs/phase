@@ -34,7 +34,7 @@ export interface ExpandedDeck {
   signature_spell: string[];
 }
 
-export function expandEntries(entries: DeckEntry[]): string[] {
+function expandEntries(entries: DeckEntry[]): string[] {
   const cards: string[] = [];
   for (const entry of entries) {
     for (let i = 0; i < entry.count; i++) {

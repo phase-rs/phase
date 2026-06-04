@@ -2413,8 +2413,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::GrantNextSpellAbility { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
-        | Effect::LoseTheGame
-        | Effect::WinTheGame
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
         | Effect::RingTemptsYou
         | Effect::GrantCastingPermission { .. }
         | Effect::Manifest { .. }
@@ -6774,7 +6774,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                         || effective_lower.contains("gift wasn't promised")
                 }
                 Effect::GenericEffect { .. } => false,
-                Effect::LoseTheGame => {
+                Effect::LoseTheGame { .. } => {
                     // "You don't lose the game for ..." parsed as LoseTheGame prevention
                     effective_lower.contains("don't lose the game")
                         || effective_lower.contains("can't lose the game")
@@ -7893,6 +7893,7 @@ fn is_keyword_line(lower: &str) -> bool {
         "investigate",
         "food ",
         "squad ",
+        "replicate ",
         "backup ",
         "devour ",
         "modular ",

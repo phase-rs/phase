@@ -27,7 +27,6 @@ import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { ensureCardDatabase } from "../services/cardData";
 import { loadDraftRun } from "../services/quickDraftPersistence";
-import { consumePlaytestDeck } from "../services/playtestDeck";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import { detectServerUrl } from "../services/serverDetection";
@@ -382,7 +381,7 @@ function scheduleStoreReset(reset: () => void): void {
 
 export interface GameProviderProps {
   gameId: string;
-  mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate" | "playtest";
+  mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate";
   difficulty?: string;
   joinCode?: string;
   formatConfig?: FormatConfig;
@@ -510,9 +509,8 @@ export function GameProvider({
     const isOnline = mode === "online" || mode === "spectate";
     const isSpectate = mode === "spectate";
     const isP2P = mode === "p2p-host" || mode === "p2p-join";
-    const isPlaytest = mode === "playtest";
     if (!isOnline && !isP2P) {
-      if (mode === "ai" || isPlaytest) {
+      if (mode === "ai") {
         setupRandomAvatars(playerCount ?? 2, gameId);
       } else if (mode === "draft-match") {
         setupDraftMatchAvatars(gameId);
@@ -1044,7 +1042,7 @@ export function GameProvider({
       };
     }
 
-    // AI, playtest, or local mode — async setup (loadGame is async due to IndexedDB)
+    // AI or local mode — async setup (loadGame is async due to IndexedDB)
     //
     // Uses the shared singleton adapter so the WASM worker (and its V8 TurboFan-
     // optimized code, card database, and AI worker pool) persist across game sessions.
@@ -1193,9 +1191,7 @@ export function GameProvider({
         }
       }
 
-      const playtestPayload = isPlaytest ? consumePlaytestDeck() : null;
-      const parsedDeck = playtestPayload?.deck ?? loadActiveDeck();
-      const effectiveFormatConfig = playtestPayload?.formatConfig ?? formatConfig;
+      const parsedDeck = loadActiveDeck();
       if (!parsedDeck) {
         onNoDeckRef.current?.();
         return;
@@ -1207,7 +1203,7 @@ export function GameProvider({
           tRef.current,
           parsedDeck,
           playerCount ?? 2,
-          effectiveFormatConfig,
+          formatConfig,
           matchConfig?.match_type,
           loadActiveDeckBracket(),
         );
@@ -1220,7 +1216,7 @@ export function GameProvider({
           gameId,
           adapter,
           deckList,
-          effectiveFormatConfig,
+          formatConfig,
           playerCount,
           matchConfig,
           firstPlayer,

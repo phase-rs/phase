@@ -800,16 +800,18 @@ pub enum Keyword {
     /// the generic activated-ability dispatch.
     Station,
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (no copy-on-cast hook reads it).
+    /// RUNTIME: `database::synthesis::synthesize_replicate` — repeatable
+    /// optional additional cost (`AdditionalCost::Optional { repeatable: true }`)
+    /// plus a `SpellCast` trigger whose execute is
+    /// `replicate_copy_ability_definition()` (a `CopySpell` with
+    /// `repeat_for = AdditionalCostPaymentCount`).
     /// CR 702.56a: Replicate {cost} — additional-cost-on-cast copy
     /// mechanic. "As an additional cost to cast this spell, you may pay
     /// [cost] any number of times" + "When you cast this spell, if a
     /// replicate cost was paid for it, copy it for each time its
     /// replicate cost was paid. If the spell has any targets, you may
     /// choose new targets for any of the copies." Carries the per-copy
-    /// mana cost; runtime semantics are not yet implemented (no
-    /// copy-on-cast hook reads this keyword).
+    /// mana cost.
     Replicate(ManaCost),
 
     /// RUNTIME: TODO — converter accepts this keyword but engine has no
@@ -1264,8 +1266,8 @@ fn parse_keyword_mana_cost(s: &str) -> ManaCost {
     ManaCost::Cost { shards, generic }
 }
 
-/// CR 702.41a: Parse the type text from "Affinity for [type]" into a TypedFilter.
-/// Handles common affinity patterns: "artifacts", "Plains", "creatures", etc.
+/// CR 702.41a: Parse the text from "Affinity for [text]" into the permanents
+/// counted for the cost reduction.
 fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
     use super::ability::TypeFilter;
     // MTGJSON provides "Affinity for artifacts" — FromStr splits on first ':' giving
@@ -1282,16 +1284,20 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
             Some(TypedFilter::new(TypeFilter::Artifact).subtype("Equipment".to_string()))
         }
         _ => {
-            // Try as a land subtype (Plains, Islands, etc.)
+            // CR 702.41a + CR 205.3: "Affinity for [text]" counts permanents
+            // matching the text. Unknown names are subtypes, but not always
+            // land subtypes ("Daleks", "Cats", "Birds"). Keep this as a bare
+            // subtype constraint so it covers land, artifact, enchantment, and
+            // creature subtype affinity without adding a false type conjunct.
             let capitalized = format!("{}{}", &s[..1].to_uppercase(), &s[1..]);
-            // Strip trailing 's' for plural land subtypes (e.g., "Plains" stays "Plains",
-            // but "Islands" → "Island", "Swamps" → "Swamp")
+            // Strip trailing 's' for plural subtype words (e.g., "Daleks" →
+            // "Dalek", "Islands" → "Island"; "Plains" stays "Plains").
             let subtype = if capitalized.ends_with('s') && capitalized != "Plains" {
                 capitalized[..capitalized.len() - 1].to_string()
             } else {
                 capitalized
             };
-            Some(TypedFilter::land().subtype(subtype))
+            Some(TypedFilter::default().subtype(subtype))
         }
     }
 }
@@ -1744,6 +1750,9 @@ impl FromStr for Keyword {
                 "backup" => return Ok(Keyword::Backup(p.parse().unwrap_or(1))),
                 // CR 702.157
                 "squad" => return Ok(Keyword::Squad(parse_keyword_mana_cost(p))),
+                // CR 702.56a: Replicate {cost} — repeatable optional additional
+                // cost paid at cast; copy the spell once per payment.
+                "replicate" => return Ok(Keyword::Replicate(parse_keyword_mana_cost(p))),
                 // CR 702.29: Typecycling — "typecycling:{subtype}:{cost}"
                 "typecycling" => {
                     if let Some(colon_pos) = p.find(':') {
@@ -2514,6 +2523,8 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         }
         // CR 702.157
         "Squad" => Ok(Keyword::Squad(mana(data)?)),
+        // CR 702.56a: Replicate {cost}
+        "Replicate" => Ok(Keyword::Replicate(mana(data)?)),
         // CR 702.29
         "Typecycling" => {
             let obj = data.as_object().ok_or("Typecycling: expected object")?;
@@ -2712,6 +2723,29 @@ mod tests {
 
         let equip = Keyword::from_str("Equip:3").unwrap();
         assert!(matches!(equip, Keyword::Equip(ManaCost::Cost { .. })));
+    }
+
+    #[test]
+    fn parse_affinity_for_arbitrary_subtype_without_land_constraint() {
+        let daleks = Keyword::from_str("Affinity for Daleks").unwrap();
+        let Keyword::Affinity(dalek_filter) = daleks else {
+            panic!("expected Affinity keyword");
+        };
+        assert_eq!(
+            dalek_filter.type_filters,
+            vec![TypeFilter::Subtype("Dalek".to_string())],
+            "CR 702.41a: arbitrary subtype affinity must not add a false Land constraint"
+        );
+
+        let islands = Keyword::from_str("Affinity for Islands").unwrap();
+        let Keyword::Affinity(island_filter) = islands else {
+            panic!("expected Affinity keyword");
+        };
+        assert_eq!(
+            island_filter.type_filters,
+            vec![TypeFilter::Subtype("Island".to_string())],
+            "land subtype affinity still matches by subtype without requiring an explicit Land conjunct"
+        );
     }
 
     #[test]

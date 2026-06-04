@@ -10,8 +10,8 @@ use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, Bracke
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
-    CardPlayMode, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
-    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CardPlayMode, CastFromZoneDriver, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
+    ChoiceType, Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
     CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp, KickerVariant,
     ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
     NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
@@ -219,6 +219,7 @@ impl KeywordTriggerInstaller {
             // instance triggers separately, so one trigger is emitted per
             // `Keyword::Afterlife(_)` on the face.
             Keyword::Afterlife(n) => vec![build_afterlife_trigger(*n)],
+            Keyword::Soulshift(n) => vec![build_soulshift_trigger(*n)],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
             Keyword::Renown(n) => vec![build_renown_trigger(*n)],
             Keyword::Mentor => vec![build_mentor_trigger()],
@@ -241,6 +242,9 @@ impl KeywordTriggerInstaller {
             Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
+            // CR 702.25a: Flanking — a becomes-blocked debuff trigger. CR 702.25b:
+            // each instance triggers separately (one trigger per instance).
+            Keyword::Flanking => vec![build_flanking_trigger()],
             Keyword::Extort => vec![build_extort_trigger()],
             Keyword::Increment => vec![build_increment_trigger()],
             Keyword::Myriad => vec![build_myriad_trigger()],
@@ -271,6 +275,7 @@ impl KeywordTriggerInstaller {
                 is_dies_return_with_counter_trigger(trigger, &CounterType::Minus1Minus1)
             }
             Keyword::Afterlife(n) => is_afterlife_trigger_for_count(trigger, *n),
+            Keyword::Soulshift(n) => is_soulshift_trigger_for_n(trigger, *n),
             Keyword::Annihilator(_) => is_annihilator_attack_trigger(trigger),
             Keyword::Renown(_) => is_renown_trigger(trigger),
             Keyword::Mentor => is_mentor_trigger(trigger),
@@ -282,6 +287,7 @@ impl KeywordTriggerInstaller {
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
+            Keyword::Flanking => is_flanking_trigger(trigger),
             Keyword::Extort => is_extort_trigger(trigger),
             Keyword::Increment => is_increment_trigger(trigger),
             Keyword::Myriad => is_myriad_attack_trigger(trigger),
@@ -1786,6 +1792,134 @@ pub fn synthesize_casualty(face: &mut CardFace) {
     );
 }
 
+/// CR 702.56a: The canonical `AbilityDefinition` produced by a Replicate
+/// trigger — a self-referential `CopySpell` repeated once for each time the
+/// replicate cost was paid, gated on the replicate (additional) cost having
+/// been paid. This is the single authority for what a replicate trigger
+/// resolves into.
+///
+/// Differs from `casualty_copy_ability_definition` in exactly one axis:
+/// Casualty copies the spell once (a single sacrifice), while Replicate is a
+/// *repeatable* additional cost (CR 702.56a: "pay [cost] any number of times")
+/// that copies the spell once per payment. That per-payment count flows through
+/// `repeat_for = QuantityRef::AdditionalCostPaymentCount`, which the
+/// `resolve_chain_body` iteration loop reads to drive N `CopySpell` iterations
+/// — each producing one stack copy with its own CR 707.10c retarget step.
+pub fn replicate_copy_ability_definition() -> AbilityDefinition {
+    let mut def = AbilityDefinition::new(
+        AbilityKind::Spell,
+        // CR 702.56a + CR 707.10c: "If the spell has any targets, you may
+        // choose new targets for any of the copies."
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+        },
+    )
+    // CR 702.56a: "if a replicate cost was paid for it". With zero payments the
+    // count is also zero, but the condition keeps the trigger's resolution a
+    // no-op (no SpellCopied events) when replicate was declined, matching the
+    // intervening-if phrasing exactly.
+    .condition(AbilityCondition::additional_cost_paid_any());
+    // CR 702.56a: "copy it for each time its replicate cost was paid." The
+    // replicate cost is a repeatable additional cost, so the number of copies
+    // equals the cast-time payment count
+    // (`SpellContext::additional_cost_payment_count`).
+    def.repeat_for = Some(QuantityExpr::Ref {
+        qty: QuantityRef::AdditionalCostPaymentCount,
+    });
+    def
+}
+
+/// CR 702.56a: Synthesize Replicate {cost} into a repeatable optional additional
+/// cost and a "when you cast this spell" trigger that copies it once for each
+/// time the replicate cost was paid.
+///
+/// Replicate = two abilities (CR 702.56a):
+/// 1. Static ability: "As an additional cost to cast this spell, you may pay
+///    [cost] any number of times" — modeled as
+///    `AdditionalCost::Optional { repeatable: true, .. }` (same shape as Squad,
+///    CR 702.157a).
+/// 2. Triggered ability: "When you cast this spell, if a replicate cost was paid
+///    for it, copy it for each time its replicate cost was paid. If the spell
+///    has any targets, you may choose new targets for any of the copies." —
+///    modeled as a `SpellCast` trigger (same shape as Casualty, CR 702.153a)
+///    whose execute is `replicate_copy_ability_definition()`.
+///
+/// Build-for-the-class: every card with `Keyword::Replicate(cost)` flows through
+/// this single synthesizer. Idempotent across repeated invocations.
+pub fn synthesize_replicate(face: &mut CardFace) {
+    let replicate_costs: Vec<_> = face
+        .keywords
+        .iter()
+        .filter_map(|k| match k {
+            Keyword::Replicate(cost) => Some(cost.clone()),
+            _ => None,
+        })
+        .collect();
+    if replicate_costs.is_empty() {
+        return;
+    }
+
+    // CR 702.56b: Multiple Replicate instances are paid separately and each
+    // instance's linked trigger counts only its own payments. The engine tracks
+    // a single aggregate `additional_cost_payment_count`, so it cannot keep
+    // per-instance payment tallies. Defer rather than over-count copies. Mirrors
+    // the Squad multi-instance deferral (CR 702.157b).
+    if replicate_costs.len() > 1 {
+        defer_synthesis(
+            face,
+            "replicate_multiple_instances",
+            "CR 702.56b: multiple Replicate instances require per-instance payment tracking"
+                .to_string(),
+        );
+        return;
+    }
+
+    let replicate_cost = replicate_costs[0].clone();
+
+    // CR 702.56a: "As an additional cost to cast this spell, you may pay [cost]
+    // any number of times." Repeatable optional mana cost — the cast-time
+    // payment loop records each payment in `additional_cost_payment_count`.
+    if face.additional_cost.is_none() {
+        face.additional_cost = Some(AdditionalCost::Optional {
+            cost: AbilityCost::Mana {
+                cost: replicate_cost,
+            },
+            repeatable: true,
+        });
+    }
+
+    // CR 702.56a: "When you cast this spell, if a replicate cost was paid for
+    // it, copy it for each time its replicate cost was paid."
+    // Idempotency: skip if the replicate copy-on-cast trigger already exists.
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::SpellCast)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && t.trigger_zones.contains(&Zone::Stack)
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::CopySpell {
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    face.triggers.push(
+        TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Stack])
+            .execute(replicate_copy_ability_definition())
+            .description(
+                "Replicate — copy this spell once for each time its replicate cost was paid"
+                    .to_string(),
+            ),
+    );
+}
+
 /// CR 702.42a: Synthesize Entwine cost onto modal spell's ModalChoice.
 ///
 /// Sets `entwine_cost` on the face's modal abilities and raises `max_choices`
@@ -2480,6 +2614,121 @@ pub fn synthesize_afterlife(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Afterlife(_)));
 }
 
+/// CR 702.46a: Soulshift N — when this permanent is put into a graveyard from
+/// the battlefield, you may return target Spirit card with mana value N or less
+/// from your graveyard to your hand.
+/// CR 702.46b: each instance triggers separately.
+pub fn synthesize_soulshift(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Soulshift(_)));
+}
+
+/// CR 702.46a: Dies trigger returning a Spirit from the controller's graveyard.
+fn build_soulshift_trigger(n: u32) -> TriggerDefinition {
+    let spirit_target = soulshift_spirit_target_filter(n);
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Hand,
+            target: spirit_target,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: false,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+        },
+    )
+    .description(format!(
+        "Return target Spirit card with mana value {n} or less from your graveyard to your hand"
+    ))
+    // CR 603.5: "you may" — optional triggered ability.
+    .optional();
+
+    TriggerDefinition::new(TriggerMode::ChangesZone)
+        .origin(Zone::Battlefield)
+        .destination(Zone::Graveyard)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(format!(
+            "CR 702.46a: Soulshift {n} — when this permanent is put into a graveyard from the battlefield, you may return target Spirit card with mana value {n} or less from your graveyard to your hand."
+        ))
+}
+
+fn soulshift_spirit_target_filter(n: u32) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::card()
+            .controller(ControllerRef::You)
+            .subtype("Spirit".to_string())
+            .properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                },
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: n as i32 },
+                },
+            ]),
+    )
+}
+
+fn is_soulshift_trigger_for_n(t: &TriggerDefinition, n: u32) -> bool {
+    soulshift_trigger_n(t) == Some(n)
+}
+
+fn soulshift_trigger_n(t: &TriggerDefinition) -> Option<u32> {
+    if !matches!(t.mode, TriggerMode::ChangesZone)
+        || t.origin != Some(Zone::Battlefield)
+        || t.destination != Some(Zone::Graveyard)
+        || !matches!(t.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return None;
+    }
+    let execute = t.execute.as_deref()?;
+    if !execute.optional {
+        return None;
+    }
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        ..
+    } = &*execute.effect
+    else {
+        return None;
+    };
+    if *origin != Some(Zone::Graveyard) || *destination != Zone::Hand {
+        return None;
+    }
+    let TargetFilter::Typed(tf) = target else {
+        return None;
+    };
+    if tf.get_subtype() != Some("Spirit") || tf.controller != Some(ControllerRef::You) {
+        return None;
+    }
+    let mut cmc_le = None;
+    let mut in_graveyard = false;
+    for prop in &tf.properties {
+        match prop {
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            } => in_graveyard = true,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value },
+            } => cmc_le = u32::try_from(*value).ok(),
+            _ => {}
+        }
+    }
+    if in_graveyard {
+        cmc_le
+    } else {
+        None
+    }
+}
+
 /// Builds the CR 702.135a Afterlife dies trigger for `count` Spirit tokens.
 fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
     let plural = if count == 1 { "" } else { "s" };
@@ -2638,6 +2887,13 @@ pub fn synthesize_annihilator(face: &mut CardFace) {
 /// `Keyword::Exalted` instance.
 pub fn synthesize_exalted(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Exalted));
+}
+
+/// CR 702.25a: Flanking — install the becomes-blocked debuff trigger that gives
+/// each blocking creature without flanking -1/-1 until end of turn. CR 702.25b:
+/// each instance triggers separately (one trigger per `Keyword::Flanking`).
+pub fn synthesize_flanking(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Flanking));
 }
 
 /// CR 702.45a: Bushido N — "Whenever this creature blocks or becomes blocked, it
@@ -3162,6 +3418,58 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
 fn is_exalted_trigger(t: &TriggerDefinition) -> bool {
     matches!(t.mode, TriggerMode::Attacks)
         && matches!(t.condition, Some(TriggerCondition::Not { .. }))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                target: TargetFilter::TriggeringSource,
+                ..
+            })
+        )
+}
+
+/// CR 702.25a: Build the Flanking trigger — "whenever this creature becomes
+/// blocked by a creature without flanking, the blocking creature gets -1/-1
+/// until end of turn." `collect_matching_triggers` splits `BecomesBlocked`
+/// events per qualifying blocker so each blocker creates its own stack object.
+fn build_flanking_trigger() -> TriggerDefinition {
+    let debuff = Effect::Pump {
+        power: PtValue::Fixed(-1),
+        toughness: PtValue::Fixed(-1),
+        target: TargetFilter::TriggeringSource,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, debuff)
+        .duration(Duration::UntilEndOfTurn)
+        .description(
+            "CR 702.25a: Flanking — blocking creatures without flanking get -1/-1 until end of turn"
+                .to_string(),
+        );
+    TriggerDefinition::new(TriggerMode::BecomesBlocked)
+        .valid_card(TargetFilter::SelfRef)
+        .valid_target(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::WithoutKeyword {
+                value: Keyword::Flanking,
+            }],
+        )))
+        .execute(execute)
+        .description(
+            "CR 702.25a: Flanking — whenever this creature becomes blocked by a creature \
+             without flanking, the blocking creature gets -1/-1 until end of turn."
+                .to_string(),
+        )
+}
+
+/// CR 702.25a: A Flanking-shaped trigger — a self-scoped `BecomesBlocked` trigger
+/// whose blocker filter excludes creatures with flanking.
+/// Used by `RemoveKeyword` symmetric removal.
+fn is_flanking_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.valid_target.as_ref(),
+            Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::WithoutKeyword {
+                value: Keyword::Flanking,
+            })
+        )
         && matches!(
             t.execute.as_deref().map(|a| &*a.effect),
             Some(Effect::Pump {
@@ -3732,6 +4040,10 @@ fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
             alt_ability_cost: None,
             constraint: None,
             duration: None,
+            // CR 702.62a + CR 608.2g: cast the suspended card AS this trigger
+            // resolves, not via a lingering permission — this arms the
+            // sorcery-speed timing bypass for an upkeep recast (issue #1520).
+            driver: CastFromZoneDriver::DuringResolution,
         },
     )
     .optional();
@@ -5249,6 +5561,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_outlast(face);
     synthesize_reinforce(face);
     synthesize_casualty(face);
+    // CR 702.56a: Replicate — repeatable optional additional cost + SpellCast
+    // copy trigger that makes one copy per replicate payment.
+    synthesize_replicate(face);
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
     synthesize_evoke(face);
@@ -5282,6 +5597,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     // Spirit creature tokens with flying. Self-referential dies trigger shape
     // shared with Undying/Persist.
     synthesize_afterlife(face);
+    // CR 702.46a: Soulshift N — dies trigger returning a Spirit from graveyard.
+    synthesize_soulshift(face);
     // CR 702.112a: Renown N — combat damage to player trigger with
     // designation-setting resolution. CR 702.112c: each instance triggers
     // separately; the resolution-time designation guard suppresses later ones.
@@ -5295,6 +5612,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // whenever a creature you control attacks alone. CR 702.83b: each instance
     // triggers separately.
     synthesize_exalted(face);
+    // CR 702.25a: Flanking — becomes-blocked trigger giving each blocking
+    // creature without flanking -1/-1 until end of turn.
+    synthesize_flanking(face);
     // CR 702.101a: Extort — spell-cast trigger that lets you pay {W/B} to drain
     // each opponent for 1 life. CR 702.101b: each instance triggers separately.
     synthesize_extort(face);
@@ -5660,6 +5980,13 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                // CR 310.11b + CR 608.2g: the Siege victory ability casts the
+                // exiled back face AS this trigger resolves — a self-free-cast
+                // during resolution, structurally identical to Suspend's
+                // last-counter cast. (Pre-`driver`, the `duration.is_none()`
+                // router already routed this shape through during-resolution;
+                // the explicit discriminator preserves that.)
+                driver: CastFromZoneDriver::DuringResolution,
             },
         )
         .optional();
@@ -7618,6 +7945,101 @@ mod undying_persist_synthesis_tests {
         assert_eq!(counts, vec![1, 2]);
     }
 
+    /// CR 702.46a: Soulshift N synthesizes an optional dies trigger that returns
+    /// a Spirit from the controller's graveyard.
+    #[test]
+    fn synthesize_soulshift_adds_optional_dies_return_trigger() {
+        let mut face = face_with_keyword(Keyword::Soulshift(4));
+        synthesize_soulshift(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_soulshift_trigger_for_n(t, 4))
+            .expect("soulshift should synthesize a dies trigger");
+
+        assert!(matches!(trigger.mode, TriggerMode::ChangesZone));
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        assert!(execute.optional);
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } = &*execute.effect
+        else {
+            panic!("soulshift execute should be Effect::ChangeZone");
+        };
+        assert_eq!(*origin, Some(Zone::Graveyard));
+        assert_eq!(*destination, Zone::Hand);
+        let TargetFilter::Typed(tf) = target else {
+            panic!("soulshift target should be TypedFilter");
+        };
+        assert_eq!(tf.get_subtype(), Some("Spirit"));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 4 },
+                    }
+                )
+            }),
+            "expected CMC <= 4 filter, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
+    fn synthesize_soulshift_is_idempotent() {
+        let mut face = face_with_keyword(Keyword::Soulshift(3));
+        synthesize_soulshift(&mut face);
+        synthesize_soulshift(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_soulshift_trigger_for_n(t, 3))
+            .count();
+        assert_eq!(count, 1, "soulshift trigger should be deduped");
+    }
+
+    /// CR 702.46b: multiple Soulshift instances trigger separately.
+    #[test]
+    fn synthesize_soulshift_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Soulshift(2));
+        face.keywords.push(Keyword::Soulshift(2));
+        synthesize_soulshift(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_soulshift_trigger_for_n(t, 2))
+            .count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn synthesize_soulshift_keeps_distinct_n_values() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Soulshift(2));
+        face.keywords.push(Keyword::Soulshift(5));
+        synthesize_soulshift(&mut face);
+
+        let mut values: Vec<u32> = face
+            .triggers
+            .iter()
+            .filter_map(soulshift_trigger_n)
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, vec![2, 5]);
+    }
+
     /// The Afterlife matcher (Spirit-token effect) must not collide with the
     /// Undying/Persist return triggers, which share the Battlefield→Graveyard
     /// self-ref shape but carry an `Effect::ChangeZone`.
@@ -7702,6 +8124,8 @@ mod undying_persist_runtime_tests {
     use crate::game::printed_cards::apply_card_face_to_object;
     use crate::game::triggers::process_triggers;
     use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::ability::TargetRef;
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::events::GameEvent;
@@ -7722,6 +8146,43 @@ mod undying_persist_runtime_tests {
         face.card_type.core_types.push(CoreType::Creature);
         synthesize_all(&mut face);
         face
+    }
+
+    fn spirit_card_face(name: &str, mana_value: u32) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            mana_cost: ManaCost::generic(mana_value),
+            power: Some(PtValue::Fixed(1)),
+            toughness: Some(PtValue::Fixed(1)),
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        face.card_type.subtypes.push("Spirit".to_string());
+        face
+    }
+
+    fn creature_card_face(name: &str, mana_value: u32) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            mana_cost: ManaCost::generic(mana_value),
+            power: Some(PtValue::Fixed(1)),
+            toughness: Some(PtValue::Fixed(1)),
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Creature);
+        face
+    }
+
+    fn create_face_object(
+        state: &mut GameState,
+        face: &CardFace,
+        owner: PlayerId,
+        zone: Zone,
+    ) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(state, card_id, owner, face.name.clone(), zone);
+        apply_card_face_to_object(state.objects.get_mut(&id).unwrap(), face);
+        id
     }
 
     /// Stand up a two-player state with `face` on the battlefield under
@@ -7919,6 +8380,82 @@ mod undying_persist_runtime_tests {
                 "Spirit token must have flying"
             );
         }
+    }
+
+    /// CR 702.46a runtime path: accepting Soulshift N returns target Spirit card
+    /// with mana value N or less from the controller's graveyard to their hand.
+    #[test]
+    fn soulshift_returns_eligible_spirit_card_from_graveyard() {
+        let face = creature_face_with_keyword("Kami of the Honored Dead", Keyword::Soulshift(4));
+        let (mut state, obj_id) = setup_with_creature(&face, PlayerId(0));
+        let legal_spirit = create_face_object(
+            &mut state,
+            &spirit_card_face("Petalmane Baku", 3),
+            PlayerId(0),
+            Zone::Graveyard,
+        );
+        let too_expensive_spirit = create_face_object(
+            &mut state,
+            &spirit_card_face("High-Cost Spirit", 5),
+            PlayerId(0),
+            Zone::Graveyard,
+        );
+        let non_spirit = create_face_object(
+            &mut state,
+            &creature_card_face("Ordinary Bear", 2),
+            PlayerId(0),
+            Zone::Graveyard,
+        );
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, obj_id, Zone::Graveyard, &mut events);
+        process_triggers(&mut state, &events);
+        if matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }) {
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(legal_spirit)),
+                },
+            )
+            .expect("choose the only legal Soulshift target");
+        }
+
+        let mut resolve_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolve_events);
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "Soulshift is optional and must ask before returning the Spirit"
+        );
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("accept Soulshift");
+        if matches!(state.waiting_for, WaitingFor::TriggerTargetSelection { .. }) {
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(legal_spirit)),
+                },
+            )
+            .expect("choose the legal Soulshift target after accepting");
+        }
+
+        assert_eq!(
+            state.objects[&legal_spirit].zone,
+            Zone::Hand,
+            "Soulshift must return the eligible Spirit card to hand"
+        );
+        assert_eq!(
+            state.objects[&too_expensive_spirit].zone,
+            Zone::Graveyard,
+            "Soulshift 4 must not return a Spirit card with mana value 5"
+        );
+        assert_eq!(
+            state.objects[&non_spirit].zone,
+            Zone::Graveyard,
+            "Soulshift must not return a non-Spirit card"
+        );
     }
 
     /// CR 603 multi-trigger semantics: a permanent that carries BOTH Undying
@@ -8466,6 +9003,69 @@ mod exalted_synthesis_tests {
             .filter(|t| is_exalted_trigger(t))
             .count();
         assert_eq!(count, 2);
+    }
+}
+
+#[cfg(test)]
+mod flanking_synthesis_tests {
+    //! CR 702.25a shape tests: a self-scoped BecomesBlocked trigger whose
+    //! `Effect::Pump(-1/-1)` debuffs the triggering blocker without flanking.
+    use super::*;
+
+    #[test]
+    fn synthesize_flanking_adds_becomes_blocked_debuff_trigger() {
+        // CR 702.25a: Flanking installs a self BecomesBlocked trigger that gives
+        // each blocking creature without flanking -1/-1 until end of turn.
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flanking);
+        synthesize_flanking(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_flanking_trigger(t))
+            .expect("flanking should add a BecomesBlocked trigger");
+        assert!(matches!(trigger.mode, TriggerMode::BecomesBlocked));
+        assert!(matches!(trigger.valid_card, Some(TargetFilter::SelfRef)));
+        let execute = trigger.execute.as_deref().expect("execute body required");
+        assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+        let Effect::Pump {
+            power,
+            toughness,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("flanking execute must be Effect::Pump");
+        };
+        assert!(matches!(power, PtValue::Fixed(-1)));
+        assert!(matches!(toughness, PtValue::Fixed(-1)));
+        assert!(matches!(target, TargetFilter::TriggeringSource));
+        let Some(TargetFilter::Typed(tf)) = trigger.valid_target.as_ref() else {
+            panic!("expected Typed non-flanking blocker filter");
+        };
+        assert!(tf.properties.contains(&FilterProp::WithoutKeyword {
+            value: Keyword::Flanking,
+        }));
+    }
+
+    #[test]
+    fn synthesize_flanking_is_idempotent_and_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Flanking);
+        synthesize_flanking(&mut face);
+        synthesize_flanking(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_flanking_trigger(t))
+                .count(),
+            1,
+            "flanking trigger should be deduped across passes"
+        );
+
+        let mut bare = CardFace::default();
+        synthesize_flanking(&mut bare);
+        assert!(bare.triggers.iter().all(|t| !is_flanking_trigger(t)));
     }
 }
 
@@ -12343,6 +12943,126 @@ mod squad_synthesis_tests {
                         &*ability.effect,
                         Effect::Unimplemented { name, .. }
                             if name == "squad_multiple_instances"
+                    )
+                })
+                .count(),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
+mod replicate_synthesis_tests {
+    use super::*;
+    use crate::types::mana::ManaCostShard;
+
+    /// CR 702.56a: Replicate synthesizes a repeatable optional additional cost
+    /// and a SpellCast trigger whose `CopySpell` count is the number of
+    /// replicate payments (`AdditionalCostPaymentCount`).
+    #[test]
+    fn synthesize_replicate_sets_repeatable_cost_and_payment_count_copy_trigger() {
+        let replicate_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Blue],
+        };
+        let mut face = CardFace {
+            keywords: vec![Keyword::Replicate(replicate_cost.clone())],
+            ..CardFace::default()
+        };
+
+        synthesize_replicate(&mut face);
+
+        match face.additional_cost.as_ref().expect("additional_cost set") {
+            AdditionalCost::Optional {
+                cost: AbilityCost::Mana { cost },
+                repeatable: true,
+            } => {
+                assert_eq!(cost, &replicate_cost);
+            }
+            other => panic!("expected repeatable Optional mana cost, got {other:?}"),
+        }
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("replicate SpellCast trigger");
+        let execute = trigger.execute.as_ref().expect("execute body");
+        assert_eq!(
+            **execute,
+            replicate_copy_ability_definition(),
+            "replicate trigger's execute must equal the canonical \
+             replicate_copy_ability_definition() — single source of truth"
+        );
+        // CR 707.10c: copies may choose new targets.
+        match &*execute.effect {
+            Effect::CopySpell { target, retarget } => {
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert!(matches!(
+                    retarget,
+                    CopyRetargetPermission::MayChooseNewTargets
+                ));
+            }
+            other => panic!("expected CopySpell, got {other:?}"),
+        }
+        // CR 702.56a: one copy per replicate payment.
+        assert!(matches!(
+            execute.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::AdditionalCostPaymentCount,
+            })
+        ));
+    }
+
+    #[test]
+    fn synthesize_replicate_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Replicate(ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })],
+            ..CardFace::default()
+        };
+
+        synthesize_replicate(&mut face);
+        let first_cost = face.additional_cost.clone();
+        let first_trigger_count = face.triggers.len();
+        synthesize_replicate(&mut face);
+
+        assert_eq!(face.additional_cost, first_cost);
+        assert_eq!(face.triggers.len(), first_trigger_count);
+    }
+
+    /// CR 702.56b: Multiple Replicate instances require per-instance payment
+    /// tracking the engine cannot yet model, so synthesis defers.
+    #[test]
+    fn synthesize_replicate_defers_multiple_instances() {
+        let mut face = CardFace {
+            keywords: vec![
+                Keyword::Replicate(ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![],
+                }),
+                Keyword::Replicate(ManaCost::Cost {
+                    generic: 2,
+                    shards: vec![],
+                }),
+            ],
+            ..CardFace::default()
+        };
+
+        synthesize_replicate(&mut face);
+
+        assert!(face.additional_cost.is_none());
+        assert!(face.triggers.is_empty());
+        assert_eq!(
+            face.abilities
+                .iter()
+                .filter(|ability| {
+                    matches!(
+                        &*ability.effect,
+                        Effect::Unimplemented { name, .. }
+                            if name == "replicate_multiple_instances"
                     )
                 })
                 .count(),

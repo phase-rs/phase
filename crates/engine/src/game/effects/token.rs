@@ -442,6 +442,7 @@ pub fn resolve(
     let proposed = ProposedEvent::CreateToken {
         owner: token_owner,
         spec: Box::new(spec),
+        copy: None,
         enter_tapped: crate::types::proposed_event::EtbTapState::from_seeded_tapped(tapped),
         count,
         applied: HashSet::new(),
@@ -581,6 +582,7 @@ pub fn apply_create_token_after_replacement(
     let ProposedEvent::CreateToken {
         owner,
         spec,
+        copy,
         enter_tapped,
         count: final_count,
         ..
@@ -588,6 +590,24 @@ pub fn apply_create_token_after_replacement(
     else {
         return;
     };
+
+    if let Some(copy) = copy {
+        let created = super::token_copy::apply_copy_token_after_replacement(
+            state,
+            owner,
+            *copy,
+            enter_tapped,
+            spec.enter_with_counters.clone(),
+            final_count,
+            events,
+        );
+        if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+            pending.created_ids.extend(created);
+        } else {
+            state.last_created_token_ids = created;
+        }
+        return;
+    }
 
     let mut created_ids = Vec::with_capacity(final_count as usize);
 
@@ -858,6 +878,7 @@ fn token_creation_needs_choice(
     let proposed = ProposedEvent::CreateToken {
         owner,
         spec: Box::new(spec.clone()),
+        copy: None,
         enter_tapped,
         count,
         applied: HashSet::new(),
@@ -1207,8 +1228,22 @@ fn try_resolve_copy_batch(
 /// only the copiable values (CR 707.2): token art comes from the live source at
 /// resolution time (`token_copy::resolve`), so no `PrintedCardRef` is threaded
 /// through the probe.
-fn copy_probe_spec(
+pub(crate) fn copy_probe_spec(
     ability: &ResolvedAbility,
+    values: &crate::types::ability::CopiableValues,
+) -> TokenSpec {
+    copy_probe_spec_for(
+        ability.source_id,
+        ability.controller,
+        ability.duration.clone(),
+        values,
+    )
+}
+
+pub(crate) fn copy_probe_spec_for(
+    source_id: ObjectId,
+    controller: PlayerId,
+    sacrifice_at: Option<Duration>,
     values: &crate::types::ability::CopiableValues,
 ) -> TokenSpec {
     use crate::types::proposed_event::TokenCharacteristics;
@@ -1228,9 +1263,9 @@ fn copy_probe_spec(
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
-        sacrifice_at: ability.duration.clone(),
-        source_id: ability.source_id,
-        controller: ability.controller,
+        sacrifice_at,
+        source_id,
+        controller,
         attach_to: None,
     }
 }
@@ -3980,6 +4015,7 @@ mod tests {
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(spec),
+            copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),
@@ -4037,6 +4073,7 @@ mod tests {
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(spec),
+            copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),

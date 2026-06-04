@@ -88,11 +88,11 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, DamageModification, DamageSource,
     DelayedTriggerCondition, DoubleTarget, Duration, Effect, FilterProp, GameRestriction,
     IterationKindBinding, ManaProduction, ManaSpendPermission, MultiTargetSpec, ObjectProperty,
-    ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
-    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TargetFilter, TargetSelectionMode, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+    ObjectScope, PaymentCost, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
+    PreventionScope, ProhibitedActivity, QuantityExpr, QuantityRef, ReplacementDefinition,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    StepSkipTarget, SubAbilityLink, TargetFilter, TargetSelectionMode, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
@@ -2651,24 +2651,11 @@ fn try_parse_choose_one_of_inline(
     let mut chooser = PlayerFilter::Controller;
     let mut scoped_choice_player = false;
     let mut tp = tp;
-    if let Some((prefix_chooser, rest_original)) = nom_on_lower(tp.original, tp.lower, |i| {
-        alt((
-            value(
-                PlayerFilter::DefendingPlayer,
-                tag("defending player faces a villainous choice — "),
-            ),
-            value(
-                PlayerFilter::Opponent,
-                tag("target opponent faces a villainous choice — "),
-            ),
-            value(PlayerFilter::Controller, tag("face a villainous choice — ")),
-            value(
-                PlayerFilter::Controller,
-                tag("faces a villainous choice — "),
-            ),
-        ))
-        .parse(i)
-    }) {
+    if let Some((prefix_chooser, rest_original)) = nom_on_lower(
+        tp.original,
+        tp.lower,
+        parse_villainous_choice_chooser_prefix,
+    ) {
         let consumed = tp.original.len() - rest_original.len();
         tp = TextPair::new(rest_original, &tp.lower[consumed..]);
         chooser = prefix_chooser;
@@ -2826,6 +2813,51 @@ fn try_parse_choose_one_of_inline(
         chooser,
         branches: vec![left_def, right_def],
     }))
+}
+
+fn parse_villainous_choice_chooser_prefix(input: &str) -> OracleResult<'_, PlayerFilter> {
+    alt((
+        value(
+            PlayerFilter::DefendingPlayer,
+            tag("defending player faces a villainous choice — "),
+        ),
+        value(
+            PlayerFilter::Opponent,
+            tag("target opponent faces a villainous choice — "),
+        ),
+        parse_life_lost_villainous_choice_chooser,
+        value(PlayerFilter::Controller, tag("face a villainous choice — ")),
+        value(
+            PlayerFilter::Controller,
+            tag("faces a villainous choice — "),
+        ),
+    ))
+    .parse(input)
+}
+
+fn parse_life_lost_villainous_choice_chooser(input: &str) -> OracleResult<'_, PlayerFilter> {
+    let (input, relation) = alt((
+        value(PlayerRelation::Opponent, tag("each other player who lost ")),
+        value(PlayerRelation::Opponent, tag("each opponent who lost ")),
+        value(PlayerRelation::All, tag("each player who lost ")),
+        value(PlayerRelation::Opponent, tag("who lost ")),
+    ))
+    .parse(input)?;
+    let (input, threshold) = nom_primitives::parse_number(input)?;
+    let (input, _) = tag(" or more life this turn faces a villainous choice — ").parse(input)?;
+    let threshold = i32::try_from(threshold).unwrap_or(i32::MAX);
+
+    Ok((
+        input,
+        PlayerFilter::PlayerAttribute {
+            relation,
+            attr: Box::new(QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::ScopedPlayer,
+            }),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Fixed { value: threshold }),
+        },
+    ))
 }
 
 fn ability_definition_from_clause(
@@ -10204,6 +10236,23 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         Effect::ExtraTurn { target } if *target == TargetFilter::Controller => {
             *target = subject_filter;
         }
+        // CR 104.3e + CR 603.7c: "that player loses the game" / "target player
+        // loses the game" — bind the named player into the effect's
+        // optional target field. The subject parser ("subject.rs") maps "that
+        // player" → `TargetFilter::TriggeringPlayer` (a context ref resolved
+        // at effect-resolution time against `state.current_trigger_event`)
+        // and "target player" → `TargetFilter::Player` (declared at cast/
+        // stack-push time). Guard on `is_none()` so an already-parsed target
+        // (no current call site, kept defensively) is preserved. Canonical
+        // cards: Ezio Auditore da Firenze's reflexive "that player loses the
+        // game" sub-ability (CR 104.3e); the WinTheGame arm is the symmetric
+        // CR 104.2b counterpart for any future "that player wins the game"
+        // wording.
+        Effect::LoseTheGame { ref mut target } | Effect::WinTheGame { ref mut target }
+            if target.is_none() =>
+        {
+            *target = Some(subject_filter);
+        }
         // CR 122.1: "target player gets a poison counter" — inject subject target
         Effect::GivePlayerCounter { target, .. } if *target == TargetFilter::Controller => {
             *target = subject_filter;
@@ -10863,6 +10912,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
 
@@ -10897,6 +10947,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
     // CR 610.3 + CR 118.9 + CR 608.2c + CR 701.13a: "Cast [quantifier] [filter]
@@ -10918,6 +10969,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
     if scan_contains_phrase(rest, "from among them")
@@ -10933,6 +10985,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
 
@@ -10985,6 +11038,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
 
@@ -11011,6 +11065,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         });
     }
 
@@ -11023,6 +11078,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
         alt_ability_cost: None,
         constraint,
         duration: None,
+        driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
     })
 }
 
@@ -16434,11 +16490,12 @@ fn constrain_filter_to_stack(filter: TargetFilter) -> TargetFilter {
     }
 }
 
-/// CR 115.7: Parse "change the target of [spell]" and "you may choose new targets for [spell]".
+/// CR 115.7: Parse "change the/a target of [spell]" and "you may choose new targets for [spell]".
 ///
-/// Covers two Oracle text patterns:
-/// - "change the target of [spell phrase]" → scope: `Single`
-/// - "you may choose new targets for [spell phrase]" → scope: `All`
+/// Covers Oracle text patterns:
+/// - "change the target of [spell phrase]" → scope: `Single` (CR 115.7a)
+/// - "change a target of [spell phrase]" → scope: `Single` (CR 115.7b — Spellskite, Phyresis)
+/// - "you may choose new targets for [spell phrase]" → scope: `All` (CR 115.7d)
 ///
 /// An optional trailing "to [target phrase]" sets `forced_to`.
 fn try_parse_change_targets(lower: &str) -> Option<Effect> {
@@ -16449,6 +16506,7 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
             RetargetScope::Single,
             tag::<_, _, E>("change the target of "),
         ),
+        value(RetargetScope::Single, tag("change a target of ")),
         value(RetargetScope::All, tag("you may choose new targets for ")),
     ))
     .parse(lower)
@@ -17381,7 +17439,7 @@ mod tests {
         );
 
         assert!(
-            matches!(*def.effect, Effect::WinTheGame),
+            matches!(*def.effect, Effect::WinTheGame { .. }),
             "top-level effect must be WinTheGame, got: {:?}",
             def.effect
         );
@@ -29206,6 +29264,19 @@ mod tests {
     }
 
     #[test]
+    fn change_targets_change_a_target_of_forced_to_self() {
+        let e = parse_effect("change a target of target spell or ability to ~");
+        let Effect::ChangeTargets {
+            scope, forced_to, ..
+        } = e
+        else {
+            panic!("Expected ChangeTargets, got {e:?}");
+        };
+        assert!(matches!(scope, RetargetScope::Single));
+        assert_eq!(forced_to, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
     fn change_targets_spell_or_ability_with_single_target() {
         let e = parse_effect("change the target of target spell or ability with a single target");
         let Effect::ChangeTargets {
@@ -37255,6 +37326,112 @@ mod tests {
                 ));
             }
             other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    fn assert_life_lost_villainous_chooser(
+        chooser: &PlayerFilter,
+        expected_relation: PlayerRelation,
+    ) {
+        match chooser {
+            PlayerFilter::PlayerAttribute {
+                relation,
+                attr,
+                comparator,
+                value,
+            } => {
+                assert_eq!(*relation, expected_relation);
+                assert_eq!(*comparator, Comparator::GE);
+                assert!(matches!(
+                    attr.as_ref(),
+                    QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::ScopedPlayer
+                    }
+                ));
+                assert_eq!(value.as_ref(), &QuantityExpr::Fixed { value: 3 });
+            }
+            other => panic!("expected life-lost PlayerAttribute chooser, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_supports_life_lost_restricted_chooser() {
+        let ability = parse_effect_chain(
+            "Each opponent who lost 3 or more life this turn faces a villainous choice — You draw a card, or that player discards a card.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_eq!(
+                    ability.player_scope, None,
+                    "restricted villainous choice must use chooser, not player_scope fan-out"
+                );
+                assert_life_lost_villainous_chooser(chooser, PlayerRelation::Opponent);
+                assert_eq!(branches.len(), 2);
+                assert!(matches!(&*branches[0].effect, Effect::Draw { .. }));
+                assert!(matches!(
+                    &*branches[1].effect,
+                    Effect::Discard {
+                        target: TargetFilter::ScopedPlayer,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_supports_life_lost_continuation_remainder() {
+        let ability = parse_effect_chain(
+            "Who lost 3 or more life this turn faces a villainous choice — You draw a card, or that player discards a card.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_life_lost_villainous_chooser(chooser, PlayerRelation::Opponent);
+                assert_eq!(branches.len(), 2);
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_supports_life_lost_restricted_all_players() {
+        let ability = parse_effect_chain(
+            "Each player who lost 3 or more life this turn faces a villainous choice — You draw a card, or that player discards a card.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_life_lost_villainous_chooser(chooser, PlayerRelation::All);
+                assert_eq!(branches.len(), 2);
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn davros_token_then_restricted_villainous_choice_chain() {
+        let ability = parse_effect_chain(
+            "Create a 3/3 black Dalek artifact creature token with menace. Then each opponent who lost 3 or more life this turn faces a villainous choice — You draw a card, or that player discards a card.",
+            AbilityKind::Spell,
+        );
+
+        assert!(matches!(&*ability.effect, Effect::Token { .. }));
+        let choice = ability
+            .sub_ability
+            .as_ref()
+            .expect("expected Davros villainous choice as sub-ability");
+        match &*choice.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_life_lost_villainous_chooser(chooser, PlayerRelation::Opponent);
+                assert_eq!(branches.len(), 2);
+            }
+            other => panic!("expected ChooseOneOf sub-ability, got {other:?}"),
         }
     }
 

@@ -1097,7 +1097,10 @@ export type WaitingFor =
   | { type: "DefilerPayment"; data: { player: PlayerId; life_cost: number; mana_reduction: ManaCost; pending_cast: PendingCast } }
   | { type: "CastOffer"; data: { player: PlayerId; kind: CastOfferKind } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
-  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
+  | { type: "AlternativeCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; keyword: { type: "Warp" } | { type: "Evoke" } | { type: "Overload" } | { type: "Bestow" } | { type: "Awaken" } | { type: "Cleave" } | { type: "MoreThanMeetsTheEye" } | { type: "Mutate" }; normal_cost: ManaCost; alternative_cost: ManaCost | null; alternative_additional_cost: SerializedAbilityCost | null } }
+  // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
+  // target — controller chooses to put it on top of or under the target creature.
+  | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
   | { type: "CastingVariantChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; options: CastingVariantChoiceOption[] } }
   | { type: "ChoosePermanentTypeSlot"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; source: ObjectId; payment_mode?: CastPaymentMode; available_slots: CoreType[] } }
   | { type: "MultiTargetSelection"; data: { player: PlayerId; legal_targets: ObjectId[]; min_targets: number; max_targets: number; pending_ability: unknown } }
@@ -1501,6 +1504,8 @@ export type GameAction =
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
+  // CR 702.140c + CR 730.2a: answer to MutateMergeChoice — top or bottom.
+  | { type: "ChooseMutateMergeSide"; data: { side: "Top" | "Bottom" } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }

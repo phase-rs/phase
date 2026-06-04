@@ -1678,10 +1678,11 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 /// (`quantity::resolve_quantity_for_trigger_check`). CR 603.4 covers the
 /// intervening-if recheck at resolution.
 ///
-/// Currently covers the hand-size suffix family used by Ghirapur Orrery and
-/// related "if that player has no cards in hand" / "N or more / N or fewer"
-/// patterns; life-total / graveyard variants will compose in here as more
-/// cards exercise them.
+/// Covers the hand-size suffix family used by Ghirapur Orrery and related
+/// "if that player has no cards in hand" / "N or more / N or fewer" patterns,
+/// plus the life-total suffix family ("N or less life" / "N or more life")
+/// used by Ezio Auditore da Firenze's combat-damage trigger. Graveyard
+/// variants will compose in here as more cards exercise them.
 fn parse_that_player_has_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     // CR 115.1 + CR 603.4: "that/target player/opponent has" decomposes the
     // reference axis ("that" vs. "target") from the subject noun
@@ -1701,13 +1702,66 @@ fn parse_that_player_has_conditions(input: &str) -> OracleResult<'_, StaticCondi
     ))
     .parse(rest)?;
 
-    if let Some((rest, cond)) = parse_hand_size_predicate(rest, player) {
+    if let Some((rest, cond)) = parse_hand_size_predicate(rest, player.clone()) {
+        return Ok((rest, cond));
+    }
+    // CR 119 + CR 603.4: life-total intervening-if predicates for the scoped
+    // player ("if that player has 10 or less life"). The aggregate-less
+    // `PlayerScope::ScopedPlayer` / `PlayerScope::Target` already names a
+    // single player, so the comparison is a direct scalar (no existential
+    // aggregate needed). Canonical card: Ezio Auditore da Firenze.
+    if let Some((rest, cond)) = parse_life_predicate(rest, player) {
         return Ok((rest, cond));
     }
     Err(nom::Err::Error(nom::error::Error::new(
         input,
         nom::error::ErrorKind::Fail,
     )))
+}
+
+/// Parse life-total predicates after a `<subject> has ` prefix has been
+/// consumed. Returns `Some(condition)` on match.
+///
+/// Mirrors `parse_hand_size_predicate`: the only axis that varies is the
+/// `PlayerScope` of the resulting `LifeTotal` ref. Used by
+/// `parse_that_player_has_conditions` so any single-player subject ("that
+/// player", "target player") composes with these life-total tails.
+///
+/// CR 119 (Life), CR 603.4 (intervening-if), CR 603.7c ("that player" anaphora
+/// binds to the player event-context for damage triggers).
+fn parse_life_predicate(rest: &str, player: PlayerScope) -> Option<(&str, StaticCondition)> {
+    // CR 119: "no life" → LifeTotal EQ 0 (defensive, mirrors hand-size's
+    // "no cards in hand"). Not currently printed on cards but kept symmetric
+    // so the predicate covers the full grammatical family.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("no life").parse(rest) {
+        return Some((
+            rest,
+            make_quantity_comparison(QuantityRef::LifeTotal { player }, Comparator::EQ, 0),
+        ));
+    }
+
+    // CR 119 + CR 603.4: "N or less life" / "N or more life" → scalar
+    // comparison against the scoped player's life total. Ezio Auditore da
+    // Firenze canonical for the LE arm.
+    let (after_n, n) = parse_number(rest).ok()?;
+    if let Ok((rest, comparator)) = alt((
+        value(
+            Comparator::LE,
+            tag::<_, _, OracleError<'_>>(" or less life"),
+        ),
+        value(
+            Comparator::GE,
+            tag::<_, _, OracleError<'_>>(" or more life"),
+        ),
+    ))
+    .parse(after_n)
+    {
+        return Some((
+            rest,
+            make_quantity_comparison(QuantityRef::LifeTotal { player }, comparator, n),
+        ));
+    }
+    None
 }
 
 /// Build a QuantityComparison: qty [comparator] n.
@@ -5390,6 +5444,64 @@ mod tests {
                 );
                 assert_eq!(comparator, Comparator::LE);
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// CR 119 + CR 603.4 + CR 603.7c: "if that player has N or less life"
+    /// intervening-if predicate on a combat-damage trigger. Canonical card:
+    /// Ezio Auditore da Firenze. "That player" resolves to the damaged
+    /// player (the event-context player), not the source's controller.
+    #[test]
+    fn test_parse_condition_that_player_n_or_less_life() {
+        let (rest, c) = parse_condition("if that player has 10 or less life").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::LE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 10 });
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// CR 119 + CR 603.4: sibling for the GE arm of the life-predicate
+    /// combinator. Not yet printed on a known card with the "that player"
+    /// subject, but kept to cover the full grammatical family alongside the
+    /// hand-size N-or-more test.
+    #[test]
+    fn test_parse_condition_that_player_n_or_more_life() {
+        let (rest, c) = parse_condition("if that player has 20 or more life").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    }
+                );
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 20 });
             }
             other => panic!("expected QuantityComparison, got {other:?}"),
         }
