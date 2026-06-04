@@ -306,6 +306,46 @@ impl FromStr for CastFrequency {
     }
 }
 
+/// CR 601.2a + CR 903.8: Which origin zones a continuous free-cast permission
+/// may replace the mana cost from.
+///
+/// The axis is separate from `CastFrequency`: Omniscience/Zaffai explicitly say
+/// "from your hand", while Dracogenesis omits a zone qualifier and therefore
+/// also reaches command-zone roles that are already authorized by CR 903.8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum CastFreeOrigin {
+    /// Explicit "from your hand" permissions.
+    #[default]
+    Hand,
+    /// No explicit origin qualifier. This does not create a new zone permission;
+    /// runtime casting still has to prove the object is in a built-in cast zone
+    /// (hand, or an already-authorized command-zone role).
+    DefaultCastPermission,
+}
+
+impl fmt::Display for CastFreeOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CastFreeOrigin::Hand => write!(f, "hand"),
+            CastFreeOrigin::DefaultCastPermission => write!(f, "default_cast_permission"),
+        }
+    }
+}
+
+impl FromStr for CastFreeOrigin {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "hand" => Ok(CastFreeOrigin::Hand),
+            "default_cast_permission" | "implicit_cast_zone" | "otherwise_castable" => {
+                Ok(CastFreeOrigin::DefaultCastPermission)
+            }
+            other => Err(format!("unknown CastFreeOrigin: {other}")),
+        }
+    }
+}
+
 /// CR 118.9 + CR 601.2a: The cost axis for `StaticMode::ExileCastPermission`.
 ///
 /// Sibling to `CastFrequency` and `CardPlayMode` — each axis of the exile-cast
@@ -765,11 +805,15 @@ pub enum StaticMode {
         alt_cost: Option<AbilityCost>,
     },
     /// CR 601.2b + CR 118.9a: Static ability granting permission to cast matching
-    /// spells from hand without paying their mana costs. `Unlimited` = Omniscience,
-    /// Tamiyo emblem. `OncePerTurn` = Zaffai and the Tempests.
+    /// spells without paying their mana costs. `Unlimited` = Omniscience,
+    /// Tamiyo emblem, Dracogenesis. `OncePerTurn` = Zaffai and the Tempests.
     CastFromHandFree {
         /// CR 601.2b: Per-turn cast frequency.
         frequency: CastFrequency,
+        /// CR 601.2a + CR 903.8: Whether the permission is explicitly hand-only
+        /// or applies to built-in cast zones that already authorize the spell.
+        #[serde(default)]
+        origin: CastFreeOrigin,
     },
     /// CR 601.2a + CR 113.6b + CR 118.9: Static ability granting permission to
     /// cast cards exiled with this source — restricted to cards exiled *this
@@ -1233,8 +1277,9 @@ impl Hash for StaticMode {
                 // alt_cost contains AbilityCost which lacks Hash; discriminant + play_mode only.
                 play_mode.hash(state);
             }
-            StaticMode::CastFromHandFree { frequency } => {
+            StaticMode::CastFromHandFree { frequency, origin } => {
                 frequency.hash(state);
+                origin.hash(state);
             }
             StaticMode::ExileCastPermission {
                 frequency,
@@ -1371,8 +1416,12 @@ impl fmt::Display for StaticMode {
                     write!(f, "TopOfLibraryCastPermission({play_mode})")
                 }
             }
-            StaticMode::CastFromHandFree { frequency } => {
-                write!(f, "CastFromHandFree({frequency})")
+            StaticMode::CastFromHandFree { frequency, origin } => {
+                if matches!(origin, CastFreeOrigin::Hand) {
+                    write!(f, "CastFromHandFree({frequency})")
+                } else {
+                    write!(f, "CastFromHandFree({frequency},{origin})")
+                }
             }
             StaticMode::ExileCastPermission {
                 frequency,
@@ -1713,14 +1762,22 @@ impl FromStr for StaticMode {
             }
             "CastFromHandFree" => StaticMode::CastFromHandFree {
                 frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::Hand,
             },
             s if s.starts_with("CastFromHandFree(") => {
-                let freq = s
+                let inner = s
                     .strip_prefix("CastFromHandFree(")
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("unlimited");
+                let mut parts = inner.split(',');
+                let freq = parts.next().unwrap_or("unlimited");
+                let origin = parts
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(CastFreeOrigin::Hand);
                 StaticMode::CastFromHandFree {
                     frequency: freq.parse().unwrap_or(CastFrequency::Unlimited),
+                    origin,
                 }
             }
             "ExileCastPermission" => StaticMode::ExileCastPermission {
@@ -2236,9 +2293,15 @@ mod tests {
             // Cast-from-hand-free permissions (Omniscience; Zaffai).
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::Hand,
             },
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
+                origin: CastFreeOrigin::Hand,
+            },
+            StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+                origin: CastFreeOrigin::DefaultCastPermission,
             },
             // Exile-cast permission (Maralen, Fae Ascendant).
             StaticMode::ExileCastPermission {

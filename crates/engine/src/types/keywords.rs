@@ -1266,8 +1266,8 @@ fn parse_keyword_mana_cost(s: &str) -> ManaCost {
     ManaCost::Cost { shards, generic }
 }
 
-/// CR 702.41a: Parse the type text from "Affinity for [type]" into a TypedFilter.
-/// Handles common affinity patterns: "artifacts", "Plains", "creatures", etc.
+/// CR 702.41a: Parse the text from "Affinity for [text]" into the permanents
+/// counted for the cost reduction.
 fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
     use super::ability::TypeFilter;
     // MTGJSON provides "Affinity for artifacts" — FromStr splits on first ':' giving
@@ -1284,16 +1284,20 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
             Some(TypedFilter::new(TypeFilter::Artifact).subtype("Equipment".to_string()))
         }
         _ => {
-            // Try as a land subtype (Plains, Islands, etc.)
+            // CR 702.41a + CR 205.3: "Affinity for [text]" counts permanents
+            // matching the text. Unknown names are subtypes, but not always
+            // land subtypes ("Daleks", "Cats", "Birds"). Keep this as a bare
+            // subtype constraint so it covers land, artifact, enchantment, and
+            // creature subtype affinity without adding a false type conjunct.
             let capitalized = format!("{}{}", &s[..1].to_uppercase(), &s[1..]);
-            // Strip trailing 's' for plural land subtypes (e.g., "Plains" stays "Plains",
-            // but "Islands" → "Island", "Swamps" → "Swamp")
+            // Strip trailing 's' for plural subtype words (e.g., "Daleks" →
+            // "Dalek", "Islands" → "Island"; "Plains" stays "Plains").
             let subtype = if capitalized.ends_with('s') && capitalized != "Plains" {
                 capitalized[..capitalized.len() - 1].to_string()
             } else {
                 capitalized
             };
-            Some(TypedFilter::land().subtype(subtype))
+            Some(TypedFilter::default().subtype(subtype))
         }
     }
 }
@@ -2719,6 +2723,29 @@ mod tests {
 
         let equip = Keyword::from_str("Equip:3").unwrap();
         assert!(matches!(equip, Keyword::Equip(ManaCost::Cost { .. })));
+    }
+
+    #[test]
+    fn parse_affinity_for_arbitrary_subtype_without_land_constraint() {
+        let daleks = Keyword::from_str("Affinity for Daleks").unwrap();
+        let Keyword::Affinity(dalek_filter) = daleks else {
+            panic!("expected Affinity keyword");
+        };
+        assert_eq!(
+            dalek_filter.type_filters,
+            vec![TypeFilter::Subtype("Dalek".to_string())],
+            "CR 702.41a: arbitrary subtype affinity must not add a false Land constraint"
+        );
+
+        let islands = Keyword::from_str("Affinity for Islands").unwrap();
+        let Keyword::Affinity(island_filter) = islands else {
+            panic!("expected Affinity keyword");
+        };
+        assert_eq!(
+            island_filter.type_filters,
+            vec![TypeFilter::Subtype("Island".to_string())],
+            "land subtype affinity still matches by subtype without requiring an explicit Land conjunct"
+        );
     }
 
     #[test]

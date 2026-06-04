@@ -20,8 +20,8 @@ use crate::types::mana::{
 };
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    ActivationExemption, CastFrequency, CastingProhibitionCondition, CostModifyMode, ExileCardPool,
-    ExileCastCost, ExileCastTiming, ProhibitionScope, StaticMode,
+    ActivationExemption, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
+    CostModifyMode, ExileCardPool, ExileCastCost, ExileCastTiming, ProhibitionScope, StaticMode,
 };
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -2006,40 +2006,89 @@ pub fn exile_lands_playable_by_permission(
 ///
 /// For `OncePerTurn` sources, the already-used set is consulted; exhausted sources
 /// do not qualify. `Unlimited` sources always qualify if their filter matches.
+fn cast_free_origin_admits_object(
+    state: &GameState,
+    player: PlayerId,
+    obj: &crate::game::game_object::GameObject,
+    origin: CastFreeOrigin,
+) -> bool {
+    if obj.owner != player {
+        return false;
+    }
+    match origin {
+        CastFreeOrigin::Hand => obj.zone == Zone::Hand,
+        CastFreeOrigin::DefaultCastPermission => match obj.zone {
+            Zone::Hand => true,
+            Zone::Command => {
+                state.format_config.command_zone
+                    && (obj.is_commander
+                        || (obj.is_signature_spell() && oathbreaker_on_battlefield(state, player)))
+            }
+            _ => false,
+        },
+    }
+}
+
+fn cast_free_permission_from_source(
+    state: &GameState,
+    player: PlayerId,
+    obj: &crate::game::game_object::GameObject,
+    source_id: ObjectId,
+) -> Option<CastFrequency> {
+    let src_obj = state.objects.get(&source_id)?;
+    if src_obj.controller != player {
+        return None;
+    }
+    active_static_definitions(state, src_obj).find_map(|s| {
+        let StaticMode::CastFromHandFree { frequency, origin } = s.mode else {
+            return None;
+        };
+        // CR 601.2b: Skip if this source's once-per-turn slot was already used.
+        if frequency == CastFrequency::OncePerTurn
+            && state.hand_cast_free_permissions_used.contains(&source_id)
+        {
+            return None;
+        }
+        if !cast_free_origin_admits_object(state, player, obj, origin) {
+            return None;
+        }
+        let filter = s.affected.as_ref()?;
+        if super::filter::matches_target_filter(
+            state,
+            obj.id,
+            filter,
+            &super::filter::FilterContext::from_source_with_controller(source_id, player),
+        ) {
+            Some(frequency)
+        } else {
+            None
+        }
+    })
+}
+
 pub(crate) fn hand_cast_free_permission_source(
     state: &GameState,
     player: PlayerId,
     obj: &crate::game::game_object::GameObject,
 ) -> Option<(ObjectId, CastFrequency)> {
     state.battlefield.iter().find_map(|&src_id| {
-        let src_obj = state.objects.get(&src_id)?;
-        if src_obj.controller != player {
-            return None;
-        }
-        let (filter, frequency) =
-            active_static_definitions(state, src_obj).find_map(|s| match s.mode {
-                StaticMode::CastFromHandFree { frequency } => {
-                    s.affected.as_ref().map(|f| (f, frequency))
-                }
-                _ => None,
-            })?;
-        // CR 601.2b: Skip if this source's once-per-turn slot was already used.
-        if frequency == CastFrequency::OncePerTurn
-            && state.hand_cast_free_permissions_used.contains(&src_id)
-        {
-            return None;
-        }
-        if super::filter::matches_target_filter(
-            state,
-            obj.id,
-            filter,
-            &super::filter::FilterContext::from_source_with_controller(src_id, player),
-        ) {
-            Some((src_id, frequency))
-        } else {
-            None
-        }
+        cast_free_permission_from_source(state, player, obj, src_id)
+            .map(|frequency| (src_id, frequency))
     })
+}
+
+/// CR 601.2b + CR 118.9a: `Unlimited` `CastFromHandFree` that zeroes mana cost on
+/// the normal `CastSpell` path (Omniscience from hand; Dracogenesis from hand or
+/// command-zone commanders).
+fn unlimited_hand_cast_free_applies(
+    state: &GameState,
+    player: PlayerId,
+    obj: &crate::game::game_object::GameObject,
+    casting_variant: CastingVariant,
+) -> bool {
+    !matches!(casting_variant, CastingVariant::HandPermission { .. })
+        && hand_cast_free_permission_source(state, player, obj)
+            .is_some_and(|(_, frequency)| frequency == CastFrequency::Unlimited)
 }
 
 /// CR 601.2f: Whether `spell_id` matches a pending next-spell modifier's optional filter.
@@ -2896,14 +2945,12 @@ fn prepare_spell_cast_with_variant_override_inner(
         .is_some();
 
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
-    // casting from hand. Auto-application is restricted to `Unlimited` sources
-    // (Omniscience, Tamiyo emblem); `OncePerTurn` sources (Zaffai) must be opted
-    // into explicitly via a dedicated action to preserve the player's "may cast"
+    // casting from the origin scope carried by the static. Auto-application is
+    // restricted to `Unlimited` sources (Omniscience, Tamiyo emblem,
+    // Dracogenesis); `OncePerTurn` sources (Zaffai) must be opted into
+    // explicitly via a dedicated action to preserve the player's "may cast"
     // choice and make per-turn slot consumption visible at the action layer.
-    let hand_cast_free = obj.zone == Zone::Hand
-        && !matches!(casting_variant, CastingVariant::HandPermission { .. })
-        && hand_cast_free_permission_source(state, player, obj)
-            .is_some_and(|(_, frequency)| frequency == CastFrequency::Unlimited);
+    let hand_cast_free = unlimited_hand_cast_free_applies(state, player, obj, casting_variant);
 
     // CR 118.9: Energy replaces mana cost entirely when casting with ExileWithEnergyCost.
     // CR 702.34a: Non-mana flashback costs use NoCost for mana (cost is paid separately).
@@ -5685,20 +5732,16 @@ pub fn handle_cast_spell_for_free_with_payment_mode(
             "CastSpellForFree requires a hand card owned by the caster".to_string(),
         ));
     }
-    // CR 601.2b + CR 400.7: The granting source's permission must be active and
-    // filter-matched. `hand_cast_free_permission_source` also enforces that any
-    // `OncePerTurn` slot has not already been consumed this turn.
-    let (matched_source, frequency) = hand_cast_free_permission_source(state, player, obj)
-        .ok_or_else(|| {
+    // CR 601.2b + CR 400.7: The named granting source's permission must be
+    // active and filter-matched. Source-specific validation avoids accepting a
+    // stale legal action for one source only because an earlier battlefield
+    // source also matches the spell.
+    let frequency =
+        cast_free_permission_from_source(state, player, obj, source_id).ok_or_else(|| {
             EngineError::ActionNotAllowed(
-                "No CastFromHandFree permission source admits this spell".to_string(),
+                "Named CastFromHandFree permission source does not admit this spell".to_string(),
             )
         })?;
-    if matched_source != source_id {
-        return Err(EngineError::ActionNotAllowed(
-            "Named source is not the permission grantor for this spell".to_string(),
-        ));
-    }
     let variant = CastingVariant::HandPermission {
         source: source_id,
         frequency,
@@ -5956,8 +5999,7 @@ pub fn handle_cast_spell_with_payment_mode(
             // Defense-in-depth — the candidate generator already excludes the
             // no-permission case via `can_cast_object_now`.
             if matches!(obj.mana_cost, ManaCost::NoCost)
-                && !hand_cast_free_permission_source(state, player, obj)
-                    .is_some_and(|(_, frequency)| frequency == CastFrequency::Unlimited)
+                && !unlimited_hand_cast_free_applies(state, player, obj, CastingVariant::Normal)
             {
                 return Err(EngineError::InvalidAction(format!(
                     "Cannot cast {object_id:?} from hand — it has no mana cost (CR 118.6)",
@@ -7503,7 +7545,7 @@ pub fn hand_cast_free_candidates(
 ) -> Vec<(ObjectId, ObjectId, CastFrequency)> {
     // CR 601.2b + CR 400.7: Collect active (source_id, frequency, filter)
     // triples for OncePerTurn permissions that haven't been consumed this turn.
-    let sources: Vec<(ObjectId, TargetFilter, CastFrequency)> = state
+    let sources: Vec<(ObjectId, TargetFilter, CastFrequency, CastFreeOrigin)> = state
         .battlefield
         .iter()
         .filter_map(|&src_id| {
@@ -7512,13 +7554,15 @@ pub fn hand_cast_free_candidates(
                 return None;
             }
             active_static_definitions(state, src_obj).find_map(|s| match s.mode {
-                StaticMode::CastFromHandFree { frequency } => {
+                StaticMode::CastFromHandFree { frequency, origin } => {
                     if frequency == CastFrequency::OncePerTurn
                         && state.hand_cast_free_permissions_used.contains(&src_id)
                     {
                         None
                     } else if frequency == CastFrequency::OncePerTurn {
-                        s.affected.as_ref().map(|f| (src_id, f.clone(), frequency))
+                        s.affected
+                            .as_ref()
+                            .map(|f| (src_id, f.clone(), frequency, origin))
                     } else {
                         None
                     }
@@ -7537,7 +7581,13 @@ pub fn hand_cast_free_candidates(
         return out;
     };
     for &hand_id in &player_data.hand {
-        for (src_id, filter, frequency) in &sources {
+        for (src_id, filter, frequency, origin) in &sources {
+            let Some(obj) = state.objects.get(&hand_id) else {
+                continue;
+            };
+            if !cast_free_origin_admits_object(state, player, obj, *origin) {
+                continue;
+            }
             let ctx = super::filter::FilterContext::from_source_with_controller(*src_id, player);
             if !super::filter::matches_target_filter(state, hand_id, filter, &ctx) {
                 continue;
@@ -7650,10 +7700,11 @@ fn can_cast_prepared_now(
     // emblem), which `prepare_spell_cast` recognizes via the same predicate and
     // zeroes the cost. `OncePerTurn` sources (Zaffai) opt in via the dedicated
     // `CastSpellForFree` action instead. Block the normal hand cast otherwise.
-    if obj.zone == Zone::Hand
+    // Exile-zone copies (Prepare, Suspend, Discover, etc.) carry their own
+    // `ExileWithAltCost` permission and must not hit this hand/command guard.
+    if matches!(obj.zone, Zone::Hand | Zone::Command)
         && matches!(obj.mana_cost, ManaCost::NoCost)
-        && !hand_cast_free_permission_source(state, player, obj)
-            .is_some_and(|(_, frequency)| frequency == CastFrequency::Unlimited)
+        && !unlimited_hand_cast_free_applies(state, player, obj, prepared.casting_variant)
     {
         return false;
     }
@@ -18942,6 +18993,125 @@ mod tests {
         );
     }
 
+    /// CR 601.2 + CR 118.9a + CR 903.8 (issue #2000): Dracogenesis lets Dragon
+    /// spells be cast without paying mana from hand or from the command zone.
+    #[test]
+    fn dracogenesis_dragon_commander_in_command_zone_has_no_mana_cost() {
+        let mut state = setup_game_at_main_phase();
+        state.format_config.command_zone = true;
+
+        let dracogenesis_id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Dracogenesis".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&dracogenesis_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                parse_static_line("You may cast Dragon spells without paying their mana costs.")
+                    .expect("Dracogenesis static should parse"),
+            );
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "The Ur-Dragon".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.is_commander = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Dragon".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::White,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Black,
+                    ManaCostShard::Red,
+                    ManaCostShard::Green,
+                ],
+                generic: 0,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Dragon Commander".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let cost = effective_spell_cost(&state, PlayerId(0), commander_id)
+            .expect("dragon commander should be castable from command zone");
+        assert!(
+            matches!(cost, ManaCost::NoCost),
+            "Dracogenesis should zero the commander's mana cost, got {cost:?}"
+        );
+        assert!(can_cast_object_now(&state, PlayerId(0), commander_id));
+    }
+
+    /// Omniscience's explicit hand qualifier must not free-cast commanders from
+    /// the command zone (issue #2000 regression guard).
+    #[test]
+    fn omniscience_does_not_free_cast_commander_from_command_zone() {
+        let mut state = setup_game_at_main_phase();
+        state.format_config.command_zone = true;
+
+        let omniscience_id = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Omniscience".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&omniscience_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                parse_static_line(
+                    "You may cast spells from your hand without paying their mana costs.",
+                )
+                .expect("Omniscience static should parse"),
+            );
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(0),
+            "Dragon Commander".to_string(),
+            Zone::Command,
+        );
+        {
+            let obj = state.objects.get_mut(&commander_id).unwrap();
+            obj.is_commander = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::generic(5);
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Commander".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let cost = effective_spell_cost(&state, PlayerId(0), commander_id)
+            .expect("commander cost should compute");
+        assert!(
+            !matches!(cost, ManaCost::NoCost),
+            "Omniscience must not apply to command-zone commanders, got {cost:?}"
+        );
+    }
+
     // Witherbloom, the Balancer (cost {5}{B}{G}) has printed `Keyword::Affinity(Creature)`.
     // When cast from the command zone, the same cost-reduction code path runs as
     // a hand cast. Witherbloom itself in the command zone is NOT on the battlefield,
@@ -19049,6 +19219,70 @@ mod tests {
         assert_eq!(
             g_with_opp, 2,
             "opponent creatures must not contribute to caster's Affinity reduction"
+        );
+    }
+
+    #[test]
+    fn affinity_for_daleks_reduces_dalek_emperor_generic_cost() {
+        let mut state = setup_game_at_main_phase();
+        let emperor_id = create_object(
+            &mut state,
+            CardId(2184),
+            PlayerId(0),
+            "The Dalek Emperor".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&emperor_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.supertypes.push(Supertype::Legendary);
+            obj.card_types.subtypes.push("Dalek".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Red],
+                generic: 5,
+            };
+            obj.keywords
+                .push("Affinity for Daleks".parse::<Keyword>().unwrap());
+        }
+
+        for i in 0u64..4 {
+            let id = create_object(
+                &mut state,
+                CardId(2200 + i),
+                PlayerId(0),
+                format!("Dalek Token {i}"),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Dalek".to_string());
+        }
+        let opponent_dalek = create_object(
+            &mut state,
+            CardId(2300),
+            PlayerId(1),
+            "Opponent Dalek".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&opponent_dalek).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Dalek".to_string());
+        }
+
+        let cost = effective_spell_cost(&state, PlayerId(0), emperor_id)
+            .expect("Dalek Emperor cost should compute");
+        let ManaCost::Cost { generic, shards } = cost else {
+            panic!("expected mana cost");
+        };
+        assert_eq!(generic, 1, "four controlled Daleks reduce {{5}} to {{1}}");
+        assert_eq!(
+            shards,
+            vec![ManaCostShard::Black, ManaCostShard::Red],
+            "Affinity only reduces generic mana"
         );
     }
 

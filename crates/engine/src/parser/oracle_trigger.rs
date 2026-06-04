@@ -5969,6 +5969,8 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
+        /// Digital-only Specialize — permanent specializes into a color.
+        Specializes,
         /// CR 702.26c: Permanent phases in from phased-out state.
         PhasesIn,
         /// CR 702.26b: Permanent phases out.
@@ -6107,6 +6109,8 @@ fn try_parse_event(
             // CR 702.26b: "phases out" / "phase out" — phasing-out trigger.
             value(SimpleEvent::PhasesOut, tag("phases out")),
             value(SimpleEvent::PhasesOut, tag("phase out")),
+            // Digital-only: "specializes" — Specialize trigger (not in CR).
+            value(SimpleEvent::Specializes, tag("specializes")),
             // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
             parse_becomes_unattached,
             // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
@@ -6257,6 +6261,11 @@ fn try_parse_event(
             SimpleEvent::PhasesOut => {
                 // CR 702.26b: Permanent phases out.
                 def.mode = TriggerMode::PhaseOut;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::Specializes => {
+                // Digital-only Specialize trigger (not in CR).
+                def.mode = TriggerMode::Specializes;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::BecomesUnattached(host_filter) => {
@@ -10869,6 +10878,18 @@ mod tests {
         );
 
         assert_eq!(def.mode, TriggerMode::PhaseOut);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn parses_specializes_trigger_as_specializes_mode() {
+        // Digital-only Alchemy: "When ~ specializes, draw a card."
+        let def = parse_trigger_line(
+            "When Jaheira, Insightful Harper specializes, draw a card.",
+            "Jaheira, Insightful Harper",
+        );
+
+        assert_eq!(def.mode, TriggerMode::Specializes);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 

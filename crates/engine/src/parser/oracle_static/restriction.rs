@@ -1685,9 +1685,8 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
 /// mana cost[s]?" — covering Omniscience and the Tamiyo, Field Researcher emblem
 /// (no filter, hand qualifier), Zaffai-and-the-Tempests (typed filter, hand
 /// qualifier, once-per-turn frequency), and Dracogenesis (subtype filter, no
-/// zone qualifier — implicit hand per CR 601.2: "To cast a spell is to take it
-/// from where it is (usually the hand)..."). Continuous static — not a one-shot
-/// effect.
+/// zone qualifier, so it can replace the mana cost from built-in cast zones like
+/// hand and command). Continuous static — not a one-shot effect.
 pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
     // CR 601.2b: Prefix determines frequency. `OncePerTurn` (Zaffai) is the
     // explicit-choice path; `Unlimited` (Omniscience, Dracogenesis) runs silently.
@@ -1704,10 +1703,9 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
         )
     };
 
-    // The zone qualifier "from your hand" is optional. CR 601.2 makes the hand
-    // the implicit cast zone, so Dracogenesis's "you may cast Dragon spells
-    // without paying their mana costs" carries the same semantics as Omniscience's
-    // "you may cast spells from your hand without paying their mana costs".
+    // The zone qualifier "from your hand" is optional. When omitted, the static
+    // only replaces the mana cost for spells already castable from their current
+    // zone; it does not create an independent cast-from-anywhere permission.
     //
     // Both branches must terminate at " without paying" — that token is the
     // single anchor for the static. The qualified branch keeps a permissive
@@ -1716,23 +1714,23 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
     // unconsumed remainder) so complex filters like Fires of Invention's
     // "spells with mana value less than or equal to the number of lands you
     // control" decline cleanly instead of misparsing as `TargetFilter::Any`.
-    let (filter_text, zone_qualified) = if let Ok((_, (before, hand_rest))) =
+    let (filter_text, origin) = if let Ok((_, (before, hand_rest))) =
         nom_primitives::split_once_on(rest, " from your hand")
     {
         // "without paying" must follow "from your hand" — reject unusual word orders
         if !nom_primitives::scan_contains(hand_rest, "without paying") {
             return None;
         }
-        (before, true)
+        (before, CastFreeOrigin::Hand)
     } else {
         let (_, (before, _)) = nom_primitives::split_once_on(rest, " without paying").ok()?;
-        (before, false)
+        (before, CastFreeOrigin::DefaultCastPermission)
     };
 
     // Intentional: "spells" with no qualifier → Any filter (Omniscience) — no warning needed.
     if filter_text == "spells" {
         return Some(
-            StaticDefinition::new(StaticMode::CastFromHandFree { frequency })
+            StaticDefinition::new(StaticMode::CastFromHandFree { frequency, origin })
                 .affected(TargetFilter::Any)
                 .description(text.to_string()),
         );
@@ -1752,7 +1750,7 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
     };
 
     let (filter, remainder) = parse_type_phrase(&cleaned);
-    if !remainder.trim().is_empty() && !zone_qualified {
+    if !remainder.trim().is_empty() && matches!(origin, CastFreeOrigin::DefaultCastPermission) {
         // Unqualified branch is strict: an unconsumed remainder signals a
         // complex filter we don't yet model (e.g. Fires of Invention's
         // dynamic mana-value bound). Decline rather than emit a partial
@@ -1761,7 +1759,7 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
     }
 
     Some(
-        StaticDefinition::new(StaticMode::CastFromHandFree { frequency })
+        StaticDefinition::new(StaticMode::CastFromHandFree { frequency, origin })
             .affected(filter)
             .description(text.to_string()),
     )

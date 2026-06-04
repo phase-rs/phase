@@ -3677,7 +3677,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         && state
             .objects
             .get(&object_id)
-            .map(|obj| obj.is_commander)
+            .map(|obj| obj.uses_command_zone_rules())
             .unwrap_or(false);
     let source_zone = origin_zone;
 
