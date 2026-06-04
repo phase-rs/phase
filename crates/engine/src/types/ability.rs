@@ -4170,6 +4170,11 @@ pub enum StaticCondition {
     OpponentPoisonAtLeast {
         count: u32,
     },
+    /// CR 702.90c + CR 508.1d: True when the defending player for the source
+    /// creature's attack has at least this many poison counters.
+    DefendingPlayerPoisonAtLeast {
+        count: u32,
+    },
     /// CR 118.12a + CR 508.1d + CR 509.1c: "unless [player] pays [cost]" — an optional cost
     /// condition attached to a combat restriction (attack tax / block tax).
     ///

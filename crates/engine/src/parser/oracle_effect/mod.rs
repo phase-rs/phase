@@ -2029,6 +2029,55 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
 /// When this text appears on a permanent as a static ability, the static parser handles it.
 /// When it appears as an effect line in a spell or triggered ability (e.g., Choice of Fortunes),
 /// it needs to create an emblem to produce a persistent game-state effect.
+/// CR 118.12a: "[effect] unless a player has [~] deal N damage to them" — any
+/// player may have the source deal damage instead of the primary effect
+/// (Barbarian Bully).
+fn try_parse_unless_player_have_deal_damage(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let (before_unless, _, after_unless) =
+        nom_primitives::scan_preceded(tp.lower, |i| tag(" unless a player has ").parse(i))?;
+    let cost = parse_unless_player_have_deal_damage_cost(after_unless)?;
+    let cleaned = tp.original[..before_unless.trim_end().len()].trim();
+    let diagnostics_snapshot = ctx.diagnostics.len();
+    let mut clause = parse_effect_clause(cleaned, ctx);
+    if matches!(clause.effect, Effect::Unimplemented { .. }) {
+        ctx.diagnostics.truncate(diagnostics_snapshot);
+        return None;
+    }
+    clause.unless_pay = Some(UnlessPayModifier {
+        cost,
+        payer: TargetFilter::AllPlayers,
+    });
+    Some(clause)
+}
+
+fn parse_unless_player_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("this creature "),
+        tag::<_, _, OracleError<'_>>("~ "),
+    ))
+    .parse(after_unless)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("deal ").parse(rest).ok()?;
+    let (amount, tail) = super::oracle_util::parse_count_expr(rest)?;
+    let tail = tail
+        .strip_prefix("damage to ")
+        .map(str::trim)
+        .map(|s| s.trim_end_matches('.'))?;
+    if tail != "them" {
+        return None;
+    }
+    Some(AbilityCost::EffectCost {
+        effect: Box::new(Effect::DealDamage {
+            amount,
+            target: TargetFilter::Player,
+            damage_source: None,
+        }),
+    })
+}
+
 /// CR 700.2 + CR 608.2d: "[DEFAULT] unless that player [A] or [B]" —
 /// three-branch forced choice. The scoped player picks an avoidance option or
 /// accepts the default consequence. Called before `try_parse_choose_one_of_inline`
@@ -3817,6 +3866,11 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     // subject dispatch, which would bind `ControllerRef::Opponent` as a cast-time
     // player target on Draw/Mill/etc.
     if let Some(clause) = try_parse_an_opponent_to_verb(tp, ctx) {
+        return clause;
+    }
+
+    // CR 700.2 + CR 118.12a: "[DEFAULT] unless a player has ~ deal N to them".
+    if let Some(clause) = try_parse_unless_player_have_deal_damage(tp, ctx) {
         return clause;
     }
 
@@ -16239,6 +16293,34 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     Some(AbilityCost::Mana { cost })
 }
 
+/// CR 118.12a: "unless that creature's controller has [~] deal N damage to them"
+/// (Blazing Salvo) — the controller may take the damage instead of the creature.
+fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("that creature's controller has ")
+        .parse(after_unless)
+        .ok()?;
+    let (rest, _) = take_until::<_, _, OracleError<'_>>(" deal ")
+        .parse(rest)
+        .ok()?;
+    // `take_until` leaves the matched delimiter on the input (" deal N ...").
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" deal ").parse(rest).ok()?;
+    let (amount, tail) = super::oracle_util::parse_count_expr(rest)?;
+    let tail = tail
+        .strip_prefix("damage to ")
+        .map(str::trim)
+        .map(|s| s.trim_end_matches('.'))?;
+    if tail != "them" {
+        return None;
+    }
+    Some(AbilityCost::EffectCost {
+        effect: Box::new(Effect::DealDamage {
+            amount,
+            target: TargetFilter::Player,
+            damage_source: None,
+        }),
+    })
+}
+
 fn extract_resolution_unless_pay_modifier(
     text: &str,
     player_scope: Option<&PlayerFilter>,
@@ -16262,6 +16344,16 @@ fn extract_resolution_unless_pay_modifier(
     if let Some((before_unless, _, after_unless_lower)) =
         nom_primitives::scan_preceded(&lower, |i| tag::<_, _, OracleError<'_>>("unless ").parse(i))
     {
+        if let Some(cost) = parse_unless_have_deal_damage_cost(after_unless_lower) {
+            let cleaned = text[..before_unless.trim_end().len()].trim().to_string();
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost,
+                    payer: TargetFilter::ParentTargetController,
+                }),
+            );
+        }
         if let Some(cost) =
             crate::parser::oracle_trigger::parse_unless_they_alt_cost_chain(after_unless_lower)
         {
@@ -20292,6 +20384,30 @@ mod tests {
     /// `targeting::resolve_effect_player_ref`). Without this the parser's
     /// `try_parse_choose_one_of_inline` would misfire on the inner ` or ` and
     /// split the imperative into two malformed branches.
+    /// CR 118.12a: Blazing Salvo — unless the target's controller takes the damage.
+    #[test]
+    fn blazing_salvo_unless_have_deal_damage() {
+        let def = parse_effect_chain(
+            "Blazing Salvo deals 3 damage to target creature unless that creature's controller has Blazing Salvo deal 5 damage to them.",
+            AbilityKind::Spell,
+        );
+        let unless_pay = def
+            .unless_pay
+            .as_ref()
+            .expect("Blazing Salvo must attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        match &unless_pay.cost {
+            AbilityCost::EffectCost { effect } => match effect.as_ref() {
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    ..
+                } => {}
+                other => panic!("expected DealDamage 5, got {other:?}"),
+            },
+            other => panic!("expected EffectCost, got {other:?}"),
+        }
+    }
+
     #[test]
     fn effect_chain_rhystic_lightning_unless_dual_payer_is_parent_target_controller() {
         use crate::types::mana::ManaCost;

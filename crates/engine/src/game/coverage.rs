@@ -5482,6 +5482,9 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
             ("SpellCastWithVariantThisTurn", Handled)
         }
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
+        StaticCondition::DefendingPlayerPoisonAtLeast { .. } => {
+            ("DefendingPlayerPoisonAtLeast", Handled)
+        }
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
         StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Unhandled),

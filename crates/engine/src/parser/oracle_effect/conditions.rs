@@ -2216,6 +2216,7 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::SourceIsMonstrous
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::DefendingPlayerPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::RingLevelAtLeast { .. }

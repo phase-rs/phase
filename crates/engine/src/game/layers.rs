@@ -592,6 +592,7 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::DefendingPlayerPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::SourceEnteredThisTurn
@@ -706,6 +707,7 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::DefendingPlayerPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::SourceEnteredThisTurn
@@ -1037,6 +1039,19 @@ fn evaluate_condition_with_context(
             .iter()
             .filter(|player| player.id != controller)
             .any(|player| player.poison_counters >= *count),
+        // CR 702.90c + CR 508.1d: defending player poison gate during declare attackers.
+        StaticCondition::DefendingPlayerPoisonAtLeast { count } => state
+            .combat
+            .as_ref()
+            .and_then(|combat| {
+                combat
+                    .attackers
+                    .iter()
+                    .find(|a| a.object_id == source_id)
+                    .map(|a| a.defending_player)
+            })
+            .and_then(|defending| state.players.iter().find(|player| player.id == defending))
+            .is_some_and(|player| player.poison_counters >= *count),
         // CR 118.12a: "unless pays" conditions evaluate as false (restriction active).
         // This is a conservative but rules-correct default for cards like Ghostly
         // Prison: absent a per-attacker/per-blocker optional cost payment round-trip
