@@ -13637,7 +13637,7 @@ pub(crate) fn parse_effect_chain_ir(
     // chain; the anchor is reset at each top-level call.
     let mut anchor_subject: Option<TargetFilter> = None;
     let mut chunk_diagnostics: Vec<OracleDiagnostic> = Vec::new();
-    // CR 609.3: "Repeat the following process N times." appears as its own
+    // CR 608.2c: "Repeat the following process N times." appears as its own
     // sentence before the body clause. The count is stashed here and applied
     // to the immediately-following clause so the body executes N times.
     let mut pending_repeat_for: Option<QuantityExpr> = None;
@@ -14350,7 +14350,7 @@ pub(crate) fn parse_effect_chain_ir(
             (None, text)
         };
         let condition = condition.or(leading_cond);
-        // CR 609.3: "[effect] a number of times equal to the difference" — when
+        // CR 608.2c: "[effect] a number of times equal to the difference" — when
         // a leading comparison condition was just stripped, a trailing
         // difference-repeat suffix repeats the effect by the unsigned magnitude
         // gap between the condition's operands (Expand the Sphere's "If you put
@@ -14593,7 +14593,7 @@ pub(crate) fn parse_effect_chain_ir(
                 strip_trailing_where_x(TextPair::new(&text, &text_where_x_lower));
             (without_where_x.original.to_string(), where_x_expression)
         };
-        // CR 609.3: "twice" / "N times" suffix — same mechanism as "for each" prefix.
+        // CR 608.2c: "twice" / "N times" suffix — same mechanism as "for each" prefix.
         let (repeat_count, text) = if repeat_for.is_none() {
             let (repeat_count, stripped_text) = strip_repeat_count_suffix(&text_without_where_x);
             if repeat_count.is_some() {
@@ -14606,11 +14606,12 @@ pub(crate) fn parse_effect_chain_ir(
         };
         let repeat_for = repeat_for
             .or(repeat_count)
-            // CR 609.3: difference-repeat count detected after the leading
+            // CR 608.2c: difference-repeat count detected after the leading
             // conditional strip ("a number of times equal to the difference").
             .or(difference_repeat)
             .or_else(|| pending_repeat_for.take());
         let (player_scope, text) = strip_player_scope_subject(&text);
+        let pending_player_scope_for_clause = pending_player_scope.take();
         let carried_player_scope = if player_scope.is_none()
             && !sequence::starts_clause_text(&text)
             && sequence::starts_clause_text_or_conjugated(&text)
@@ -14631,7 +14632,7 @@ pub(crate) fn parse_effect_chain_ir(
             .or(carried_player_scope)
             // CR 101.4 + CR 608.2f: forward-carry from a preceding
             // "Repeat the following process for each <scope> [in turn order]."
-            .or_else(|| pending_player_scope.take());
+            .or(pending_player_scope_for_clause);
 
         // CR 608.2e + CR 608.2c + CR 101.3: A decline-tail strips one of four
         // shapes (prepositional vs subject-only × optional `doesn't` vs
@@ -40756,6 +40757,31 @@ mod tests {
             AbilityKind::Spell,
         );
         assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+    }
+
+    /// CR 608.2f: the carried directive scope is consumed by the next body
+    /// clause even when that body has its own explicit player subject. A later
+    /// independent sentence must not inherit stale pending scope.
+    #[test]
+    fn parse_repeat_for_each_explicit_body_subject_does_not_leak_to_later_clause() {
+        let def = parse_effect_chain(
+            "Repeat the following process for each player. Each opponent draws a card. Draw a card.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+
+        let tail = def
+            .sub_ability
+            .as_ref()
+            .expect("expected trailing Draw clause");
+        assert_eq!(tail.player_scope, None);
+        assert!(matches!(
+            &*tail.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
     }
 
     /// CR 608.2f: the "in turn order" suffix is optional — bare
