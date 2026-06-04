@@ -9,7 +9,7 @@ use crate::types::ability::{
     PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
     MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor, ZoneChangeRecord,
@@ -2176,6 +2176,123 @@ fn affected_objects_from_events(
     }
 }
 
+fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> bool {
+    match effect {
+        Effect::Destroy { .. } | Effect::DestroyAll { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    from: Some(crate::types::zones::Zone::Battlefield),
+                    ..
+                }
+            )
+        }),
+        Effect::Sacrifice { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PermanentSacrificed { .. })),
+        Effect::Mill { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ExileFromTopUntil { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. })),
+        Effect::Counter { .. } | Effect::CounterAll { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::SpellCountered { .. })),
+        Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::Fight { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamageDealt { .. })),
+        Effect::Discard { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::Discarded { .. })),
+        Effect::AddCounter { .. }
+        | Effect::PutCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::MoveCounters { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterAdded { .. })),
+        Effect::RemoveCounter { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterRemoved { .. })),
+        Effect::Token { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+        Effect::Tap { .. } | Effect::TapAll { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PermanentTapped { .. })),
+        Effect::Untap { .. } | Effect::UntapAll { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PermanentUntapped { .. })),
+        Effect::GainLife { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::LifeChanged { amount, .. } if *amount > 0)),
+        Effect::LoseLife { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::LifeChanged { amount, .. } if *amount < 0)),
+        Effect::Draw { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardDrawn { .. })),
+        Effect::Scry { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Scry,
+                    ..
+                }
+            )
+        }),
+        Effect::Surveil { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Surveil,
+                    ..
+                }
+            )
+        }),
+        Effect::Investigate => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Investigate,
+                    ..
+                }
+            )
+        }),
+        Effect::Proliferate => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Proliferate,
+                    ..
+                }
+            )
+        }),
+        Effect::Shuffle { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )
+        }),
+        Effect::SearchLibrary { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::SearchedLibrary,
+                    ..
+                }
+            )
+        }),
+        _ => true,
+    }
+}
+
 pub(crate) fn publish_tracked_set(state: &mut GameState, affected_ids: Vec<ObjectId>) {
     // CR 603.7 + CR 608.2c: Chain unification. If an ancestor in this
     // resolution chain already published a tracked set, extend that set with
@@ -4034,6 +4151,7 @@ fn resolve_chain_body(
     let ability = if !ability.optional
         && !ability.context.optional_effect_performed
         && !state.cost_payment_failed_flag
+        && mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
         && !effect_manages_own_outcome_flag(&ability.effect)
         && ability.sub_ability.as_ref().is_some_and(|sub| {
             sub.sub_link == SubAbilityLink::SequentialSibling
