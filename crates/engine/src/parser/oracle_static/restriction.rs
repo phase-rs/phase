@@ -100,9 +100,10 @@ pub(crate) fn parse_legend_rule_exemption(
 /// CR 704.5j: Resolve the `<scope>` noun phrase of a legend-rule exemption
 /// ("permanents you control", "Slivers you control", ...) into a
 /// controller-scoped `affected` filter. Returns `None` for scopes this parser
-/// cannot resolve precisely ("tokens", "commanders", "creature tokens", "them"),
+/// cannot resolve precisely ("tokens", "commanders", "them"),
 /// so those cards are deferred rather than given a filter that silently matches
-/// nothing.
+/// nothing. "creature tokens you control" is handled explicitly (The Master,
+/// Multiplied).
 /// CR 109.5: "you control" resolves to the source's controller.
 pub(crate) fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilter> {
     // Drop the trailing sentence terminator so the combinator suffix split sees
@@ -123,6 +124,14 @@ pub(crate) fn parse_legend_rule_scope(scope: &TextPair<'_>) -> Option<TargetFilt
     // "<Subtype>s you control" — permanents of a single subtype (Sliver
     // Gravemother, Spider-Verse). Require the subtype to consume the whole base
     // so multi-word scopes ("creature tokens") are deferred, not truncated.
+    if base.lower == "creature tokens" {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .properties(vec![FilterProp::Token])
+                .controller(ControllerRef::You),
+        ));
+    }
+
     if let Some((canonical, consumed)) = parse_subtype(base.original) {
         if consumed == base.original.len() {
             return Some(TargetFilter::Typed(
@@ -402,6 +411,51 @@ pub(crate) fn parse_cant_search_library(tp: &TextPair<'_>, text: &str) -> Option
 
     Some(
         StaticDefinition::new(StaticMode::CantSearchLibrary { cause })
+            .description(text.to_string()),
+    )
+}
+
+/// CR 603.2 + CR 609.3: Parse "Triggered abilities <scope> can't cause you to
+/// sacrifice or exile <affected>." statics (The Master, Multiplied class).
+///
+/// Supported Oracle class:
+/// - "Triggered abilities you control can't cause you to sacrifice or exile
+///   creature tokens you control."
+pub(crate) fn parse_cant_cause_sacrifice_or_exile(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    fn parse_sacrifice_or_exile_negation(input: &str) -> OracleResult<'_, ()> {
+        let (input, _) = alt((
+            value((), tag::<_, _, OracleError<'_>>("can't ")),
+            value((), tag("cannot ")),
+            value((), tag("may not ")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag::<_, _, OracleError<'_>>("cause you to ").parse(input)?;
+        let (input, _) =
+            alt((tag("sacrifice or exile "), tag("exile or sacrifice "))).parse(input)?;
+        Ok((input, ()))
+    }
+
+    let rest = nom_tag_tp(tp, "triggered abilities ")?;
+    let (cause, predicate) = strip_controller_possessive_scope(rest.original)?;
+    let predicate_lower = predicate.to_lowercase();
+    nom_on_lower(predicate, &predicate_lower, |i| {
+        let (i, _) = parse_sacrifice_or_exile_negation(i)?;
+        let (i, _) = tag("creature tokens you control").parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof(i)?;
+        Ok((i, ()))
+    })?;
+    let affected = TargetFilter::Typed(
+        TypedFilter::creature()
+            .properties(vec![FilterProp::Token])
+            .controller(ControllerRef::You),
+    );
+    Some(
+        StaticDefinition::new(StaticMode::CantCauseSacrificeOrExile { cause })
+            .affected(affected)
             .description(text.to_string()),
     )
 }
@@ -1483,10 +1537,114 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
             frequency,
             play_mode: CardPlayMode::Cast,
             cost,
+            // CR 113.6b: The "this turn" suffix scoped the pool to the per-turn
+            // rolling list; this Maralen-class permission has no turn-of-use
+            // restriction beyond its once-each-turn frequency.
+            pool: ExileCardPool::ThisTurn,
+            timing: ExileCastTiming::AnyTime,
         })
         .affected(filter)
         .description(text.to_string()),
     )
+}
+
+/// CR 113.6b + CR 305.1 + CR 406.6 + CR 117.1c: Parse the persistent,
+/// name-anchored exile-play permission — "[During your turn, ]you may play
+/// lands and cast spells from among cards exiled with ~[.]" (The Matrix of
+/// Time) and the "you may look at cards exiled with ~, and you may play lands
+/// and cast spells from among those cards." variant (the Prosper/Tibalt
+/// impulse-commander class).
+///
+/// Distinguished from `try_parse_exile_cast_permission` (Maralen) by:
+/// - **No "this turn" pool bound** → `pool: ExileCardPool::Persistent` reads the
+///   lifetime `exile_links` set rather than the per-turn rolling list.
+/// - **`Unlimited` frequency** → no once-per-turn cast slot.
+/// - **`play_mode: Play`** → CR 305.1: "play lands and cast spells" collapses to
+///   `Play`, which covers both lands (played) and non-land cards (cast). The
+///   affected filter is `Any`; the persistent pool itself is the scope.
+///
+/// The optional leading "during your turn, " → `timing: YourTurnOnly`
+/// (CR 117.1c). The "you may look at …" preamble is purely informational
+/// (CR 601.3f: the controller must be able to look at the cards to cast them;
+/// for face-up impulse exile this is always satisfiable) and is consumed
+/// without affecting the emitted permission.
+pub(crate) fn try_parse_persistent_exile_play_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // Optional leading timing qualifier. CR 117.1c: "during your turn, " gates
+    // the permission to the source controller's turn.
+    let (rest, timing) = match nom_tag_lower(lower, lower, "during your turn, ") {
+        Some(r) => (r, ExileCastTiming::YourTurnOnly),
+        None => (lower, ExileCastTiming::AnyTime),
+    };
+
+    // Optional "you may look at cards exiled with <self>, and " preamble
+    // (CR 601.3f). When present, the play clause uses the "those cards" anaphor
+    // rather than re-naming the source; when absent, the play clause names the
+    // source directly via "from among cards exiled with <self>".
+    let after_look = strip_look_at_exiled_preamble(rest);
+    let uses_anaphor = after_look.is_some();
+    let rest = after_look.unwrap_or(rest);
+
+    // Core permission phrase. CR 305.1: "play lands and cast spells" → Play mode.
+    let rest = nom_tag_lower(rest, rest, "you may play lands and cast spells from among ")?;
+
+    // The play clause either names the source ("cards exiled with <self>") or
+    // refers back to the look-at preamble's set ("those cards").
+    let after_clause = if uses_anaphor {
+        nom_tag_lower(rest, rest, "those cards")?
+    } else {
+        let after_anchor = nom_tag_lower(rest, rest, "cards exiled with ")?;
+        strip_self_reference(after_anchor)?
+    };
+
+    // CR 113.6b: A trailing period is the only permitted remainder; any other
+    // tail is an unmodeled shape — decline so it surfaces as a coverage gap
+    // rather than a silent misparse.
+    let tail = after_clause.trim_start();
+    // allow-noncombinator: punctuation cleanup (drop the sentence terminator) on a pre-tokenized chunk, not parsing dispatch.
+    let tail = tail.strip_prefix('.').unwrap_or(tail); // allow-noncombinator: punctuation cleanup on a pre-tokenized chunk, not parsing dispatch.
+    if !tail.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::ExileCastPermission {
+            // CR 601.2a: No once-per-turn cap on this class.
+            frequency: CastFrequency::Unlimited,
+            // CR 305.1: Play covers lands (played) and non-land cards (cast).
+            play_mode: CardPlayMode::Play,
+            // CR 305.1 / CR 601.3: Cards are played/cast at their normal cost.
+            cost: ExileCastCost::PayNormalCost,
+            // CR 406.6: Lifetime per-source exile-link pool.
+            pool: ExileCardPool::Persistent,
+            timing,
+        })
+        // CR 305.1: The permission applies to every card in the source's exile
+        // pool; the pool itself is the scope, so no type/MV constraint.
+        .affected(TargetFilter::Any)
+        .description(text.to_string()),
+    )
+}
+
+/// CR 601.3f + CR 113.6b: Strip the "you may look at cards exiled with
+/// <self>, and " informational preamble. Returns the remainder after the
+/// conjunction when present, else `None`.
+fn strip_look_at_exiled_preamble(lower: &str) -> Option<&str> {
+    let rest = std::iter::once("you may look at cards exiled with ")
+        .chain(std::iter::once("you may look at the cards exiled with "))
+        .find_map(|prefix| nom_tag_lower(lower, lower, prefix))?;
+    let rest = strip_self_reference(rest)?;
+    nom_tag_lower(rest, rest, ", and ")
+}
+
+/// CR 113.6b + CR 201.5: Strip a self-reference token (`~` normalized name, or
+/// any `SELF_REF_PARSE_ONLY_PHRASES` spelling like "this card") from the front.
+fn strip_self_reference(lower: &str) -> Option<&str> {
+    std::iter::once("~")
+        .chain(SELF_REF_PARSE_ONLY_PHRASES.iter().copied())
+        .find_map(|phrase| nom_tag_lower(lower, lower, phrase))
 }
 
 /// CR 401.5 + CR 118.9 + CR 601.2a: Parse "you may [play|cast] [filter] from
@@ -1581,9 +1739,8 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
 /// mana cost[s]?" — covering Omniscience and the Tamiyo, Field Researcher emblem
 /// (no filter, hand qualifier), Zaffai-and-the-Tempests (typed filter, hand
 /// qualifier, once-per-turn frequency), and Dracogenesis (subtype filter, no
-/// zone qualifier — implicit hand per CR 601.2: "To cast a spell is to take it
-/// from where it is (usually the hand)..."). Continuous static — not a one-shot
-/// effect.
+/// zone qualifier, so it can replace the mana cost from built-in cast zones like
+/// hand and command). Continuous static — not a one-shot effect.
 pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
     // CR 601.2b: Prefix determines frequency. `OncePerTurn` (Zaffai) is the
     // explicit-choice path; `Unlimited` (Omniscience, Dracogenesis) runs silently.
@@ -1600,10 +1757,9 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
         )
     };
 
-    // The zone qualifier "from your hand" is optional. CR 601.2 makes the hand
-    // the implicit cast zone, so Dracogenesis's "you may cast Dragon spells
-    // without paying their mana costs" carries the same semantics as Omniscience's
-    // "you may cast spells from your hand without paying their mana costs".
+    // The zone qualifier "from your hand" is optional. When omitted, the static
+    // only replaces the mana cost for spells already castable from their current
+    // zone; it does not create an independent cast-from-anywhere permission.
     //
     // Both branches must terminate at " without paying" — that token is the
     // single anchor for the static. The qualified branch keeps a permissive
@@ -1612,23 +1768,23 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
     // unconsumed remainder) so complex filters like Fires of Invention's
     // "spells with mana value less than or equal to the number of lands you
     // control" decline cleanly instead of misparsing as `TargetFilter::Any`.
-    let (filter_text, zone_qualified) = if let Ok((_, (before, hand_rest))) =
+    let (filter_text, origin) = if let Ok((_, (before, hand_rest))) =
         nom_primitives::split_once_on(rest, " from your hand")
     {
         // "without paying" must follow "from your hand" — reject unusual word orders
         if !nom_primitives::scan_contains(hand_rest, "without paying") {
             return None;
         }
-        (before, true)
+        (before, CastFreeOrigin::Hand)
     } else {
         let (_, (before, _)) = nom_primitives::split_once_on(rest, " without paying").ok()?;
-        (before, false)
+        (before, CastFreeOrigin::DefaultCastPermission)
     };
 
     // Intentional: "spells" with no qualifier → Any filter (Omniscience) — no warning needed.
     if filter_text == "spells" {
         return Some(
-            StaticDefinition::new(StaticMode::CastFromHandFree { frequency })
+            StaticDefinition::new(StaticMode::CastFromHandFree { frequency, origin })
                 .affected(TargetFilter::Any)
                 .description(text.to_string()),
         );
@@ -1648,7 +1804,7 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
     };
 
     let (filter, remainder) = parse_type_phrase(&cleaned);
-    if !remainder.trim().is_empty() && !zone_qualified {
+    if !remainder.trim().is_empty() && matches!(origin, CastFreeOrigin::DefaultCastPermission) {
         // Unqualified branch is strict: an unconsumed remainder signals a
         // complex filter we don't yet model (e.g. Fires of Invention's
         // dynamic mana-value bound). Decline rather than emit a partial
@@ -1657,7 +1813,7 @@ pub(crate) fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<
     }
 
     Some(
-        StaticDefinition::new(StaticMode::CastFromHandFree { frequency })
+        StaticDefinition::new(StaticMode::CastFromHandFree { frequency, origin })
             .affected(filter)
             .description(text.to_string()),
     )

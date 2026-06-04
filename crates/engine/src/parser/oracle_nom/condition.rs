@@ -1812,8 +1812,9 @@ fn creatures_you_controlled_left_battlefield_this_turn_ref() -> QuantityRef {
     }
 }
 
-/// Parse "you control" condition patterns.
-fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+/// Parse "you control" condition patterns. Exposed for rule-static parsers that
+/// attach a trailing "unless you control <X>" clause as a negated condition.
+pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         // CR 201.2 + CR 603.4: "you control N or more [type] with different names"
         // → QuantityComparison(ObjectCountDistinct[Name] >= N). Tried before the

@@ -181,6 +181,45 @@ pub fn validate_lookup_join_target_fields(
     Ok(())
 }
 
+pub struct UpdateLobbyMetadataFields<'a> {
+    pub game_code: &'a str,
+    pub current_players: u8,
+    pub max_players: u8,
+    pub consumed_reservation_tokens: &'a [String],
+}
+
+pub fn validate_update_lobby_metadata_fields(
+    fields: UpdateLobbyMetadataFields<'_>,
+) -> Result<(), String> {
+    validate_token("game_code", fields.game_code, MAX_GAME_CODE_LEN)?;
+    if fields.max_players == 0 || fields.max_players > MAX_PLAYER_COUNT {
+        return Err(format!(
+            "max_players must be between 1 and {MAX_PLAYER_COUNT}"
+        ));
+    }
+    if fields.current_players > MAX_PLAYER_COUNT {
+        return Err(format!(
+            "current_players must be at most {MAX_PLAYER_COUNT}"
+        ));
+    }
+    if fields.current_players > fields.max_players {
+        return Err("current_players must not exceed max_players".to_string());
+    }
+    if fields.consumed_reservation_tokens.len() > MAX_CONSUMED_TOKENS {
+        return Err(format!(
+            "consumed_reservation_tokens must contain at most {MAX_CONSUMED_TOKENS} entries"
+        ));
+    }
+    for token in fields.consumed_reservation_tokens {
+        validate_token("consumed_reservation_token", token, MAX_TOKEN_LEN)?;
+    }
+    Ok(())
+}
+
+pub fn validate_unregister_lobby_fields(game_code: &str) -> Result<(), String> {
+    validate_token("game_code", game_code, MAX_GAME_CODE_LEN)
+}
+
 /// Validate every client-supplied field of a parsed lobby message against the
 /// size/shape bounds above. Returns the first violation as a human-readable
 /// reason suitable for an `Error` reply. Server-populated reply types
@@ -251,31 +290,15 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
             max_players,
             consumed_reservation_tokens,
         } => {
-            validate_token("game_code", game_code, MAX_GAME_CODE_LEN)?;
-            if *max_players == 0 || *max_players > MAX_PLAYER_COUNT {
-                return Err(format!(
-                    "max_players must be between 1 and {MAX_PLAYER_COUNT}"
-                ));
-            }
-            if *current_players > MAX_PLAYER_COUNT {
-                return Err(format!(
-                    "current_players must be at most {MAX_PLAYER_COUNT}"
-                ));
-            }
-            if *current_players > *max_players {
-                return Err("current_players must not exceed max_players".to_string());
-            }
-            if consumed_reservation_tokens.len() > MAX_CONSUMED_TOKENS {
-                return Err(format!(
-                    "consumed_reservation_tokens must contain at most {MAX_CONSUMED_TOKENS} entries"
-                ));
-            }
-            for token in consumed_reservation_tokens {
-                validate_token("consumed_reservation_token", token, MAX_TOKEN_LEN)?;
-            }
+            validate_update_lobby_metadata_fields(UpdateLobbyMetadataFields {
+                game_code,
+                current_players: *current_players,
+                max_players: *max_players,
+                consumed_reservation_tokens,
+            })?;
         }
         M::UnregisterLobby { game_code } => {
-            validate_token("game_code", game_code, MAX_GAME_CODE_LEN)?;
+            validate_unregister_lobby_fields(game_code)?;
         }
         // No client-supplied bounded fields.
         M::SubscribeLobby | M::UnsubscribeLobby | M::Ping { .. } => {}

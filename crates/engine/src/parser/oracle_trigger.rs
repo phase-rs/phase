@@ -33,12 +33,13 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind, CastManaObjectScope,
-    CastManaSpentMetric, CastVariantPaid, CoinFlipResult, Comparator, ControllerRef,
-    CounterTriggerFilter, DamageKindFilter, DestinationConstraint, Effect, FilterProp, ObjectScope,
-    OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier, ZoneChangeClause,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AttachmentKind,
+    AttackersDeclaredCountSubject, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
+    CoinFlipResult, Comparator, ControllerRef, CounterTriggerFilter, DamageKindFilter,
+    DestinationConstraint, Effect, FilterProp, ObjectScope, OriginConstraint, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition,
+    TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ZoneChangeClause,
 };
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
@@ -2702,7 +2703,14 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             // triggers that reward defensive (non-aggressor) opponents.
             (
                 "if none of those creatures attacked you",
-                TriggerCondition::NoneOfAttackersTargetedYou,
+                TriggerCondition::AttackersDeclaredCount {
+                    subject: AttackersDeclaredCountSubject::AttackTarget {
+                        controller: ControllerRef::You,
+                        attacked: AttackTargetFilter::Player,
+                    },
+                    comparator: Comparator::EQ,
+                    count: 0,
+                },
             ),
             (
                 "if it's the first combat phase of the turn",
@@ -2729,6 +2737,13 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // contraction and optional negation postfix) rather than enumerated as
     // five verbatim phrases.
     if let Some(result) = try_extract_that_players_turn(&tp, &lower, text) {
+        return result;
+    }
+
+    // CR 506.2 + CR 508.1b + CR 603.4: Mangara-class attack-batch
+    // intervening-if, "if N or more of those creatures are attacking you
+    // and/or planeswalkers you control."
+    if let Some(result) = try_extract_attackers_to_controller_min(&lower, text) {
         return result;
     }
 
@@ -3114,6 +3129,57 @@ fn try_extract_that_players_turn(
         base
     };
     Some((strip_condition_clause(text, pos, consumed), Some(condition)))
+}
+
+fn try_extract_attackers_to_controller_min(
+    lower: &str,
+    text: &str,
+) -> Option<(String, Option<TriggerCondition>)> {
+    let (before, condition, rest) =
+        scan_preceded(lower, parse_attackers_to_controller_min_condition)?;
+    let rest_trimmed = rest.trim_start();
+    if !(rest_trimmed.is_empty() || rest_trimmed.starts_with(',') || rest_trimmed.starts_with('.'))
+    {
+        return None;
+    }
+    let consumed = lower.len() - before.len() - rest.len();
+    Some((
+        strip_condition_clause(text, before.len(), consumed),
+        Some(condition),
+    ))
+}
+
+fn parse_attackers_to_controller_min_condition(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (rest, _) = tag("if ").parse(input)?;
+    let (rest, minimum) = nom_primitives::parse_number.parse(rest)?;
+    let (rest, _) = tag(" or more of those creatures are attacking ").parse(rest)?;
+    let (rest, attacked) = alt((
+        value(
+            AttackTargetFilter::PlayerOrPlaneswalker,
+            tag("you and/or planeswalkers you control"),
+        ),
+        value(
+            AttackTargetFilter::PlayerOrPlaneswalker,
+            tag("you or planeswalkers you control"),
+        ),
+        value(
+            AttackTargetFilter::Planeswalker,
+            tag("planeswalkers you control"),
+        ),
+        value(AttackTargetFilter::Player, tag("you")),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        TriggerCondition::AttackersDeclaredCount {
+            subject: AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked,
+            },
+            comparator: Comparator::GE,
+            count: minimum,
+        },
+    ))
 }
 
 /// Policy for a post-effect occurrence of the intervening keyword (one that
@@ -5948,6 +6014,8 @@ fn try_parse_event(
         SaddlesOrCrews,
         Crews,
         Saddles,
+        /// Digital-only Specialize — permanent specializes into a color.
+        Specializes,
         /// CR 702.26c: Permanent phases in from phased-out state.
         PhasesIn,
         /// CR 702.26b: Permanent phases out.
@@ -6086,6 +6154,8 @@ fn try_parse_event(
             // CR 702.26b: "phases out" / "phase out" — phasing-out trigger.
             value(SimpleEvent::PhasesOut, tag("phases out")),
             value(SimpleEvent::PhasesOut, tag("phase out")),
+            // Digital-only: "specializes" — Specialize trigger (not in CR).
+            value(SimpleEvent::Specializes, tag("specializes")),
             // CR 701.3d: Equipment/Aura becomes unattached from a permanent.
             parse_becomes_unattached,
             // CR 701.3a: "becomes attached to [a creature / a permanent / …]" —
@@ -6236,6 +6306,11 @@ fn try_parse_event(
             SimpleEvent::PhasesOut => {
                 // CR 702.26b: Permanent phases out.
                 def.mode = TriggerMode::PhaseOut;
+                def.valid_card = Some(subject.clone());
+            }
+            SimpleEvent::Specializes => {
+                // Digital-only Specialize trigger (not in CR).
+                def.mode = TriggerMode::Specializes;
                 def.valid_card = Some(subject.clone());
             }
             SimpleEvent::BecomesUnattached(host_filter) => {
@@ -7167,8 +7242,9 @@ fn strip_attachment_relative_clause(subject: &str) -> (&str, Option<FilterProp>)
 /// "creature[s]" head noun — i.e. it carries a subtype/negated-type/property
 /// constraint or a non-creature type. Used to decide whether a typed
 /// attacker-COUNT trigger ("two or more Dinosaurs attack") needs the
-/// condition-level type axis on `AttackersDeclaredMin`, or whether the untyped
-/// "two or more creatures attack" path can keep `filter: None`.
+/// condition-level type axis on `AttackersDeclaredCount`'s `Controller`
+/// subject, or whether the untyped "two or more creatures attack" path can
+/// keep `filter: None`.
 ///
 /// Controller scope ("creatures you control") does NOT narrow the class for
 /// counting purposes — it is already enforced by `matching_you_attack_pairs`'
@@ -7250,10 +7326,13 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
             // so use the AttackersDeclared batch count rather than the
             // source-excluding MinCoAttackers condition.
             let count_filter = filter_narrows_beyond_creature(&filter).then_some(filter.clone());
-            def.condition = Some(TriggerCondition::AttackersDeclaredMin {
-                scope: ControllerRef::You,
-                minimum: min_count,
-                filter: count_filter,
+            def.condition = Some(TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::Controller {
+                    scope: ControllerRef::You,
+                    filter: count_filter,
+                },
+                comparator: Comparator::GE,
+                count: min_count,
             });
         }
         def.valid_card = Some(filter);
@@ -7282,12 +7361,13 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
 ///     known — this drives `match_you_attack`'s attacking-player filter AND
 ///     feeds `resolve_they_pronoun` so a trailing "they draw a card" resolves
 ///     to `TargetFilter::TriggeringPlayer`.
-///   - `condition = AttackersDeclaredMin { scope, minimum, filter }` so only
-///     batches with at least N attackers from the scoped player — matching the
-///     typed `filter` when present — fire the trigger. The typed count>1 case
-///     ("attack with two or more Dinosaurs") parses the head-noun type phrase
-///     into both the matcher's `valid_card` gate and the condition's `filter`
-///     (CR 508.1), so it counts only Dinosaurs and cannot over-fire.
+///   - `condition = AttackersDeclaredCount { subject: Controller { scope, filter },
+///     comparator: GE, count }` so only batches with at least N attackers from the
+///     scoped player — matching the typed `filter` when present — fire the trigger.
+///     The typed count>1 case ("attack with two or more Dinosaurs") parses the
+///     head-noun type phrase into both the matcher's `valid_card` gate and the
+///     subject's `filter` (CR 508.1), so it counts only Dinosaurs and cannot
+///     over-fire.
 fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     use nom::combinator::opt;
 
@@ -7331,7 +7411,7 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
 
     // Capture the head-noun type phrase once for both count==1 and count>1.
     // Count==1 needs only the matcher's valid_card gate; count>1 additionally
-    // uses AttackersDeclaredMin when the type phrase narrows beyond bare
+    // uses AttackersDeclaredCount when the type phrase narrows beyond bare
     // "creatures".
     let (filter, remainder) = parse_type_phrase(after_or_more);
     // Accept optional trailing " each turn" / " this turn" qualifier (unused here,
@@ -7371,10 +7451,13 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
         def.valid_card = Some(filter.clone());
     }
     let count_filter = narrows.then_some(filter);
-    def.condition = Some(TriggerCondition::AttackersDeclaredMin {
-        scope: actor,
-        minimum: n,
-        filter: count_filter,
+    def.condition = Some(TriggerCondition::AttackersDeclaredCount {
+        subject: AttackersDeclaredCountSubject::Controller {
+            scope: actor,
+            filter: count_filter,
+        },
+        comparator: Comparator::GE,
+        count: n,
     });
 
     Some((TriggerMode::YouAttack, def))
@@ -10847,6 +10930,18 @@ mod tests {
         );
 
         assert_eq!(def.mode, TriggerMode::PhaseOut);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn parses_specializes_trigger_as_specializes_mode() {
+        // Digital-only Alchemy: "When ~ specializes, draw a card."
+        let def = parse_trigger_line(
+            "When Jaheira, Insightful Harper specializes, draw a card.",
+            "Jaheira, Insightful Harper",
+        );
+
+        assert_eq!(def.mode, TriggerMode::Specializes);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     }
 
@@ -20991,10 +21086,13 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::YouAttack);
         assert_eq!(
             def.condition,
-            Some(TriggerCondition::AttackersDeclaredMin {
-                scope: ControllerRef::You,
-                minimum: 2,
-                filter: None
+            Some(TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::Controller {
+                    scope: ControllerRef::You,
+                    filter: None,
+                },
+                comparator: Comparator::GE,
+                count: 2,
             })
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
@@ -21020,10 +21118,14 @@ mod tests {
             other => panic!("expected Typed valid_card with Dinosaur, got {other:?}"),
         }
         match &def.condition {
-            Some(TriggerCondition::AttackersDeclaredMin {
-                scope: ControllerRef::You,
-                minimum: 2,
-                filter: Some(TargetFilter::Typed(tf)),
+            Some(TriggerCondition::AttackersDeclaredCount {
+                subject:
+                    AttackersDeclaredCountSubject::Controller {
+                        scope: ControllerRef::You,
+                        filter: Some(TargetFilter::Typed(tf)),
+                    },
+                comparator: Comparator::GE,
+                count: 2,
             }) => assert!(
                 tf.type_filters
                     .iter()
@@ -21032,7 +21134,7 @@ mod tests {
                 tf.type_filters,
             ),
             other => {
-                panic!("expected AttackersDeclaredMin {{ You, 2, Some(Dinosaur) }}, got {other:?}")
+                panic!("expected AttackersDeclaredCount {{ Controller {{ You, Some(Dinosaur) }}, GE, 2 }}, got {other:?}")
             }
         }
     }
@@ -23948,9 +24050,9 @@ mod tests {
 
     /// CR 508.1a + CR 603.2c: the UNTYPED actor-led count>1 form
     /// ("two or more creatures") stays byte-identical to pre-fix behavior:
-    /// `valid_card` UNSET and the count condition carries `filter: None`.
-    /// (Formerly the deferral lock — the typed count>1 form is now implemented;
-    /// see `trigger_you_attack_with_two_or_more_typed_creatures`.)
+    /// `valid_card` UNSET and the count condition's `Controller` subject carries
+    /// `filter: None`. (Formerly the deferral lock — the typed count>1 form is
+    /// now implemented; see `trigger_you_attack_with_two_or_more_typed_creatures`.)
     #[test]
     fn you_attack_with_two_or_more_creatures_untyped_no_filter() {
         let def = parse_trigger_line(
@@ -23964,10 +24066,13 @@ mod tests {
         );
         assert_eq!(
             def.condition,
-            Some(TriggerCondition::AttackersDeclaredMin {
-                scope: ControllerRef::You,
-                minimum: 2,
-                filter: None,
+            Some(TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::Controller {
+                    scope: ControllerRef::You,
+                    filter: None,
+                },
+                comparator: Comparator::GE,
+                count: 2,
             })
         );
     }
@@ -23975,8 +24080,9 @@ mod tests {
     /// CR 508.1a + CR 603.2c: the TYPED actor-led count>1 form
     /// ("two or more Dinosaurs") now parses the type phrase into BOTH the
     /// matcher's `valid_card` gate AND the condition-level type axis
-    /// (`AttackersDeclaredMin.filter`), so the count enforces ≥N *Dinosaurs*
-    /// rather than ≥N *any* attackers. This is the over-fire guard.
+    /// (`AttackersDeclaredCount`'s `Controller` subject `filter`), so the count
+    /// enforces ≥N *Dinosaurs* rather than ≥N *any* attackers. This is the
+    /// over-fire guard.
     #[test]
     fn trigger_you_attack_with_two_or_more_typed_creatures() {
         let def = parse_trigger_line(
@@ -23999,10 +24105,14 @@ mod tests {
         }
         // The count condition carries the SAME filter as the type axis.
         match &def.condition {
-            Some(TriggerCondition::AttackersDeclaredMin {
-                scope: ControllerRef::You,
-                minimum: 2,
-                filter: Some(TargetFilter::Typed(tf)),
+            Some(TriggerCondition::AttackersDeclaredCount {
+                subject:
+                    AttackersDeclaredCountSubject::Controller {
+                        scope: ControllerRef::You,
+                        filter: Some(TargetFilter::Typed(tf)),
+                    },
+                comparator: Comparator::GE,
+                count: 2,
             }) => assert!(
                 tf.type_filters
                     .iter()
@@ -24011,7 +24121,7 @@ mod tests {
                 tf.type_filters,
             ),
             other => {
-                panic!("expected AttackersDeclaredMin {{ You, 2, Some(Dinosaur) }}, got {other:?}")
+                panic!("expected AttackersDeclaredCount {{ Controller {{ You, Some(Dinosaur) }}, GE, 2 }}, got {other:?}")
             }
         }
     }
@@ -24032,10 +24142,13 @@ mod tests {
         );
         assert!(matches!(
             def.condition,
-            Some(TriggerCondition::AttackersDeclaredMin {
-                scope: ControllerRef::You,
-                minimum: 2,
-                filter: None,
+            Some(TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::Controller {
+                    scope: ControllerRef::You,
+                    filter: None,
+                },
+                comparator: Comparator::GE,
+                count: 2,
             })
         ));
     }
@@ -24060,19 +24173,29 @@ mod tests {
                 assert_eq!(conditions.len(), 2);
                 assert!(matches!(
                     &conditions[0],
-                    TriggerCondition::AttackersDeclaredMin {
-                        scope: ControllerRef::Opponent,
-                        minimum: 2,
-                        filter: None,
+                    TriggerCondition::AttackersDeclaredCount {
+                        subject: AttackersDeclaredCountSubject::Controller {
+                            scope: ControllerRef::Opponent,
+                            filter: None,
+                        },
+                        comparator: Comparator::GE,
+                        count: 2,
                     }
                 ));
                 assert!(matches!(
                     &conditions[1],
-                    TriggerCondition::NoneOfAttackersTargetedYou
+                    TriggerCondition::AttackersDeclaredCount {
+                        subject: AttackersDeclaredCountSubject::AttackTarget {
+                            controller: ControllerRef::You,
+                            attacked: AttackTargetFilter::Player,
+                        },
+                        comparator: Comparator::EQ,
+                        count: 0,
+                    }
                 ));
             }
             other => panic!(
-                "expected And(AttackersDeclaredMin, NoneOfAttackersTargetedYou), got {other:?}"
+                "expected And(controller AttackersDeclaredCount, target AttackersDeclaredCount), got {other:?}"
             ),
         }
         // CR 121.1 + CR 603.7c + CR 608.2k: "they draw a card" — the effect-level
@@ -24109,13 +24232,36 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::YouAttack);
         assert!(matches!(
             def.condition,
-            Some(TriggerCondition::AttackersDeclaredMin {
-                scope: ControllerRef::Opponent,
-                minimum: 2,
-                filter: None,
+            Some(TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::Controller {
+                    scope: ControllerRef::Opponent,
+                    filter: None,
+                },
+                comparator: Comparator::GE,
+                count: 2,
             })
         ));
         assert!(def.batched);
+    }
+
+    #[test]
+    fn mangara_attack_batch_intervening_if_counts_attacking_you_or_planeswalkers() {
+        let def = parse_trigger_line(
+            "Whenever an opponent attacks with creatures, if two or more of those creatures are attacking you and/or planeswalkers you control, draw a card.",
+            "Mangara, the Diplomat",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::AttackersDeclaredCount {
+                subject: AttackersDeclaredCountSubject::AttackTarget {
+                    controller: ControllerRef::You,
+                    attacked: AttackTargetFilter::PlayerOrPlaneswalker,
+                },
+                comparator: Comparator::GE,
+                count: 2,
+            })
+        );
     }
 
     /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar's first trigger introduces

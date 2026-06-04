@@ -25,7 +25,7 @@ use super::mana::{ManaColor, ManaCost, ManaType, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerId};
-use super::proposed_event::{ProposedEvent, ReplacementId};
+use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId};
 use super::zones::{ExileCostSourceZone, Zone};
 
 use crate::game::bracket_estimate::CommanderBracketTier;
@@ -863,6 +863,29 @@ pub struct PendingChangeZoneIteration {
     pub duration: Option<crate::types::ability::Duration>,
     pub track_exiled_by_source: bool,
     pub effect_kind: crate::types::ability::EffectKind,
+}
+
+/// CR 707.2 + CR 614.1a + CR 616.1: Resume state for `CopyTokenOf` when a
+/// copy-token `CreateToken` event pauses for replacement ordering/optional
+/// choice. The currently-paused source is stored in `pending_replacement`; this
+/// record carries already-created token ids and the remaining copy sources so
+/// `handle_replacement_choice` can continue the same resolver after the chosen
+/// replacement applies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCopyTokenBatch {
+    pub owner: PlayerId,
+    pub copy: Box<CopyTokenSpec>,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCopyTokenResolution {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_ids: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pub remaining: VecDeque<PendingCopyTokenBatch>,
+    pub effect_kind: EffectKind,
+    pub source_id: ObjectId,
 }
 
 /// CR 608.2c + CR 107.1c: Resume state for a "repeat this process" loop
@@ -4873,6 +4896,13 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_change_zone_iteration: Option<PendingChangeZoneIteration>,
 
+    /// CR 707.2 + CR 614.1a + CR 616.1: Pending `CopyTokenOf` source loop
+    /// paused by an interactive token-creation replacement. Drained by
+    /// `token_copy::drain_pending_copy_token_resolution` after the current
+    /// replacement choice creates the accepted copy token(s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_copy_token_resolution: Option<PendingCopyTokenResolution>,
+
     /// CR 705.1 + CR 614.1a: Pending multi-flip coin resolver paused mid-loop
     /// for a Krark's Thumb keep-1 choice. Stashes the full resolution context +
     /// loop position so `resume_after_keep` can re-enter the flip loop after the
@@ -5549,6 +5579,7 @@ impl GameState {
             pending_continuation: None,
             pending_repeat_iteration: None,
             pending_change_zone_iteration: None,
+            pending_copy_token_resolution: None,
             pending_coin_flip: None,
             pending_repeat_until: None,
             pending_choose_one_of: None,
@@ -5849,6 +5880,7 @@ impl PartialEq for GameState {
             && self.pending_continuation == other.pending_continuation
             && self.pending_repeat_iteration == other.pending_repeat_iteration
             && self.pending_change_zone_iteration == other.pending_change_zone_iteration
+            && self.pending_copy_token_resolution == other.pending_copy_token_resolution
             && self.pending_coin_flip == other.pending_coin_flip
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of

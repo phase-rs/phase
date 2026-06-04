@@ -1801,6 +1801,23 @@ mod tests {
         );
     }
 
+    /// CR 702.39b: repeated Provoke instances each trigger separately. MTGJSON
+    /// dedupes the keywords array to one "Provoke", so keyword-line extraction
+    /// must recover every printed occurrence before synthesis installs triggers.
+    #[test]
+    fn extract_keyword_line_recovers_repeated_provoke_instances() {
+        let mtgjson_kws = vec!["provoke".to_string()];
+        let result = extract_keyword_line("Provoke, provoke", &mtgjson_kws)
+            .expect("repeated provoke line is a keyword line");
+        assert_eq!(
+            result
+                .iter()
+                .filter(|keyword| matches!(keyword, Keyword::Provoke))
+                .count(),
+            2
+        );
+    }
+
     /// CR 702.60a: Ripple N triggers when the spell is cast. The engine
     /// currently stores `Keyword::Ripple` as a unit variant, so supported
     /// numeric suffixes map to that variant while trailing text is rejected.

@@ -377,6 +377,15 @@ pub(super) fn handle_replacement_choice(
             }
 
             if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state.pending_copy_token_resolution.is_some()
+            {
+                effects::token_copy::drain_pending_copy_token_resolution(state, events);
+                if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
+            if matches!(waiting_for, WaitingFor::Priority { .. })
                 && (state.pending_continuation.is_some()
                     || state.pending_change_zone_iteration.is_some())
             {
@@ -432,6 +441,13 @@ pub(super) fn handle_replacement_choice(
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     effects::drain_pending_continuation(state, events);
                 }
+                return Ok(state.waiting_for.clone());
+            }
+            if state.pending_copy_token_resolution.is_some() {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                effects::token_copy::drain_pending_copy_token_resolution(state, events);
                 return Ok(state.waiting_for.clone());
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
@@ -1379,6 +1395,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(spec),
+            copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
             applied: std::collections::HashSet::new(),
