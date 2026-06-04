@@ -11,7 +11,7 @@ use crate::types::ability::{
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
     MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor, ZoneChangeRecord,
@@ -265,7 +265,7 @@ pub(crate) fn matches_player_scope(
                         .iter()
                         .any(|(voter, idx)| *voter == p.id && *idx == *choice_index),
                     PlayerFilter::PerformedActionThisWay { relation, action } => {
-                        crate::game::players::matches_relation(p.id, controller, *relation)
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
                             && crate::game::players::performed_action_this_way(state, p.id, *action)
                     }
                     PlayerFilter::OwnersOfCardsExiledBySource => {
@@ -281,7 +281,7 @@ pub(crate) fn matches_player_scope(
                     // CR 120.3 + CR 603.2c: Each opponent other than the triggering opponent.
                     // Falls back to plain Opponent semantics when no trigger event is in scope.
                     PlayerFilter::OpponentOtherThanTriggering => {
-                        if p.id == controller {
+                        if !crate::game::players::is_opponent(state, controller, p.id) {
                             return false;
                         }
                         let triggering = state.current_trigger_event.as_ref().and_then(|e| {
@@ -309,7 +309,7 @@ pub(crate) fn matches_player_scope(
                         let threshold = crate::game::quantity::resolve_quantity(
                             state, count, controller, source_id,
                         );
-                        crate::game::players::matches_relation(p.id, controller, *relation)
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
                             && player_control_count_compares(
                                 state,
                                 p.id,
@@ -319,7 +319,7 @@ pub(crate) fn matches_player_scope(
                                 source_id,
                             )
                     }
-                    // CR 402.1 / 119.1 / 122.1f / 404.1: "each [player class]
+                    // CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: "each [player class]
                     // whose [scalar attr] [comparator] [value]" — the candidate
                     // satisfies both `relation` and the per-candidate scalar
                     // comparison. `value` is the controller-relative threshold,
@@ -333,7 +333,7 @@ pub(crate) fn matches_player_scope(
                         let threshold = crate::game::quantity::resolve_quantity(
                             state, value, controller, source_id,
                         );
-                        crate::game::players::matches_relation(p.id, controller, *relation)
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
                             && candidate_player_scalar(p, attr)
                                 .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                     }
@@ -380,11 +380,12 @@ pub(crate) fn player_control_count_compares(
     )
 }
 
-/// CR 402.1 / 119.1 / 122.1f / 404.1: Read scalar `attr` for one candidate
-/// player DIRECTLY off the candidate `Player` (NOT via the controller-scoped
-/// `resolve_quantity`), so `PlayerFilter::PlayerAttribute` reads each player's
-/// own hand size / life / graveyard / player-counter rather than the
-/// controller's. Returns `None` for any non-scalar `QuantityRef`; the parser
+/// CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: Read scalar `attr` for one
+/// candidate player DIRECTLY off the candidate `Player` (NOT via the
+/// controller-scoped `resolve_quantity`), so `PlayerFilter::PlayerAttribute`
+/// reads each player's own hand size / life total / life lost / graveyard /
+/// player-counter rather than the controller's. Returns `None` for any
+/// non-scalar `QuantityRef`; the parser
 /// invariant guarantees only the scalar subset reaches here, and `None` fails
 /// the candidate predicate closed.
 pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<i32> {
@@ -394,6 +395,8 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
         QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
         // CR 119.1: the candidate's current life total.
         QuantityRef::LifeTotal { .. } => Some(p.life),
+        // CR 119.3: life lost this turn is tracked per candidate player.
+        QuantityRef::LifeLostThisTurn { .. } => Some(u32_to_i32_saturating(p.life_lost_this_turn)),
         // CR 404.1: cards in the candidate's graveyard.
         QuantityRef::GraveyardSize { .. } => Some(usize_to_i32_saturating(p.graveyard.len())),
         // CR 122.1f (poison) + CR 122.1: the candidate's named player-counter total.
@@ -1049,6 +1052,35 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
     }
 }
 
+/// CR 608.2c: Whether a parent effect computes its own "if you do" outcome
+/// signal (`optional_effect_performed`) rather than that signal meaning "the
+/// mandatory action occurred."
+///
+/// For most effects, "[Action]. If you do, [rider]." means the rider fires iff
+/// the action was performed. An *optional* ("you may") parent sets the flag when
+/// the controller accepts. A handful of effects instead compute the flag from a
+/// random/choice OUTCOME — a coin flip's win/loss, a clash's win/tie, a dig's
+/// kept selection — and resolve their gated branch against that computed flag
+/// (see `flip_coin.rs`, `clash.rs`, `engine_resolution_choices.rs`). For those,
+/// a mandatory parent does NOT imply "performed" (a lost flip is mandatory but
+/// did not "win"), so the default-true rule below must exclude them.
+fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
+    // Redundant-but-safe: coin/die win-loss riders gate on `EventOutcomeWon` /
+    // `WhenYouDo`, which are NOT in `condition_depends_on_effect_performed`, so
+    // the seed-block guard above would already skip them. Excluding the
+    // FlipCoin*/RollDie/Clash/Dig set here is defensive belt-and-suspenders — a
+    // future reader should not assume those paths depend on this exclusion.
+    matches!(
+        effect,
+        Effect::FlipCoin { .. }
+            | Effect::FlipCoins { .. }
+            | Effect::FlipCoinUntilLose { .. }
+            | Effect::Clash
+            | Effect::RollDie { .. }
+            | Effect::Dig { .. }
+    )
+}
+
 fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> bool {
     match ability.condition {
         Some(AbilityCondition::Not { ref condition })
@@ -1254,6 +1286,7 @@ fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a Qua
         QuantityExpr::Fixed { .. } => {}
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
@@ -1759,8 +1792,8 @@ pub fn resolve_effect(
         Effect::CreateDamageReplacement { .. } => {
             create_damage_replacement::resolve(state, ability, events)
         }
-        Effect::LoseTheGame => win_lose::resolve_lose(state, ability, events),
-        Effect::WinTheGame => win_lose::resolve_win(state, ability, events),
+        Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
+        Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => roll_die::resolve(state, ability, events),
         Effect::FlipCoin { .. } => flip_coin::resolve(state, ability, events),
         Effect::FlipCoins { .. } => flip_coin::resolve_flip_coins(state, ability, events),
@@ -2000,6 +2033,7 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             )
         }
         QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_tracked_set),
@@ -2143,6 +2177,123 @@ fn affected_objects_from_events(
                 })
                 .collect()
         }
+    }
+}
+
+fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> bool {
+    match effect {
+        Effect::Destroy { .. } | Effect::DestroyAll { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    from: Some(crate::types::zones::Zone::Battlefield),
+                    ..
+                }
+            )
+        }),
+        Effect::Sacrifice { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PermanentSacrificed { .. })),
+        Effect::Mill { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ExileFromTopUntil { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. })),
+        Effect::Counter { .. } | Effect::CounterAll { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::SpellCountered { .. })),
+        Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::Fight { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamageDealt { .. })),
+        Effect::Discard { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::Discarded { .. })),
+        Effect::AddCounter { .. }
+        | Effect::PutCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::MoveCounters { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterAdded { .. })),
+        Effect::RemoveCounter { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterRemoved { .. })),
+        Effect::Token { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+        Effect::Tap { .. } | Effect::TapAll { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PermanentTapped { .. })),
+        Effect::Untap { .. } | Effect::UntapAll { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PermanentUntapped { .. })),
+        Effect::GainLife { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::LifeChanged { amount, .. } if *amount > 0)),
+        Effect::LoseLife { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::LifeChanged { amount, .. } if *amount < 0)),
+        Effect::Draw { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardDrawn { .. })),
+        Effect::Scry { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Scry,
+                    ..
+                }
+            )
+        }),
+        Effect::Surveil { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Surveil,
+                    ..
+                }
+            )
+        }),
+        Effect::Investigate => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Investigate,
+                    ..
+                }
+            )
+        }),
+        Effect::Proliferate => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Proliferate,
+                    ..
+                }
+            )
+        }),
+        Effect::Shuffle { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )
+        }),
+        Effect::SearchLibrary { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::SearchedLibrary,
+                    ..
+                }
+            )
+        }),
+        _ => true,
     }
 }
 
@@ -3974,6 +4125,52 @@ fn resolve_chain_body(
     };
     let effect_context_object =
         parent_referent_context_from_events(state, &events[events_before..]);
+
+    // CR 608.2c: "[Mandatory action]. If you do, [rider]." — seed the
+    // performed-flag for a mandatory parent whose action just occurred.
+    //
+    // The "if you do" gate (`EffectOutcome { OptionalEffectPerformed }`) means
+    // "if the preceding instruction's event happened." For an *optional* parent
+    // ("you may …") the flag is set when the controller accepts; for effects
+    // that compute their own win/loss/selection outcome (coin flip, clash, dig —
+    // see `effect_manages_own_outcome_flag`) the branch handlers set it; for an
+    // unless-pay / "if a player does" alternative the payment flow sets it. But a
+    // plain *mandatory* action (Sacrifice, Mill, Destroy, …) whose rider is a
+    // SEPARATE SENTENCE ("Sacrifice it. If you do, create Marit Lage.") has no
+    // such hook — and per CR 608.2c that sentence is the next printed
+    // instruction, gating on whether the prior action happened. We restrict to
+    // `SubAbilityLink::SequentialSibling` precisely so the within-clause
+    // `ContinuationStep` alternatives that ride on a payment / opponent choice
+    // (unless-pay, `IfAPlayerDoes`) are NOT affected. When the action was not
+    // signalled as failed (`cost_payment_failed_flag`, e.g. nothing eligible to
+    // sacrifice), set the flag on the parent's context so it propagates to the
+    // sub via `apply_parent_chain_context` and survives the sub's own chain-body
+    // condition re-check. Covers the whole mandatory-rider class, not one card.
+    // NOTE: this seed fires for any `EffectOutcome`-gated `SequentialSibling`,
+    // including a `CurrentScopeSucceeded` gate. Seeding `optional_effect_performed`
+    // there is a harmless no-op: a `CurrentScopeSucceeded` rider resolves against
+    // `!cost_payment_failed_flag` (not this flag), and that guard already requires
+    // `!cost_payment_failed_flag` — the same condition gating this seed.
+    let mandatory_rider_owned;
+    let ability = if !ability.optional
+        && !ability.context.optional_effect_performed
+        && !state.cost_payment_failed_flag
+        && mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
+        && !effect_manages_own_outcome_flag(&ability.effect)
+        && ability.sub_ability.as_ref().is_some_and(|sub| {
+            sub.sub_link == SubAbilityLink::SequentialSibling
+                && sub
+                    .condition
+                    .as_ref()
+                    .is_some_and(condition_depends_on_effect_performed)
+        }) {
+        let mut owned = ability.clone();
+        owned.context.optional_effect_performed = true;
+        mandatory_rider_owned = owned;
+        &mandatory_rider_owned
+    } else {
+        ability
+    };
 
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
     // This allows sub-abilities like "its controller gains life" to access the object
@@ -13516,8 +13713,12 @@ mod tests {
 
         // WIN scenario: library = 1, devotion = 2 → 2 >= 1 → true.
         let state_win = build_state(1);
-        let ability_win =
-            ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(9001), PlayerId(0));
+        let ability_win = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(9001),
+            PlayerId(0),
+        );
         assert!(
             evaluate_condition(&condition, &state_win, &ability_win),
             "WIN scenario: devotion=2, library=1 should satisfy GE",
@@ -13525,8 +13726,12 @@ mod tests {
 
         // NO-WIN scenario: library = 50, devotion = 2 → 2 >= 50 → false.
         let state_no_win = build_state(50);
-        let ability_no_win =
-            ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(9002), PlayerId(0));
+        let ability_no_win = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(9002),
+            PlayerId(0),
+        );
         assert!(
             !evaluate_condition(&condition, &state_no_win, &ability_no_win),
             "NO-WIN scenario: devotion=2, library=50 must NOT satisfy GE",
@@ -13900,8 +14105,8 @@ mod tests {
         );
     }
 
-    /// CR 402.1 / 119.1 / 122.1f / 404.1: `candidate_player_scalar` reads each
-    /// of the four scalar `QuantityRef` attributes directly off the candidate
+    /// CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: `candidate_player_scalar` reads each
+    /// scalar `QuantityRef` attribute directly off the candidate
     /// `Player`, and returns `None` for any non-scalar `QuantityRef` (failing
     /// the predicate closed). Exercises the building block across its full input
     /// range, not a single card.
@@ -13913,6 +14118,7 @@ mod tests {
         {
             let p = &mut state.players[1];
             p.life = 17;
+            p.life_lost_this_turn = 3;
             p.poison_counters = 4;
             p.hand.push_back(ObjectId(1));
             p.hand.push_back(ObjectId(2));
@@ -13943,6 +14149,16 @@ mod tests {
                 }
             ),
             Some(17)
+        );
+        // CR 119.3: life lost this turn reads p.life_lost_this_turn.
+        assert_eq!(
+            candidate_player_scalar(
+                p,
+                &QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::ScopedPlayer
+                }
+            ),
+            Some(3)
         );
         // CR 404.1: graveyard size reads p.graveyard.len().
         assert_eq!(

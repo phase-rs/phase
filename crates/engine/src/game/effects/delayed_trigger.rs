@@ -304,6 +304,7 @@ fn snapshot_quantity_expr(expr: &mut QuantityExpr, state: &GameState, ability: &
             }
         }
         QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. } => {
             snapshot_quantity_expr(inner, state, ability);

@@ -464,7 +464,7 @@ fn finish_pending_cost_or_cast(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if let Some(ability_index) = pending.activation_ability_index {
-        return push_activated_ability_to_stack(
+        let waiting_for = push_activated_ability_to_stack(
             state,
             player,
             pending.object_id,
@@ -472,7 +472,12 @@ fn finish_pending_cost_or_cast(
             pending.ability,
             pending.activation_cost.as_ref(),
             events,
-        );
+        )?;
+        return Ok(drain_deferred_triggers_after_stack_object_announcement(
+            state,
+            events,
+            waiting_for,
+        ));
     }
 
     if matches!(
@@ -641,7 +646,7 @@ fn finish_pending_cost_or_cast(
     }
 
     let base_cost = pending.base_cost.clone();
-    pay_and_push(
+    let waiting_for = pay_and_push(
         state,
         player,
         pending.object_id,
@@ -655,7 +660,24 @@ fn finish_pending_cost_or_cast(
         pending.origin_zone,
         pending.payment_mode,
         events,
-    )
+    )?;
+    Ok(drain_deferred_triggers_after_stack_object_announcement(
+        state,
+        events,
+        waiting_for,
+    ))
+}
+
+pub(super) fn drain_deferred_triggers_after_stack_object_announcement(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    waiting_for: WaitingFor,
+) -> WaitingFor {
+    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+        return waiting_for;
+    }
+    crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
+        .unwrap_or(waiting_for)
 }
 
 fn begin_deferred_target_selection(
@@ -1032,6 +1054,13 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
+    // Boundary of the cost-payment events THIS handler produces — captured
+    // before the sacrifice so the death/leaves-the-battlefield `ZoneChanged`
+    // records (and their producer co-departed stamp, below) can be scanned for
+    // observers if the cast pauses before Priority (see the deferred-parking
+    // block after `finish_pending_cost_or_cast`).
+    let cost_event_start = events.len();
+
     // Sacrifice each chosen permanent
     for &id in chosen {
         super::sacrifice::sacrifice_permanent(state, id, player, events)
@@ -1043,16 +1072,11 @@ pub(crate) fn handle_sacrifice_for_cost(
     // among them observes the rest (look-back-in-time). Single authority — identical
     // wiring to `effects::sacrifice::resolve`. `departed_subset` drops any permanent
     // that did not actually leave (CantBeSacrificed, replacement).
-    // NOTE: this stamp is read only when the cast lands in the SAME action
-    // (`run_post_action_pipeline` scans `events`). If the cast pauses on a later
-    // kicker/target/modal choice before Priority, the cast lands in a future action
-    // with a fresh `events` vector and this stamp is unreadable — that kicker-paused
-    // sub-case shares the cross-action seam gap tracked by
-    // `cost_paid_multi_sacrifice_kicker_paused_under_observes`.
     crate::game::zones::mark_simultaneous_departures(
         events,
         &crate::game::zones::departed_subset(state, chosen),
     );
+    let cost_event_end = events.len();
 
     // CR 107.3a: The selected payment count defines X for this activation or
     // additional cost while its ability is on the stack.
@@ -1062,7 +1086,39 @@ pub(crate) fn handle_sacrifice_for_cost(
             .set_chosen_x_recursive(chosen.len().try_into().unwrap_or(u32::MAX));
     }
 
-    finish_pending_cost_or_cast(state, player, pending, events)
+    let waiting_for = finish_pending_cost_or_cast(state, player, pending, events)?;
+
+    // CR 603.6c + CR 603.10a + CR 603.3b: When `finish_pending_cost_or_cast`
+    // lands on `Priority` the cast completed in THIS action, so
+    // `run_post_action_pipeline` will scan `events` (including the
+    // cost-sacrifice `ZoneChanged` records stamped just above) and the
+    // leaves-the-battlefield / dies observers fire normally.
+    //
+    // But when the cast PAUSES on a later target/kicker/modal choice
+    // (a non-`Priority` `WaitingFor`), `apply_action` does NOT run the
+    // post-action pipeline over this action's `events` (engine.rs gates the
+    // pipeline on `WaitingFor::Priority`), and the cast lands in a LATER
+    // action whose fresh `events` vector no longer carries these records — so
+    // the producer co-departed stamp would be unreadable and a "whenever a
+    // creature you control dies" / leaves-the-battlefield observer among the
+    // co-sacrificed permanents would under-observe. Mirror the established
+    // B2 parking pattern in `engine_resolution_choices::batch_or_drain_observer_triggers`:
+    // collect the cost-payment observer triggers into `deferred_triggers` now,
+    // where the stamped records are still in scope. They are NOT drained while
+    // the announced spell remains on the stack (`should_drain_deferred_triggers_now`
+    // refuses to drain with a `Spell` entry present), so they reach the stack
+    // at the next true resolution boundary after the cast completes — CR 603.3
+    // ("the next time a player would receive priority").
+    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+        let cost_events: Vec<GameEvent> = events[cost_event_start..cost_event_end]
+            .iter()
+            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .cloned()
+            .collect();
+        crate::game::triggers::collect_triggers_into_deferred(state, &cost_events);
+    }
+
+    Ok(waiting_for)
 }
 
 /// CR 118.3 + CR 601.2b: Complete return-to-hand-as-cost after player selection.
@@ -2006,22 +2062,31 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         .and_then(|obj| obj.additional_cost.clone())
         .or(flash_additional);
 
-    // CR 601.2b: Optional costs (Casualty) must be declared before required additional
-    // costs. When obj.additional_cost is Required and the spell also has Casualty (e.g.,
-    // Village Rites gaining Casualty via a static effect), offer Casualty first and stash
-    // the Required cost in additional_cost_flow for processing after Casualty resolves.
+    // CR 601.2b: Optional costs (Casualty/Replicate) must be declared before
+    // required additional costs. When obj.additional_cost is Required and the
+    // spell also has a granted optional cost (e.g., Village Rites gaining
+    // Casualty via a static effect), offer the optional cost first and stash the
+    // Required cost in additional_cost_flow for processing after it resolves.
     let casualty_additional = effective_casualty_additional_cost(state, player, object_id);
+    let replicate_additional = effective_replicate_additional_cost(state, player, object_id);
+    let granted_optional_additional = casualty_additional
+        .clone()
+        .or_else(|| replicate_additional.clone());
     let offering_additional = effective_offering_additional_cost(state, player, object_id);
 
     let (additional, deferred_required, additional_cost_source) =
         if let Some(AdditionalCost::Required(ref req)) = obj_additional {
-            if let Some(casualty) = casualty_additional {
+            if let Some(granted_optional) = granted_optional_additional {
                 if !req.is_payable(state, player, object_id) {
                     return Err(EngineError::ActionNotAllowed(
                         "Cannot pay required additional cost".to_string(),
                     ));
                 }
-                (Some(casualty), obj_additional, SpellCostSource::Other)
+                (
+                    Some(granted_optional),
+                    obj_additional,
+                    SpellCostSource::Other,
+                )
             } else {
                 (obj_additional, None, SpellCostSource::Other)
             }
@@ -2029,6 +2094,8 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
             (obj_additional, None, SpellCostSource::Other)
         } else if let Some(casualty) = casualty_additional {
             (Some(casualty), None, SpellCostSource::Other)
+        } else if let Some(replicate) = replicate_additional {
+            (Some(replicate), None, SpellCostSource::Other)
         } else if let Some(offering) = offering_additional {
             // CR 702.48a: Offering — optional sacrifice before target selection
             // (becomes Required when cast via Offering instant-speed timing; that
@@ -2368,7 +2435,7 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         });
     }
 
-    pay_and_push(
+    let waiting_for = pay_and_push(
         state,
         player,
         object_id,
@@ -2382,7 +2449,12 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         origin_zone,
         payment_mode,
         events,
-    )
+    )?;
+    Ok(drain_deferred_triggers_after_stack_object_announcement(
+        state,
+        events,
+        waiting_for,
+    ))
 }
 
 fn flash_timing_non_mana_additional_cost(
@@ -3079,6 +3151,25 @@ pub(super) fn effective_casualty_additional_cost(
     })
 }
 
+/// CR 702.56a: Return the repeatable optional additional cost from a spell's
+/// effective Replicate keyword, including keywords granted by statics.
+pub(super) fn effective_replicate_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<AdditionalCost> {
+    let cost = super::casting::effective_spell_keywords(state, player, object_id)
+        .into_iter()
+        .find_map(|keyword| match keyword {
+            Keyword::Replicate(cost) => Some(cost),
+            _ => None,
+        })?;
+    Some(AdditionalCost::Optional {
+        cost: AbilityCost::Mana { cost },
+        repeatable: true,
+    })
+}
+
 /// CR 702.48a: Return the quality (creature subtype) string from a spell's
 /// Offering keyword, if it has one. Uses `effective_spell_keywords` so
 /// layer-granted copies are included.
@@ -3470,16 +3561,17 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .objects
         .get(&object_id)
         .map(|obj| obj.mana_cost.mana_value() + ability.chosen_x.unwrap_or(0));
+    let mut cascade_cast_transformed = false;
     if let Some(resulting_mv) = cascade_resulting_mv {
-        let cascade_accepted = match evaluate_cascade_constraint_with_resulting_mv(
+        let cascade_check = match evaluate_cascade_constraint_with_resulting_mv(
             state,
             object_id,
             player,
             resulting_mv,
             events,
         ) {
-            CascadeCheck::NotApplicable => false,
-            CascadeCheck::Accepted => true,
+            CascadeCheck::NotApplicable => None,
+            CascadeCheck::Accepted { cast_transformed } => Some(cast_transformed),
             CascadeCheck::Rejected {
                 exiled_misses,
                 reject_action,
@@ -3494,7 +3586,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
                 );
             }
         };
-        if !cascade_accepted
+        if cascade_check.is_none()
             && !super::casting::selected_exile_alt_cost_permission_accepts_resulting_mv(
                 state,
                 object_id,
@@ -3508,7 +3600,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
                 "Spell mana value does not satisfy the cast permission".to_string(),
             ));
         }
-        if !cascade_accepted
+        if cascade_check.is_none()
             && !super::casting::exile_alt_cost_permissions_accept_resulting_mv(
                 state,
                 object_id,
@@ -3522,6 +3614,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
                 "Spell mana value does not satisfy the cast permission".to_string(),
             ));
         }
+        cascade_cast_transformed = cascade_check == Some(true);
     }
 
     // CR 700.14: Snapshot pool size before payment to compute actual mana spent.
@@ -3531,6 +3624,10 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .find(|p| p.id == player)
         .map(|p| p.mana_pool.produced_mana_total())
         .unwrap_or(0);
+    let cast_transformed = cascade_cast_transformed
+        || super::casting::selected_exile_alt_cost_permission_casts_transformed(
+            state, object_id, player,
+        );
 
     super::casting::pay_mana_cost_with_choices(
         state,
@@ -3580,7 +3677,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         && state
             .objects
             .get(&object_id)
-            .map(|obj| obj.is_commander)
+            .map(|obj| obj.uses_command_zone_rules())
             .unwrap_or(false);
     let source_zone = origin_zone;
 
@@ -3741,6 +3838,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
             additional_cost_payment_count,
             additional_cost_paid,
             casting_variant,
+            cast_transformed,
             convoked_creatures: convoked_creature_count,
         },
     );
@@ -3863,7 +3961,7 @@ enum CascadeCheck {
     /// The constraint passed (Cascade: resulting MV < source MV; Discover:
     /// resulting MV <= N). The cast proceeds; the misses have already been
     /// bottom-shuffled as a side effect.
-    Accepted,
+    Accepted { cast_transformed: bool },
     /// The constraint failed. The cast must be aborted; the caller should
     /// unwind the announcement stack entry and route through
     /// `handle_resolution_cast_rejection`, which sends the hit to its
@@ -3928,12 +4026,18 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         .expect("object present above")
         .casting_permissions
         .remove(index);
-    let (constraint, exiled_misses, reject_action) = match permission {
+    let (constraint, cast_transformed, exiled_misses, reject_action) = match permission {
         CastingPermission::ExileWithAltCost {
             constraint,
+            cast_transformed,
             resolution_cleanup: Some(cleanup),
             ..
-        } => (constraint, cleanup.exiled_misses, cleanup.reject_action),
+        } => (
+            constraint,
+            cast_transformed,
+            cleanup.exiled_misses,
+            cleanup.reject_action,
+        ),
         _ => unreachable!("position() already filtered to this variant"),
     };
 
@@ -3951,7 +4055,7 @@ fn evaluate_cascade_constraint_with_resulting_mv(
         // CR 702.85a: "cards exiled this way that weren't cast" — the hit is
         // being cast, so only the misses bottom-shuffle.
         crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
-        CascadeCheck::Accepted
+        CascadeCheck::Accepted { cast_transformed }
     } else {
         CascadeCheck::Rejected {
             exiled_misses,
@@ -3994,6 +4098,11 @@ fn handle_resolution_cast_rejection(
             crate::game::effects::cascade::shuffle_to_bottom(state, &exiled_misses, events);
             super::zones::move_to_zone(state, object_id, Zone::Hand, events);
         }
+        // CR 702.62a / CR 702.88a: Suspend / Rebound — no dig misses and no
+        // resulting-MV gate, so this path is unreachable in practice. "If you
+        // don't [cast it], it remains exiled": the card simply stays in exile
+        // (the announcement-time stack entry was already removed above).
+        ResolutionMvRejectAction::RemainExiled => {}
     }
 
     // CR 601.2a: Priority returns to the would-be caster.
@@ -5489,8 +5598,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
-        PtStat, PtValueScope, QuantityExpr, ReplacementDefinition, ReplacementMode, TargetFilter,
-        TypeFilter, TypedFilter,
+        PtStat, PtValueScope, QuantityExpr, ReplacementDefinition, ReplacementMode,
+        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -5712,27 +5821,22 @@ mod tests {
         );
     }
 
-    /// CR 603.10a + CR 601.2h (DEFERRED kicker/target-paused sub-case): when an
-    /// additional sacrifice cost is followed by a deferred target/kicker/modal
-    /// pause, the co-departing observer under-observes. After the sacrifice,
-    /// `finish_pending_cost_or_cast` returns a non-`Priority` `WaitingFor`
-    /// (`TargetSelection` here), so `apply_action` does NOT run
-    /// `run_post_action_pipeline` over the cost-sacrifice `ZoneChanged` events,
-    /// and the producer stamp from `handle_sacrifice_for_cost` is never read in
-    /// this action. The cast then lands in a LATER `apply_action` whose fresh
-    /// `events` vector (engine.rs `let mut events = Vec::new();`) does not carry
-    /// the stamped records. This asserts the CURRENT wrong outcome at the pause
-    /// boundary (the observer observes NONE of the co-sacrificed creatures —
-    /// life stays 20); flip the expectation to 22 once the cross-action seam
-    /// lands (see plan Unit B redesign sketch).
+    /// CR 603.6c + CR 603.10a + CR 603.3b (DEFERRED kicker/target-paused
+    /// sub-case): when an additional sacrifice cost is followed by a deferred
+    /// target/kicker/modal pause, `finish_pending_cost_or_cast` returns a
+    /// non-`Priority` `WaitingFor` (`TargetSelection` here), so `apply_action`
+    /// does NOT run `run_post_action_pipeline` over the cost-sacrifice
+    /// `ZoneChanged` events in this action, and the cast lands in a LATER
+    /// `apply_action` whose fresh `events` vector no longer carries the records
+    /// stamped by `handle_sacrifice_for_cost`. To bridge that cross-action seam,
+    /// `handle_sacrifice_for_cost` parks the cost-payment observer triggers into
+    /// `deferred_triggers` at the pause boundary (the established B2 pattern from
+    /// `engine_resolution_choices::batch_or_drain_observer_triggers`); they are
+    /// held while the announced spell remains on the stack and drained at the
+    /// next resolution boundary after the cast completes. The co-departing
+    /// observer therefore fires once per co-sacrificed creature (itself + the
+    /// plain bear): life 20 + 2 = 22.
     #[test]
-    #[ignore = "DEFERRED cross-action seam: when an additional sacrifice cost is \
-                followed by a kicker/target/modal pause, the cost-sacrifice ZoneChanged \
-                events are emitted in the pausing action and gone from the fresh events \
-                vector when the cast lands in a later action — apply_action allocates a \
-                new events Vec per action and only runs run_post_action_pipeline on the \
-                Priority-returning action, so the producer stamp at handle_sacrifice_for_cost \
-                is unreadable. Shares Unit B's cross-action consumption gap. See plan Unit B."]
     fn cost_paid_multi_sacrifice_kicker_paused_under_observes() {
         use crate::game::engine::apply_as_current;
         use crate::types::ability::{TargetFilter, TriggerDefinition};
@@ -5888,19 +5992,80 @@ mod tests {
             state.waiting_for
         );
 
-        // FIXME(unit-b-seam): the cost-sacrifice events were emitted in THIS
-        // (pausing) action but never scanned, and the cast lands in a LATER action
-        // whose fresh `events` vector no longer carries them — so the producer
-        // stamp at `handle_sacrifice_for_cost` is unreadable and the observer
-        // observes NONE of the co-sacrificed creatures at the pause boundary
-        // (life stays 20). Once the cross-action seam routes the cost-payment
-        // events through the post-cast-resolution collection, the observer fires
-        // once per co-sacrificed creature (itself + the plain bear) — flip to 22.
+        // CR 603.6c + CR 603.10a + CR 603.3b: the cost-sacrifice `ZoneChanged`
+        // records (carrying the producer co-departed stamp from
+        // `handle_sacrifice_for_cost`) were emitted in THIS pausing action.
+        // `handle_sacrifice_for_cost` now parks their observer triggers into
+        // `deferred_triggers` because the cast paused on a non-`Priority`
+        // `WaitingFor` (so `run_post_action_pipeline` will not scan this
+        // action's `events`). The parked triggers drain when the cast finishes
+        // and the player would receive priority, while the announced spell still
+        // remains on the stack. Drive the rest of the cast (choose a damage
+        // target, then resolve the stack) and confirm the co-departing observer
+        // fired once per co-sacrificed creature (itself + the plain bear) — life
+        // 20 + 2 = 22.
+        if let WaitingFor::TargetSelection { target_slots, .. } = state.waiting_for.clone() {
+            // Pick the first legal damage target to land the cast on the stack.
+            let target = target_slots
+                .first()
+                .and_then(|slot| slot.legal_targets.first())
+                .cloned()
+                .expect("at least one legal damage target for the paused cast");
+            apply_as_current(
+                &mut state,
+                GameAction::ChooseTarget {
+                    target: Some(target),
+                },
+            )
+            .expect("submit the deferred damage target");
+        } else {
+            panic!(
+                "expected TargetSelection after the additional sacrifice cost (got {:?})",
+                state.waiting_for
+            );
+        }
+
+        if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
+            crate::game::triggers::drain_order_triggers_with_identity(&mut state);
+        }
         assert_eq!(
-            state.players[0].life, 20,
-            "CURRENT (wrong) outcome: when the cast pauses before Priority the \
-             cost-sacrifice events are never scanned, so the co-departing observer \
-             under-observes (life 20); expected 22 once the cross-action seam lands"
+            state.deferred_triggers.len(),
+            0,
+            "cost-sacrifice triggers must be drained at cast completion, not left \
+             parked behind the spell"
+        );
+        assert_eq!(
+            state.stack.len(),
+            3,
+            "the two cost-sacrifice triggers must be on the stack above the spell \
+             before priority is offered"
+        );
+        assert!(
+            matches!(state.stack[0].kind, StackEntryKind::Spell { .. }),
+            "the announced spell must remain below the cost-triggered abilities"
+        );
+        assert!(
+            state
+                .stack
+                .iter()
+                .skip(1)
+                .all(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+            "cost-sacrifice triggers must sit above the announced spell before it resolves"
+        );
+
+        // Resolve the stack (observer triggers + the spell itself).
+        for _ in 0..30 {
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) || state.stack.is_empty() {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::PassPriority).expect("pass priority");
+        }
+
+        assert_eq!(
+            state.players[0].life, 22,
+            "co-departing LTB observer must fire once per permanent sacrificed to \
+             pay one additional cost even when the cast PAUSES on target selection \
+             before Priority (20 + 2 = 22)"
         );
     }
 
@@ -8470,7 +8635,12 @@ mod tests {
                 resulting_mv,
                 &mut events,
             );
-            assert!(matches!(outcome, CascadeCheck::Accepted));
+            assert!(matches!(
+                outcome,
+                CascadeCheck::Accepted {
+                    cast_transformed: false
+                }
+            ));
 
             let hit_obj = state.objects.get(&hit).unwrap();
             assert!(
@@ -8902,7 +9072,7 @@ mod tests {
         fn matches_name(check: &CascadeCheck) -> &'static str {
             match check {
                 CascadeCheck::NotApplicable => "NotApplicable",
-                CascadeCheck::Accepted => "Accepted",
+                CascadeCheck::Accepted { .. } => "Accepted",
                 CascadeCheck::Rejected { .. } => "Rejected",
             }
         }
@@ -10386,6 +10556,308 @@ many tokens that are copies of it.)";
         assert_eq!(
             assault_permanents, 3,
             "original permanent plus two squad copy tokens should be on the battlefield"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 702.56a: Replicate — repeatable optional additional cost paid any
+    // number of times at cast (CR 601.2b/f-h), then a "when you cast this
+    // spell" trigger copies the spell once per replicate payment (CR 707.10).
+    // Reuses the same repeatable-`Optional` cost flow as Squad/multikicker and
+    // the same `CopySpell` machinery as Casualty — the copy count comes from
+    // `repeat_for = AdditionalCostPaymentCount`.
+    // -----------------------------------------------------------------------
+
+    /// Build a targetless "draw a card" instant in P0's hand carrying Replicate
+    /// {1}. A targetless spell avoids the per-copy `CopyRetarget` prompt
+    /// (CR 707.10c), so the copies resolve straight through and the copy count
+    /// is observable via `SpellCopied` events alone.
+    fn replicate_draw_scenario() -> (crate::game::scenario::GameRunner, ObjectId, CardId) {
+        use crate::game::scenario::GameScenario;
+
+        const REPLICATE_DRAW_ORACLE: &str = "Replicate {1} (As an additional cost to cast this \
+spell, you may pay {1} any number of times. When you cast this spell, copy it for each time \
+its replicate cost was paid.)\nDraw a card.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+        let mut builder =
+            scenario.add_spell_to_hand_from_oracle(PlayerId(0), "Test Replicate Draw", true, "");
+        // {0} base cost — only the replicate payments cost mana.
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        });
+        builder.from_oracle_text_with_keywords(&["replicate:{1}"], REPLICATE_DRAW_ORACLE);
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+        let runner = scenario.build();
+        (runner, spell_id, card_id)
+    }
+
+    fn granted_replicate_static() -> StaticDefinition {
+        let replicate_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        };
+        StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Replicate(replicate_cost),
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Instant).controller(ControllerRef::You),
+        ))
+    }
+
+    fn granted_replicate_draw_scenario() -> (crate::game::scenario::GameRunner, ObjectId, CardId) {
+        use crate::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+
+        scenario
+            .add_creature(PlayerId(0), "Replicate Grantor", 1, 1)
+            .with_static_definition(granted_replicate_static());
+
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Granted Replicate Draw", true);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        });
+        builder.from_oracle_text("Draw a card.");
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+        let runner = scenario.build();
+        (runner, spell_id, card_id)
+    }
+
+    /// Count `SpellCopied` events emitted while resolving the stack to empty.
+    /// Each `Effect::CopySpell` iteration emits exactly one (CR 707.10), so the
+    /// total equals the number of replicate copies created.
+    fn drain_counting_spell_copies(runner: &mut crate::game::scenario::GameRunner) -> usize {
+        use crate::types::actions::GameAction;
+        let mut copies = 0usize;
+        for _ in 0..40 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            match runner.act(GameAction::PassPriority) {
+                Ok(result) => {
+                    copies += result
+                        .events
+                        .iter()
+                        .filter(|e| {
+                            matches!(e, crate::types::events::GameEvent::SpellCopied { .. })
+                        })
+                        .count();
+                }
+                Err(_) => break,
+            }
+        }
+        copies
+    }
+
+    /// CR 702.56a: Replicate paid twice copies the spell twice — two extra
+    /// copies on the stack (plus the original spell), per CR 707.10.
+    #[test]
+    fn replicate_paid_twice_creates_two_copies() {
+        use crate::types::GameAction;
+        let (mut runner, spell_id, card_id) = replicate_draw_scenario();
+        fund_colorless(&mut runner, 2); // {1} + {1} for two replicate payments
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the replicate spell must be accepted");
+
+        // CR 601.2b/f-h: the repeatable additional cost surfaces as the same
+        // `OptionalCostChoice` prompt Squad/multikicker use.
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice {
+                cost, times_kicked, ..
+            } => {
+                assert!(
+                    matches!(
+                        cost,
+                        AdditionalCost::Optional {
+                            cost: AbilityCost::Mana { .. },
+                            repeatable: true,
+                        }
+                    ),
+                    "replicate must surface a repeatable Optional mana cost: {cost:?}"
+                );
+                assert_eq!(times_kicked, 0, "first replicate prompt count must be 0");
+            }
+            other => panic!("expected the first replicate prompt, got {other:?}"),
+        }
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("first replicate payment must be accepted");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("second replicate payment must be accepted");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("declining further replicate payments must finish the cast");
+
+        // CR 601.2i + CR 603.3: after the cast commits, the stack holds the
+        // original spell plus its "when you cast this spell" replicate trigger.
+        assert!(
+            runner.state().stack.iter().any(|e| e.id == spell_id),
+            "the original replicate spell must be on the stack after the cast commits"
+        );
+
+        // CR 702.56a + CR 707.10: resolving the cast trigger copies the spell
+        // once per replicate payment — exactly two copies.
+        let copies = drain_counting_spell_copies(&mut runner);
+        assert_eq!(
+            copies, 2,
+            "replicate paid twice must create exactly two copies (original + 2 copies)"
+        );
+    }
+
+    /// CR 702.56a: Replicate granted by `CastWithKeyword` must use the same
+    /// optional payment and copy-on-cast machinery as printed Replicate.
+    #[test]
+    fn granted_replicate_paid_twice_creates_two_copies() {
+        use crate::types::GameAction;
+        let (mut runner, spell_id, card_id) = granted_replicate_draw_scenario();
+        fund_colorless(&mut runner, 2);
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the granted-replicate spell must be accepted");
+
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice {
+                cost, times_kicked, ..
+            } => {
+                assert!(
+                    matches!(
+                        cost,
+                        AdditionalCost::Optional {
+                            cost: AbilityCost::Mana { .. },
+                            repeatable: true,
+                        }
+                    ),
+                    "granted Replicate must surface a repeatable Optional mana cost: {cost:?}"
+                );
+                assert_eq!(times_kicked, 0, "first granted Replicate prompt count");
+            }
+            other => panic!("expected granted Replicate prompt, got {other:?}"),
+        }
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("first granted Replicate payment must be accepted");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: true })
+            .expect("second granted Replicate payment must be accepted");
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("declining further granted Replicate payments must finish the cast");
+
+        let copies = drain_counting_spell_copies(&mut runner);
+        assert_eq!(
+            copies, 2,
+            "granted Replicate paid twice must create exactly two copies"
+        );
+    }
+
+    /// CR 601.2b + CR 702.56a: Replicate's optional cost is declared before
+    /// target selection for targeted spells, including when granted by a static.
+    #[test]
+    fn granted_replicate_targeted_spell_prompts_before_target_selection() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::GameAction;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::Phase::PreCombatMain);
+        scenario
+            .add_creature(PlayerId(0), "Replicate Grantor", 1, 1)
+            .with_static_definition(granted_replicate_static());
+        scenario.add_creature(PlayerId(1), "Target Bear", 2, 2);
+
+        let mut builder = scenario.add_spell_to_hand(PlayerId(0), "Granted Replicate Bolt", true);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        });
+        builder.with_ability(Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Any,
+            damage_source: None,
+        });
+        let spell_id = builder.id();
+        let card_id = scenario.state.objects[&spell_id].card_id;
+        let mut runner = scenario.build();
+        fund_colorless(&mut runner, 1);
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting targeted granted-Replicate spell must start");
+
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice { .. }
+            ),
+            "granted Replicate must prompt before target selection, got {:?}",
+            runner.state().waiting_for
+        );
+    }
+
+    /// CR 702.56a: Paying replicate zero times makes no copies — the "if a
+    /// replicate cost was paid" intervening clause is false, and the
+    /// `AdditionalCostPaymentCount`-driven copy count is zero.
+    #[test]
+    fn replicate_paid_zero_times_creates_no_copies() {
+        use crate::types::GameAction;
+        let (mut runner, spell_id, card_id) = replicate_draw_scenario();
+        // {0} base cost — no mana needed when replicate is declined.
+
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: vec![],
+            })
+            .expect("casting the replicate spell must be accepted");
+
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalCostChoice {
+                    times_kicked: 0,
+                    ..
+                }
+            ),
+            "expected the first replicate prompt"
+        );
+
+        runner
+            .act(GameAction::DecideOptionalCost { pay: false })
+            .expect("declining replicate must finish the cast");
+
+        let copies = drain_counting_spell_copies(&mut runner);
+        assert_eq!(
+            copies, 0,
+            "declining replicate must create zero copies (just the original spell)"
+        );
+        assert!(
+            !runner.state().cancelled_casts.contains(&spell_id),
+            "declining replicate must NOT cancel the cast"
         );
     }
 

@@ -33,8 +33,7 @@
   "tabs": {
     "ariaLabel": "Superficie del constructor de mazos",
     "deck": "Mazo",
-    "info": "Info",
-    "playtest": "Playtest"
+    "info": "Info"
   },
   "toolbar": {
     "menu": "Menú",
@@ -230,19 +229,5 @@
     "minimumCount": "El mazo tiene {{count}} cartas (mínimo 60)",
     "maxCopies": "{{name}}: {{count}} copias (máx. 4)",
     "companionInMain": "{{name}} es tu compañero pero también está en el mazo principal — esto infringe su condición de construcción de mazo. Quítalo del mazo principal para usarlo como compañero."
-  },
-  "playtest": {
-    "title": "Goldfish playtest",
-    "subtitle": "Sample opening hands or launch a solo game against the AI with this list — no deck save required.",
-    "sampleHand": "Sample opening hand",
-    "sampleHandHint": "Random seven from your main deck (display preview only).",
-    "reshuffle": "Reshuffle",
-    "goldfish": "Launch goldfish game",
-    "goldfishHint": "Starts a local {{count}}-card game vs AI using your current list and format.",
-    "difficulty": "AI difficulty",
-    "difficultyEasy": "Easy",
-    "difficultyMedium": "Medium",
-    "difficultyHard": "Hard",
-    "launch": "Launch game"
   }
 }

@@ -1697,10 +1697,10 @@ fn parse_for_each_clause_expr_with_parser(
     Some(QuantityExpr::Sum { exprs })
 }
 
-/// CR 702.23a: "for each [object] beyond the first" composes a
-/// normal object-count quantity with an offset of -1. This preserves the
-/// shared `for each` grammar and keeps "beyond the first" as an expression
-/// modifier rather than adding a leaf-level `QuantityRef` variant.
+/// CR 702.23a + CR 107.1b: "for each [object] beyond the first" composes a
+/// normal object-count quantity with an offset of -1, clamped at zero. This
+/// preserves the shared `for each` grammar and keeps "beyond the first" as an
+/// expression modifier rather than adding a leaf-level `QuantityRef` variant.
 fn parse_for_each_beyond_first_clause_expr_with_parser(
     input: &str,
     parse_clause: impl Fn(&str) -> Option<QuantityRef>,
@@ -1712,11 +1712,15 @@ fn parse_for_each_beyond_first_clause_expr_with_parser(
     .parse(input)
     .ok()?;
     let qty = parse_clause(base_clause)?;
+    let count_minus_one = QuantityExpr::Offset {
+        inner: Box::new(QuantityExpr::Ref { qty }),
+        offset: -1,
+    };
     Some((
         input,
-        QuantityExpr::Offset {
-            inner: Box::new(QuantityExpr::Ref { qty }),
-            offset: -1,
+        QuantityExpr::ClampMin {
+            inner: Box::new(count_minus_one),
+            minimum: 0,
         },
     ))
 }
@@ -4597,10 +4601,14 @@ mod tests {
     }
 
     #[test]
-    fn for_each_beyond_the_first_offsets_base_count() {
+    fn for_each_beyond_the_first_clamps_offset_base_count() {
         let result = parse_for_each_clause_expr("creature blocking it beyond the first");
-        let Some(QuantityExpr::Offset { inner, offset }) = result else {
-            panic!("expected Offset, got {result:?}");
+        let Some(QuantityExpr::ClampMin { inner, minimum }) = result else {
+            panic!("expected ClampMin, got {result:?}");
+        };
+        assert_eq!(minimum, 0);
+        let QuantityExpr::Offset { inner, offset } = *inner else {
+            panic!("expected clamped Offset, got {inner:?}");
         };
         assert_eq!(offset, -1);
         match inner.as_ref() {

@@ -203,7 +203,8 @@ fn legal_aura_attachment_targets(
         if player.is_eliminated || player.is_phased_out() {
             return None;
         }
-        if crate::game::filter::player_matches_target_filter(
+        if crate::game::filter::player_matches_target_filter_in_state(
+            state,
             enchant_filter,
             player.id,
             Some(controller),
@@ -838,6 +839,26 @@ pub fn resolve(
             })
             .map(|(id, _)| *id)
             .collect();
+        let eligible: Vec<ObjectId> = if dest_zone == Zone::Exile {
+            eligible
+                .into_iter()
+                .filter(|id| {
+                    let acting_player = state
+                        .objects
+                        .get(id)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(ability.controller);
+                    !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                        state,
+                        ability,
+                        *id,
+                        acting_player,
+                    )
+                })
+                .collect()
+        } else {
+            eligible
+        };
 
         if eligible.is_empty() {
             if !up_to {
@@ -995,6 +1016,22 @@ pub fn resolve(
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
 
     for (i, obj_id) in targeted_objects.iter().enumerate() {
+        if dest_zone == Zone::Exile {
+            let acting_player = state
+                .objects
+                .get(obj_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(ability.controller);
+            if crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                state,
+                ability,
+                *obj_id,
+                acting_player,
+            ) {
+                continue;
+            }
+        }
+
         match process_one_zone_move(state, &ctx, *obj_id, events) {
             ZoneMoveResult::Done => {}
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
@@ -1300,6 +1337,26 @@ pub fn resolve_all(
             .map(|(id, _)| *id)
             .collect()
     };
+    let matching: Vec<_> = if dest_zone == Zone::Exile {
+        matching
+            .into_iter()
+            .filter(|id| {
+                let acting_player = state
+                    .objects
+                    .get(id)
+                    .map(|obj| obj.controller)
+                    .unwrap_or(ability.controller);
+                !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                    state,
+                    ability,
+                    *id,
+                    acting_player,
+                )
+            })
+            .collect()
+    } else {
+        matching
+    };
 
     // Clean up consumed tracked set after scanning.
     if let TargetFilter::TrackedSet { id } = &effective_filter {
@@ -1449,11 +1506,11 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::game_state::ZoneChangeRecord;
+    use crate::types::game_state::{StackEntry, StackEntryKind, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
     use std::sync::Arc;
 
     fn make_hand_choice_ability(up_to: bool) -> ResolvedAbility {
@@ -2805,6 +2862,99 @@ mod tests {
             Zone::Graveyard,
             "controller's graveyard must be untouched"
         );
+    }
+
+    #[test]
+    fn change_zone_all_triggered_muzzle_skips_creature_tokens() {
+        // CR 603.2 + CR 609.3: The Master, Multiplied-style statics suppress
+        // triggered mass-exile effects for protected objects while the effect
+        // still does as much as possible for unprotected objects.
+        let mut state = GameState::new_two_player(42);
+        let master = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "The Master, Multiplied".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&master)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantCauseSacrificeOrExile {
+                    cause: ProhibitionScope::Controller,
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .properties(vec![FilterProp::Token])
+                        .controller(ControllerRef::You),
+                )),
+            );
+
+        let token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Copied Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token).unwrap();
+            obj.is_token = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let nontoken = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Real Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&nontoken)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                enters_under: None,
+                enter_tapped: false,
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(101),
+            controller: PlayerId(0),
+            source_id: ObjectId(100),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(100),
+                ability: Box::new(ability.clone()),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&token].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&nontoken].zone, Zone::Exile);
+        assert_eq!(state.last_effect_count, Some(1));
     }
 
     #[test]

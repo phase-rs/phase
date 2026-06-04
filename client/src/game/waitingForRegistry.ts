@@ -46,6 +46,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "AbilityModeChoice",
     "ModalFaceChoice",
     "AlternativeCastChoice",
+    // CR 702.140c + CR 730.2a: mutate top/bottom merge choice (MutateMergeChoiceModal).
+    "MutateMergeChoice",
     "CastingVariantChoice",
     "ChoosePermanentTypeSlot",
     // CR 118.3 + CR 601.2b + CR 605.3b: unified cost-payment selection

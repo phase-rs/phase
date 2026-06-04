@@ -115,6 +115,154 @@ fn extra_blockers_static_self_reference_stays_selfref() {
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
 }
 
+/// CR 509.1b: Copper Carapace — "Equipped creature gets +2/+2 and can't block."
+/// must decompose into BOTH the P/T grant AND a `CantBlock` static affecting the
+/// equipped creature. Previously the "can't block" drawback was dropped, making
+/// the card a strictly-better-than-printed pure pump.
+#[test]
+fn cant_block_static_splits_from_pump() {
+    let defs = parse_static_line_multi("Equipped creature gets +2/+2 and can't block.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantBlock),
+        "expected a CantBlock static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +2/+2 grant must be preserved"
+    );
+}
+
+/// CR 509.1b: A self-referential pump ("This creature gets +2/+2 and can't
+/// block.", e.g. Threshold downside creatures) also splits, with the `CantBlock`
+/// static affecting the source.
+#[test]
+fn cant_block_static_splits_self_reference() {
+    let defs = parse_static_line_multi("This creature gets +2/+2 and can't block.");
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBlock)
+        .expect("expected a CantBlock static");
+    assert_eq!(cant.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
+/// blocked by more than one creature." must decompose into BOTH the P/T grant
+/// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted
+/// creature. Previously the evasion clause was dropped entirely.
+#[test]
+fn cant_be_blocked_static_splits_from_keyword_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +3/+0 and can't be blocked by more than one creature.",
+    );
+    assert!(
+        defs.len() >= 2,
+        "expected P/T + evasion defs, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::CantBeBlockedByMoreThan { max: 1 }
+                && matches!(
+                    d.affected,
+                    Some(TargetFilter::Typed(TypedFilter { ref properties, .. }))
+                        if properties.contains(&FilterProp::EnchantedBy)
+                )),
+        "expected enchanted-creature CantBeBlockedByMoreThan {{ max: 1 }}, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    // The P/T grant is preserved (and remains a continuous modification).
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "P/T grant must be preserved"
+    );
+}
+
+/// CR 509.1b: The compound split must also match the typographic U+2019
+/// apostrophe ("can'​t"), matching the standalone evasion branches — MTGJSON
+/// Oracle text uses U+2019, and the static path doesn't normalize apostrophes.
+#[test]
+fn cant_be_blocked_static_splits_with_typographic_apostrophe() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +3/+0 and can\u{2019}t be blocked by more than one creature.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::CantBeBlockedByMoreThan { max: 1 }),
+        "U+2019 form must still split off the evasion grant, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 509.1b: The bare compound form "… and can't be blocked" yields a plain
+/// `CantBeBlocked` static alongside the keyword grant.
+#[test]
+fn cant_be_blocked_static_splits_bare_form() {
+    let defs = parse_static_line_multi("Enchanted creature gets +2/+2 and can't be blocked.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantBeBlocked),
+        "expected CantBeBlocked, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 105.4 + CR 509.1b + CR 608.2c: The split path must use the chosen-color
+/// qualifier parser before the generic type parser, matching the standalone
+/// "can't be blocked by <filter>" path.
+#[test]
+fn cant_be_blocked_static_split_keeps_chosen_color_filter() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked by creatures of that color.",
+    );
+    let filter = defs
+        .iter()
+        .find_map(|d| match &d.mode {
+            StaticMode::CantBeBlockedBy { filter } => Some(filter),
+            _ => None,
+        })
+        .expect("expected split CantBeBlockedBy static");
+
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::IsChosenColor))
+        ),
+        "expected IsChosenColor blocker filter, got {filter:?}"
+    );
+}
+
+/// CR 509.1b: A trailing evasion condition belongs on the split
+/// `CantBeBlocked` companion, not only on standalone attached-subject forms.
+#[test]
+fn cant_be_blocked_static_split_keeps_trailing_condition() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked as long as you control a Gate.",
+    );
+    let condition = defs
+        .iter()
+        .find_map(|d| {
+            (d.mode == StaticMode::CantBeBlocked)
+                .then_some(d.condition.as_ref())
+                .flatten()
+        })
+        .expect("expected split CantBeBlocked static with condition");
+
+    assert!(
+        matches!(
+            condition,
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf))
+            } if tf.get_subtype() == Some("Gate")
+        ),
+        "expected Gate condition, got {condition:?}"
+    );
+}
+
 /// CR 118.9: Rooftop Storm grants {0} as an alternative MANA cost for Zombie
 /// creature spells the controller casts.
 #[test]
@@ -512,6 +660,24 @@ fn static_rancor() {
         .contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::Trample
         }));
+}
+
+#[test]
+fn static_archetype_cant_have_keyword() {
+    // CR 613.1f + CR 702: Theros Archetype cycle / Arcane Lighthouse —
+    // "... can't have or gain [keyword]" must emit a Layer 6 CantHaveKeyword denial
+    // static (scoped to the same subject) alongside the keyword removal.
+    let defs = parse_static_line_multi(
+        "Creatures your opponents control lose flying and can't have or gain flying.",
+    );
+    assert!(
+        defs.iter().any(|d| matches!(
+            &d.mode,
+            StaticMode::CantHaveKeyword { keyword } if *keyword == Keyword::Flying
+        )),
+        "expected a CantHaveKeyword(Flying) denial static, got modes {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -2638,10 +2804,31 @@ fn static_lands_you_control_have() {
 
 #[test]
 fn static_cant_be_the_target() {
+    // CR 702.11a: "can't be the target of spells or abilities your opponents
+    // control" (Sphinx of the Final Word) IS Hexproof — the permanent's controller
+    // can still target it — so it is modeled as a Hexproof keyword grant (which the
+    // targeting check already enforces with the correct controller scope) rather
+    // than a scope-less blanket static.
     let def = parse_static_line(
             "Sphinx of the Final Word can't be the target of spells or abilities your opponents control.",
         )
         .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof,
+        }));
+}
+
+#[test]
+fn static_cant_be_targeted_blanket_is_shroud_static() {
+    // CR 702.18a: the unqualified "can't be the target of spells or abilities"
+    // (no controller qualifier) is blanket Shroud — untargetable by any player,
+    // including the controller — modeled as the CantBeTargeted static and enforced
+    // in `targeting.rs::can_target`.
+    let def =
+        parse_static_line("Guardian Idol can't be the target of spells or abilities.").unwrap();
     assert_eq!(def.mode, StaticMode::CantBeTargeted);
 }
 
@@ -2986,6 +3173,34 @@ fn static_tarmogoyf_cda() {
                 offset: 1,
             },
         }));
+}
+
+#[test]
+fn attacks_each_combat_unless_you_control_is_conditional_must_attack() {
+    // CR 508.1d + CR 604.1: Reckless Cohort — "attacks each combat if able
+    // unless you control another Ally" is a MustAttack rule-static gated by a
+    // negated control-presence condition (the requirement applies only while you
+    // do NOT control another Ally).
+    let def = parse_static_line(
+        "This creature attacks each combat if able unless you control another Ally.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::MustAttack);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(def.condition, Some(StaticCondition::Not { .. })),
+        "expected a negated control-presence condition, got {:?}",
+        def.condition
+    );
+}
+
+#[test]
+fn attacks_each_combat_if_able_unconditional_has_no_condition() {
+    // Regression: the plain rule-static (no "unless") still parses to an
+    // unconditional MustAttack.
+    let def = parse_static_line("This creature attacks each combat if able.").unwrap();
+    assert_eq!(def.mode, StaticMode::MustAttack);
+    assert!(def.condition.is_none());
 }
 
 #[test]
@@ -3887,6 +4102,46 @@ fn static_legend_rule_routes_through_classifier() {
     ));
     assert!(crate::parser::oracle_classifier::is_static_pattern(
         "the \"legend rule\" doesn't apply."
+    ));
+}
+
+#[test]
+fn static_legend_rule_creature_tokens_scope() {
+    // CR 704.5j: The Master, Multiplied — "doesn't apply to creature tokens you control."
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to creature tokens you control.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::Token)
+    ));
+}
+
+#[test]
+fn static_cant_cause_sacrifice_or_exile_creature_tokens() {
+    // CR 603.2 + CR 609.3: The Master, Multiplied.
+    let def = parse_static_line(
+        "Triggered abilities you control can't cause you to sacrifice or exile creature tokens you control.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCauseSacrificeOrExile {
+            cause: ProhibitionScope::Controller,
+        }
+    );
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::Token)
     ));
 }
 
@@ -5120,6 +5375,8 @@ fn exile_cast_permission_maralen_fae_ascendant() {
             frequency: CastFrequency::OncePerTurn,
             play_mode: CardPlayMode::Cast,
             cost: ExileCastCost::WithoutPayingManaCost,
+            pool: ExileCardPool::ThisTurn,
+            timing: ExileCastTiming::AnyTime,
         },
         "expected ExileCastPermission, got {:?}",
         def.mode
@@ -5163,6 +5420,8 @@ fn exile_cast_permission_during_each_of_your_turns_synonym() {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
                 cost: ExileCastCost::WithoutPayingManaCost,
+                pool: ExileCardPool::ThisTurn,
+                timing: ExileCastTiming::AnyTime,
             }
         ),
         "expected ExileCastPermission(OncePerTurn, Cast, free), got {:?}",
@@ -5201,6 +5460,66 @@ fn exile_cast_permission_not_intercepted_by_graveyard_branch() {
     assert!(try_parse_exile_cast_permission(text, &lower).is_some());
 }
 
+/// CR 113.6b + CR 305.1 + CR 406.6 + CR 117.1c: The Matrix-of-Time persistent
+/// exile-play line lowers to `ExileCastPermission { pool: Persistent, play_mode:
+/// Play, frequency: Unlimited, timing: YourTurnOnly }` with `affected: Any`.
+#[test]
+fn persistent_exile_play_permission_matrix_form() {
+    let text =
+        "During your turn, you may play lands and cast spells from among cards exiled with ~.";
+    let def = parse_static_line(text).expect("Matrix-class static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+        },
+        "expected persistent your-turn Play permission, got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Any),
+        "the persistent pool is the scope; affected must be Any"
+    );
+}
+
+/// CR 601.3f + CR 305.1: The "you may look at cards exiled with ~, and you may
+/// play lands and cast spells from among those cards." variant lowers to the
+/// same persistent Play permission, but without the your-turn timing gate.
+#[test]
+fn persistent_exile_play_permission_look_at_variant() {
+    let text = "You may look at cards exiled with ~, and you may play lands and cast spells from among those cards.";
+    let def = parse_static_line(text).expect("look-at variant must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::AnyTime,
+        },
+        "expected persistent any-time Play permission, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 113.6b: The persistent handler must NOT swallow the Maralen "this turn"
+/// per-turn-pool line — that belongs to `try_parse_exile_cast_permission`.
+#[test]
+fn persistent_exile_play_permission_rejects_maralen_this_turn() {
+    let text = "Once each turn, you may cast a spell from among cards exiled with ~ this turn.";
+    let lower = text.to_lowercase();
+    assert!(
+        try_parse_persistent_exile_play_permission(text, &lower).is_none(),
+        "the per-turn Maralen line must not match the persistent class"
+    );
+}
+
 #[test]
 fn graveyard_cast_permission_no_rider_leaves_filter_clean() {
     // Lurrus / Muldrotha / Karador / Conduit / Yawgmoth's Will regression:
@@ -5235,6 +5554,7 @@ fn hand_cast_free_omniscience() {
         def.mode,
         StaticMode::CastFromHandFree {
             frequency: CastFrequency::Unlimited,
+            origin: CastFreeOrigin::Hand,
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::Any));
@@ -5258,6 +5578,7 @@ fn hand_cast_free_zaffai_once_per_turn() {
             def.mode,
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
+                origin: CastFreeOrigin::Hand,
             }
         ),
         "expected CastFromHandFree {{ OncePerTurn }}, got: {:?}",
@@ -5288,7 +5609,8 @@ fn hand_cast_free_zaffai_not_intercepted_by_graveyard_branch() {
 
 // CR 601.2 + CR 118.9a: B10 Dracogenesis — Omniscience-class static with
 // the zone qualifier omitted ("you may cast Dragon spells without paying
-// their mana costs"). Implicit cast zone defaults to hand per CR 601.2.
+// their mana costs"). The mana-cost replacement applies from built-in cast
+// zones already authorized for that spell, including CR 903.8 command zone casts.
 #[test]
 fn cast_free_dracogenesis_no_zone_qualifier() {
     let text = "You may cast Dragon spells without paying their mana costs.";
@@ -5297,6 +5619,7 @@ fn cast_free_dracogenesis_no_zone_qualifier() {
         def.mode,
         StaticMode::CastFromHandFree {
             frequency: CastFrequency::Unlimited,
+            origin: CastFreeOrigin::DefaultCastPermission,
         }
     );
     // Dragon subtype filter must survive.
@@ -7306,6 +7629,30 @@ fn lands_you_control_are_plains_celestial_dawn() {
             assert_eq!(tf.controller, Some(ControllerRef::You));
         }
         _ => panic!("Expected Typed land filter with you-control"),
+    }
+}
+
+#[test]
+fn all_mountains_are_plains_conversion() {
+    // CR 305.7: Conversion / Glaciers — "All Mountains are Plains" sets every
+    // Mountain (any controller) to Plains via SetBasicLandType. Covers the
+    // "All <basic land type> are <type>" subject class.
+    let def = parse_static_line("All Mountains are Plains.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(matches!(
+        def.modifications.as_slice(),
+        [ContinuousModification::SetBasicLandType { land_type }]
+        if *land_type == BasicLandType::Plains
+    ));
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Land));
+            assert!(tf
+                .type_filters
+                .contains(&TypeFilter::Subtype("Mountain".to_string())));
+            assert_eq!(tf.controller, None, "battlefield-wide, any controller");
+        }
+        _ => panic!("Expected Typed land filter with Mountain subtype"),
     }
 }
 

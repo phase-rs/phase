@@ -44,6 +44,7 @@ pub fn arm_rebound(state: &mut GameState, exiled_id: ObjectId, controller: Playe
             // cast, so a leftover Rebound permission cannot leak into a later
             // turn.
             duration: Some(Duration::UntilEndOfTurn),
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         },
         vec![TargetRef::Object(exiled_id)],
         exiled_id,
@@ -174,6 +175,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: Some(Duration::UntilEndOfTurn),
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![TargetRef::Object(exiled)],
             exiled,

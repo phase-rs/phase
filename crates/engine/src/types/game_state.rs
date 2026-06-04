@@ -6,7 +6,7 @@ use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
-    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost,
+    default_target_filter_permanent, AbilityCost, AbilityDefinition, AdditionalCost, AttackSubject,
     BeholdCostAction, CategoryChooserScope, ChoiceType, ChoiceValue, ChooseFromZoneConstraint,
     ChosenAttribute, Comparator, ContinuousModification, CostPaidObjectSnapshot,
     DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
@@ -25,7 +25,7 @@ use super::mana::{ManaColor, ManaCost, ManaType, StepEndManaAction};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerId};
-use super::proposed_event::{ProposedEvent, ReplacementId};
+use super::proposed_event::{CopyTokenSpec, ProposedEvent, ReplacementId};
 use super::zones::{ExileCostSourceZone, Zone};
 
 use crate::game::bracket_estimate::CommanderBracketTier;
@@ -863,6 +863,29 @@ pub struct PendingChangeZoneIteration {
     pub duration: Option<crate::types::ability::Duration>,
     pub track_exiled_by_source: bool,
     pub effect_kind: crate::types::ability::EffectKind,
+}
+
+/// CR 707.2 + CR 614.1a + CR 616.1: Resume state for `CopyTokenOf` when a
+/// copy-token `CreateToken` event pauses for replacement ordering/optional
+/// choice. The currently-paused source is stored in `pending_replacement`; this
+/// record carries already-created token ids and the remaining copy sources so
+/// `handle_replacement_choice` can continue the same resolver after the chosen
+/// replacement applies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCopyTokenBatch {
+    pub owner: PlayerId,
+    pub copy: Box<CopyTokenSpec>,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCopyTokenResolution {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_ids: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pub remaining: VecDeque<PendingCopyTokenBatch>,
+    pub effect_kind: EffectKind,
+    pub source_id: ObjectId,
 }
 
 /// CR 608.2c + CR 107.1c: Resume state for a "repeat this process" loop
@@ -1703,6 +1726,11 @@ pub enum AlternativeCastKeyword {
     /// spell/permanent uses the secondary power, toughness, and mana cost
     /// characteristics while it is a creature.
     Prototype,
+    /// CR 702.140a: Mutate alternative cost paid from hand. The spell becomes a
+    /// mutating creature spell targeting a non-Human creature the caster owns
+    /// (CR 702.140a); on resolution it merges with that creature (CR 730) rather
+    /// than entering the battlefield, unless the target is illegal (CR 702.140b).
+    Mutate,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -2449,6 +2477,20 @@ pub enum WaitingFor {
         /// string; the frontend renders the engine-provided description.
         #[serde(default)]
         alternative_additional_cost: Option<AbilityCost>,
+    },
+    /// CR 702.140c + CR 730.2a: As a mutating creature spell resolves with a
+    /// legal target, the spell's controller chooses whether the spell is put on
+    /// TOP of the target creature or on the BOTTOM. `merging_id` is the resolving
+    /// mutate spell object (popped from the stack into a paused state); `target_id`
+    /// is the surviving battlefield creature whose `ObjectId` the merged permanent
+    /// keeps (CR 730.2c). The choice only sets which component supplies copiable
+    /// characteristics (CR 730.2a); the merged permanent always has the union of
+    /// all components' abilities (CR 702.140e). Resolved by
+    /// `merge::handle_mutate_merge_choice` via `GameAction::ChooseMutateMergeSide`.
+    MutateMergeChoice {
+        player: PlayerId,
+        merging_id: ObjectId,
+        target_id: ObjectId,
     },
     /// CR 601.2b: Player chooses which legal cast permission / variant to use
     /// when more than one applies to the same spell from the same zone.
@@ -3282,6 +3324,7 @@ impl WaitingFor {
             | WaitingFor::CastOffer { player, .. }
             | WaitingFor::ModalFaceChoice { player, .. }
             | WaitingFor::AlternativeCastChoice { player, .. }
+            | WaitingFor::MutateMergeChoice { player, .. }
             | WaitingFor::CastingVariantChoice { player, .. }
             | WaitingFor::ChoosePermanentTypeSlot { player, .. }
             | WaitingFor::ChooseRingBearer { player, .. }
@@ -3805,6 +3848,27 @@ pub enum CastingVariant {
     /// stack display plus layer evaluation use the secondary mana cost and P/T
     /// while it is a creature.
     Prototype,
+    /// CR 702.140a-c: Cast from hand via Mutate's alternative cost. The printed
+    /// mana cost is replaced by `Keyword::Mutate(cost)` at cast preparation
+    /// (mirrors Bestow). The spell gains a single target — a non-Human creature
+    /// the caster owns (CR 702.140a) — attached Bestow-style before preparation.
+    /// On resolution (`stack::resolve_top`): if the target is illegal
+    /// (CR 702.140b) the spell reverts to a plain creature spell and enters the
+    /// battlefield normally; if legal (CR 702.140c) it does NOT enter — instead
+    /// it merges with the target creature (CR 730) and the controller chooses
+    /// top/bottom. Unlike Bestow this variant neither exiles on leaving the stack
+    /// nor restores a front face, so it is intentionally absent from
+    /// `exiles_when_leaving_stack_for_any_reason` and
+    /// `restores_front_face_after_stack_exit`.
+    Mutate,
+    /// CR 702.173a: Cast from hand via Freerunning's alternative cost. Legal
+    /// only when a player was dealt combat damage this turn by an Assassin
+    /// creature or a commander under the caster's control. The printed mana
+    /// cost is replaced by the `Keyword::Freerunning(cost)` payload at cast
+    /// preparation (mirrors `Overload` / `Foretell`). Resolution routing
+    /// matches a normal cast — no on-resolve special behavior — so this is a
+    /// casting-context tag, not a resolution-affecting variant.
+    Freerunning,
 }
 
 impl CastingVariant {
@@ -3835,7 +3899,11 @@ impl CastingVariant {
             | CastingVariant::MoreThanMeetsTheEye
             | CastingVariant::Disturb
             | CastingVariant::Impending
-            | CastingVariant::Prototype => true,
+            | CastingVariant::Prototype
+            // CR 702.140a: Mutate replaces the spell's mana cost with the mutate
+            // cost — an alternative cost, so only one may apply (CR 118.9a).
+            | CastingVariant::Mutate
+            | CastingVariant::Freerunning => true,
             CastingVariant::Normal
             | CastingVariant::Adventure
             | CastingVariant::Omen
@@ -4023,6 +4091,10 @@ pub struct StackPaidSnapshot {
     pub additional_cost_paid: bool,
     #[serde(default, skip_serializing_if = "CastingVariant::is_normal")]
     pub casting_variant: CastingVariant,
+    /// CR 310.11b + CR 712.14a: Exile alt-cost casts that were explicitly cast
+    /// transformed resolve onto the battlefield back face up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cast_transformed: bool,
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub convoked_creatures: usize,
 }
@@ -4198,6 +4270,13 @@ pub struct GameState {
     /// after the zone change completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_spell_resolution: Option<PendingSpellResolution>,
+
+    /// CR 702.140c + CR 730.2: Transient context for a mutating creature spell
+    /// whose resolution is paused awaiting the controller's top/bottom merge
+    /// choice. Set in `stack::resolve_top` (legal-target branch), consumed by
+    /// `merge::handle_mutate_merge_choice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_mutate_merge: Option<PendingMutateMerge>,
 
     /// CR 614.12a + CR 707.9 + CR 603.2: `ZoneChanged`-to-battlefield events
     /// for an object whose entry is paused mid-resolution awaiting an
@@ -4502,6 +4581,10 @@ pub struct GameState {
         with = "tuple_key_map"
     )]
     pub trigger_fire_counts_this_turn: HashMap<(ObjectId, usize), u32>,
+    /// CR 603.2: Tracks per-opponent-per-turn firing for
+    /// OncePerOpponentPerTurn. Keyed by (object_id, trigger_index, opponent_id).
+    #[serde(default)]
+    pub triggers_fired_this_turn_per_opponent: HashSet<(ObjectId, usize, PlayerId)>,
     #[serde(default)]
     pub triggers_fired_this_game: HashSet<(ObjectId, usize)>,
     #[serde(
@@ -4743,6 +4826,15 @@ pub struct GameState {
     /// of deep-copying them on the AI-search hot path.
     #[serde(default)]
     pub damage_dealt_this_turn: im::Vector<DamageRecord>,
+    /// CR 702.173a + CR 608.2i: Set of players P such that, at some point this
+    /// turn, a creature controlled by P that was an Assassin OR a commander
+    /// (snapshot at damage-dealing time per CR 608.2i — "looks back in time")
+    /// dealt combat damage to ANY player. Populated by the trigger pipeline's
+    /// `DamageDealt` observer in `game::triggers` and cleared in
+    /// `turns::start_next_turn` per CR 514. Read by `casting_variant_candidates`
+    /// to gate the Freerunning cast permission on the spell's controller.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub assassin_or_commander_dealt_combat_damage_this_turn: HashSet<PlayerId>,
     /// CR 700.14: Cumulative mana spent on spells this turn per player (for Expend triggers).
     #[serde(default)]
     pub mana_spent_on_spells_this_turn: HashMap<PlayerId, u32>,
@@ -4807,6 +4899,13 @@ pub struct GameState {
     /// [`PendingChangeZoneIteration`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_change_zone_iteration: Option<PendingChangeZoneIteration>,
+
+    /// CR 707.2 + CR 614.1a + CR 616.1: Pending `CopyTokenOf` source loop
+    /// paused by an interactive token-creation replacement. Drained by
+    /// `token_copy::drain_pending_copy_token_resolution` after the current
+    /// replacement choice creates the accepted copy token(s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_copy_token_resolution: Option<PendingCopyTokenResolution>,
 
     /// CR 705.1 + CR 614.1a: Pending multi-flip coin resolver paused mid-loop
     /// for a Krark's Thumb keep-1 choice. Stashes the full resolution context +
@@ -5230,6 +5329,24 @@ pub struct PendingSpellResolution {
     pub convoked_creatures: Vec<ObjectId>,
 }
 
+/// CR 702.140c + CR 730.2: Context stored when a mutating creature spell resolves
+/// with a legal target. Resolution pauses (the stack entry is popped, mirroring
+/// the Clone replacement-needs-choice detour) until the spell's controller chooses
+/// top or bottom via `GameAction::ChooseMutateMergeSide`; then
+/// `merge::handle_mutate_merge_choice` performs the merge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingMutateMerge {
+    /// The resolving mutate spell object (the card/token being merged onto the
+    /// target). Retains its original owner so CR 730.3 can route it correctly.
+    pub merging_id: ObjectId,
+    /// The surviving battlefield creature. The merged permanent keeps THIS
+    /// object's `ObjectId` (CR 730.2c continuity).
+    pub target_id: ObjectId,
+    /// The mutate spell's controller — the player who chooses top/bottom
+    /// (CR 702.140c).
+    pub controller: PlayerId,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTurnControl {
     pub target_player: PlayerId,
@@ -5280,6 +5397,22 @@ impl GameState {
             .collect()
     }
 
+    /// CR 730.2: True if `object_id` is an absorbed (non-surviving) component of
+    /// some merged permanent. Such a component is part of one battlefield object
+    /// (the merged permanent, identified by the surviving target's `ObjectId`) and
+    /// is NOT independently present in `state.battlefield`, yet its `GameObject`
+    /// is retained in `state.objects` so the CR 730.3 leave-split can restore it.
+    ///
+    /// Any code that scans `state.objects` and gates on `obj.zone == Battlefield`
+    /// to enumerate independent permanents MUST skip these ids — otherwise the
+    /// single merged permanent would be observed as multiple permanents (double-
+    /// counted as a same-name permanent, an extra mana source, etc.).
+    pub fn is_absorbed_merge_component(&self, object_id: ObjectId) -> bool {
+        self.objects.get(&object_id).is_some_and(|obj| {
+            obj.zone == Zone::Battlefield && !self.battlefield.contains(&object_id)
+        })
+    }
+
     /// CR 508.6: True if `attacker` declared one or more creatures attacking
     /// `defender` this turn (reads the per-turn attacked-defenders ledger).
     pub fn has_attacked(&self, attacker: PlayerId, defender: PlayerId) -> bool {
@@ -5303,7 +5436,7 @@ impl GameState {
     /// the turn- vs combat-scoped lookup behind `PlayerFilter::OpponentAttacked`.
     pub fn opponent_attacked(
         &self,
-        subject: crate::types::ability::AttackSubject,
+        subject: AttackSubject,
         scope: crate::types::ability::AttackScope,
         controller: PlayerId,
         source_id: ObjectId,
@@ -5325,28 +5458,26 @@ impl GameState {
     }
 
     /// CR 508.6 + CR 506.1: Within the CURRENT combat, did `attacker_controller`
-    /// declare any creature attacking `defender`? Read from the live combat
-    /// attacker set, so it reflects only this combat (CR 509: attackers locked at
-    /// declaration). `defending_player` already resolves planeswalker/battle
-    /// attacks to the defending player (CR 508.5).
+    /// declare any creature attacking `defender`? Read from the combat's
+    /// declaration ledger, so it reflects only this combat while surviving
+    /// attackers leaving combat before a trigger resolves. `defending_player`
+    /// already resolves planeswalker/battle attacks to the defending player
+    /// (CR 508.5).
     pub fn player_attacked_player_this_combat(
         &self,
         attacker_controller: PlayerId,
         defender: PlayerId,
     ) -> bool {
         self.combat.as_ref().is_some_and(|combat| {
-            combat.attackers.iter().any(|info| {
-                info.defending_player == defender
-                    && self
-                        .objects
-                        .get(&info.object_id)
-                        .is_some_and(|obj| obj.controller == attacker_controller)
-            })
+            combat
+                .attacked_defenders_this_combat
+                .get(&attacker_controller)
+                .is_some_and(|defenders| defenders.contains(&defender))
         })
     }
 
     /// CR 508.6: Within the CURRENT combat, did creature `source_id` attack
-    /// `defender`?
+    /// `defender`? Reads declaration history, not live combat membership.
     pub fn creature_attacked_player_this_combat(
         &self,
         source_id: ObjectId,
@@ -5354,10 +5485,27 @@ impl GameState {
     ) -> bool {
         self.combat.as_ref().is_some_and(|combat| {
             combat
-                .attackers
-                .iter()
-                .any(|info| info.object_id == source_id && info.defending_player == defender)
+                .creature_attacked_defenders_this_combat
+                .get(&source_id)
+                .is_some_and(|defenders| defenders.contains(&defender))
         })
+    }
+
+    /// CR 508.6 + CR 702.121a: Defending players the subject attacked in the
+    /// current combat, read from declaration history for Melee-style counts.
+    pub fn attacked_defenders_this_combat_for(
+        &self,
+        subject: AttackSubject,
+        controller: PlayerId,
+        source_id: ObjectId,
+    ) -> Option<&HashSet<PlayerId>> {
+        let combat = self.combat.as_ref()?;
+        match subject {
+            AttackSubject::You => combat.attacked_defenders_this_combat.get(&controller),
+            AttackSubject::Source => combat
+                .creature_attacked_defenders_this_combat
+                .get(&source_id),
+        }
     }
 
     /// Create a new game with the given format configuration and player count.
@@ -5403,6 +5551,7 @@ impl GameState {
             post_replacement_event_source: None,
             post_replacement_event_target: None,
             pending_spell_resolution: None,
+            pending_mutate_merge: None,
             deferred_entry_events: Vec::new(),
             layers_dirty: LayersDirty::full(),
             static_gate_truth: std::collections::HashMap::new(),
@@ -5456,6 +5605,7 @@ impl GameState {
             sideboard_submitted: Vec::new(),
             triggers_fired_this_turn: HashSet::new(),
             trigger_fire_counts_this_turn: HashMap::new(),
+            triggers_fired_this_turn_per_opponent: HashSet::new(),
             triggers_fired_this_game: HashSet::new(),
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
@@ -5498,6 +5648,7 @@ impl GameState {
             zone_changes_this_turn: Vec::new(),
             battlefield_entries_this_turn: Vec::new(),
             damage_dealt_this_turn: im::Vector::new(),
+            assassin_or_commander_dealt_combat_damage_this_turn: HashSet::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             pending_spell_cost_reductions: Vec::new(),
             pending_next_spell_modifiers: Vec::new(),
@@ -5509,6 +5660,7 @@ impl GameState {
             pending_continuation: None,
             pending_repeat_iteration: None,
             pending_change_zone_iteration: None,
+            pending_copy_token_resolution: None,
             pending_coin_flip: None,
             pending_repeat_until: None,
             pending_choose_one_of: None,
@@ -5751,6 +5903,7 @@ impl PartialEq for GameState {
             && self.sideboard_submitted == other.sideboard_submitted
             && self.triggers_fired_this_turn == other.triggers_fired_this_turn
             && self.trigger_fire_counts_this_turn == other.trigger_fire_counts_this_turn
+            && self.triggers_fired_this_turn_per_opponent == other.triggers_fired_this_turn_per_opponent
             && self.triggers_fired_this_game == other.triggers_fired_this_game
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
@@ -5797,6 +5950,8 @@ impl PartialEq for GameState {
             && self.zone_changes_this_turn == other.zone_changes_this_turn
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
+            && self.assassin_or_commander_dealt_combat_damage_this_turn
+                == other.assassin_or_commander_dealt_combat_damage_this_turn
             && self.pending_spell_cost_reductions == other.pending_spell_cost_reductions
             && self.pending_next_spell_modifiers == other.pending_next_spell_modifiers
             && self.pending_etb_counters == other.pending_etb_counters
@@ -5807,6 +5962,7 @@ impl PartialEq for GameState {
             && self.pending_continuation == other.pending_continuation
             && self.pending_repeat_iteration == other.pending_repeat_iteration
             && self.pending_change_zone_iteration == other.pending_change_zone_iteration
+            && self.pending_copy_token_resolution == other.pending_copy_token_resolution
             && self.pending_coin_flip == other.pending_coin_flip
             && self.pending_repeat_until == other.pending_repeat_until
             && self.pending_choose_one_of == other.pending_choose_one_of

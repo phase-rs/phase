@@ -189,6 +189,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![],
             ObjectId(1),

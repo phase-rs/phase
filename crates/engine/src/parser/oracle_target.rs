@@ -1717,11 +1717,33 @@ pub fn parse_type_phrase_with_ctx<'a>(
             if starts_with_type_word(after_trimmed) {
                 let sep_text = &text[pos + rest_offset + separator.len()..];
                 let (other_filter, final_rest) = parse_type_phrase_with_ctx(sep_text, ctx);
+                // CR 205.2a: The left branch of a type disjunction must retain
+                // every type word that bound to it before the connector — the
+                // primary core type (`card_type`), the trailing core types from
+                // adjective-conjunction ("artifact creature" → `Creature` in
+                // `extra_core_type_filters`), any adjective subtype unions
+                // ("outlaw" → `AnyOf(...)` in `adjective_type_filters`), and the
+                // negated types collected via the `non-` scan. Dropping any of
+                // these on the floor would collapse a multi-type conjunction
+                // (AND of `type_filters`, per `game/filter.rs`) into a strictly
+                // looser filter, e.g. parsing "artifact creature card or
+                // Vehicle card" to `Or[Typed{Artifact}, Typed{Vehicle}]` —
+                // which would match any artifact, not only artifact creatures
+                // (#1537, Szarekh, the Silent King).
+                // This branch `return`s immediately below, so the three
+                // accumulators are never read again — drain them into
+                // `left_extras` instead of cloning. `std::mem::take` (rather
+                // than a plain move) keeps the borrow checker happy inside the
+                // `for separator` loop, and `append` reuses each backing
+                // allocation rather than heap-cloning every `TypeFilter`.
+                let mut left_extras = std::mem::take(&mut adjective_type_filters);
+                left_extras.append(&mut extra_core_type_filters);
+                left_extras.append(&mut neg_type_filters);
                 let left = typed(
                     card_type.unwrap_or(TypeFilter::Any),
                     subtype,
                     properties.clone(),
-                    neg_type_filters.clone(),
+                    left_extras,
                 );
                 let combined = merge_or_filters(left, other_filter);
                 let combined = distribute_shared_properties(combined, &properties);
@@ -3692,6 +3714,18 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
         }
     }
 
+    // CR 702.140: Mutate is a parameterized keyword (`Mutate(ManaCost)`), so the
+    // `Keyword::from_str` fallback below would yield `Concrete(Keyword::Mutate(cost))`
+    // and force an exact-cost match. Text like "creature card with mutate" refers to the
+    // keyword class regardless of cost, so map it to the discriminant-level `Kind`.
+    if let Ok((rest, kind)) =
+        value(KeywordKind::Mutate, tag::<_, _, OracleError<'_>>("mutate")).parse(text)
+    {
+        if rest.is_empty() {
+            return Some(KeywordMatch::Kind(kind));
+        }
+    }
+
     if matches!(
         text,
         "flashback" | "cycling" | "escape" | "embalm" | "eternalize" | "harmonize" | "unearth"
@@ -5574,6 +5608,87 @@ mod tests {
         }
     }
 
+    /// CR 205.2a + CR 205.3a + CR 301.7: A multi-core-type adjective
+    /// conjunction ("artifact creature card") on the left side of an `or` /
+    /// `and/or` disjunction must keep every core type word that bound to that
+    /// branch — the primary `card_type` AND the trailing core types in
+    /// `extra_core_type_filters`. Dropping the trailing types collapses the
+    /// left branch's AND-constraint into a strictly looser filter (any
+    /// artifact, not only artifact creatures).
+    ///
+    /// Issue #1537 (Szarekh, the Silent King): Oracle text
+    /// "artifact creature card or Vehicle card" was parsing to
+    /// `Or[Typed{Artifact}, Typed{Subtype(Vehicle)}]`, letting `Mill 3`
+    /// retrieval pull any milled artifact (e.g. an Equipment) into hand
+    /// instead of restricting to artifact creatures or Vehicles.
+    ///
+    /// This is a building-block test: any `<typeword1> <typeword2> card or
+    /// <typeword> card` shape must preserve the full type conjunction on the
+    /// left branch.
+    #[test]
+    fn multi_core_type_disjunction_preserves_conjoined_types() {
+        let (f, rest) = parse_target("artifact creature card or Vehicle card");
+        assert_eq!(rest, "");
+        let TargetFilter::Or { filters } = &f else {
+            panic!("expected Or disjunction, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected two disjuncts, got {filters:?}");
+
+        // Left branch: "artifact creature card" must AND Artifact with
+        // Creature — both type filters must be present so the runtime
+        // `type_filters.iter().all(...)` check rejects artifacts that
+        // aren't also creatures (e.g. Equipment, artifact lands).
+        let TargetFilter::Typed(left) = &filters[0] else {
+            panic!("expected left Typed, got {:?}", filters[0]);
+        };
+        assert!(
+            has_type(left, TypeFilter::Artifact),
+            "left branch missing Artifact: {left:?}",
+        );
+        assert!(
+            has_type(left, TypeFilter::Creature),
+            "left branch dropped the trailing Creature core type — \
+             this is the #1537 regression: {left:?}",
+        );
+
+        // Right branch: "Vehicle card" — Vehicle is a creature subtype, so
+        // `normalize_search_typed_filter` (and the bare subtype path in
+        // `parse_specialized_type_word`) lift it onto Creature. We only
+        // assert that the Vehicle subtype is present; the inferred core
+        // type may or may not be Creature depending on the parse path.
+        let TargetFilter::Typed(right) = &filters[1] else {
+            panic!("expected right Typed, got {:?}", filters[1]);
+        };
+        assert!(
+            has_type(right, TypeFilter::Subtype("Vehicle".into())),
+            "right branch missing Vehicle subtype: {right:?}",
+        );
+    }
+
+    /// Companion case to `multi_core_type_disjunction_preserves_conjoined_types`:
+    /// the right branch can also carry a multi-type adjective conjunction.
+    /// Both branches must independently retain their full type set.
+    #[test]
+    fn multi_core_type_disjunction_preserves_both_branches() {
+        let (f, _) = parse_target("creature card or artifact creature card");
+        let TargetFilter::Or { filters } = &f else {
+            panic!("expected Or disjunction, got {f:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        let TargetFilter::Typed(left) = &filters[0] else {
+            panic!("expected left Typed");
+        };
+        assert!(has_type(left, TypeFilter::Creature));
+        let TargetFilter::Typed(right) = &filters[1] else {
+            panic!("expected right Typed");
+        };
+        assert!(has_type(right, TypeFilter::Artifact));
+        assert!(
+            has_type(right, TypeFilter::Creature),
+            "right branch dropped the trailing Creature core type: {right:?}",
+        );
+    }
+
     #[test]
     fn tilde_is_self_ref() {
         let (f, rest) = parse_target("~");
@@ -6536,6 +6651,52 @@ mod tests {
                 },])
             )
         );
+    }
+
+    #[test]
+    fn card_with_mutate_uses_keyword_kind_filter() {
+        // CR 702.140: "creature card with mutate" refers to the keyword class regardless
+        // of its mana-cost parameter, so it must lower to a discriminant-level keyword-kind
+        // filter rather than a concrete `Keyword::Mutate(cost)` exact match.
+        let (f, _) = parse_type_phrase("creature card with mutate");
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            properties,
+            ..
+        }) = f
+        else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert!(properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Mutate,
+        }));
+    }
+
+    #[test]
+    fn otrimi_trigger_returns_mutate_creature_card_to_hand() {
+        // CR 702.140: Otrimi's reflexive trigger returns "target creature card with mutate
+        // from your graveyard to your hand" — a graveyard->hand bounce (destination None),
+        // NOT a battlefield bounce. The target must be a creature card you own in your
+        // graveyard that has the Mutate keyword kind.
+        let (f, _) = parse_target("target creature card with mutate from your graveyard");
+        let TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller,
+            properties,
+            ..
+        }) = f
+        else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(controller, Some(ControllerRef::You));
+        assert!(properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Mutate,
+        }));
+        assert!(properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
     }
 
     #[test]

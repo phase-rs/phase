@@ -1634,6 +1634,18 @@ fn apply_action(
                         &mut events,
                     )?
                 }
+                AlternativeCastKeyword::Mutate => {
+                    // CR 702.140a: Handle the mutate alternative cost choice.
+                    casting::handle_mutate_cost_choice_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        choice,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
                 AlternativeCastKeyword::Cleave => {
                     casting::handle_cleave_cost_choice_with_payment_mode(
                         state,

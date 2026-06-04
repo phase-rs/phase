@@ -151,9 +151,9 @@ fn opponents_attacked_this_turn_counts_multiple_defenders() {
 
 /// CR 702.121a: Melee's magnitude — `OpponentAttacked { You, ThisCombat }` — must
 /// count the distinct opponents attacked in the CURRENT combat, resolved from the
-/// live `state.combat` attacker set (not the turn-scoped ledger). With P0
-/// attacking both P1 and P2 this combat, the combat-scoped count is 2, so a Melee
-/// creature would get +2/+2.
+/// current combat's declaration ledger (not the turn-scoped ledger). With P0
+/// attacking both P1 and P2 this combat, the combat-scoped count is 2, so a
+/// Melee creature would get +2/+2.
 #[test]
 fn opponents_attacked_this_combat_counts_current_combat_defenders() {
     let mut scenario = GameScenario::new_n_player(3, 42);
@@ -194,6 +194,112 @@ fn opponents_attacked_this_combat_counts_current_combat_defenders() {
     assert_eq!(
         count, 2,
         "P0 attacked both opponents this combat — Melee pumps +2/+2 (CR 702.121a)"
+    );
+}
+
+/// CR 702.121a + CR 506.4: Melee counts opponents attacked this combat from
+/// declaration history, not from the live attacker set. Removing attackers from
+/// combat before the trigger resolves must not reduce the count.
+#[test]
+fn opponents_attacked_this_combat_survives_attackers_leaving_combat() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_vs_p1 = scenario.add_creature(P0, "Soldier", 2, 2).id();
+    let attacker_vs_p2 = scenario.add_creature(P0, "Soldier", 2, 2).id();
+    let mut runner = scenario.build();
+
+    for _ in 0..12 {
+        if runner.waiting_for_kind() == "DeclareAttackers" {
+            break;
+        }
+        let _ = runner.act(GameAction::PassPriority);
+    }
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (attacker_vs_p1, AttackTarget::Player(P1)),
+                (attacker_vs_p2, AttackTarget::Player(P2)),
+            ],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    runner
+        .state_mut()
+        .combat
+        .as_mut()
+        .expect("combat exists")
+        .attackers
+        .clear();
+
+    let count = resolve_quantity(
+        runner.state(),
+        &QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisCombat,
+                },
+            },
+        },
+        P0,
+        attacker_vs_p1,
+    );
+
+    assert_eq!(
+        count, 2,
+        "Melee still counts both opponents attacked this combat after attackers leave combat"
+    );
+}
+
+/// CR 702.121a: Melee counts the opponents attacked this combat even if an
+/// attacked opponent leaves the game before the trigger resolves.
+#[test]
+fn opponents_attacked_this_combat_counts_eliminated_defender() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_vs_p1 = scenario.add_creature(P0, "Soldier", 2, 2).id();
+    let attacker_vs_p2 = scenario.add_creature(P0, "Soldier", 2, 2).id();
+    let mut runner = scenario.build();
+
+    for _ in 0..12 {
+        if runner.waiting_for_kind() == "DeclareAttackers" {
+            break;
+        }
+        let _ = runner.act(GameAction::PassPriority);
+    }
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (attacker_vs_p1, AttackTarget::Player(P1)),
+                (attacker_vs_p2, AttackTarget::Player(P2)),
+            ],
+        })
+        .expect("DeclareAttackers should succeed");
+    runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == P2)
+        .expect("P2 exists")
+        .is_eliminated = true;
+
+    let count = resolve_quantity(
+        runner.state(),
+        &QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisCombat,
+                },
+            },
+        },
+        P0,
+        attacker_vs_p1,
+    );
+
+    assert_eq!(
+        count, 2,
+        "Melee still counts P2 because P0 attacked P2 this combat"
     );
 }
 
