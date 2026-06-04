@@ -5549,30 +5549,39 @@ pub fn handle_cast_spell_as_madness_with_payment_mode(
 /// (CR 702.85a, etc.) and returns priority to the active player — satisfying CR
 /// 608.2g's "no player receives priority after it's cast" without any explicit
 /// suppression (the opponent only gets priority later via normal passing).
+///
+/// Every during-resolution caster passes a `cleanup` — it is the marker that
+/// arms the CR 608.2g timing bypass in `restrictions::check_spell_timing`, so a
+/// sorcery cast while its trigger is still on the stack is not blocked by the
+/// sorcery-speed / empty-stack / active-player gates. Cascade/Discover carry
+/// the dig misses + an MV-reject disposition that bottoms/hands the hit. Suspend
+/// (CR 702.62a) carries an empty-misses / `RemainExiled` cleanup whose sole
+/// purpose is to arm that timing bypass — it has no dig and no MV gate, so it
+/// never enters the cascade reject path.
 pub(super) fn initiate_cast_during_resolution(
     state: &mut GameState,
     player: PlayerId,
     hit_card: ObjectId,
     constraint: Option<crate::types::ability::CastPermissionConstraint>,
-    cleanup: Option<crate::types::ability::ResolutionCastCleanup>,
+    cleanup: crate::types::ability::ResolutionCastCleanup,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if let Some(obj) = state.objects.get_mut(&hit_card) {
         // CR 601.2a + CR 601.2i: zero-cost permission consumed by
         // `prepare_spell_cast_with_variant_override`'s exile alt-cost scan.
-        // `resolution_cleanup` is `Some` only for the library-dig casts
-        // (Cascade/Discover) that must dispose of misses / the hit on a
-        // cast-time MV rejection (CR 608.2g). Self-free-casts that have no dig
-        // misses and no MV gate (Suspend's last-counter cast, CR 702.62a;
-        // Rebound's upkeep recast, CR 702.88a) pass `None`, so the permission
-        // is a plain alt-cost grant and never enters the cascade reject path.
+        // `resolution_cleanup` is always `Some` here: it is the
+        // cast-during-resolution discriminator that arms the CR 608.2g timing
+        // bypass. Cascade/Discover carry their dig misses + MV-reject
+        // disposition; Suspend (CR 702.62a) carries an empty-misses /
+        // `RemainExiled` cleanup that has no dig and no MV gate, so it never
+        // enters the cascade reject path.
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
                 cost: ManaCost::zero(),
                 cast_transformed: false,
                 constraint,
                 granted_to: Some(player),
-                resolution_cleanup: cleanup,
+                resolution_cleanup: Some(cleanup),
                 duration: None,
             });
     }
@@ -15465,6 +15474,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
             },
             vec![TargetRef::Object(suspended)],
             suspended,
@@ -15596,6 +15606,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
             },
             vec![TargetRef::Object(suspended)],
             suspended,

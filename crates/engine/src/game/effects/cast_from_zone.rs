@@ -23,26 +23,35 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target_filter, without_paying, cast_transformed, alt_ability_cost, constraint, duration) =
-        match &ability.effect {
-            Effect::CastFromZone {
-                target,
-                without_paying_mana_cost,
-                cast_transformed,
-                alt_ability_cost,
-                constraint,
-                duration,
-                ..
-            } => (
-                target,
-                *without_paying_mana_cost,
-                *cast_transformed,
-                alt_ability_cost.clone(),
-                constraint.clone(),
-                duration.clone(),
-            ),
-            _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
-        };
+    let (
+        target_filter,
+        without_paying,
+        cast_transformed,
+        alt_ability_cost,
+        constraint,
+        duration,
+        driver,
+    ) = match &ability.effect {
+        Effect::CastFromZone {
+            target,
+            without_paying_mana_cost,
+            cast_transformed,
+            alt_ability_cost,
+            constraint,
+            duration,
+            driver,
+            ..
+        } => (
+            target,
+            *without_paying_mana_cost,
+            *cast_transformed,
+            alt_ability_cost.clone(),
+            constraint.clone(),
+            duration.clone(),
+            *driver,
+        ),
+        _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
+    };
 
     // Collect target object IDs from the resolved ability's targets.
     let mut target_ids: Vec<_> = ability
@@ -84,29 +93,44 @@ pub fn resolve(
     // CR 702.62a + CR 608.2g: Suspend's last-time-counter ability casts the
     // card it is attached to, for free, AS THE TRIGGER RESOLVES. The card casts
     // itself (the single resolved target IS the ability's source), there is no
-    // mana cost (`without_paying`), no replacement alt-cost (`alt_ability_cost
-    // == None`), and the grant is standing (`duration == None`). Per CR
-    // 702.62a/702.62d the cast happens during resolution — it must NOT be
-    // deferred to a lingering permission the player acts on at a later priority
-    // window (issue #1520: accepting the optional "cast it?" prompt appeared to
-    // do nothing because only a permission was stamped — the spell was never
-    // put on the stack, and a sorcery like Treasure Cruise was additionally
-    // blocked by the sorcery-speed timing gate at upkeep). Drive the cast
-    // immediately through the same cast-during-resolution authority
-    // Cascade/Discover use (`initiate_cast_during_resolution`).
+    // mana cost (`without_paying`), and no replacement alt-cost
+    // (`alt_ability_cost == None`). Per CR 702.62a/702.62d the cast happens
+    // during resolution — it must NOT be deferred to a lingering permission the
+    // player acts on at a later priority window (issue #1520: accepting the
+    // optional "cast it?" prompt appeared to do nothing because only a
+    // permission was stamped — the spell was never put on the stack, and a
+    // sorcery like Treasure Cruise was additionally blocked by the
+    // sorcery-speed timing gate at upkeep). Drive the cast immediately through
+    // the same cast-during-resolution authority Cascade/Discover use
+    // (`initiate_cast_during_resolution`).
     //
-    // This is deliberately NARROW:
-    //   - Nashi/Jeleva-style "you may cast [other] exiled cards" (target !=
-    //     source, `ExiledBySource` filter, or an `alt_ability_cost`) keep the
-    //     lingering-permission path below so the controller casts them during
-    //     the granting effect's own priority window.
-    //   - Rebound (CR 702.88a) carries `duration: Some(UntilEndOfTurn)` on its
-    //     `CastFromZone` body so its declined permission is pruned at cleanup;
-    //     gating on `duration.is_none()` leaves Rebound on the existing
-    //     durational-permission path untouched.
-    let self_free_cast = without_paying
+    // The router reads the EXPLICIT `driver` discriminator
+    // (`CastFromZoneDriver::DuringResolution`, set by
+    // `build_suspend_last_counter_cast_trigger`), NOT `duration`. `duration` is
+    // CR 611.2a permission-expiry and says nothing about the casting mechanism;
+    // routing on it conflated two axes. The structural-shape guard
+    // (`without_paying` + no alt-cost + single self target) is retained as a
+    // defense-in-depth invariant — a `DuringResolution` body must always be a
+    // self-free-cast, since `initiate_cast_during_resolution` casts the single
+    // card object itself at zero cost.
+    //
+    // FOLLOW-UP (#1520 twin): Rebound (CR 702.88a) is still a
+    // `LingeringPermission` driver because its recast permission legitimately
+    // needs `duration: Some(UntilEndOfTurn)` to prune on decline (see the
+    // `consuming_vapors_rebound` suite). A rebounding SORCERY recast at upkeep
+    // therefore still passes through the lingering path; whether it hits the
+    // sorcery-speed gate is tracked separately. Routing Rebound through
+    // `DuringResolution` would regress that durational-prune contract, so it is
+    // intentionally left on the permission path under the explicit `driver`
+    // signal rather than forced through during-resolution here.
+    //
+    // Nashi/Jeleva-style "you may cast [other] exiled cards" (target != source,
+    // `ExiledBySource` filter, or an `alt_ability_cost`) are also
+    // `LingeringPermission`: the controller casts them during the granting
+    // effect's own priority window.
+    let self_free_cast = driver.is_during_resolution()
+        && without_paying
         && alt_ability_cost.is_none()
-        && duration.is_none()
         && target_ids.len() == 1
         && target_ids[0] == ability.source_id;
     if self_free_cast {
@@ -145,10 +169,10 @@ pub fn resolve(
             ability.controller,
             card,
             constraint.clone(),
-            Some(cleanup),
+            cleanup,
             events,
         )
-        .map_err(|e| EffectError::InvalidParam(format!("{e:?}")))?;
+        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
         return Ok(());
     }
 
@@ -309,6 +333,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
             },
             vec![TargetRef::Object(suspended)],
             suspended,
@@ -353,6 +378,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -388,6 +414,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -420,6 +447,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -488,6 +516,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![],
             source,
@@ -523,6 +552,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![],
             ObjectId(999),
@@ -560,6 +590,7 @@ mod tests {
                 alt_ability_cost: None,
                 constraint: Some(constraint.clone()),
                 duration: None,
+                driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),

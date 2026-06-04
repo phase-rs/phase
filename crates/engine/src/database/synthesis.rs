@@ -10,14 +10,14 @@ use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, Bracke
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
-    CardPlayMode, CastVariantPaid, ChoiceType, Comparator, ContinuousModification, ControllerRef,
-    CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp,
-    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    CardPlayMode, CastFromZoneDriver, CastVariantPaid, ChoiceType, Comparator,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, CounterTriggerFilter,
+    DamageKindFilter, Duration, Effect, FilterProp, KickerVariant, ManaContribution,
+    ManaProduction, ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant,
+    ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue, PtValueScope,
+    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
+    SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -3556,6 +3556,10 @@ fn build_suspend_last_counter_cast_trigger() -> TriggerDefinition {
             alt_ability_cost: None,
             constraint: None,
             duration: None,
+            // CR 702.62a + CR 608.2g: cast the suspended card AS this trigger
+            // resolves, not via a lingering permission — this arms the
+            // sorcery-speed timing bypass for an upkeep recast (issue #1520).
+            driver: CastFromZoneDriver::DuringResolution,
         },
     )
     .optional();
@@ -5326,6 +5330,13 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 alt_ability_cost: None,
                 constraint: None,
                 duration: None,
+                // CR 310.11b + CR 608.2g: the Siege victory ability casts the
+                // exiled back face AS this trigger resolves — a self-free-cast
+                // during resolution, structurally identical to Suspend's
+                // last-counter cast. (Pre-`driver`, the `duration.is_none()`
+                // router already routed this shape through during-resolution;
+                // the explicit discriminator preserves that.)
+                driver: CastFromZoneDriver::DuringResolution,
             },
         )
         .optional();

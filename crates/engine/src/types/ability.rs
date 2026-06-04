@@ -545,6 +545,47 @@ impl std::str::FromStr for CardPlayMode {
     }
 }
 
+/// CR 608.2g vs CR 118.9: Which casting *mechanism* an `Effect::CastFromZone`
+/// drives — i.e. *when* relative to the granting ability's resolution the card
+/// is cast. This is orthogonal to `duration` (CR 611.2a permission-expiry),
+/// `mode` (CR 601.2 cast vs CR 305.1 play), and `alt_ability_cost` (CR 118.9
+/// cost-substitution); none of those describe the casting mechanism, so the
+/// router must read this field rather than inferring the mechanism from them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CastFromZoneDriver {
+    /// CR 118.9: Grant a lingering `CastingPermission` on the target card(s)
+    /// and return — the controller casts the card later, during the granting
+    /// effect's own (or a future) priority window. The default for every
+    /// permission-granting cast-from-zone effect: Discover/Nashi/Jeleva-style
+    /// "you may cast those exiled cards" and Rebound's next-upkeep recast offer
+    /// (CR 702.88a), whose `duration: Some(UntilEndOfTurn)` then prunes the
+    /// unused permission.
+    #[default]
+    LingeringPermission,
+    /// CR 608.2g: Cast the card *as the granting ability resolves* — the card
+    /// goes onto the stack immediately via `initiate_cast_during_resolution`,
+    /// and the CR 608.2g timing bypass (sorcery-speed / empty-stack /
+    /// active-player gates do not apply) is armed. Set by Suspend's
+    /// last-time-counter trigger (CR 702.62a) so a suspended sorcery recast at
+    /// upkeep is not blocked by the sorcery-speed gate (issue #1520).
+    DuringResolution,
+}
+
+impl CastFromZoneDriver {
+    /// Serde skip predicate — the `LingeringPermission` default is the common
+    /// case and is elided from serialized `Effect::CastFromZone` bodies.
+    pub fn is_default(&self) -> bool {
+        matches!(self, CastFromZoneDriver::LingeringPermission)
+    }
+
+    /// CR 608.2g: true iff this effect casts the card as the granting ability
+    /// resolves (Suspend's last-counter cast), rather than granting a lingering
+    /// permission.
+    pub fn is_during_resolution(&self) -> bool {
+        matches!(self, CastFromZoneDriver::DuringResolution)
+    }
+}
+
 /// CR 702.104a + CR 702.104b: The outcome of the Tribute choice the chosen opponent
 /// made as the creature entered the battlefield. Persisted as a `ChosenAttribute` on
 /// the Tribute creature so the companion "if tribute wasn't paid" trigger (CR
@@ -6570,6 +6611,16 @@ pub enum Effect {
         /// grants (Discover, Suspend, Nashi, etc.).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration: Option<Duration>,
+        /// CR 608.2g vs CR 118.9: Which casting mechanism this effect drives —
+        /// cast the card as the granting ability resolves (`DuringResolution`,
+        /// Suspend's last-counter cast per CR 702.62a) versus grant a lingering
+        /// permission the controller acts on at a later priority window
+        /// (`LingeringPermission`, the default for Discover/Nashi/Rebound). The
+        /// router in `cast_from_zone::resolve` reads THIS field, not `duration`
+        /// (which is CR 611.2a permission-expiry and means nothing about the
+        /// casting mechanism). See issue #1520.
+        #[serde(default, skip_serializing_if = "CastFromZoneDriver::is_default")]
+        driver: CastFromZoneDriver,
     },
     /// CR 615: Prevent damage to a target.
     PreventDamage {
