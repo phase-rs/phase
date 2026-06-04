@@ -442,6 +442,7 @@ pub fn resolve(
     let proposed = ProposedEvent::CreateToken {
         owner: token_owner,
         spec: Box::new(spec),
+        copy: None,
         enter_tapped: crate::types::proposed_event::EtbTapState::from_seeded_tapped(tapped),
         count,
         applied: HashSet::new(),
@@ -581,6 +582,7 @@ pub fn apply_create_token_after_replacement(
     let ProposedEvent::CreateToken {
         owner,
         spec,
+        copy,
         enter_tapped,
         count: final_count,
         ..
@@ -588,6 +590,24 @@ pub fn apply_create_token_after_replacement(
     else {
         return;
     };
+
+    if let Some(copy) = copy {
+        let created = super::token_copy::apply_copy_token_after_replacement(
+            state,
+            owner,
+            *copy,
+            enter_tapped,
+            spec.enter_with_counters.clone(),
+            final_count,
+            events,
+        );
+        if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+            pending.created_ids.extend(created);
+        } else {
+            state.last_created_token_ids = created;
+        }
+        return;
+    }
 
     let mut created_ids = Vec::with_capacity(final_count as usize);
 
@@ -858,6 +878,7 @@ fn token_creation_needs_choice(
     let proposed = ProposedEvent::CreateToken {
         owner,
         spec: Box::new(spec.clone()),
+        copy: None,
         enter_tapped,
         count,
         applied: HashSet::new(),
@@ -1207,8 +1228,22 @@ fn try_resolve_copy_batch(
 /// only the copiable values (CR 707.2): token art comes from the live source at
 /// resolution time (`token_copy::resolve`), so no `PrintedCardRef` is threaded
 /// through the probe.
-fn copy_probe_spec(
+pub(crate) fn copy_probe_spec(
     ability: &ResolvedAbility,
+    values: &crate::types::ability::CopiableValues,
+) -> TokenSpec {
+    copy_probe_spec_for(
+        ability.source_id,
+        ability.controller,
+        ability.duration.clone(),
+        values,
+    )
+}
+
+pub(crate) fn copy_probe_spec_for(
+    source_id: ObjectId,
+    controller: PlayerId,
+    sacrifice_at: Option<Duration>,
     values: &crate::types::ability::CopiableValues,
 ) -> TokenSpec {
     use crate::types::proposed_event::TokenCharacteristics;
@@ -1228,79 +1263,10 @@ fn copy_probe_spec(
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
-        sacrifice_at: ability.duration.clone(),
-        source_id: ability.source_id,
-        controller: ability.controller,
+        sacrifice_at,
+        source_id,
+        controller,
         attach_to: None,
-    }
-}
-
-/// CR 614.1a + CR 707.2: Run a copy-token's creation through the
-/// `ProposedEvent::CreateToken` replacement pipeline to compute the final
-/// number of copies to create, after any token-count-modifying replacement
-/// (Doubling Season, Adrix and Nev, Parallel Lives, Anointed Procession,
-/// Mondrak) has applied.
-///
-/// This is the single shared count-modification application point that the
-/// predefined `Effect::Token` path uses (`resolve` → `replace_event` →
-/// `create_token_applier`). `Effect::CopyTokenOf` delegates here so the
-/// doubling sees copy-token creation uniformly: token-count doublers (Doubling
-/// Season, Parallel Lives, Adrix and Nev, Anointed Procession, Mondrak) are
-/// CR 614.1a replacement effects that modify the number of tokens created, and
-/// copy-token creation (CR 707.5 / CR 707.2) is itself a token-creation event,
-/// so the same `CreateToken` replacement applies to it. Each resulting copy
-/// enters with its own ETB.
-///
-/// The probe spec is built from the copy source's resolved copiable values so
-/// subtype-scoped doublers (Chatterfang-class) and owner-scoped doublers
-/// (`token_owner_scope`) match against the copy's true characteristics. Any
-/// `additional_token_spec` / `ensure_token_specs` riders carried by a matching
-/// replacement materialize their own generic tokens inside `replace_event`
-/// (the same as for `Effect::Token`); this helper returns only the
-/// count-of-copies for the primary copy batch.
-///
-/// `NeedsChoice` (an optional / order-material replacement, CR 616.1) cannot be
-/// honored mid-`CopyTokenOf` resolution — the copy path has no continuation
-/// hook — so the pending pause is cleared and the un-modified `requested_count`
-/// is used. No printed token-count doubler is optional (all are mandatory
-/// `Double`), so this conservative fallback is unreachable for the real card
-/// class; it exists only so a future optional replacement degrades safely
-/// rather than panicking.
-pub(crate) fn copy_token_count_after_replacement(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    values: &crate::types::ability::CopiableValues,
-    token_owner: PlayerId,
-    requested_count: u32,
-    events: &mut Vec<GameEvent>,
-) -> u32 {
-    if requested_count == 0 {
-        return 0;
-    }
-    let spec = copy_probe_spec(ability, values);
-    let proposed = ProposedEvent::CreateToken {
-        owner: token_owner,
-        spec: Box::new(spec),
-        enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
-        count: requested_count,
-        applied: HashSet::new(),
-    };
-    match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(ProposedEvent::CreateToken { count, .. }) => count,
-        // CR 614.6: a Prevent-style replacement fully suppresses the creation.
-        ReplacementResult::Prevented => 0,
-        // CR 616.1: an interactive (optional / order-material) replacement —
-        // not reachable for the mandatory token-count doubler class. Clear the
-        // pending pause so it never leaks out of `CopyTokenOf` and fall back to
-        // the requested count (no double-application).
-        ReplacementResult::NeedsChoice(_) => {
-            state.pending_replacement = None;
-            requested_count
-        }
-        // `replace_event` on a `CreateToken` proposal can only return a
-        // `CreateToken` survivor; any other survivor is a pipeline invariant
-        // violation — fall back to the requested count.
-        ReplacementResult::Execute(_) => requested_count,
     }
 }
 
@@ -4049,6 +4015,7 @@ mod tests {
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(spec),
+            copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),
@@ -4106,6 +4073,7 @@ mod tests {
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(spec),
+            copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),

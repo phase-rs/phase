@@ -440,6 +440,7 @@ pub fn apply_debug_action(
             let proposed = ProposedEvent::CreateToken {
                 owner,
                 spec: Box::new(spec),
+                copy: None,
                 enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
                 count: 1,
                 applied: HashSet::new(),
