@@ -149,6 +149,7 @@
     "p2pCodePlaceholder": "Enter 5-character P2P code",
     "serverCodePlaceholder": "Enter code or CODE@IP:PORT",
     "join": "Join",
+    "watch": "Watch",
     "host": "Host",
     "hostP2PDescription": "Create a direct room for one opponent.",
     "hostServerDescription": "Open a room and wait for players.",

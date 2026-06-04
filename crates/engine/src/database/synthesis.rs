@@ -10,14 +10,15 @@ use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, Bracke
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
-    CardPlayMode, CastVariantPaid, ChoiceType, Comparator, ContinuousModification, ControllerRef,
-    CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp,
-    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    CardPlayMode, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
+    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp, KickerVariant,
+    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+    NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    RuntimeHandler, SearchSelectionConstraint, StaticCondition, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -231,10 +232,17 @@ impl KeywordTriggerInstaller {
             // static-on-battlefield ability that fires from the granted-from
             // moment on.
             Keyword::Graft(_) => vec![build_graft_enters_trigger()],
+            // CR 702.45a: Bushido N — fires on both "blocks" and "becomes
+            // blocked". CR 702.45b: each instance separately; one trigger per event.
+            Keyword::Bushido(n) => vec![
+                build_bushido_trigger(TriggerMode::Blocks, *n),
+                build_bushido_trigger(TriggerMode::BecomesBlocked, *n),
+            ],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
             Keyword::Extort => vec![build_extort_trigger()],
+            Keyword::Increment => vec![build_increment_trigger()],
             Keyword::Myriad => vec![build_myriad_trigger()],
             Keyword::DoubleTeam => vec![build_double_team_trigger()],
             Keyword::Soulbond => build_soulbond_triggers(),
@@ -270,10 +278,12 @@ impl KeywordTriggerInstaller {
             // strips the Graft enters-trigger when the granted keyword is
             // removed.
             Keyword::Graft(_) => is_graft_enters_trigger(trigger),
+            Keyword::Bushido(n) => is_bushido_trigger(trigger, *n),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
             Keyword::Extort => is_extort_trigger(trigger),
+            Keyword::Increment => is_increment_trigger(trigger),
             Keyword::Myriad => is_myriad_attack_trigger(trigger),
             Keyword::DoubleTeam => is_double_team_attack_trigger(trigger),
             Keyword::Soulbond => is_soulbond_trigger(trigger),
@@ -419,6 +429,69 @@ pub fn synthesize_reconfigure(face: &mut CardFace) {
                     required_type: CoreType::Creature,
                 }),
             }])
+            .sorcery_speed(),
+        );
+    }
+    face.abilities.extend(abilities);
+}
+
+/// CR 702.167a/b: Craft is an activated ability "[Cost], Exile this permanent,
+/// Exile [materials] from among permanents you control and/or cards in your
+/// graveyard: Return this card to the battlefield transformed under its owner's
+/// control. Activate only as a sorcery." (CR 712.14a: "transformed" enters the
+/// back face up.) Synthesized as a sorcery-speed activated ability whose cost is
+/// a `Composite` of the mana cost, the self-exile (`Exile { filter: SelfRef }`),
+/// and the materials exile (`ExileMaterials`); the effect returns the source
+/// from exile to the battlefield transformed. Without this synthesis a card with
+/// `Keyword::Craft` offered no ability at all (issue #1516).
+pub fn synthesize_craft(face: &mut CardFace) {
+    let mut abilities: Vec<AbilityDefinition> = Vec::new();
+    for kw in &face.keywords {
+        let Keyword::Craft {
+            cost,
+            materials,
+            count,
+        } = kw
+        else {
+            continue;
+        };
+        abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    // CR 712.14a: "transformed" — the card enters showing its back face.
+                    enter_transformed: true,
+                    enters_under: None,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana { cost: cost.clone() },
+                    // CR 702.167a: "Exile this permanent" — the source self-exiles
+                    // from the battlefield as part of the cost.
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: Some(Zone::Battlefield),
+                        filter: Some(TargetFilter::SelfRef),
+                    },
+                    // CR 702.167a/b: "Exile [materials] from among permanents you
+                    // control and/or cards in your graveyard."
+                    AbilityCost::ExileMaterials {
+                        materials: materials.clone(),
+                        count: *count,
+                    },
+                ],
+            })
+            // CR 702.167a: "Activate only as a sorcery."
             .sorcery_speed(),
         );
     }
@@ -1421,6 +1494,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 );
                 put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
@@ -1778,6 +1852,7 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )));
         face.replacements.push(replacement);
@@ -2565,11 +2640,43 @@ pub fn synthesize_exalted(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Exalted));
 }
 
+/// CR 702.45a: Bushido N — "Whenever this creature blocks or becomes blocked, it
+/// gets +N/+N until end of turn." Two self-triggers (blocks + becomes-blocked),
+/// since there is no combined block trigger mode. CR 702.45b: each instance
+/// triggers separately, so one pair is synthesized per `Keyword::Bushido`.
+pub fn synthesize_bushido(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Bushido(_)));
+}
+
 /// CR 702.101a: Extort — a spell-cast trigger that lets you pay {W/B} to drain
 /// each opponent for 1 life. CR 702.101b: each instance triggers separately,
 /// so one trigger is synthesized per `Keyword::Extort` instance.
 pub fn synthesize_extort(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Extort));
+}
+
+/// CR 702.191a: Increment — spell-cast trigger that puts a +1/+1 counter on this
+/// creature when mana spent to cast the spell exceeds its power or toughness.
+/// CR 702.191b: each instance triggers separately.
+pub fn synthesize_increment(face: &mut CardFace) {
+    // `install_matching` dedupes exact synthesized trigger values. Increment can
+    // also arrive from parsed reminder text, whose trigger is semantically the
+    // same but not necessarily structurally identical, so count by Increment
+    // identity instead.
+    let desired = face
+        .keywords
+        .iter()
+        .filter(|kw| matches!(kw, Keyword::Increment))
+        .count();
+    let existing = face
+        .triggers
+        .iter()
+        .filter(|t| is_increment_trigger(t))
+        .count();
+
+    for _ in existing..desired {
+        face.triggers.push(build_increment_trigger());
+    }
 }
 
 /// CR 702.105a: Dethrone — an attack trigger that fires whenever this creature
@@ -3064,6 +3171,54 @@ fn is_exalted_trigger(t: &TriggerDefinition) -> bool {
         )
 }
 
+/// CR 702.45a: Build one Bushido self-trigger for the given block event
+/// (`Blocks` or `BecomesBlocked`): "this creature gets +N/+N until end of turn."
+/// Scoped to the source creature via `valid_card` (the field block matchers read)
+/// and pumps `SelfRef`, mirroring self-trigger handling in `build_dethrone_trigger`.
+fn build_bushido_trigger(mode: TriggerMode, n: u32) -> TriggerDefinition {
+    // CR 702.45a: "it gets +N/+N" — the Bushido creature itself. Target `SelfRef`,
+    // NOT `TriggeringSource`: for a `BecomesBlocked` event the triggering source
+    // resolves to the *blocker* (ambiguous/None with multiple blockers), so
+    // `TriggeringSource` would pump the wrong creature. The pending trigger's
+    // own source is this creature, so `SelfRef` is correct on both the blocks
+    // and becomes-blocked halves. Mirrors the self-trigger Dethrone, not Exalted
+    // (which watches other attacking creatures).
+    let pump = Effect::Pump {
+        power: PtValue::Fixed(n as i32),
+        toughness: PtValue::Fixed(n as i32),
+        target: TargetFilter::SelfRef,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, pump).description(format!(
+        "CR 702.45a: Bushido {n} — +{n}/+{n} until end of turn"
+    ));
+    TriggerDefinition::new(mode)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(format!(
+            "CR 702.45a: Bushido {n} — whenever this creature blocks or becomes \
+             blocked, it gets +{n}/+{n} until end of turn."
+        ))
+}
+
+/// CR 702.45a: A Bushido `n` trigger — a self-scoped (`valid_card: SelfRef`)
+/// block / becomes-blocked trigger that pumps the source creature +n/+n. Used
+/// by `RemoveKeyword` symmetric removal so a granted-then-removed `Bushido(n)`
+/// strips exactly its own triggers — parameterized by `n` (and asserting
+/// `valid_card`) so it never matches a different Bushido level or a coincidental
+/// printed block-pump on the same face.
+fn is_bushido_trigger(t: &TriggerDefinition, n: u32) -> bool {
+    matches!(t.mode, TriggerMode::Blocks | TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                power: PtValue::Fixed(p),
+                toughness: PtValue::Fixed(tough),
+                target: TargetFilter::SelfRef,
+            }) if *p == n as i32 && *tough == n as i32
+        )
+}
+
 fn build_exalted_trigger() -> TriggerDefinition {
     let pump_effect = Effect::Pump {
         power: PtValue::Fixed(1),
@@ -3166,6 +3321,88 @@ fn is_extort_trigger(t: &TriggerDefinition) -> bool {
         && t.execute
             .as_deref()
             .is_some_and(|a| a.optional && a.cost.is_some())
+}
+
+/// CR 702.191a: Intervening-if — this permanent is a creature and mana spent to
+/// cast the spell exceeds its power or toughness.
+fn increment_mana_spent_exceeds_self_pt_condition() -> TriggerCondition {
+    TriggerCondition::And {
+        conditions: vec![
+            TriggerCondition::SourceMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            TriggerCondition::Or {
+                conditions: vec![
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ManaSpentToCast {
+                                scope: CastManaObjectScope::TriggeringSpell,
+                                metric: CastManaSpentMetric::Total,
+                            },
+                        },
+                        comparator: Comparator::GT,
+                        rhs: QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Source,
+                            },
+                        },
+                    },
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ManaSpentToCast {
+                                scope: CastManaObjectScope::TriggeringSpell,
+                                metric: CastManaSpentMetric::Total,
+                            },
+                        },
+                        comparator: Comparator::GT,
+                        rhs: QuantityExpr::Ref {
+                            qty: QuantityRef::Toughness {
+                                scope: ObjectScope::Source,
+                            },
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+/// CR 702.191a: Synthesized Increment spell-cast trigger identity.
+fn is_increment_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::SpellCast)
+        && matches!(t.valid_target, Some(TargetFilter::Controller))
+        && t.condition.as_ref() == Some(&increment_mana_spent_exceeds_self_pt_condition())
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            })
+        )
+}
+
+/// CR 702.191a: Increment — whenever you cast a spell, if this permanent is a
+/// creature and mana spent to cast that spell exceeds its power or toughness,
+/// put a +1/+1 counter on this creature.
+fn build_increment_trigger() -> TriggerDefinition {
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("Put a +1/+1 counter on this creature".to_string());
+
+    TriggerDefinition::new(TriggerMode::SpellCast)
+        .valid_target(TargetFilter::Controller)
+        .condition(increment_mana_spent_exceeds_self_pt_condition())
+        .execute(execute)
+        .description(
+            "CR 702.191a: Increment — whenever you cast a spell, if mana spent to cast that spell is greater than this creature's power or toughness, put a +1/+1 counter on it.".to_string(),
+        )
 }
 
 fn build_extort_trigger() -> TriggerDefinition {
@@ -3415,6 +3652,7 @@ fn build_dies_return_with_counter_trigger(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![(counter_type.clone(), QuantityExpr::Fixed { value: 1 })],
+        face_down_profile: None,
     };
 
     let execute = AbilityDefinition::new(AbilityKind::Spell, return_effect).description(format!(
@@ -3781,6 +4019,150 @@ fn is_modular_dies_transfer_trigger(t: &TriggerDefinition) -> bool {
             && *lki_ct == CounterType::Plus1Plus1
             && tf.type_filters.iter().any(|f| matches!(f, TypeFilter::Creature))
             && tf.type_filters.iter().any(|f| matches!(f, TypeFilter::Artifact))
+    )
+}
+
+/// CR 702.44a: Sunburst — "If this object is entering as a creature, ignoring
+/// any type-changing effects that would affect it, it enters with a +1/+1
+/// counter on it for each color of mana spent to cast it. Otherwise, it enters
+/// with a charge counter on it for each color of mana spent to cast it."
+///
+/// CR 702.44b: counters are added only when the object enters from the stack as
+/// a resolving spell and one or more colored mana was spent on its costs. Both
+/// gates are satisfied for free by the chosen primitives:
+///   * The replacement is a `ReplacementEvent::Moved` on `SelfRef` (mirrors
+///     `synthesize_modular`), so it only fires on the keyword-bearing object's
+///     own battlefield entry. A permanent entering from a zone other than the
+///     stack (e.g. blinked, reanimated) had no mana spent on it, so
+///     `colors_spent_to_cast` is empty (CR 601.2h tracks it only on a cast) and
+///     `DistinctColors` resolves to 0 — no counters are placed, matching CR
+///     702.44b without a separate "from the stack" guard.
+///   * The count is `QuantityRef::ManaSpentToCast { SelfObject, DistinctColors }`,
+///     which the ETB-counter resolver threads against the *entering* object's
+///     per-color mana tally (see `extract_etb_counters`). Colorless and generic
+///     mana never increment a color bucket, so a fully colorless payment yields
+///     0 distinct colors and 0 counters.
+///
+/// CR 702.44a's creature-vs-noncreature branch is resolved at synthesis time on
+/// the face's characteristic-defining (printed) core types — which is precisely
+/// "ignoring any type-changing effects." Every printed Sunburst card is either
+/// a creature card or a noncreature card on its face, so the printed type is the
+/// authoritative branch. A creature face places `Plus1Plus1`; any other face
+/// places `Generic("charge")` (charge counters have no dedicated `CounterType`
+/// variant — they are the canonical generic counter; see Everflowing Chalice).
+///
+/// CR 702.44d: if an object has multiple instances of sunburst, each one works
+/// separately — so one replacement is emitted per `Keyword::Sunburst` instance,
+/// with the same per-instance idempotency discipline as `synthesize_modular`.
+///
+/// CR 702.44c (Sunburst used as a variable for another ability, e.g.
+/// "Modular—Sunburst") is NOT this keyword: that case is parsed as a
+/// `QuantityRef::ManaSpentToCast { DistinctColors }` count on the host ability
+/// and already resolves through the shared mana-spent-to-cast plumbing,
+/// independent of creature/noncreature status.
+///
+/// Build-for-the-class: this is the exact `synthesize_modular` ETB shape with
+/// the count generalized from `Fixed(n)` to the distinct-colors-spent ref and
+/// the counter type chosen by entering-as-creature. Any future
+/// "enters-with-counters-equal-to-a-cast-metric" keyword lifts this directly.
+pub fn synthesize_sunburst(face: &mut CardFace) {
+    let instances = face
+        .keywords
+        .iter()
+        .filter(|kw| matches!(kw, Keyword::Sunburst))
+        .count();
+    if instances == 0 {
+        return;
+    }
+
+    // CR 702.44a: branch on the printed (characteristic-defining) core types,
+    // ignoring type-changing effects.
+    let counter_type = if face.card_type.core_types.contains(&CoreType::Creature) {
+        CounterType::Plus1Plus1
+    } else {
+        CounterType::Generic("charge".to_string())
+    };
+
+    // CR 702.44d: each instance works separately. Emit one replacement per
+    // instance, counting existing synthesized Sunburst replacements so a re-run
+    // adds only the delta (idempotency mirrors `synthesize_modular`).
+    let existing = face
+        .replacements
+        .iter()
+        .filter(|r| is_sunburst_etb_replacement(r, &counter_type))
+        .count();
+
+    let counter_phrase = match &counter_type {
+        CounterType::Plus1Plus1 => "+1/+1",
+        _ => "charge",
+    };
+
+    for _ in existing..instances {
+        let etb_counters = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: counter_type.clone(),
+                // CR 702.44a + CR 601.2h: one counter per *color* (max 5) of mana
+                // spent to cast this object — the distinct-colors metric, not the
+                // total amount.
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::SelfObject,
+                        metric: CastManaSpentMetric::DistinctColors,
+                    },
+                },
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .description(format!(
+            "This permanent enters with a {counter_phrase} counter on it for each color of mana spent to cast it"
+        ));
+
+        let replacement = ReplacementDefinition {
+            event: ReplacementEvent::Moved,
+            execute: Some(Box::new(etb_counters)),
+            valid_card: Some(TargetFilter::SelfRef),
+            description: Some(format!(
+                "CR 702.44a: Sunburst — this permanent enters with a {counter_phrase} counter on it for each color of mana spent to cast it."
+            )),
+            ..ReplacementDefinition::new(ReplacementEvent::Moved)
+        };
+        face.replacements.push(replacement);
+    }
+}
+
+/// Idempotency-shape predicate for `synthesize_sunburst`'s ETB-with-counters
+/// replacement. True iff `replacement` is a `Moved` replacement on `SelfRef`
+/// whose execute body is `Effect::PutCounter` placing the expected counter type
+/// on `SelfRef` with a `ManaSpentToCast { SelfObject, DistinctColors }` count.
+///
+/// The `expected_ct` argument keys the match to the branch (`Plus1Plus1` for a
+/// creature face, `Generic("charge")` otherwise) so the predicate counts only
+/// replacements this synthesizer would have emitted for the current face.
+fn is_sunburst_etb_replacement(
+    replacement: &ReplacementDefinition,
+    expected_ct: &CounterType,
+) -> bool {
+    if !matches!(replacement.event, ReplacementEvent::Moved)
+        || !matches!(replacement.valid_card, Some(TargetFilter::SelfRef))
+    {
+        return false;
+    }
+    let Some(execute) = replacement.execute.as_deref() else {
+        return false;
+    };
+    matches!(
+        &*execute.effect,
+        Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::DistinctColors,
+                },
+            },
+            target: TargetFilter::SelfRef,
+        } if counter_type == expected_ct
     )
 }
 
@@ -4832,6 +5214,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_equip(face);
     // CR 702.151a: Reconfigure — attach/unattach activated abilities.
     synthesize_reconfigure(face);
+    // CR 702.167a/b: Craft — sorcery-speed activated ability that exiles the
+    // source plus materials and returns the card transformed.
+    synthesize_craft(face);
     // CR 702.122a: Crew has no synthesized ability — activation is handled by
     // GameAction::CrewVehicle directly, not through ActivateAbility dispatch.
     // The Keyword::Crew(N) on the card provides display information.
@@ -4913,6 +5298,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.101a: Extort — spell-cast trigger that lets you pay {W/B} to drain
     // each opponent for 1 life. CR 702.101b: each instance triggers separately.
     synthesize_extort(face);
+    // CR 702.191a: Increment — spell-cast trigger when mana spent exceeds P/T.
+    // CR 702.191b: each instance triggers separately.
+    synthesize_increment(face);
     // CR 702.105a: Dethrone — attack trigger that puts a +1/+1 counter on the
     // creature whenever it attacks the player with the most life or tied for
     // most life. CR 702.105b: each instance triggers separately.
@@ -4929,6 +5317,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // Double team is an Arena/Alchemy attack trigger creating one tapped
     // attacking copy. Each instance triggers separately.
     synthesize_double_team(face);
+    // CR 702.45a: Bushido N — self blocks / becomes-blocked triggers that pump
+    // the creature +N/+N until end of turn.
+    synthesize_bushido(face);
     // CR 702.95a: Soulbond — two optional ETB triggers that create pair
     // relationships under the resolution checks in CR 702.95c-d.
     synthesize_soulbond(face);
@@ -4936,6 +5327,13 @@ pub fn synthesize_all(face: &mut CardFace) {
     // dies-trigger transferring counters (LKI-counted) to a target artifact
     // creature. Each instance functions independently.
     synthesize_modular(face);
+    // CR 702.44a + CR 702.44b + CR 702.44d: Sunburst — as-enters replacement
+    // placing one +1/+1 counter (creature face) or charge counter (noncreature
+    // face) per distinct color of mana spent to cast it. Reuses the Modular ETB
+    // shape with the count generalized to the distinct-colors-spent metric. Each
+    // instance functions independently. Must run after Oracle parsing so
+    // `face.card_type` reflects the printed type for the CR 702.44a branch.
+    synthesize_sunburst(face);
     // CR 702.58a + CR 702.58b: Graft N — ETB-with-N-P1P1 replacement plus a
     // "whenever another creature enters" trigger that optionally moves one
     // +1/+1 counter from this permanent onto the entering creature, gated on
@@ -5154,6 +5552,7 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
     )
     .sub_ability(shuffle);
@@ -5277,6 +5676,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )
         .sub_ability(cast_sub);
@@ -5471,12 +5871,25 @@ fn build_oracle_face_inner(
         &subtypes,
     );
 
+    let extracted_keywords = parsed.extracted_keywords;
+    let extracted_has_craft = extracted_keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Craft { .. }));
+    let oracle_has_craft_materials = raw_oracle_text
+        .lines()
+        .map(str::trim_start)
+        .map(str::to_ascii_lowercase)
+        .any(|line| line.strip_prefix("craft with ").is_some());
+    if oracle_has_craft_materials && !extracted_has_craft {
+        keywords.retain(|keyword| !matches!(keyword, Keyword::Craft { .. }));
+    }
+
     // Merge keywords extracted from Oracle text with MTGJSON keywords via the
     // shared `merge_extracted_keywords` authority (also used by the scenario test
     // harness so the two pipelines cannot diverge). It reconciles parameterized
     // keywords (e.g., Morph) and CR 113.2c multi-instance keywords (Cascade/Storm/
     // Myriad/Exalted) — see the helper's doc comment for the per-class rules.
-    merge_extracted_keywords(&mut keywords, parsed.extracted_keywords);
+    merge_extracted_keywords(&mut keywords, extracted_keywords);
 
     // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
@@ -8057,6 +8470,69 @@ mod exalted_synthesis_tests {
 }
 
 #[cfg(test)]
+mod bushido_synthesis_tests {
+    //! CR 702.45a shape tests: two self-scoped triggers (Blocks +
+    //! BecomesBlocked), each an `Effect::Pump` on `SelfRef` of +N/+N.
+    use super::*;
+
+    #[test]
+    fn synthesize_bushido_adds_block_and_becomes_blocked_triggers() {
+        // CR 702.45a: Bushido N installs two self-triggers (blocks + becomes
+        // blocked), each pumping the source +N/+N until end of turn.
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Bushido(2));
+        synthesize_bushido(&mut face);
+
+        let bushido: Vec<_> = face
+            .triggers
+            .iter()
+            .filter(|t| is_bushido_trigger(t, 2))
+            .collect();
+        assert_eq!(bushido.len(), 2, "blocks + becomes-blocked");
+        assert!(bushido
+            .iter()
+            .any(|t| matches!(t.mode, TriggerMode::Blocks)));
+        assert!(bushido
+            .iter()
+            .any(|t| matches!(t.mode, TriggerMode::BecomesBlocked)));
+        for t in &bushido {
+            assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
+            let Some(Effect::Pump {
+                power,
+                toughness,
+                target,
+            }) = t.execute.as_deref().map(|a| &*a.effect)
+            else {
+                panic!("bushido execute must be Effect::Pump");
+            };
+            assert!(matches!(power, PtValue::Fixed(2)));
+            assert!(matches!(toughness, PtValue::Fixed(2)));
+            assert!(matches!(target, TargetFilter::SelfRef));
+        }
+    }
+
+    #[test]
+    fn synthesize_bushido_is_idempotent_and_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Bushido(1));
+        synthesize_bushido(&mut face);
+        synthesize_bushido(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_bushido_trigger(t, 1))
+                .count(),
+            2,
+            "two triggers (blocks + becomes-blocked), deduped across passes"
+        );
+
+        let mut bare = CardFace::default();
+        synthesize_bushido(&mut bare);
+        assert!(bare.triggers.iter().all(|t| !is_bushido_trigger(t, 1)));
+    }
+}
+
+#[cfg(test)]
 mod extort_synthesis_tests {
     //! CR 702.101a + CR 702.101b shape tests: the synthesized Extort trigger
     //! is a `SpellCast` trigger with `valid_target = Controller` whose execute
@@ -8195,6 +8671,169 @@ mod extort_synthesis_tests {
         assert_eq!(state.players[0].life, 22);
         assert_eq!(state.players[1].life, 19);
         assert_eq!(state.players[2].life, 19);
+    }
+}
+
+#[cfg(test)]
+mod increment_synthesis_tests {
+    use super::*;
+
+    fn increment_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Increment);
+        face
+    }
+
+    fn increment_atomic_card(text: &str) -> AtomicCard {
+        AtomicCard {
+            name: "Topiary Lecturer".to_string(),
+            mana_cost: Some("{2}{G}".to_string()),
+            colors: vec!["G".to_string()],
+            color_identity: vec!["G".to_string()],
+            text: Some(text.to_string()),
+            power: Some("2".to_string()),
+            toughness: Some("3".to_string()),
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Creature — Plant Employee".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Plant".to_string(), "Employee".to_string()],
+            supertypes: Vec::new(),
+            keywords: Some(vec!["Increment".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 3.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_oracle_id: Some("increment-dedupe-test".to_string()),
+                scryfall_id: Some("increment-dedupe-test-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn synthesize_increment_adds_spell_cast_trigger_with_intervening_if() {
+        let mut face = increment_face();
+        synthesize_increment(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_increment_trigger(t))
+            .expect("increment should add a SpellCast trigger");
+
+        assert!(matches!(trigger.mode, TriggerMode::SpellCast));
+        assert!(matches!(
+            trigger.valid_target,
+            Some(TargetFilter::Controller)
+        ));
+        assert!(
+            matches!(trigger.condition, Some(TriggerCondition::And { .. })),
+            "increment must gate on creature check and mana spent vs source P/T"
+        );
+
+        let Some(execute) = trigger.execute.as_deref() else {
+            panic!("execute body required");
+        };
+        assert!(matches!(
+            &*execute.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn synthesize_increment_is_idempotent() {
+        let mut face = increment_face();
+        synthesize_increment(&mut face);
+        synthesize_increment(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_increment_trigger(t))
+            .count();
+        assert_eq!(count, 1, "increment trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_increment_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Increment);
+        face.keywords.push(Keyword::Increment);
+        synthesize_increment(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_increment_trigger(t))
+            .count();
+        assert_eq!(count, 2, "CR 702.191b: each instance triggers separately");
+    }
+
+    #[test]
+    fn build_oracle_face_dedupes_increment_keyword_and_reminder_body() {
+        let mtgjson = increment_atomic_card(
+            "Increment (Whenever you cast a spell, if the amount of mana you spent is greater than this creature's power or toughness, put a +1/+1 counter on this creature.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert!(face
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Increment)));
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_increment_trigger(trigger))
+                .count(),
+            1,
+            "Increment keyword synthesis should recognize the parsed reminder trigger"
+        );
+        assert_eq!(
+            face.triggers.len(),
+            1,
+            "Increment reminder parsing and keyword synthesis should not create duplicate triggers"
+        );
+    }
+
+    #[test]
+    fn build_oracle_face_preserves_repeated_increment_instances_from_oracle_text() {
+        let mtgjson = increment_atomic_card(
+            "Increment, increment (Whenever you cast a spell, if the amount of mana you spent is greater than this creature's power or toughness, put a +1/+1 counter on this creature.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|keyword| matches!(keyword, Keyword::Increment))
+                .count(),
+            2,
+            "Oracle text must recover repeated Increment instances that MTGJSON dedupes"
+        );
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_increment_trigger(trigger))
+                .count(),
+            2,
+            "CR 702.191b: each recovered Increment instance triggers separately"
+        );
+        assert_eq!(
+            face.triggers.len(),
+            2,
+            "repeated Increment should produce exactly one trigger per printed instance"
+        );
     }
 }
 
@@ -10904,6 +11543,97 @@ mod sorcery_speed_invariant_tests {
                     }
                 )),
             "unattach mode is legal only while attached to a creature (CR 702.151a)"
+        );
+    }
+
+    /// CR 702.167a/b: Parsing the Oracle line "craft with creature {4}{b}" must
+    /// produce a `Keyword::Craft` whose materials are the dual-zone
+    /// (battlefield + graveyard) `Or` and count 1, and `synthesize_craft` must
+    /// turn it into exactly one sorcery-speed activated ability whose cost is a
+    /// `Composite[Mana, Exile{SelfRef}, ExileMaterials]` and whose effect returns
+    /// the source from exile transformed. RED on main (no ability synthesized).
+    #[test]
+    fn synthesize_craft_from_oracle_line_builds_sorcery_speed_return_transformed() {
+        use crate::parser::oracle_keyword::parse_keyword_from_oracle;
+        use crate::types::ability::{CostObjectCount, TargetFilter};
+        use crate::types::zones::Zone;
+
+        let kw = parse_keyword_from_oracle("craft with creature {4}{b}")
+            .expect("craft Oracle line parses to a keyword");
+        let (materials, count) = match &kw {
+            Keyword::Craft {
+                materials, count, ..
+            } => (materials.clone(), *count),
+            other => panic!("expected Keyword::Craft, got {other:?}"),
+        };
+        assert_eq!(count, CostObjectCount::exactly(1), "single-material craft");
+        match &materials {
+            TargetFilter::Or { filters } => {
+                assert_eq!(filters.len(), 2, "battlefield + graveyard legs");
+            }
+            other => panic!("expected dual-zone Or materials, got {other:?}"),
+        }
+
+        let mut face = CardFace::default();
+        face.keywords.push(kw);
+        synthesize_craft(&mut face);
+
+        assert_eq!(
+            face.abilities.len(),
+            1,
+            "craft synthesizes exactly one activated ability"
+        );
+        let def = &face.abilities[0];
+        assert!(matches!(def.kind, AbilityKind::Activated));
+        assert!(def.sorcery_speed, "craft is sorcery-speed (CR 702.167a)");
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+
+        // Effect: return self from exile to battlefield transformed.
+        match def.effect.as_ref() {
+            Effect::ChangeZone {
+                origin,
+                destination,
+                target,
+                enter_transformed,
+                ..
+            } => {
+                assert_eq!(*origin, Some(Zone::Exile));
+                assert_eq!(*destination, Zone::Battlefield);
+                assert_eq!(*target, TargetFilter::SelfRef);
+                assert!(*enter_transformed, "CR 712.14a: enters transformed");
+            }
+            other => panic!("expected ChangeZone effect, got {other:?}"),
+        }
+
+        // Cost: Composite[Mana, Exile{SelfRef}, ExileMaterials].
+        let Some(AbilityCost::Composite { costs }) = def.cost.as_ref() else {
+            panic!("expected Composite craft cost, got {:?}", def.cost);
+        };
+        assert!(
+            costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })),
+            "mana sub-cost present"
+        );
+        assert!(
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::Exile {
+                    filter: Some(TargetFilter::SelfRef),
+                    ..
+                }
+            )),
+            "self-exile sub-cost present (CR 702.167a)"
+        );
+        assert!(
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::ExileMaterials {
+                    count: CostObjectCount::Exactly { count: 1 },
+                    ..
+                }
+            )),
+            "materials-exile sub-cost present (CR 702.167a/b)"
         );
     }
 
@@ -13681,6 +14411,55 @@ mod bloodthirst_synthesis_tests {
         assert_eq!(base, vec![Keyword::Squad(squad_cost)]);
     }
 
+    #[test]
+    fn build_oracle_face_drops_craft_default_when_material_constraint_is_unparsed() {
+        let mtgjson = AtomicCard {
+            name: "Threefold Thunderhulk".to_string(),
+            mana_cost: Some("{7}".to_string()),
+            colors: Vec::new(),
+            color_identity: Vec::new(),
+            power: Some("0".to_string()),
+            toughness: Some("0".to_string()),
+            loyalty: None,
+            defense: None,
+            text: Some("Craft with two that share a card type {6}".to_string()),
+            layout: "transform".to_string(),
+            type_line: Some("Artifact Creature — Gnome".to_string()),
+            types: vec!["Artifact".to_string(), "Creature".to_string()],
+            subtypes: vec!["Gnome".to_string()],
+            supertypes: Vec::new(),
+            keywords: Some(vec!["Craft:{6}".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 7.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_id: None,
+                scryfall_oracle_id: None,
+            },
+            foreign_data: Vec::new(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert!(
+            face.keywords
+                .iter()
+                .all(|keyword| !matches!(keyword, Keyword::Craft { .. })),
+            "unparsed Craft material constraints must not keep MTGJSON's generic Craft fallback"
+        );
+        assert!(
+            face.abilities
+                .iter()
+                .all(|definition| !matches!(definition.cost, Some(AbilityCost::Composite { .. }))),
+            "unsupported Craft must not synthesize an approximate activated ability"
+        );
+    }
+
     /// Re-running synthesis must not duplicate the replacement.
     #[test]
     fn synthesize_bloodthirst_is_idempotent() {
@@ -14890,5 +15669,342 @@ mod reinforce_synthesis_tests {
             }
             other => panic!("expected Composite cost, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod sunburst_synthesis_tests {
+    //! CR 702.44a + CR 702.44b + CR 702.44d: shape tests for the synthesized
+    //! Sunburst ETB-with-counters replacement.
+    //!
+    //! A Sunburst face gets one `ReplacementEvent::Moved` replacement per
+    //! `Keyword::Sunburst` instance whose execute body is `Effect::PutCounter`
+    //! on `SelfRef` with the count read from
+    //! `QuantityRef::ManaSpentToCast { SelfObject, DistinctColors }`. The counter
+    //! type is `Plus1Plus1` for a creature face and `Generic("charge")` for any
+    //! noncreature face.
+    use super::*;
+
+    fn creature_sunburst_face() -> CardFace {
+        let mut face = CardFace {
+            name: "Sunburst Creature".to_string(),
+            power: Some(PtValue::Fixed(0)),
+            toughness: Some(PtValue::Fixed(0)),
+            keywords: vec![Keyword::Sunburst],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Artifact);
+        face.card_type.core_types.push(CoreType::Creature);
+        face
+    }
+
+    fn artifact_sunburst_face() -> CardFace {
+        let mut face = CardFace {
+            name: "Sunburst Artifact".to_string(),
+            keywords: vec![Keyword::Sunburst],
+            ..CardFace::default()
+        };
+        face.card_type.core_types.push(CoreType::Artifact);
+        face
+    }
+
+    /// CR 702.44a (creature branch): a creature face synthesizes a Moved → SelfRef
+    /// `PutCounter` replacement placing +1/+1 counters, counted by the distinct
+    /// colors of mana spent to cast it.
+    #[test]
+    fn synthesize_sunburst_creature_adds_p1p1_etb_replacement() {
+        let mut face = creature_sunburst_face();
+        synthesize_sunburst(&mut face);
+
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_sunburst_etb_replacement(r, &CounterType::Plus1Plus1))
+            .expect("creature Sunburst must synthesize a P1P1 ETB replacement");
+
+        assert!(matches!(replacement.event, ReplacementEvent::Moved));
+        assert!(matches!(
+            replacement.valid_card,
+            Some(TargetFilter::SelfRef)
+        ));
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("ETB replacement requires execute body");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!("sunburst ETB execute body should be Effect::PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert!(matches!(target, TargetFilter::SelfRef));
+        // CR 702.44a + CR 601.2h: one counter per distinct color of mana spent.
+        assert!(matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::DistinctColors,
+                },
+            }
+        ));
+    }
+
+    /// CR 702.44a (noncreature branch): a noncreature artifact face synthesizes a
+    /// Moved → SelfRef `PutCounter` placing charge counters
+    /// (`Generic("charge")`), counted by distinct colors spent.
+    #[test]
+    fn synthesize_sunburst_artifact_adds_charge_etb_replacement() {
+        let mut face = artifact_sunburst_face();
+        synthesize_sunburst(&mut face);
+
+        let charge = CounterType::Generic("charge".to_string());
+        let replacement = face
+            .replacements
+            .iter()
+            .find(|r| is_sunburst_etb_replacement(r, &charge))
+            .expect("noncreature Sunburst must synthesize a charge ETB replacement");
+
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("requires execute body");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = &*execute.effect
+        else {
+            panic!("expected Effect::PutCounter");
+        };
+        assert_eq!(counter_type, &charge);
+        // The noncreature branch must NOT emit a +1/+1 replacement.
+        assert!(
+            !face
+                .replacements
+                .iter()
+                .any(|r| is_sunburst_etb_replacement(r, &CounterType::Plus1Plus1)),
+            "a noncreature Sunburst face must not place +1/+1 counters (CR 702.44a)"
+        );
+        assert!(matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::SelfObject,
+                    metric: CastManaSpentMetric::DistinctColors,
+                },
+            }
+        ));
+    }
+
+    /// Re-running synthesis must not duplicate the replacement (idempotency
+    /// discipline shared with `synthesize_modular`).
+    #[test]
+    fn synthesize_sunburst_is_idempotent() {
+        let mut face = creature_sunburst_face();
+        synthesize_sunburst(&mut face);
+        synthesize_sunburst(&mut face);
+
+        let count = face
+            .replacements
+            .iter()
+            .filter(|r| is_sunburst_etb_replacement(r, &CounterType::Plus1Plus1))
+            .count();
+        assert_eq!(count, 1, "Sunburst ETB replacement must be emitted once");
+    }
+
+    /// CR 702.44d: two instances of Sunburst each work separately — two
+    /// replacements are emitted (so the counters stack).
+    #[test]
+    fn synthesize_sunburst_emits_one_replacement_per_instance() {
+        let mut face = creature_sunburst_face();
+        face.keywords.push(Keyword::Sunburst);
+        synthesize_sunburst(&mut face);
+
+        let count = face
+            .replacements
+            .iter()
+            .filter(|r| is_sunburst_etb_replacement(r, &CounterType::Plus1Plus1))
+            .count();
+        assert_eq!(
+            count, 2,
+            "two Sunburst instances must each emit their own ETB replacement (CR 702.44d)"
+        );
+    }
+
+    /// A face without `Keyword::Sunburst` is unaffected.
+    #[test]
+    fn synthesize_sunburst_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.card_type.core_types.push(CoreType::Artifact);
+        face.card_type.core_types.push(CoreType::Creature);
+        synthesize_sunburst(&mut face);
+        assert!(face.replacements.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sunburst_runtime_tests {
+    //! CR 702.44a/b runtime integration: cast a Sunburst object through the full
+    //! casting pipeline paying N distinct colors and assert it enters the
+    //! battlefield with N counters of the branch-correct type. The full cast is
+    //! required so the engine populates the entering object's
+    //! `colors_spent_to_cast` from the actual mana spent (CR 601.2h), which the
+    //! synthesized ETB replacement reads via
+    //! `QuantityRef::ManaSpentToCast { DistinctColors }`.
+    use super::*;
+    use crate::game::printed_cards::apply_card_face_to_object;
+    use crate::game::scenario::GameRunner;
+    use crate::game::zones::create_object;
+    use crate::types::counter::CounterType;
+    use crate::types::game_state::{GameState, WaitingFor};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::player::PlayerId;
+
+    const P0: PlayerId = PlayerId(0);
+
+    /// A Sunburst face with the given printed core types, fully synthesized.
+    fn sunburst_face(name: &str, core_types: &[CoreType], pt: Option<i32>) -> CardFace {
+        let mut face = CardFace {
+            name: name.to_string(),
+            power: pt.map(PtValue::Fixed),
+            toughness: pt.map(PtValue::Fixed),
+            keywords: vec![Keyword::Sunburst],
+            ..CardFace::default()
+        };
+        for ct in core_types {
+            face.card_type.core_types.push(*ct);
+        }
+        synthesize_all(&mut face);
+        face
+    }
+
+    /// Stage a Sunburst spell in P0's hand with the given mana cost, fund P0's
+    /// pool with exactly `colors` (one unit each), and park the engine at P0
+    /// priority in a main phase. Returns the runner and the spell object id.
+    fn stage_sunburst_cast(
+        face: &CardFace,
+        shards: Vec<ManaCostShard>,
+        colors: &[ManaColor],
+    ) -> (GameRunner, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+
+        let card_id = CardId(state.next_object_id);
+        let spell = create_object(&mut state, card_id, P0, face.name.clone(), Zone::Hand);
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            apply_card_face_to_object(obj, face);
+            obj.mana_cost = ManaCost::Cost { shards, generic: 0 };
+        }
+
+        let mana: Vec<ManaUnit> = colors
+            .iter()
+            .map(|c| ManaUnit::new(ManaType::from(*c), ObjectId(0), false, Vec::new()))
+            .collect();
+        if let Some(p) = state.players.iter_mut().find(|p| p.id == P0) {
+            p.mana_pool.mana = mana;
+        }
+
+        (GameRunner::from_state(state), spell)
+    }
+
+    fn counters_of(runner: &GameRunner, id: ObjectId, ct: &CounterType) -> u32 {
+        runner
+            .state()
+            .objects
+            .get(&id)
+            .and_then(|o| o.counters.get(ct))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Cast a Sunburst CREATURE (artifact creature) paying three distinct colors
+    /// → it must enter with three +1/+1 counters. CR 702.44a (creature branch).
+    #[test]
+    fn sunburst_creature_paying_three_colors_enters_with_three_p1p1_counters() {
+        let face = sunburst_face(
+            "Sunburst Drake",
+            &[CoreType::Artifact, CoreType::Creature],
+            Some(0),
+        );
+        let (mut runner, spell) = stage_sunburst_cast(
+            &face,
+            vec![
+                ManaCostShard::White,
+                ManaCostShard::Blue,
+                ManaCostShard::Black,
+            ],
+            &[ManaColor::White, ManaColor::Blue, ManaColor::Black],
+        );
+
+        runner.cast(spell).resolve();
+
+        assert_eq!(
+            counters_of(&runner, spell, &CounterType::Plus1Plus1),
+            3,
+            "creature Sunburst cast for 3 colors must enter with 3 +1/+1 counters"
+        );
+    }
+
+    /// Cast a Sunburst CREATURE paying a single color (twice) → exactly one
+    /// +1/+1 counter. CR 702.44a counts COLORS, not total mana.
+    #[test]
+    fn sunburst_creature_paying_one_color_enters_with_one_p1p1_counter() {
+        let face = sunburst_face(
+            "Sunburst Imp",
+            &[CoreType::Artifact, CoreType::Creature],
+            Some(0),
+        );
+        // {R}{R}: two mana, one distinct color.
+        let (mut runner, spell) = stage_sunburst_cast(
+            &face,
+            vec![ManaCostShard::Red, ManaCostShard::Red],
+            &[ManaColor::Red, ManaColor::Red],
+        );
+
+        runner.cast(spell).resolve();
+
+        assert_eq!(
+            counters_of(&runner, spell, &CounterType::Plus1Plus1),
+            1,
+            "Sunburst counts distinct colors: {{R}}{{R}} is one color, so one +1/+1 counter"
+        );
+    }
+
+    /// Cast a Sunburst noncreature ARTIFACT paying two distinct colors → it must
+    /// enter with two CHARGE counters and zero +1/+1 counters. CR 702.44a
+    /// (otherwise branch).
+    #[test]
+    fn sunburst_artifact_paying_two_colors_enters_with_two_charge_counters() {
+        let face = sunburst_face("Sunburst Relic", &[CoreType::Artifact], None);
+        let (mut runner, spell) = stage_sunburst_cast(
+            &face,
+            vec![ManaCostShard::White, ManaCostShard::Green],
+            &[ManaColor::White, ManaColor::Green],
+        );
+
+        runner.cast(spell).resolve();
+
+        let charge = CounterType::Generic("charge".to_string());
+        assert_eq!(
+            counters_of(&runner, spell, &charge),
+            2,
+            "noncreature Sunburst cast for 2 colors must enter with 2 charge counters"
+        );
+        assert_eq!(
+            counters_of(&runner, spell, &CounterType::Plus1Plus1),
+            0,
+            "a noncreature Sunburst must not place +1/+1 counters (CR 702.44a)"
+        );
     }
 }

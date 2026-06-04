@@ -254,6 +254,7 @@ fn apply_search_partition(
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                face_down_profile: None,
             },
             primary_targets,
             source_id,

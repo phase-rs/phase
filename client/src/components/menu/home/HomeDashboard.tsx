@@ -271,21 +271,17 @@ export function HomeDashboard() {
   const cardStatus = useCardDataStore((s) => s.status);
   const cardsPending = cardStatus !== "ready" && cardStatus !== "error";
 
+  // Left-aligned wordmark masthead at the grid's left edge. The wordmark carries
+  // the name without re-stating the sigil the rail already owns, so the brand
+  // reads once (rail = sigil, masthead = wordmark) with no repeated shape.
   const masthead = (
-    <div className="w-full">
-      <div className="flex items-center gap-3">
-        <img
-          src="/logo_only.webp"
-          alt=""
-          aria-hidden="true"
-          className="h-9 w-9 drop-shadow-[0_0_14px_rgba(251,146,60,0.45)]"
-        />
-        <span className="font-display text-[1.7rem] font-semibold tracking-[-0.02em] text-fg">phase.rs</span>
-        <span className="rounded-full border border-ember-soft/25 bg-ember/[0.12] px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] text-ember-soft">
-          {t("nav.alpha")}
-        </span>
-      </div>
-      <p className="mt-2.5 max-w-2xl text-[0.95rem] leading-relaxed text-fg-muted">
+    <div className="flex w-full flex-col items-start">
+      <img
+        src="/wordmark.webp"
+        alt="phase.rs"
+        className="h-10 w-auto drop-shadow-[0_0_16px_rgba(251,146,60,0.25)]"
+      />
+      <p className="mt-3 max-w-xl text-[1.02rem] leading-relaxed text-fg-muted">
         {t("home.dashboard.tagline")}
       </p>
     </div>
