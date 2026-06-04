@@ -103,6 +103,7 @@ fn terra_combat_damage_optional_pay_prompts_terras_controller() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(terra, AttackTarget::Player(P0))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
     if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {

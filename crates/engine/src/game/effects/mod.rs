@@ -9,6 +9,8 @@ use crate::types::ability::{
     PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
+#[cfg(test)]
+use crate::types::ability::{AttackScope, AttackSubject};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
@@ -233,14 +235,11 @@ pub(crate) fn matches_player_scope(
                             state, p.id, controller, source, source_id,
                         )
                     }
-                    // CR 508.6: opponent this player attacked this turn.
-                    PlayerFilter::OpponentAttackedThisTurn => {
-                        p.id != controller && state.has_attacked(controller, p.id)
-                    }
-                    // CR 508.6: opponent this source creature attacked this turn.
-                    PlayerFilter::OpponentAttackedBySourceThisTurn => {
+                    // CR 508.6: opponent the subject attacked within scope.
+                    PlayerFilter::OpponentAttacked { subject, scope } => {
                         p.id != controller
-                            && state.creature_attacked_player_this_turn(source_id, p.id)
+                            && state
+                                .opponent_attacked(*subject, *scope, controller, source_id, p.id)
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -1287,6 +1286,7 @@ fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a Qua
         QuantityExpr::Fixed { .. } => {}
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
@@ -2033,6 +2033,7 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             )
         }
         QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_tracked_set),
@@ -3240,6 +3241,16 @@ fn resolve_chain_body(
                     remaining_scoped.set_original_controller_recursive(controller);
                     remaining_scoped.controller = remaining_pid;
                     remaining_scoped.set_scoped_player_recursive(remaining_pid);
+                    // CR 608.2c: each remaining player's clause is an INDEPENDENT
+                    // following instruction, not a continuation of the prior
+                    // player's. When the scoped template carries a conditional
+                    // rider (e.g. Momentum Breaker's "each opponent who can't
+                    // discards a card"), this clause gets appended after the
+                    // first player's stashed rider; marking it `SequentialSibling`
+                    // ensures it still resolves when that rider's condition is
+                    // false (it ran for a player who DID perform the action), so
+                    // the per-opponent fan-out is not truncated after the first.
+                    remaining_scoped.sub_link = SubAbilityLink::SequentialSibling;
                     if let Some(prev) = tail {
                         super::ability_utils::append_to_sub_chain(&mut remaining_scoped, *prev);
                     }
@@ -3482,13 +3493,32 @@ fn resolve_chain_body(
                 // here: `CopyTokenOf {IfYouDo}` is skipped (no pay → effect not
                 // performed) and the chain descends to `Token(Insect)
                 // {Not(IfYouDo)}`, which evaluates true and creates the Insect.
-                // Restricted to performed-gate sub-conditions so an
-                // unconditional continuation is never run when its parent's
+                // Restricted to performed-gate sub-conditions so a *dependent*
+                // continuation (one whose own gate references the parent's
+                // action, e.g. a `WhenYouDo` reflexive — Ezio's "When you do,
+                // that player loses the game") is never run when its parent's
                 // condition failed (that remains an early return).
+                //
+                // CR 608.2c: An UNCONDITIONAL `SequentialSibling` is the next
+                // INDEPENDENT instruction "in the order written", not a
+                // continuation of this node's action, so it resolves regardless
+                // of this node's condition. The `is_none()` guard is what keeps
+                // Ezio's gated reflexive blocked while letting a truly
+                // independent sibling through. This covers per-opponent
+                // `player_scope` continuations: when a scoped clause carries a
+                // conditional rider (Momentum Breaker's "each opponent who can't
+                // discards a card"), the remaining opponents' unconditional
+                // sacrifice clauses are appended after the first opponent's
+                // stashed rider as `SequentialSibling`s, and must still resolve
+                // when that rider's condition is false. Mirrors the gated-sub
+                // sibling escape hatch (the `next.sub_link == SequentialSibling`
+                // branch below).
                 if sub
                     .condition
                     .as_ref()
                     .is_some_and(condition_depends_on_effect_performed)
+                    || (sub.sub_link == SubAbilityLink::SequentialSibling
+                        && sub.condition.is_none())
                 {
                     let mut sub_resolved = sub.as_ref().clone();
                     if sub_resolved.targets.is_empty() && !ability.targets.is_empty() {
@@ -5087,8 +5117,7 @@ fn scoped_player_matches_filter(
         // game/triggers.rs:3703-3723).
         PlayerFilter::DefendingPlayer
         | PlayerFilter::OpponentDealtCombatDamage { .. }
-        | PlayerFilter::OpponentAttackedThisTurn
-        | PlayerFilter::OpponentAttackedBySourceThisTurn
+        | PlayerFilter::OpponentAttacked { .. }
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
@@ -5458,7 +5487,10 @@ mod tests {
             matches_player_scope(
                 &state,
                 PlayerId(2),
-                &PlayerFilter::OpponentAttackedThisTurn,
+                &PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisTurn,
+                },
                 PlayerId(0),
                 angel,
             ),
@@ -5468,7 +5500,10 @@ mod tests {
             !matches_player_scope(
                 &state,
                 PlayerId(2),
-                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                &PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::Source,
+                    scope: AttackScope::ThisTurn,
+                },
                 PlayerId(0),
                 angel,
             ),
@@ -5478,7 +5513,10 @@ mod tests {
             matches_player_scope(
                 &state,
                 PlayerId(1),
-                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                &PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::Source,
+                    scope: AttackScope::ThisTurn,
+                },
                 PlayerId(0),
                 angel,
             ),

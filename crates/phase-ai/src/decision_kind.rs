@@ -124,6 +124,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // CR 702.140c + CR 730.2a: mutate top/bottom merge side — a forced
         // mid-resolution choice; route to the ability catch-all.
         | WaitingFor::MutateMergeChoice { .. }
+        // CR 702.99a: cipher encode-on-resolve — a mid-resolution selection;
+        // route to the same ability catch-all as the mutate merge choice.
+        | WaitingFor::CipherEncodeChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
@@ -138,6 +141,9 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ChooseObjectsSelection { .. }
         | WaitingFor::CategoryChoice { .. }
         | WaitingFor::AssignCombatDamage { .. }
+        // CR 510.1d + CR 702.22k: active player divides a banded blocker's
+        // damage — a forced mid-combat choice, routed to the ability catch-all.
+        | WaitingFor::AssignBlockerDamage { .. }
         // CR 107.1c + CR 107.14: "Pay any amount of X" prompts are forced
         // mid-resolution choices; route to ActivateAbility as a catch-all.
         | WaitingFor::PayAmountChoice { .. }

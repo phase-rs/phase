@@ -1179,6 +1179,30 @@ pub(crate) fn parse_static_line_inner(
 
     // --- "~ can't attack" ---
     if nom_primitives::scan_contains(tp.lower, "can't attack") {
+        // CR 508.1d: Subject-led lines ("Each creature ... can't attack you") must not
+        // collapse to SelfRef — `parse_subject_combat_rule_static` handles them above.
+        if let Some((subject_lower, _, rest)) =
+            nom_primitives::scan_preceded(tp.lower, parse_cant_attack_rule_static_predicate_nom)
+        {
+            let rest = match opt(tag::<_, _, OracleError<'_>>(".")).parse(rest) {
+                Ok((r, _)) => r,
+                Err(_) => rest,
+            };
+            // Only defer when the line is a fully consumed scoped cant-attack
+            // (Eriette). Trailing "unless"/"if" clauses must still use SelfRef.
+            if rest.trim().is_empty() {
+                let subject = tp.original[..subject_lower.len()].trim();
+                let subject_lower = subject.to_lowercase();
+                if !subject.is_empty()
+                    && subject_lower != "~"
+                    && subject_lower != "it"
+                    && subject_lower != "this"
+                    && !SELF_REF_PARSE_ONLY_PHRASES.contains(&subject_lower.as_str())
+                {
+                    return None;
+                }
+            }
+        }
         let mode = if nom_primitives::scan_contains(tp.lower, "can't attack or block") {
             StaticMode::CantAttackOrBlock
         } else {

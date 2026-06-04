@@ -35,6 +35,7 @@ fn declare_attacker(runner: &mut engine::game::scenario::GameRunner, attacker: O
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
 }

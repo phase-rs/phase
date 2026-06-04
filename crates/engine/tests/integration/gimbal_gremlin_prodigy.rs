@@ -88,7 +88,10 @@ fn advance_until_end_step_trigger_resolved(runner: &mut GameRunner) {
             }
             WaitingFor::DeclareAttackers { .. } => {
                 runner
-                    .act(GameAction::DeclareAttackers { attacks: vec![] })
+                    .act(GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    })
                     .expect("declaring no attackers must succeed");
             }
             WaitingFor::DeclareBlockers { .. } => {

@@ -2861,20 +2861,39 @@ pub enum ObjectScope {
     /// trio (CR 117.1 + CR 400.7j cost referent and CR 603.2 trigger
     /// referent are the two enumerated members of CR 608.2k's single clause).
     CostPaidObject,
-    /// CR 608.2k: A deferred anaphoric pronoun ("it" / "its") whose object
-    /// referent is bound at parse time. The parser remaps this to a concrete
-    /// scope wherever it can — `Source` when the clause subject is the ability
-    /// source, `Target` when the recipient is "itself". For triggered abilities
-    /// no remap applies and `Anaphoric` survives to runtime, where it resolves
-    /// identically to `CostPaidObject` (behavior-preserving — these cards
-    /// parsed to `CostPaidObject` before this variant existed). General
-    /// rules-correct runtime resolution of triggered-ability anaphora (e.g.
-    /// "its mana value" after a reveal — see issue #511) is separate per-card
-    /// parser work. Distinguishing this from an explicit cost-paid possessive
-    /// ("the sacrificed creature's power", CR 608.2k -> `CostPaidObject`) is
-    /// what prevents the subject-injection rewrite from clobbering
-    /// correctly-scoped possessives.
+    /// CR 608.2k: A deferred anaphoric **pronoun** ("it" / "its") whose object
+    /// referent is bound at parse time. The parser rebinds this to a concrete
+    /// scope wherever the enclosing clause establishes the antecedent —
+    /// `Source` when the clause subject is the ability source, `Target` when
+    /// the recipient is "itself", `EventSource` when the subject is the
+    /// triggering object. The rebind ([`rebind_anaphoric_object_scope`] in
+    /// `parser/oracle_effect/mod.rs`) covers every per-object characteristic
+    /// (power, toughness, mana value, …) — not just power — because the
+    /// pronoun refers to one object and the rebind only retargets *which*
+    /// object, never *which* characteristic. When no clause subject applies
+    /// (triggered-ability anaphora) `Anaphoric` survives to runtime, where it
+    /// resolves identically to a demonstrative (effect-context referent first;
+    /// see [`ObjectScope::Demonstrative`]). General rules-correct runtime
+    /// resolution of triggered-ability anaphora (e.g. "its mana value" after a
+    /// reveal — see issue #511) is separate per-card parser work.
     Anaphoric,
+    /// CR 608.2c: A **demonstrative / definite** possessive back-reference
+    /// ("that creature's", "that card's", "that spell's", "the creature's")
+    /// whose antecedent is a full noun phrase naming an object introduced by an
+    /// earlier instruction in the same ability — *not* the grammatical subject
+    /// of the clause it appears in. Unlike [`ObjectScope::Anaphoric`] (the
+    /// pronoun "its"), the subject-injection rewrite MUST NOT rebind this — its
+    /// antecedent is fixed by the Oracle text. Steadfast Armasaur ("its
+    /// toughness", `Anaphoric` → rebound to `Source`) and Creature Bond ("that
+    /// creature's toughness", `Demonstrative` → never rebound) parse to the
+    /// same `QuantityRef` property and differ only by this scope: collapsing
+    /// them caused the LKI-toughness bug. At runtime `Demonstrative` resolves
+    /// identically to `Anaphoric` — `effect_context_object` (CR 608.2c
+    /// instruction-order referent) first, then the trigger source (CR 608.2k),
+    /// then the cost-paid object. This is the Yuriko / Dark Confidant / Mana
+    /// Drain class (issue #511): a reveal/counter/reanimate earlier in the same
+    /// ability binds "that <type>'s" to the referenced object.
+    Demonstrative,
 }
 
 /// Source set for counting distinct card types.
@@ -3502,6 +3521,25 @@ pub enum PlayerRelation {
     All,
 }
 
+/// CR 506.2 + CR 508.1b: Whose attacks the "opponents attacked" player set is
+/// measured over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttackSubject {
+    /// The ability's controller — "opponents you attacked".
+    You,
+    /// The ability's source creature — "opponents this creature attacked".
+    Source,
+}
+
+/// CR 508.6: The time window over which "attacked [a player]" is measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttackScope {
+    /// Across the whole turn, accumulated over every combat (CR 508.5).
+    ThisTurn,
+    /// Within the current combat only (CR 702.121a Melee).
+    ThisCombat,
+}
+
 /// A filter matching players by game-state conditions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3531,17 +3569,20 @@ pub enum PlayerFilter {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<Box<TargetFilter>>,
     },
-    /// CR 508.6: A player has "attacked [a player]" if they declared one or more
-    /// creatures attacking that player. Each opponent the controller attacked this
-    /// turn, resolved against `state.attacked_defenders_this_turn[controller]`.
-    /// Used by "the number of opponents you attacked this turn" (Militant Angel).
-    /// (CR 508.1b: declare-attackers announcement; CR 506.2: active = attacking player.)
-    OpponentAttackedThisTurn,
-    /// CR 508.6: Each opponent the ability's source creature attacked this turn.
-    /// Uses `state.creature_attacked_defenders_this_turn[source_id]` for
-    /// source-specific text like "each player this creature attacked this turn"
-    /// (Angel of Destiny).
-    OpponentAttackedBySourceThisTurn,
+    /// CR 508.6: Each opponent that `subject` attacked (declared one or more
+    /// creatures attacking, per CR 508.1b; CR 508.5 resolves planeswalker/battle
+    /// attacks to the controller/protector) within `scope`. Resolved via
+    /// `GameState::opponent_attacked`: turn scope reads
+    /// `attacked_defenders_this_turn` / `creature_attacked_defenders_this_turn`;
+    /// combat scope reads the current combat's declaration ledgers.
+    ///
+    /// Subsumes the former `OpponentAttackedThisTurn` (`subject: You` — Militant
+    /// Angel) and `OpponentAttackedBySourceThisTurn` (`subject: Source` — Angel of
+    /// Destiny), and adds the combat-scoped form used by Melee (CR 702.121a).
+    OpponentAttacked {
+        subject: AttackSubject,
+        scope: AttackScope,
+    },
     /// All players.
     All,
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
@@ -3673,6 +3714,15 @@ pub enum QuantityExpr {
         inner: Box<QuantityExpr>,
         offset: i32,
     },
+    /// CR 107.1b: If a calculation that determines an effect result would be
+    /// negative, zero is used instead. Generalized as a lower-bound clamp so
+    /// phrases like "for each [object] beyond the first" can compose
+    /// `ObjectCount - 1` without producing a negative count when the live set
+    /// has shrunk before resolution.
+    ClampMin {
+        inner: Box<QuantityExpr>,
+        minimum: i32,
+    },
     /// "Twice the number of X" / "N times X" / negation via factor: -1.
     Multiply {
         factor: i32,
@@ -3768,6 +3818,7 @@ impl QuantityExpr {
                 qty: QuantityRef::Variable { name },
             } => name == "X",
             QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::UpTo { max: inner }
@@ -10209,7 +10260,20 @@ pub enum TriggerCondition {
     /// CR 508.1a: "Whenever ~ and at least N other creatures attack".
     /// True when combat is active and at least `minimum` other creatures
     /// controlled by the same player are also attacking.
-    MinCoAttackers { minimum: u32 },
+    ///
+    /// `filter` optionally narrows which co-attackers count toward `minimum`
+    /// (the source creature is always excluded). `None` counts every
+    /// same-controller co-attacker (Exalted's "attacks alone" check); `Some(f)`
+    /// counts only co-attackers matching `f`, resolved via
+    /// `target_filter_matches_object` with the source creature as the filter's
+    /// source object. CR 702.149a (Training) uses
+    /// `Some(creature with power > source power)` so only a higher-power
+    /// co-attacker satisfies the trigger.
+    MinCoAttackers {
+        minimum: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// CR 719.2: Intervening-if for Case auto-solve.
     /// True when the source Case is unsolved AND its solve condition is met.
     SolveConditionMet,
@@ -11085,6 +11149,12 @@ pub struct StaticDefinition {
     pub characteristic_defining: bool,
     #[serde(default)]
     pub description: Option<String>,
+    /// CR 506.3 + CR 508.1d: When set on `CantAttack` / `CantAttackOrBlock`, the
+    /// prohibition applies only to attacks whose `AttackTarget` matches this filter,
+    /// scoped to the static's source controller (Propaganda's `UnlessPay::defended`
+    /// uses the same axis). `None` means the creature cannot attack at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_defended: Option<crate::types::triggers::AttackTargetFilter>,
 }
 
 impl StaticDefinition {
@@ -11100,6 +11170,7 @@ impl StaticDefinition {
             active_zones: vec![],
             characteristic_defining: false,
             description: None,
+            attack_defended: None,
         }
     }
 
@@ -11127,6 +11198,14 @@ impl StaticDefinition {
     /// controller), not the source controller. Mirrors `.condition()`.
     pub fn per_player_condition(mut self, cond: ParsedCondition) -> Self {
         self.per_player_condition = Some(cond);
+        self
+    }
+
+    pub fn attack_defended(
+        mut self,
+        defended: Option<crate::types::triggers::AttackTargetFilter>,
+    ) -> Self {
+        self.attack_defended = defended;
         self
     }
 
@@ -11947,6 +12026,14 @@ pub enum ContinuousModification {
         /// characteristics").
         if_type: Option<CoreType>,
     },
+    /// CR 707.9 + CR 202.1b: Strip a copy's mana cost — the "has no mana cost"
+    /// copy exception used by Embalm (CR 702.128a) and Eternalize
+    /// (CR 702.129a). Like `AddCounterOnEnter`, this is consumed at copy
+    /// resolution, never evaluated through the layer system, so
+    /// `ContinuousModification::layer()` treats it as unreachable: `token_copy.rs`
+    /// bakes it into the new token's base mana cost, and `become_copy.rs` strips
+    /// it from the copied values so the continuous copy carries mana value 0.
+    RemoveManaCost,
 }
 
 // ---------------------------------------------------------------------------
@@ -13177,6 +13264,7 @@ mod tests {
             active_zones: vec![],
             characteristic_defining: false,
             description: Some("Other creatures you control get +1/+1.".to_string()),
+            attack_defended: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
         let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
@@ -13464,6 +13552,7 @@ mod tests {
                 active_zones: vec![],
                 characteristic_defining: false,
                 description: None,
+                attack_defended: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,

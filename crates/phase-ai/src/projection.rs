@@ -398,7 +398,7 @@ fn pick_pass_or_first(actions: &[GameAction]) -> GameAction {
 fn pick_empty_attackers(actions: &[GameAction]) -> GameAction {
     actions
         .iter()
-        .find(|a| matches!(a, GameAction::DeclareAttackers { attacks } if attacks.is_empty()))
+        .find(|a| matches!(a, GameAction::DeclareAttackers { attacks, .. } if attacks.is_empty()))
         .cloned()
         .unwrap_or_else(|| actions[0].clone())
 }
@@ -418,7 +418,7 @@ fn pick_max_attackers_against(actions: &[GameAction], ai_player: PlayerId) -> Ga
     // attackers targeting `ai_player` (pessimistic worst-case).
     let mut best: Option<(usize, &GameAction)> = None;
     for action in actions {
-        if let GameAction::DeclareAttackers { attacks } = action {
+        if let GameAction::DeclareAttackers { attacks, .. } = action {
             let count = attacks
                 .iter()
                 .filter(|(_, target)| matches!(target, AttackTarget::Player(p) if *p == ai_player))

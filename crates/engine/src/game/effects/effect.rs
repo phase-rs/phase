@@ -489,6 +489,10 @@ fn snapshot_resolution_context_quantity(expr: &QuantityExpr, events: &[GameEvent
             inner: Box::new(snapshot_resolution_context_quantity(inner, events)),
             offset: *offset,
         },
+        QuantityExpr::ClampMin { inner, minimum } => QuantityExpr::ClampMin {
+            inner: Box::new(snapshot_resolution_context_quantity(inner, events)),
+            minimum: *minimum,
+        },
         QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
             factor: *factor,
             inner: Box::new(snapshot_resolution_context_quantity(inner, events)),
