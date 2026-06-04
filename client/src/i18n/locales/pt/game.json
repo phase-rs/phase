@@ -1527,5 +1527,12 @@
     "banner": "Spectating — read only",
     "leave": "Leave",
     "watchingWith": "Also watching: {{names}}"
+  },
+  "replay": {
+    "viewHistory": "View history",
+    "exitReplay": "Exit replay",
+    "turnLabel": "Turn {{turn}}",
+    "replayBanner": "Replaying turn {{turn}} — actions disabled",
+    "noHistory": "No turn history yet"
   }
 }

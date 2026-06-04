@@ -72,7 +72,7 @@ describe("LogEntry", () => {
       segments: [{ type: "Zone", value: "Graveyard" as const }],
     });
     render(<LogEntry entry={entry} />);
-    const el = screen.getByText("graveyard");
+    const el = screen.getByText("Graveyard");
     expect(el.className).toContain("italic");
   });
 
