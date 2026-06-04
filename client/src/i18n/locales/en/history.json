@@ -1,0 +1,145 @@
+{
+  "page": {
+    "title": "Match History",
+    "tabGames": "Games",
+    "tabStats": "Statistics"
+  },
+  "header": {
+    "clearHistory": "Clear History",
+    "clearConfirm": "Delete all {{count}} matches from your local history? This cannot be undone.",
+    "clearConfirmTitle": "Clear Match History",
+    "clearCancel": "Cancel",
+    "clearConfirmAction": "Clear All",
+    "exportCsv": "Export CSV",
+    "gamesPlayed": "{{count}} game played",
+    "gamesPlayed_other": "{{count}} games played"
+  },
+  "empty": {
+    "title": "No games recorded yet",
+    "description": "Finish a game to see your match history here.",
+    "cta": "Play Now"
+  },
+  "emptyFiltered": {
+    "title": "No games match these filters",
+    "description": "Try adjusting the filters to see more results.",
+    "reset": "Reset Filters"
+  },
+  "outcome": {
+    "win": "Win",
+    "loss": "Loss",
+    "draw": "Draw",
+    "all": "All Outcomes"
+  },
+  "mode": {
+    "ai": "vs AI",
+    "local": "Local",
+    "online": "Online",
+    "p2p-host": "P2P (Host)",
+    "p2p-join": "P2P (Guest)",
+    "draft-match": "Draft Match",
+    "all": "All Modes"
+  },
+  "filters": {
+    "heading": "Filters",
+    "outcome": "Outcome",
+    "format": "Format",
+    "mode": "Mode",
+    "deck": "Deck",
+    "allFormats": "All Formats",
+    "allDecks": "All Decks",
+    "dateFrom": "From",
+    "dateTo": "To",
+    "reset": "Reset"
+  },
+  "sort": {
+    "label": "Sort by",
+    "date": "Date",
+    "turns": "Turns",
+    "duration": "Duration",
+    "asc": "Ascending",
+    "desc": "Descending"
+  },
+  "record": {
+    "turn": "Turn {{turn}}",
+    "turns": "{{count}} turn",
+    "turns_other": "{{count}} turns",
+    "duration": "{{minutes}}m {{seconds}}s",
+    "durationHours": "{{hours}}h {{minutes}}m",
+    "life": "{{life}} life",
+    "mulligan": "Mulliganed {{count}}x",
+    "noMulligan": "No mulligan",
+    "players": "{{count}} players",
+    "difficulty": "Difficulty: {{difficulty}}",
+    "commander": "Commander: {{name}}",
+    "unknownDeck": "(no deck)",
+    "unknownFormat": "Unknown format",
+    "deleteTip": "Remove from history",
+    "expandDetail": "View details"
+  },
+  "stats": {
+    "heading": "Overview",
+    "winRate": "Win Rate",
+    "winRateValue": "{{value}}%",
+    "wld": "{{wins}}W / {{losses}}L / {{draws}}D",
+    "avgTurns": "Avg. Turns",
+    "avgTurnsValue": "{{value}}",
+    "avgDuration": "Avg. Duration",
+    "longestStreak": "Best Win Streak",
+    "longestStreakValue": "{{count}} in a row",
+    "currentStreak": "Current Streak",
+    "currentStreakWin": "{{count}} wins",
+    "currentStreakLoss": "{{count}} losses",
+    "currentStreakDraw": "{{count}} draws",
+    "noStreak": "—",
+    "mostPlayedFormat": "Most Played Format",
+    "mostPlayedDeck": "Most Played Deck"
+  },
+  "byFormat": {
+    "heading": "By Format",
+    "format": "Format",
+    "record": "Record",
+    "winRate": "Win %"
+  },
+  "byDeck": {
+    "heading": "By Deck",
+    "deck": "Deck",
+    "record": "Record",
+    "winRate": "Win %",
+    "avgTurns": "Avg Turns",
+    "avgDuration": "Avg Duration",
+    "lastPlayed": "Last Played"
+  },
+  "byColor": {
+    "heading": "By Color",
+    "color": "Color",
+    "record": "Record",
+    "winRate": "Win %"
+  },
+  "turnChart": {
+    "heading": "Turn Distribution",
+    "xLabel": "Turns",
+    "yLabel": "Games",
+    "bucketShort": "Turn {{n}}",
+    "bucket40plus": "40+"
+  },
+  "durationChart": {
+    "heading": "Game Duration",
+    "xLabel": "Duration",
+    "yLabel": "Games",
+    "under10": "< 10 min",
+    "10to20": "10–20 min",
+    "20to30": "20–30 min",
+    "30to45": "30–45 min",
+    "over45": "45+ min"
+  },
+  "recentForm": {
+    "label": "Recent form (last {{count}})"
+  },
+  "colorNames": {
+    "W": "White",
+    "U": "Blue",
+    "B": "Black",
+    "R": "Red",
+    "G": "Green"
+  }
+}

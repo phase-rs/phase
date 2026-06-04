@@ -10,6 +10,7 @@ import { ManaSymbol } from "../../mana/ManaSymbol";
 import { useCardImage } from "../../../hooks/useCardImage";
 import { useResumables } from "../../../hooks/useResumables";
 import { useCardDataStore } from "../../../stores/cardDataStore";
+import { useMatchHistoryStore } from "../../../stores/matchHistoryStore";
 import {
   getDeckCardCount,
   getDeckColorIdentity,
@@ -219,6 +220,83 @@ function ActiveDeckCard() {
   );
 }
 
+/* ---------------------------------------------------------- history card -- */
+function HistoryCard() {
+  const { t } = useTranslation("menu");
+  const navigate = useNavigate();
+  const { records, loaded, loadAll } = useMatchHistoryStore();
+
+  useEffect(() => {
+    if (!loaded) void loadAll();
+  }, [loaded, loadAll]);
+
+  const wins = records.filter((r) => r.outcome === "win").length;
+  const losses = records.filter((r) => r.outcome === "loss").length;
+  const draws = records.filter((r) => r.outcome === "draw").length;
+  const total = records.length;
+  const winRate = total > 0 ? Math.round((wins / total) * 100) : null;
+
+  const recent = records.slice(0, 5);
+
+  return (
+    <button
+      type="button"
+      onClick={() => navigate("/history")}
+      className={`${INFO_CARD} cursor-pointer text-left transition-colors hover:border-hairline-hover`}
+    >
+      <div className={`${SECTION_LABEL} mb-3 flex items-center justify-between`}>
+        <span className="flex items-center gap-2">
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current opacity-70">
+            <path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2Zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Zm1-8.414V7h-2v5.414l3.293 3.293 1.414-1.414L13 13.586Z" />
+          </svg>
+          {t("home.dashboard.history")}
+        </span>
+        {total > 0 && (
+          <span className="text-xs font-normal text-fg-muted tabular-nums">
+            {t("home.dashboard.historyGames", { count: total })}
+          </span>
+        )}
+      </div>
+
+      {total === 0 ? (
+        <p className="text-sm text-fg-muted">{t("home.dashboard.historyEmpty")}</p>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-baseline gap-2">
+            {winRate !== null && (
+              <span className={`text-2xl font-bold tabular-nums ${winRate >= 50 ? "text-jade" : "text-rose"}`}>
+                {winRate}%
+              </span>
+            )}
+            <span className="text-xs text-fg-muted">
+              {wins}W / {losses}L{draws > 0 ? ` / ${draws}D` : ""}
+            </span>
+          </div>
+
+          {/* Recent form pips */}
+          <div className="flex items-center gap-0.5">
+            {recent.map((r, i) => (
+              <span
+                // eslint-disable-next-line react/no-array-index-key
+                key={i}
+                className={`h-2 w-2 rounded-full ${
+                  r.outcome === "win" ? "bg-emerald-500" : r.outcome === "loss" ? "bg-red-600" : "bg-slate-500"
+                }`}
+                title={r.outcome}
+              />
+            ))}
+            {total > 5 && (
+              <span className="ml-1 text-[10px] text-fg-meta">
+                {t("home.dashboard.historyMore", { count: total - 5 })}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </button>
+  );
+}
+
 interface FormatCoverageSummary { total_cards: number; supported_cards: number; coverage_pct: number; }
 const FORMAT_DISPLAY = [
   ["standard", "Standard"], ["commander", "Commander"], ["modern", "Modern"],
@@ -296,8 +374,9 @@ export function HomeDashboard() {
             <CardActionButton key={a.key} action={a} disabled={a.gated && cardsPending} />
           ))}
         </div>
-        <div className="grid grid-cols-1 gap-4 min-[760px]:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 min-[760px]:grid-cols-3">
           <ActiveDeckCard />
+          <HistoryCard />
           <CoverageCard />
         </div>
       </div>

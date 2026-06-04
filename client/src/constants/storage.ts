@@ -11,6 +11,12 @@ export const ACTIVE_DECK_KEY = "phase-active-deck";
 /** Prefix for per-game saved state. Full key: `${GAME_KEY_PREFIX}${gameId}` */
 export const GAME_KEY_PREFIX = "phase-game:";
 
+/** IndexedDB store name for the match history log. */
+export const MATCH_HISTORY_STORE = "phase-match-history";
+
+/** IDB key used for the single ordered array of MatchRecord entries. */
+export const MATCH_HISTORY_KEY = "records";
+
 /** Prefix for per-game debug checkpoints. Full key: `${GAME_CHECKPOINTS_PREFIX}${gameId}` */
 export const GAME_CHECKPOINTS_PREFIX = "phase-game-checkpoints:";
 

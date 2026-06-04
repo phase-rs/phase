@@ -109,6 +109,10 @@ import { useGameDispatch } from "../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../hooks/useInspectHoverProps.ts";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts.ts";
 import { clearGame, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
+import { useMatchHistoryStore } from "../stores/matchHistoryStore.ts";
+import { parseColorIdentity } from "../services/matchHistoryPersistence.ts";
+import type { MatchMode } from "../services/matchHistoryPersistence.ts";
+import { getDeckColorIdentity } from "../components/menu/deckHelpers.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import {
@@ -2235,6 +2239,45 @@ function GameOverScreen({
         console.error("[GameOverScreen] failed to report draft pod match result:", err);
       });
   }, [isDraftPodMatch, resultRecorded, winner]);
+
+  // Record to match history for all modes except spectate and draft sub-matches
+  // (draft pod matches are tracked by the draft system separately).
+  const [historyRecorded, setHistoryRecorded] = useState(false);
+  useEffect(() => {
+    if (historyRecorded || mode === "spectate") return;
+
+    const outcome = isDraw ? "draw" : isVictory ? "win" : "loss";
+    const formatParam = searchParams.get("format") ?? "Standard";
+    const deckNameFromStorage = localStorage.getItem("phase-active-deck");
+    const feedColors = deckNameFromStorage ? getDeckColorIdentity(deckNameFromStorage) : [];
+    const deckColors = parseColorIdentity(feedColors);
+    const commanderName: string | null = null;
+
+    const safeMode: MatchMode = (
+      mode === "ai" || mode === "local" || mode === "online" ||
+      mode === "p2p-host" || mode === "p2p-join" || mode === "draft-match"
+    ) ? mode as MatchMode : "ai";
+
+    void useMatchHistoryStore.getState().addRecord({
+      id: crypto.randomUUID(),
+      startedAt: gameStartedAt ?? (Date.now() - (turnCount * 90_000)),
+      endedAt: Date.now(),
+      format: formatParam,
+      mode: safeMode,
+      outcome,
+      turnCount,
+      playerLife,
+      opponentLife,
+      playerCount: players?.length ?? 2,
+      deckName: deckNameFromStorage,
+      deckColors,
+      aiDifficulty: safeMode === "ai" ? difficulty : undefined,
+      commanderName,
+    });
+    setHistoryRecorded(true);
+  // Run once on mount — all dependencies are stable captures at game-end time.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleRematch = () => {
     const newId = crypto.randomUUID();

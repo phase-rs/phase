@@ -87,6 +87,10 @@
         "p2p-join": "P2P"
       },
       "tagline": "An open-source Magic: The Gathering rules engine and game client",
+      "history": "Match History",
+      "historyEmpty": "No games recorded yet.",
+      "historyGames": "{{count}} games",
+      "historyMore": "+{{count}} more",
       "turn": "Turn {{n}}",
       "yourTurn": "Your turn",
       "opponentTurn": "Opponent's turn",

@@ -7,6 +7,7 @@ import type common from "./locales/en/common.json";
 import type deckBuilder from "./locales/en/deck-builder.json";
 import type draft from "./locales/en/draft.json";
 import type game from "./locales/en/game.json";
+import type history from "./locales/en/history.json";
 import type menu from "./locales/en/menu.json";
 import type multiplayer from "./locales/en/multiplayer.json";
 import type settings from "./locales/en/settings.json";
@@ -20,6 +21,7 @@ declare module "react-i18next" {
       game: typeof game;
       "deck-builder": typeof deckBuilder;
       draft: typeof draft;
+      history: typeof history;
       settings: typeof settings;
       multiplayer: typeof multiplayer;
     };
