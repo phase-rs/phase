@@ -123,7 +123,15 @@ fn extra_blockers_static_self_reference_stays_selfref() {
 /// classified as a one-shot `Effect::Untap` and never reached this static path.
 #[test]
 fn self_untap_during_each_other_untap_step_bender_waterskin() {
-    for subject in ["this artifact", "this creature", "this permanent", "~"] {
+    for subject in [
+        "this artifact",
+        "this creature",
+        "this permanent",
+        "this card",
+        "this attraction",
+        "itself",
+        "~",
+    ] {
         let def = parse_static_line(&format!(
             "Untap {subject} during each other player's untap step."
         ))
@@ -131,6 +139,208 @@ fn self_untap_during_each_other_untap_step_bender_waterskin() {
         assert_eq!(def.mode, StaticMode::UntapsDuringEachOtherPlayersUntapStep);
         assert_eq!(def.affected, Some(TargetFilter::SelfRef));
     }
+}
+
+/// CR 509.1b: Copper Carapace — "Equipped creature gets +2/+2 and can't block."
+/// must decompose into BOTH the P/T grant AND a `CantBlock` static affecting the
+/// equipped creature. Previously the "can't block" drawback was dropped, making
+/// the card a strictly-better-than-printed pure pump.
+#[test]
+fn cant_block_static_splits_from_pump() {
+    let defs = parse_static_line_multi("Equipped creature gets +2/+2 and can't block.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantBlock),
+        "expected a CantBlock static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +2/+2 grant must be preserved"
+    );
+}
+
+/// CR 509.1b: A self-referential pump ("This creature gets +2/+2 and can't
+/// block.", e.g. Threshold downside creatures) also splits, with the `CantBlock`
+/// static affecting the source.
+#[test]
+fn cant_block_static_splits_self_reference() {
+    let defs = parse_static_line_multi("This creature gets +2/+2 and can't block.");
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantBlock)
+        .expect("expected a CantBlock static");
+    assert_eq!(cant.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 508.1c: Cagemail — "Enchanted creature gets +2/+2 and can't attack." must
+/// decompose into BOTH the P/T grant AND a `CantAttack` static affecting the
+/// enchanted creature. Previously the "can't attack" drawback was dropped,
+/// making the Aura a strictly-better-than-printed pure pump.
+#[test]
+fn cant_attack_static_splits_from_pump() {
+    let defs = parse_static_line_multi("Enchanted creature gets +2/+2 and can't attack.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantAttack),
+        "expected a CantAttack static, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "the +2/+2 grant must be preserved"
+    );
+}
+
+/// CR 508.1c: A self-referential pump ("This creature gets +1/+1 and can't
+/// attack.") also splits, with the `CantAttack` static affecting the source.
+#[test]
+fn cant_attack_static_splits_self_reference() {
+    let defs = parse_static_line_multi("This creature gets +1/+1 and can't attack.");
+    let cant = defs
+        .iter()
+        .find(|d| d.mode == StaticMode::CantAttack)
+        .expect("expected a CantAttack static");
+    assert_eq!(cant.affected, Some(TargetFilter::SelfRef));
+}
+
+/// CR 508.1c: The terminal-phrase guard must NOT mis-split scoped attack
+/// restrictions. "can't attack alone" (Sightless Brawler) and the Vow cycle's
+/// "can't attack you or planeswalkers you control" are different restrictions
+/// owned by other branches — the plain-`CantAttack` splitter must decline.
+#[test]
+fn cant_attack_split_declines_scoped_restrictions() {
+    let alone = parse_static_line_multi("Enchanted creature gets +3/+2 and can't attack alone.");
+    assert!(
+        !alone.iter().any(|d| d.mode == StaticMode::CantAttack),
+        "\"can't attack alone\" must not become a plain CantAttack, got {:?}",
+        alone.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+
+    let scoped = parse_static_line_multi(
+        "Enchanted creature gets +2/+2, has vigilance, and can't attack you or planeswalkers you control.",
+    );
+    assert!(
+        !scoped.iter().any(|d| d.mode == StaticMode::CantAttack),
+        "scoped \"can't attack you …\" must not become a plain CantAttack, got {:?}",
+        scoped.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 509.1b: Madcap Skills — "Enchanted creature gets +3/+0 and can't be
+/// blocked by more than one creature." must decompose into BOTH the P/T grant
+/// AND a `CantBeBlockedByMoreThan { max: 1 }` static affecting the enchanted
+/// creature. Previously the evasion clause was dropped entirely.
+#[test]
+fn cant_be_blocked_static_splits_from_keyword_grant() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +3/+0 and can't be blocked by more than one creature.",
+    );
+    assert!(
+        defs.len() >= 2,
+        "expected P/T + evasion defs, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::CantBeBlockedByMoreThan { max: 1 }
+                && matches!(
+                    d.affected,
+                    Some(TargetFilter::Typed(TypedFilter { ref properties, .. }))
+                        if properties.contains(&FilterProp::EnchantedBy)
+                )),
+        "expected enchanted-creature CantBeBlockedByMoreThan {{ max: 1 }}, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+    // The P/T grant is preserved (and remains a continuous modification).
+    assert!(
+        defs.iter()
+            .any(|d| matches!(d.mode, StaticMode::Continuous)),
+        "P/T grant must be preserved"
+    );
+}
+
+/// CR 509.1b: The compound split must also match the typographic U+2019
+/// apostrophe ("can'​t"), matching the standalone evasion branches — MTGJSON
+/// Oracle text uses U+2019, and the static path doesn't normalize apostrophes.
+#[test]
+fn cant_be_blocked_static_splits_with_typographic_apostrophe() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +3/+0 and can\u{2019}t be blocked by more than one creature.",
+    );
+    assert!(
+        defs.iter()
+            .any(|d| d.mode == StaticMode::CantBeBlockedByMoreThan { max: 1 }),
+        "U+2019 form must still split off the evasion grant, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 509.1b: The bare compound form "… and can't be blocked" yields a plain
+/// `CantBeBlocked` static alongside the keyword grant.
+#[test]
+fn cant_be_blocked_static_splits_bare_form() {
+    let defs = parse_static_line_multi("Enchanted creature gets +2/+2 and can't be blocked.");
+    assert!(
+        defs.iter().any(|d| d.mode == StaticMode::CantBeBlocked),
+        "expected CantBeBlocked, got {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+/// CR 105.4 + CR 509.1b + CR 608.2c: The split path must use the chosen-color
+/// qualifier parser before the generic type parser, matching the standalone
+/// "can't be blocked by <filter>" path.
+#[test]
+fn cant_be_blocked_static_split_keeps_chosen_color_filter() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked by creatures of that color.",
+    );
+    let filter = defs
+        .iter()
+        .find_map(|d| match &d.mode {
+            StaticMode::CantBeBlockedBy { filter } => Some(filter),
+            _ => None,
+        })
+        .expect("expected split CantBeBlockedBy static");
+
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::IsChosenColor))
+        ),
+        "expected IsChosenColor blocker filter, got {filter:?}"
+    );
+}
+
+/// CR 509.1b: A trailing evasion condition belongs on the split
+/// `CantBeBlocked` companion, not only on standalone attached-subject forms.
+#[test]
+fn cant_be_blocked_static_split_keeps_trailing_condition() {
+    let defs = parse_static_line_multi(
+        "Enchanted creature gets +2/+2 and can't be blocked as long as you control a Gate.",
+    );
+    let condition = defs
+        .iter()
+        .find_map(|d| {
+            (d.mode == StaticMode::CantBeBlocked)
+                .then_some(d.condition.as_ref())
+                .flatten()
+        })
+        .expect("expected split CantBeBlocked static with condition");
+
+    assert!(
+        matches!(
+            condition,
+            StaticCondition::IsPresent {
+                filter: Some(TargetFilter::Typed(tf))
+            } if tf.get_subtype() == Some("Gate")
+        ),
+        "expected Gate condition, got {condition:?}"
+    );
 }
 
 /// CR 118.9: Rooftop Storm grants {0} as an alternative MANA cost for Zombie
@@ -530,6 +740,24 @@ fn static_rancor() {
         .contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::Trample
         }));
+}
+
+#[test]
+fn static_archetype_cant_have_keyword() {
+    // CR 613.1f + CR 702: Theros Archetype cycle / Arcane Lighthouse —
+    // "... can't have or gain [keyword]" must emit a Layer 6 CantHaveKeyword denial
+    // static (scoped to the same subject) alongside the keyword removal.
+    let defs = parse_static_line_multi(
+        "Creatures your opponents control lose flying and can't have or gain flying.",
+    );
+    assert!(
+        defs.iter().any(|d| matches!(
+            &d.mode,
+            StaticMode::CantHaveKeyword { keyword } if *keyword == Keyword::Flying
+        )),
+        "expected a CantHaveKeyword(Flying) denial static, got modes {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -2656,10 +2884,31 @@ fn static_lands_you_control_have() {
 
 #[test]
 fn static_cant_be_the_target() {
+    // CR 702.11a: "can't be the target of spells or abilities your opponents
+    // control" (Sphinx of the Final Word) IS Hexproof — the permanent's controller
+    // can still target it — so it is modeled as a Hexproof keyword grant (which the
+    // targeting check already enforces with the correct controller scope) rather
+    // than a scope-less blanket static.
     let def = parse_static_line(
             "Sphinx of the Final Word can't be the target of spells or abilities your opponents control.",
         )
         .unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(def
+        .modifications
+        .contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Hexproof,
+        }));
+}
+
+#[test]
+fn static_cant_be_targeted_blanket_is_shroud_static() {
+    // CR 702.18a: the unqualified "can't be the target of spells or abilities"
+    // (no controller qualifier) is blanket Shroud — untargetable by any player,
+    // including the controller — modeled as the CantBeTargeted static and enforced
+    // in `targeting.rs::can_target`.
+    let def =
+        parse_static_line("Guardian Idol can't be the target of spells or abilities.").unwrap();
     assert_eq!(def.mode, StaticMode::CantBeTargeted);
 }
 
@@ -13347,4 +13596,79 @@ fn static_homing_sliver_grants_typecycling_to_slivers_in_hand() {
         "expected AddKeyword(Typecycling {{ {{3}}, Sliver }}), got {:?}",
         def.modifications
     );
+}
+
+#[test]
+fn eriette_charmed_apple_static_and_trigger_parse() {
+    use crate::parser::oracle_trigger::parse_trigger_line;
+    use crate::types::ability::{AttachmentKind, PlayerFilter, QuantityRef};
+
+    let static_def = parse_static_line(
+        "Each creature that's enchanted by an Aura you control can't attack you or planeswalkers you control.",
+    )
+    .expect("Eriette attack restriction must parse");
+    assert_eq!(static_def.mode, StaticMode::CantAttack);
+    assert_eq!(
+        static_def.affected,
+        Some(TargetFilter::Typed(TypedFilter::creature().properties(
+            vec![FilterProp::HasAttachment {
+                kind: AttachmentKind::Aura,
+                controller: Some(ControllerRef::You),
+                exclude_source: false,
+            }]
+        ))),
+        "affected must be creatures enchanted by an Aura you control, got {:?}",
+        static_def.affected
+    );
+    assert_eq!(
+        static_def.attack_defended.as_ref(),
+        Some(&crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker),
+        "scoped restriction must defend player+planeswalkers, got {:?}",
+        static_def.attack_defended
+    );
+    assert_ne!(
+        static_def.affected,
+        Some(TargetFilter::SelfRef),
+        "must not fall through to SelfRef CantAttack on Eriette herself"
+    );
+
+    let trigger = parse_trigger_line(
+        "At the beginning of your end step, each opponent loses X life and you gain X life, where X is the number of Auras you control.",
+        "Eriette of the Charmed Apple",
+    );
+    let execute = trigger.execute.expect("end step execute");
+    assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+    match &*execute.effect {
+        Effect::LoseLife { amount, .. } => match amount {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => {
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected Typed aura count filter");
+                };
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Aura"))
+                        || tf.properties.iter().any(|p| matches!(
+                            p,
+                            FilterProp::HasAttachment {
+                                kind: AttachmentKind::Aura,
+                                ..
+                            }
+                        ))
+                );
+            }
+            other => panic!("expected ObjectCount Auras on LoseLife, got {other:?}"),
+        },
+        other => panic!("expected LoseLife, got {other:?}"),
+    }
+    let gain = execute.sub_ability.expect("gain life sibling");
+    match &*gain.effect {
+        Effect::GainLife { amount, .. } => {
+            assert!(matches!(amount, QuantityExpr::Ref { .. }));
+        }
+        other => panic!("expected GainLife, got {other:?}"),
+    }
 }

@@ -1223,6 +1223,12 @@ pub(crate) fn with_clause_duration(
         } => {
             *perm_dur = duration;
         }
+        Effect::CastFromZone {
+            duration: ref mut effect_duration,
+            ..
+        } => {
+            *effect_duration = Some(duration);
+        }
         _ => {}
     }
     clause

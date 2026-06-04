@@ -156,6 +156,52 @@ pub(crate) fn strip_leading_general_conditional(
     (None, text.to_string())
 }
 
+/// CR 608.2c + CR 608.2d: Strip a leading `"If <condition>, "` head ONLY when the
+/// typed-condition strip already returned `None` AND the body that would follow
+/// the head begins with `"you may "`. The unrepresentable condition is dropped
+/// to preserve the optional choice on the body — issue #2277.
+///
+/// Without this fallback the `If <X>, ` head stays on the text, so the downstream
+/// `strip_optional_effect_prefix` (which requires `"you may "` at position 0)
+/// never fires and the optional flag is lost (e.g. Amareth's "If it shares a card
+/// type with that permanent, you may reveal that card and put it into your hand",
+/// Tithe's "If target opponent controls more lands than you, you may search …").
+/// Dropping the condition is acceptable because the upstream `Condition_If`
+/// swallow detector still flags these patterns as condition-unsupported — we are
+/// fixing the OPTIONAL representation here, NOT the condition. The condition
+/// stays correctly unrepresented; the may-choice is now preserved.
+///
+/// TRADE-OFF (read before extending): this is a deliberate rules-fidelity
+/// regression at the AST layer. The produced sub-ability carries `optional:
+/// true` with `condition: null`, so if such a card were ever executed it would
+/// offer the may-choice *ungated* — strictly more permissive than the printed
+/// `If <gate>` text. This is sound ONLY because `Condition_If` keeps the card
+/// `supported == false`, which holds it out of the engine's production-execution
+/// set. When a typed recognizer is later added for one of these conditions, the
+/// typed strip will match first, this fallback will stop firing for that shape,
+/// and the card transitions to a fully gated+optional AST in a single step.
+///
+/// Mandatory-body guard: this function is a no-op when the body does NOT start
+/// with `"you may "`. That prevents turning, e.g.,
+/// `"If you control a creature, draw a card"` into an unconditional draw.
+///
+/// Callers must invoke this ONLY after the typed strip returned `None` — the
+/// function performs no typed-condition recognition itself.
+pub(crate) fn strip_unrecognized_conditional_head_when_body_optional(text: &str) -> String {
+    let Some((_condition_fragment, body)) = split_leading_conditional(text) else {
+        return text.to_string();
+    };
+    let body_lower = body.to_lowercase();
+    if nom_on_lower(&body, &body_lower, |i| {
+        value((), tag::<_, _, OracleError<'_>>("you may ")).parse(i)
+    })
+    .is_none()
+    {
+        return text.to_string();
+    }
+    body
+}
+
 /// CR 702.33b + CR 702.33c + CR 702.33f: Recognize quantified or per-variant
 /// kicker gating in a leading `"if [subject] was kicked …, [body]"` clause.
 /// Returns the typed `AbilityCondition` and the residual body when matched.
@@ -2518,17 +2564,30 @@ pub(super) fn try_nom_condition_as_ability_condition(
         }
     }
 
-    let (negated, rest_after_prefix) = if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("it's not a ").parse(lower.as_str())
+    // CR 608.2c + CR 205.3a: Article choice must not affect anaphoric subtype gates.
+    let (negated, rest_after_prefix) = if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("it's not a "),
+        tag("it's not an "),
+    ))
+    .parse(lower.as_str())
     {
         (true, Some(rest))
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it's a ").parse(lower.as_str()) {
-        (false, Some(rest))
     } else if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("that card is a ").parse(lower.as_str())
+        alt((tag::<_, _, OracleError<'_>>("it's a "), tag("it's an "))).parse(lower.as_str())
     {
         (false, Some(rest))
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it isn't a ").parse(lower.as_str())
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("that card is a "),
+        tag("that card is an "),
+    ))
+    .parse(lower.as_str())
+    {
+        (false, Some(rest))
+    } else if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("it isn't a "),
+        tag("it isn't an "),
+    ))
+    .parse(lower.as_str())
     {
         (true, Some(rest))
     } else {
@@ -3291,6 +3350,40 @@ mod tests {
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::types::counter::{CounterMatch, CounterType};
 
+    /// CR 608.2c + CR 608.2d: When the leading `If <X>, ` has no typed
+    /// recognizer AND the body begins with `"you may "`, the structural
+    /// fallback strips the head so the inner optional choice can be peeled
+    /// downstream. Issue #2277 — Amareth pattern.
+    #[test]
+    fn strip_unrecognized_conditional_head_fires_on_optional_body() {
+        let input = "If it shares a card type with that permanent, you may reveal \
+                     that card and put it into your hand";
+        let stripped = strip_unrecognized_conditional_head_when_body_optional(input);
+        assert_eq!(
+            stripped,
+            "you may reveal that card and put it into your hand"
+        );
+    }
+
+    /// CR 608.2c: Mandatory-body guard — when the body does NOT begin with
+    /// `"you may "`, the function MUST be a no-op so a mandatory effect is
+    /// never silently un-conditioned. Issue #2277 regression.
+    #[test]
+    fn strip_unrecognized_conditional_head_noop_on_mandatory_body() {
+        let input = "If you control a creature, draw a card";
+        let stripped = strip_unrecognized_conditional_head_when_body_optional(input);
+        assert_eq!(stripped, input);
+    }
+
+    /// No-If-head guard — when there is no leading conditional at all, the
+    /// function MUST return the text unchanged.
+    #[test]
+    fn strip_unrecognized_conditional_head_noop_on_no_if_head() {
+        let input = "You may search your library for a card";
+        let stripped = strip_unrecognized_conditional_head_when_body_optional(input);
+        assert_eq!(stripped, input);
+    }
+
     /// CR 603.12: After refactoring `strip_if_you_do_conditional` to delegate to
     /// the shared `parse_reflexive_conditional_connector` combinator, all eight
     /// reflexive connectors must still strip to the same `(condition, rest)`.
@@ -3919,6 +4012,30 @@ mod tests {
             tf.type_filters
                 .contains(&TypeFilter::Subtype("Goblin".to_string())),
             "expected Goblin subtype filter, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// CR 608.2c + CR 205.3a: Article choice must not affect anaphoric subtype
+    /// gates. "If it's an Elf" is the same condition family as "If it's a Goblin".
+    #[test]
+    fn if_its_an_subtype_parses_condition() {
+        let (cond, body) = strip_leading_general_conditional(
+            "If it's an Elf, create three 1/1 green Elf Warrior creature tokens.",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(body, "create three 1/1 green Elf Warrior creature tokens.");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = cond else {
+            panic!("expected TargetMatchesFilter for 'Elf' subtype, got {cond:?}");
+        };
+        assert!(!use_lki, "present-tense 'it's an' check must not use LKI");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter for subtype");
+        };
+        assert!(
+            tf.type_filters
+                .contains(&TypeFilter::Subtype("Elf".to_string())),
+            "expected Elf subtype filter, got {:?}",
             tf.type_filters
         );
     }

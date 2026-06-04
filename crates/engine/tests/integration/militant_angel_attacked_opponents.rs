@@ -5,7 +5,7 @@
 //!   "Whenever Militant Angel attacks, create a number of 1/1 white Soldier
 //!    creature tokens equal to the number of opponents you attacked this turn."
 //!
-//! The `PlayerCount { OpponentAttackedThisTurn }` filter resolves against
+//! The `PlayerCount { OpponentAttacked { You, ThisTurn } }` filter resolves against
 //! `state.attacked_defenders_this_turn[controller]`, which is populated by
 //! `record_attackers_declared` during the real DeclareAttackers step (CR 508.5:
 //! the defending player is the player/planeswalker-controller/battle-protector
@@ -20,7 +20,7 @@
 use engine::game::combat::AttackTarget;
 use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::{PlayerFilter, QuantityExpr, QuantityRef};
+use engine::types::ability::{AttackScope, AttackSubject, PlayerFilter, QuantityExpr, QuantityRef};
 use engine::types::actions::GameAction;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -30,7 +30,7 @@ use engine::types::player::PlayerId;
 const P2: PlayerId = PlayerId(2);
 
 /// CR 508.6: after P0 declares a creature attacking P1, resolving
-/// `PlayerCount { OpponentAttackedThisTurn }` from P0's perspective counts the
+/// `PlayerCount { OpponentAttacked { You, ThisTurn } }` from P0's perspective counts the
 /// one opponent attacked this turn.
 #[test]
 fn opponents_attacked_this_turn_counts_declared_defender() {
@@ -45,6 +45,7 @@ fn opponents_attacked_this_turn_counts_declared_defender() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
 
@@ -52,7 +53,10 @@ fn opponents_attacked_this_turn_counts_declared_defender() {
         runner.state(),
         &QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentAttackedThisTurn,
+                filter: PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisTurn,
+                },
             },
         },
         P0,
@@ -79,7 +83,10 @@ fn opponents_attacked_this_turn_is_zero_without_combat() {
         runner.state(),
         &QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentAttackedThisTurn,
+                filter: PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisTurn,
+                },
             },
         },
         P0,
@@ -93,7 +100,7 @@ fn opponents_attacked_this_turn_is_zero_without_combat() {
 }
 
 /// CR 508.6: in a 3-player game, when P0 declares creatures attacking BOTH P1
-/// and P2, resolving `PlayerCount { OpponentAttackedThisTurn }` from P0 counts
+/// and P2, resolving `PlayerCount { OpponentAttacked { You, ThisTurn } }` from P0 counts
 /// both attacked opponents (Gemini-specified multi-opponent coverage for
 /// Militant Angel's token fan-out).
 #[test]
@@ -120,6 +127,7 @@ fn opponents_attacked_this_turn_counts_multiple_defenders() {
                 (attacker_vs_p1, AttackTarget::Player(P1)),
                 (attacker_vs_p2, AttackTarget::Player(P2)),
             ],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
 
@@ -127,7 +135,10 @@ fn opponents_attacked_this_turn_counts_multiple_defenders() {
         runner.state(),
         &QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentAttackedThisTurn,
+                filter: PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisTurn,
+                },
             },
         },
         P0,
@@ -140,10 +151,167 @@ fn opponents_attacked_this_turn_counts_multiple_defenders() {
     );
 }
 
+/// CR 702.121a: Melee's magnitude — `OpponentAttacked { You, ThisCombat }` — must
+/// count the distinct opponents attacked in the CURRENT combat, resolved from the
+/// current combat's declaration ledger (not the turn-scoped ledger). With P0
+/// attacking both P1 and P2 this combat, the combat-scoped count is 2, so a
+/// Melee creature would get +2/+2.
+#[test]
+fn opponents_attacked_this_combat_counts_current_combat_defenders() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_vs_p1 = scenario.add_creature(P0, "Soldier", 2, 2).id();
+    let attacker_vs_p2 = scenario.add_creature(P0, "Soldier", 2, 2).id();
+    let mut runner = scenario.build();
+
+    for _ in 0..12 {
+        if runner.waiting_for_kind() == "DeclareAttackers" {
+            break;
+        }
+        let _ = runner.act(GameAction::PassPriority);
+    }
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (attacker_vs_p1, AttackTarget::Player(P1)),
+                (attacker_vs_p2, AttackTarget::Player(P2)),
+            ],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    let count = resolve_quantity(
+        runner.state(),
+        &QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisCombat,
+                },
+            },
+        },
+        P0,
+        attacker_vs_p1,
+    );
+
+    assert_eq!(
+        count, 2,
+        "P0 attacked both opponents this combat — Melee pumps +2/+2 (CR 702.121a)"
+    );
+}
+
+/// CR 702.121a + CR 506.4: Melee counts opponents attacked this combat from
+/// declaration history, not from the live attacker set. Removing attackers from
+/// combat before the trigger resolves must not reduce the count.
+#[test]
+fn opponents_attacked_this_combat_survives_attackers_leaving_combat() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_vs_p1 = scenario.add_creature(P0, "Soldier", 2, 2).id();
+    let attacker_vs_p2 = scenario.add_creature(P0, "Soldier", 2, 2).id();
+    let mut runner = scenario.build();
+
+    for _ in 0..12 {
+        if runner.waiting_for_kind() == "DeclareAttackers" {
+            break;
+        }
+        let _ = runner.act(GameAction::PassPriority);
+    }
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (attacker_vs_p1, AttackTarget::Player(P1)),
+                (attacker_vs_p2, AttackTarget::Player(P2)),
+            ],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+
+    runner
+        .state_mut()
+        .combat
+        .as_mut()
+        .expect("combat exists")
+        .attackers
+        .clear();
+
+    let count = resolve_quantity(
+        runner.state(),
+        &QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisCombat,
+                },
+            },
+        },
+        P0,
+        attacker_vs_p1,
+    );
+
+    assert_eq!(
+        count, 2,
+        "Melee still counts both opponents attacked this combat after attackers leave combat"
+    );
+}
+
+/// CR 702.121a: Melee counts the opponents attacked this combat even if an
+/// attacked opponent leaves the game before the trigger resolves.
+#[test]
+fn opponents_attacked_this_combat_counts_eliminated_defender() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker_vs_p1 = scenario.add_creature(P0, "Soldier", 2, 2).id();
+    let attacker_vs_p2 = scenario.add_creature(P0, "Soldier", 2, 2).id();
+    let mut runner = scenario.build();
+
+    for _ in 0..12 {
+        if runner.waiting_for_kind() == "DeclareAttackers" {
+            break;
+        }
+        let _ = runner.act(GameAction::PassPriority);
+    }
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (attacker_vs_p1, AttackTarget::Player(P1)),
+                (attacker_vs_p2, AttackTarget::Player(P2)),
+            ],
+            bands: vec![],
+        })
+        .expect("DeclareAttackers should succeed");
+    runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == P2)
+        .expect("P2 exists")
+        .is_eliminated = true;
+
+    let count = resolve_quantity(
+        runner.state(),
+        &QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisCombat,
+                },
+            },
+        },
+        P0,
+        attacker_vs_p1,
+    );
+
+    assert_eq!(
+        count, 2,
+        "Melee still counts P2 because P0 attacked P2 this combat"
+    );
+}
+
 /// CR 102.3 + CR 800.4a: an opponent is a player still in the game, and a
 /// player who has left the game (`is_eliminated`) no longer participates, so a
 /// defender P0 attacked this turn but who has since left the game must NOT be
-/// counted by `PlayerCount { OpponentAttackedThisTurn }`. Discriminating test
+/// counted by `PlayerCount { OpponentAttacked { You, ThisTurn } }`. Discriminating test
 /// for the `!p.is_eliminated` guard on the resolving arm: with both defenders
 /// attacked the count is 2 (see the multi-defender test); eliminating one
 /// attacked opponent drops it to 1.
@@ -167,6 +335,7 @@ fn opponents_attacked_this_turn_excludes_eliminated_defender() {
                 (attacker_vs_p1, AttackTarget::Player(P1)),
                 (attacker_vs_p2, AttackTarget::Player(P2)),
             ],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
 
@@ -186,7 +355,10 @@ fn opponents_attacked_this_turn_excludes_eliminated_defender() {
         runner.state(),
         &QuantityExpr::Ref {
             qty: QuantityRef::PlayerCount {
-                filter: PlayerFilter::OpponentAttackedThisTurn,
+                filter: PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisTurn,
+                },
             },
         },
         P0,

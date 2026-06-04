@@ -721,6 +721,12 @@ export interface GameObject {
    */
   is_token?: boolean;
   /**
+   * CR 707.10 / CR 707.12a: Whether this object is a copy of a card/spell and so
+   * is not "represented by a card" (mirrors the engine's `is_copy`). Present
+   * only when true; the frontend does not read it (display only).
+   */
+  is_copy?: boolean;
+  /**
    * Image-lookup routing hint from the engine. "Card" → look up the image
    * in the real-card database (default; also covers token-copies of real
    * cards like Twinflame/Helm of the Host). "Token" → look up the image
@@ -1101,6 +1107,9 @@ export type WaitingFor =
   // CR 702.140c + CR 730.2a: mutating creature spell resolving with a legal
   // target — controller chooses to put it on top of or under the target creature.
   | { type: "MutateMergeChoice"; data: { player: PlayerId; merging_id: ObjectId; target_id: ObjectId } }
+  // CR 702.99a: resolving Cipher spell — controller may exile this card encoded
+  // on a creature they control (or decline, sending it to the graveyard).
+  | { type: "CipherEncodeChoice"; data: { player: PlayerId; card_id: ObjectId; creatures: ObjectId[] } }
   | { type: "CastingVariantChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode; options: CastingVariantChoiceOption[] } }
   | { type: "ChoosePermanentTypeSlot"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; source: ObjectId; payment_mode?: CastPaymentMode; available_slots: CoreType[] } }
   | { type: "MultiTargetSelection"; data: { player: PlayerId; legal_targets: ObjectId[]; min_targets: number; max_targets: number; pending_ability: unknown } }
@@ -1163,6 +1172,10 @@ export type WaitingFor =
   | { type: "ExertChoice"; data: { player: PlayerId; attacker: ObjectId; remaining?: ObjectId[] } }
   | { type: "PhyrexianPayment"; data: { player: PlayerId; spell_object: ObjectId; shards: PhyrexianShard[] } }
   | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; trample: TrampleKind | null; defending_player: PlayerId; attack_target: AttackTarget; pw_loyalty?: number; pw_controller?: PlayerId } }
+  // CR 510.1d + CR 702.22k: a blocking creature blocking a banded attacker —
+  // the active player divides that blocker's combat damage among the attackers
+  // it's blocking (free division, no lethal ordering).
+  | { type: "AssignBlockerDamage"; data: { player: PlayerId; blocker_id: ObjectId; total_damage: number; attackers: ObjectId[] } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
   | { type: "MoveCountersDistribution"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; destinations: ObjectId[]; pending_effect: unknown } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId } }
@@ -1432,7 +1445,7 @@ export type GameAction =
   | { type: "CastSpellWithPaymentMode"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode: CastPaymentMode } }
   | { type: "Foretell"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "ActivateAbility"; data: { source_id: ObjectId; ability_index: number } }
-  | { type: "DeclareAttackers"; data: { attacks: [ObjectId, AttackTarget][] } }
+  | { type: "DeclareAttackers"; data: { attacks: [ObjectId, AttackTarget][]; bands?: ObjectId[][] } }
   | { type: "DeclareBlockers"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "MulliganDecision"; data: { choice: MulliganChoice } }
   | { type: "ReorderHand"; data: { order: ObjectId[] } }
@@ -1506,11 +1519,15 @@ export type GameAction =
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
   // CR 702.140c + CR 730.2a: answer to MutateMergeChoice — top or bottom.
   | { type: "ChooseMutateMergeSide"; data: { side: "Top" | "Bottom" } }
+  // CR 702.99a: answer to CipherEncodeChoice — a creature to encode on, or null to decline.
+  | { type: "CipherEncode"; data: { creature: ObjectId | null } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }
   | { type: "SetPhaseStops"; data: { stops: Phase[] } }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
+  // CR 510.1d + CR 702.22k: blocker's combat-damage division among the attackers it blocks.
+  | { type: "AssignBlockerDamage"; data: { assignments: [ObjectId, number][] } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
   | { type: "ChooseCounterMoveDistribution"; data: { selections: CounterMoveChoice[] } }
   | { type: "RetargetSpell"; data: { new_targets: TargetRef[] } }

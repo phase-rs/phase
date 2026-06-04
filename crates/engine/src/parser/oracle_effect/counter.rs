@@ -491,6 +491,10 @@ fn rebind_counter_quantity_scope(count: QuantityExpr, scope: ObjectScope) -> Qua
             inner: Box::new(rebind_counter_quantity_scope(*inner, scope)),
             offset,
         },
+        QuantityExpr::ClampMin { inner, minimum } => QuantityExpr::ClampMin {
+            inner: Box::new(rebind_counter_quantity_scope(*inner, scope)),
+            minimum,
+        },
         QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
             factor,
             inner: Box::new(rebind_counter_quantity_scope(*inner, scope)),

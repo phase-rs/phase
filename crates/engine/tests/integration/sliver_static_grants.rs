@@ -117,6 +117,7 @@ fn cant_be_blocked_except_by_flying_rejects_nonflying_blocker() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("attacker should be able to attack");
 

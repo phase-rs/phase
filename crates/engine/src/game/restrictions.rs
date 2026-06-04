@@ -1668,6 +1668,39 @@ fn is_source_blocked(state: &crate::types::game_state::GameState, source_id: Obj
         .is_some_and(|blockers| !blockers.is_empty())
 }
 
+/// CR 508.1d + CR 508.1h: Whether a declared `AttackTarget` falls within a
+/// combat restriction's defended scope relative to the static's controller.
+pub(crate) fn attack_target_matches_defended_scope(
+    state: &crate::types::game_state::GameState,
+    attack_target: Option<&crate::game::combat::AttackTarget>,
+    filter: &crate::types::triggers::AttackTargetFilter,
+    source_controller: PlayerId,
+) -> bool {
+    use crate::game::combat::AttackTarget;
+    use crate::types::triggers::AttackTargetFilter;
+    let Some(target) = attack_target else {
+        return false;
+    };
+    let permanent_controller =
+        |id: ObjectId| -> Option<PlayerId> { state.objects.get(&id).map(|obj| obj.controller) };
+    match (filter, target) {
+        (AttackTargetFilter::Player, AttackTarget::Player(p)) => *p == source_controller,
+        (AttackTargetFilter::Planeswalker, AttackTarget::Planeswalker(pw_id)) => {
+            permanent_controller(*pw_id) == Some(source_controller)
+        }
+        (AttackTargetFilter::PlayerOrPlaneswalker, AttackTarget::Player(p)) => {
+            *p == source_controller
+        }
+        (AttackTargetFilter::PlayerOrPlaneswalker, AttackTarget::Planeswalker(pw_id)) => {
+            permanent_controller(*pw_id) == Some(source_controller)
+        }
+        (AttackTargetFilter::Battle, AttackTarget::Battle(b_id)) => {
+            permanent_controller(*b_id) == Some(source_controller)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

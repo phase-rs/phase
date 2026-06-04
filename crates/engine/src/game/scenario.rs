@@ -1223,6 +1223,7 @@ impl GameRunner {
             &mut self.state,
             GameAction::DeclareAttackers {
                 attacks: attacks.to_vec(),
+                bands: vec![],
             },
         )
     }
@@ -1490,6 +1491,7 @@ impl GameRunner {
                 }
             },
             WaitingFor::MutateMergeChoice { .. } => "MutateMergeChoice",
+            WaitingFor::CipherEncodeChoice { .. } => "CipherEncodeChoice",
             WaitingFor::CastingVariantChoice { .. } => "CastingVariantChoice",
             WaitingFor::ChoosePermanentTypeSlot { .. } => "ChoosePermanentTypeSlot",
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
@@ -1524,6 +1526,7 @@ impl GameRunner {
             WaitingFor::ChooseObjectsSelection { .. } => "ChooseObjectsSelection",
             WaitingFor::CopyRetarget { .. } => "CopyRetarget",
             WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
+            WaitingFor::AssignBlockerDamage { .. } => "AssignBlockerDamage",
             WaitingFor::DistributeAmong { .. } => "DistributeAmong",
             WaitingFor::MoveCountersDistribution { .. } => "MoveCountersDistribution",
             WaitingFor::PayAmountChoice { .. } => "PayAmountChoice",

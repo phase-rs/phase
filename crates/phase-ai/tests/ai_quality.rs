@@ -312,7 +312,7 @@ fn attacks_when_opponent_is_at_lethal() {
 
     for (diff, action) in ai_choose_at_all_difficulties(runner.state()) {
         match &action {
-            GameAction::DeclareAttackers { attacks } => {
+            GameAction::DeclareAttackers { attacks, .. } => {
                 assert!(
                     !attacks.is_empty(),
                     "{diff:?}: should attack when opponent is at lethal"
@@ -390,7 +390,7 @@ fn attacks_with_evasive_creatures() {
     // The flyer can't be blocked by a ground creature — AI should attack
     let action = ai_choose(runner.state(), AiDifficulty::VeryHard);
     match &action {
-        GameAction::DeclareAttackers { attacks } => {
+        GameAction::DeclareAttackers { attacks, .. } => {
             assert!(
                 attacks.iter().any(|(id, _)| *id == flyer),
                 "Should attack with evasive flyer that can't be blocked"

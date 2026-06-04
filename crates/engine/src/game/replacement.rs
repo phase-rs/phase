@@ -1282,6 +1282,9 @@ fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> 
         QuantityExpr::Offset { inner, offset } => {
             Some(resolve_event_replacement_quantity(inner, event_count)? + offset)
         }
+        QuantityExpr::ClampMin { inner, minimum } => {
+            Some(resolve_event_replacement_quantity(inner, event_count)?.max(*minimum))
+        }
         QuantityExpr::Multiply { factor, inner } => {
             Some(factor * resolve_event_replacement_quantity(inner, event_count)?)
         }

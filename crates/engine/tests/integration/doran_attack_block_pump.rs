@@ -49,6 +49,7 @@ fn declare_attacker(runner: &mut engine::game::scenario::GameRunner, attacker: O
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(attacker, AttackTarget::Player(P1))],
+            bands: vec![],
         })
         .expect("DeclareAttackers should succeed");
     runner.advance_until_stack_empty();
@@ -109,6 +110,7 @@ fn doran_pumps_blocking_creature() {
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![(opp_attacker, AttackTarget::Player(P0))],
+            bands: vec![],
         })
         .expect("P1 DeclareAttackers should succeed");
     if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {

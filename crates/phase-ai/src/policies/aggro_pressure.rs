@@ -53,7 +53,7 @@ impl TacticalPolicy for AggroPressurePolicy {
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
         match &ctx.candidate.action {
-            GameAction::DeclareAttackers { attacks } => score_declare_attackers(ctx, attacks),
+            GameAction::DeclareAttackers { attacks, .. } => score_declare_attackers(ctx, attacks),
             GameAction::CastSpell { object_id, .. } => score_cast_spell(ctx, *object_id),
             _ => PolicyVerdict::Score {
                 delta: 0.0,
@@ -293,7 +293,10 @@ mod tests {
         attacks: Vec<(ObjectId, engine::game::combat::AttackTarget)>,
     ) -> CandidateAction {
         CandidateAction {
-            action: GameAction::DeclareAttackers { attacks },
+            action: GameAction::DeclareAttackers {
+                attacks,
+                bands: vec![],
+            },
             metadata: ActionMetadata {
                 actor: Some(AI),
                 tactical_class: TacticalClass::Attack,

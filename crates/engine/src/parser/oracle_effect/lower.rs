@@ -1,7 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1};
-use nom::combinator::{eof, opt, rest, value};
+use nom::combinator::{all_consuming, eof, map, not, opt, rest, value, verify};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -23,10 +23,11 @@ use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, Comparator, ControllerRef, DamageSource,
-    DelayedTriggerCondition, Duration, Effect, FilterProp, MultiTargetSpec, PaymentCost,
-    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, RoundingMode, StaticCondition,
-    StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, AttackScope, AttackSubject, Comparator,
+    ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
+    MultiTargetSpec, ObjectScope, PaymentCost, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+    QuantityRef, RoundingMode, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::CounterType;
 use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
@@ -1677,7 +1678,7 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
     // "each player" / "each opponent" restricts the affected set to the players
     // the ability source creature attacked this turn — Angel of Destiny: "each
     // player this creature attacked this turn loses the game". Resolved as the
-    // source-specific `OpponentAttackedBySourceThisTurn`, which excludes the
+    // source-specific `OpponentAttacked { Source, ThisTurn }`, which excludes the
     // controller and avoids widening to players attacked by other creatures.
     // Like the "who controls" clause above, the relative clause MUST be consumed
     // and reflected in the scope; dropping it would over-apply the loss to every
@@ -1690,7 +1691,10 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
     }) {
         let deconjugated = subject::deconjugate_verb(after_clause);
         return (
-            Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
+            Some(PlayerFilter::OpponentAttacked {
+                subject: AttackSubject::Source,
+                scope: AttackScope::ThisTurn,
+            }),
             deconjugated,
         );
     }
@@ -3603,23 +3607,18 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             if let Some(qty) = qty {
                 // Route based on target phrase
                 if target_phrase == "itself" {
-                    // CR 608.2k: When target is "itself", an anaphoric "its power"
-                    // means the target's power. Only `Anaphoric` is remapped — an
-                    // explicit possessive ("the sacrificed creature's power",
-                    // `CostPaidObject` per CR 608.2k) keeps its fixed referent.
-                    let qty = match &qty {
-                        QuantityExpr::Ref {
-                            qty:
-                                QuantityRef::Power {
-                                    scope: crate::types::ability::ObjectScope::Anaphoric,
-                                },
-                        } => QuantityExpr::Ref {
-                            qty: QuantityRef::Power {
-                                scope: crate::types::ability::ObjectScope::Target,
-                            },
-                        },
-                        other => other.clone(),
-                    };
+                    // CR 608.2k: When the recipient is "itself", an anaphoric
+                    // "its <characteristic>" means that target's value. Only the
+                    // pronoun `Anaphoric` is rebound (across every per-object
+                    // characteristic) — an explicit possessive ("the sacrificed
+                    // creature's power", `CostPaidObject`) or a demonstrative
+                    // ("that creature's toughness", `Demonstrative`) keeps its
+                    // fixed referent.
+                    let mut qty = qty;
+                    super::rebind_anaphoric_object_scope(
+                        &mut qty,
+                        crate::types::ability::ObjectScope::Target,
+                    );
                     return Some((
                         Effect::DealDamage {
                             amount: qty,
@@ -4167,7 +4166,15 @@ pub(super) fn compute_sentence_where_x(chunks: &[ClauseChunk]) -> Vec<Option<Str
 pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Option<String>) {
     for needle in [", where x is ", " where x is "] {
         if let Some((before, after)) = tp.split_around(needle) {
-            let expression = after
+            // CR 608.2c: A where-X binding can precede further instructions in the
+            // same resolution ("..., where X is N. Put that card ..."). Truncate on
+            // the TextPair before materializing a String (Halana and Alena, Partners:
+            // "... where X is ~'s power. That creature gains haste ...").
+            let mut after_clause = after;
+            if let Some((clause, _)) = after.split_around(". ") {
+                after_clause = clause;
+            }
+            let expression = after_clause
                 .original
                 .trim()
                 .trim_end_matches('.')
@@ -4318,6 +4325,13 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     if let Some(expr) = parse_where_x_number_of_for_each_clause(expression_lower.as_str()) {
         return Some(expr);
     }
+    // CR 107.3f + CR 113.7: "where X is [printed card name]'s power" refers to the
+    // ability source (Halana and Alena, Partners). Must precede
+    // `parse_event_context_quantity`, which only recognizes anaphoric/participle
+    // possessives.
+    if let Some(expr) = parse_where_x_printed_name_possessive_stat(expression_lower.as_str()) {
+        return Some(expr);
+    }
     // CR 706.2 + CR 706.4: "where X is the result" of a die roll / coin flip
     // binds X to the rolled value via the shared `EventContextAmount` channel
     // (the same one inline "you gain life equal to the result" cards use). This
@@ -4327,6 +4341,57 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // `None` for the bare die-result phrase (see `cda_quantity_returns_none_for_the_result`),
     // so this fallback is what binds Ancient Bronze Dragon's "where X is the result".
     crate::parser::oracle_quantity::parse_event_context_quantity(where_x_expression)
+}
+
+/// CR 107.3f + CR 113.7: Printed-name possessive in a where-X binding
+/// ("Halana and Alena's power" → `Power { scope: Source }`). Determiner-led
+/// forms ("the sacrificed creature's power", "~'s power") are rejected here and
+/// handled by `parse_cda_quantity` / `parse_event_context_quantity` upstream.
+fn parse_where_x_printed_name_possessive_stat(expression_lower: &str) -> Option<QuantityExpr> {
+    let blocked_prefix = alt((
+        tag::<_, _, OracleError<'_>>("that "),
+        tag("the "),
+        tag("target "),
+        tag("its "),
+        tag("this "),
+        tag("sacrificed "),
+        tag("discarded "),
+        tag("destroyed "),
+        tag("exiled "),
+        tag("milled "),
+        tag("revealed "),
+        tag("targeted "),
+        tag("entered "),
+        tag("~"),
+    ));
+    let non_empty = |subject: &str| subject.chars().any(|c| !c.is_whitespace());
+    let possessive_stat = alt((
+        map(
+            (
+                verify(take_until::<_, _, OracleError<'_>>("'s power"), non_empty),
+                tag("'s power"),
+            ),
+            |(_, _)| QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        ),
+        map(
+            (
+                verify(
+                    take_until::<_, _, OracleError<'_>>("'s toughness"),
+                    non_empty,
+                ),
+                tag("'s toughness"),
+            ),
+            |(_, _)| QuantityRef::Toughness {
+                scope: ObjectScope::Source,
+            },
+        ),
+    ));
+    let (_, qty) = all_consuming(preceded(not(blocked_prefix), possessive_stat))
+        .parse(expression_lower)
+        .ok()?;
+    Some(QuantityExpr::Ref { qty })
 }
 
 fn parse_where_x_number_of_for_each_clause(expression_lower: &str) -> Option<QuantityExpr> {
@@ -4425,6 +4490,13 @@ pub(super) fn apply_where_x_quantity_expression(
                 where_x_expression,
             )),
             offset,
+        },
+        QuantityExpr::ClampMin { inner, minimum } => QuantityExpr::ClampMin {
+            inner: Box::new(apply_where_x_quantity_expression(
+                *inner,
+                where_x_expression,
+            )),
+            minimum,
         },
         QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
             factor,
@@ -4826,7 +4898,11 @@ pub(crate) fn parse_dynamic_counter_suffix_body(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_where_x_quantity_expression, strip_return_destination_ext_with_remainder};
+    use super::{
+        parse_where_x_quantity_expression, strip_return_destination_ext_with_remainder,
+        strip_trailing_where_x,
+    };
+    use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{QuantityExpr, QuantityRef};
     use crate::types::counter::CounterType;
     use crate::types::zones::Zone;
@@ -4867,6 +4943,16 @@ mod tests {
     }
 
     #[test]
+    fn strip_trailing_where_x_stops_at_next_sentence() {
+        let text = "put x +1/+1 counters on another target creature you control, where x is halana and alena's power. that creature gains haste until end of turn.";
+        let lower = text.to_ascii_lowercase();
+        let expr = strip_trailing_where_x(TextPair::new(text, &lower))
+            .1
+            .expect("where-x");
+        assert_eq!(expr, "halana and alena's power");
+    }
+
+    #[test]
     fn where_x_comparator_bounds_preserve_variable_x() {
         for expression in [
             "less than or equal to the amount of life you gained",
@@ -4888,7 +4974,7 @@ mod tests {
 mod where_x_tests {
     use super::parse_where_x_quantity_expression;
     use crate::types::ability::{
-        ControllerRef, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        ControllerRef, ObjectScope, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
     };
 
     /// CR 706.2 + CR 706.4: "where X is the result" (of a die roll / coin flip)
@@ -4902,6 +4988,19 @@ mod where_x_tests {
             parse_where_x_quantity_expression("the result"),
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
+            })
+        );
+    }
+
+    /// Issue #1993: Halana and Alena, Partners — "where X is [name]'s power".
+    #[test]
+    fn where_x_printed_name_possessive_power_is_source() {
+        assert_eq!(
+            parse_where_x_quantity_expression("Halana and Alena's power"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
             })
         );
     }

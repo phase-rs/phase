@@ -846,6 +846,7 @@ pub fn room_effects(
                         description: Some(
                             "Creatures you control get +2/+2 and have trample.".to_string(),
                         ),
+                        attack_defended: None,
                     }],
                     triggers: Vec::new(),
                 },

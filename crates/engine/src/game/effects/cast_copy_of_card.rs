@@ -155,6 +155,12 @@ fn cast_one_copy(
     // CR 707.12 + CR 601.2a: The copy is created and cast as a spell on the stack.
     copy.zone = Zone::Stack;
     copy.is_token = false;
+    // CR 707.12a: the copy is NOT represented by a card, so abilities gated on
+    // "if this spell is represented by a card" (e.g. Cipher's encode, CR 702.99a)
+    // must not fire for it. `is_token` stays false (this copy goes to the
+    // graveyard like a card per the engine's CastCopyOfCard model), so the
+    // copy-ness is recorded separately here.
+    copy.is_copy = true;
     copy.tapped = false;
     copy.prepared = None;
     // CR 707.12: The copy is created in the same zone as the source object before casting.

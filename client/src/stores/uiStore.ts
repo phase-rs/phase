@@ -115,6 +115,9 @@ interface UiStoreState {
   autoPass: boolean;
   combatMode: "attackers" | "blockers" | null;
   selectedAttackers: ObjectId[];
+  /** CR 702.22c: attacking bands declared this combat (each inner array is one
+   *  band of attacker ids). Empty when no bands are declared. */
+  attackerBands: ObjectId[][];
   blockerAssignments: Map<ObjectId, ObjectId>;
   combatClickHandler: ((id: ObjectId) => void) | null;
   previewSticky: boolean;
@@ -182,6 +185,7 @@ interface UiStoreActions {
   toggleAttacker: (id: ObjectId) => void;
   setGroupSelectedAttackers: (groupIds: ObjectId[], selectedIds: ObjectId[]) => void;
   selectAllAttackers: (ids: ObjectId[]) => void;
+  setAttackerBands: (bands: ObjectId[][]) => void;
   assignBlocker: (blockerId: ObjectId, attackerId: ObjectId) => void;
   removeBlockerAssignment: (blockerId: ObjectId) => void;
   clearCombatSelection: () => void;
@@ -235,6 +239,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   autoPass: false,
   combatMode: null,
   selectedAttackers: [],
+  attackerBands: [],
   blockerAssignments: new Map(),
   combatClickHandler: null,
   previewSticky: false,
@@ -411,6 +416,8 @@ export const useUiStore = create<UiStore>()((set, get) => ({
 
   selectAllAttackers: (ids) => set({ selectedAttackers: ids }),
 
+  setAttackerBands: (bands) => set({ attackerBands: bands }),
+
   assignBlocker: (blockerId, attackerId) =>
     set((state) => {
       const next = new Map(state.blockerAssignments);
@@ -429,6 +436,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     set({
       combatMode: null,
       selectedAttackers: [],
+      attackerBands: [],
       blockerAssignments: new Map(),
       combatClickHandler: null,
     }),
