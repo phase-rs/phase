@@ -233,7 +233,7 @@ fn register_transient_effect(
                 .collect();
             register_for_players(state, player_ids);
         }
-        // CR 119.7 + CR 119.8 + CR 113.10: Bare player-scope `Typed` affected
+        // CR 119.7 + CR 119.8: Bare player-scope `Typed` affected
         // filter. A `TargetFilter::Typed` with no `type_filters` and no
         // `properties`, carrying a `You`/`Opponent`/unscoped `controller`, is the
         // engine's canonical *player* filter (see `targeting.rs`: "Typed filter
@@ -1312,7 +1312,7 @@ mod tests {
         );
     }
 
-    /// CR 119.7 + CR 119.8 + CR 702.16j: Teferi's-Protection-style life-lock.
+    /// CR 119.7 + CR 119.8: Teferi's-Protection-style life-lock.
     /// Parse "your life total can't change", feed the parsed effect into
     /// `resolve`, and verify the single-authority queries report the controller
     /// as both can't-gain-life and can't-lose-life. The parser emits these
