@@ -939,7 +939,13 @@ fn collect_pending_triggers(
             for matched in matched_triggers {
                 #[cfg(debug_assertions)]
                 production_matched.insert((obj_id, matched.trig_idx));
-                record_trigger_fired(state, matched.constraint.as_ref(), obj_id, matched.trig_idx);
+                record_trigger_fired(
+                    state,
+                    matched.constraint.as_ref(),
+                    obj_id,
+                    matched.trig_idx,
+                    event,
+                );
                 if matched.batched {
                     batched_this_pass.insert((obj_id, matched.trig_idx));
                 }
@@ -1326,6 +1332,7 @@ fn collect_pending_triggers(
                         matched.constraint.as_ref(),
                         *moved_id,
                         matched.trig_idx,
+                        event,
                     );
                     if matched.batched {
                         batched_this_pass.insert((*moved_id, matched.trig_idx));
@@ -1393,6 +1400,7 @@ fn collect_pending_triggers(
                         matched.constraint.as_ref(),
                         observer_id,
                         matched.trig_idx,
+                        event,
                     );
                     if matched.batched {
                         batched_this_pass.insert((observer_id, matched.trig_idx));
@@ -1437,6 +1445,7 @@ fn collect_pending_triggers(
                         matched.constraint.as_ref(),
                         obj_id,
                         matched.trig_idx,
+                        event,
                     );
                     if matched.batched {
                         batched_this_pass.insert((obj_id, matched.trig_idx));
@@ -3730,6 +3739,17 @@ fn check_trigger_constraint(
         TriggerConstraint::OncePerGame => !state.triggers_fired_this_game.contains(&key),
         TriggerConstraint::OnlyDuringYourTurn => state.active_player == controller,
         TriggerConstraint::OnlyDuringOpponentsTurn => state.active_player != controller,
+        TriggerConstraint::OncePerOpponentPerTurn => {
+            // Extract the opponent player_id from the event
+            let opponent_id = match event {
+                GameEvent::LifeChanged { player_id, .. } => *player_id,
+                _ => return false,
+            };
+            let per_opponent_key = (obj_id, trig_idx, opponent_id);
+            !state
+                .triggers_fired_this_turn_per_opponent
+                .contains(&per_opponent_key)
+        }
         // CR 505.1: Main phases are precombat and postcombat.
         TriggerConstraint::OnlyDuringYourMainPhase => {
             state.active_player == controller
@@ -4519,6 +4539,7 @@ fn record_trigger_fired(
     constraint: Option<&crate::types::ability::TriggerConstraint>,
     obj_id: ObjectId,
     trig_idx: usize,
+    event: &GameEvent,
 ) {
     use crate::types::ability::TriggerConstraint;
 
@@ -4535,6 +4556,17 @@ fn record_trigger_fired(
         }
         TriggerConstraint::OncePerGame => {
             state.triggers_fired_this_game.insert(key);
+        }
+        TriggerConstraint::OncePerOpponentPerTurn => {
+            // Extract the opponent player_id from the event
+            let opponent_id = match event {
+                GameEvent::LifeChanged { player_id, .. } => *player_id,
+                _ => return,
+            };
+            let per_opponent_key = (obj_id, trig_idx, opponent_id);
+            state
+                .triggers_fired_this_turn_per_opponent
+                .insert(per_opponent_key);
         }
         TriggerConstraint::OnlyDuringYourTurn
         | TriggerConstraint::OnlyDuringOpponentsTurn

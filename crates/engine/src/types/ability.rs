@@ -10680,6 +10680,10 @@ pub enum TriggerConstraint {
     /// CR 603.4: "This ability triggers only the first N times each turn." — generalizes
     /// OncePerTurn to arbitrary limits. OncePerTurn remains for backward compatibility.
     MaxTimesPerTurn { max: u32 },
+    /// "for the first time during each of their turns" — fires once per opponent per turn.
+    /// Used by Valgavoth, Harrower of Souls: "Whenever an opponent loses life for the first
+    /// time during each of their turns, ..."
+    OncePerOpponentPerTurn,
 }
 
 /// CR 603.6c: source-zone constraint for one clause of a zone-change trigger.

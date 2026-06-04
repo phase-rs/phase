@@ -486,13 +486,24 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
 /// Implementation: `scan_preceded` locates the phrase at a word boundary
 /// (consistent with `scan_contains`), returning both the prefix and
 /// post-phrase remainder in a single pass — no `str::find` fallback.
-fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
+/// Returns (stripped_text, is_first_time_each_turn, is_per_opponent) where
+/// is_per_opponent is true if "for the first time during each of their turns"
+/// was detected.
+fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool, bool) {
     const PHRASE: &str = "for the first time each turn";
+    const PHRASE_PER_OPPONENT: &str = "for the first time during each of their turns";
     let lower = condition.to_lowercase();
-    let Some((before_lower, _, rest_lower)) =
-        scan_preceded(&lower, |i| tag::<_, _, OracleError<'_>>(PHRASE).parse(i))
-    else {
-        return (condition.to_string(), false);
+    let Some((before_lower, matched_phrase, rest_lower)) = scan_preceded(&lower, |i| {
+        alt((
+            value(
+                PHRASE_PER_OPPONENT,
+                tag::<_, _, OracleError<'_>>(PHRASE_PER_OPPONENT),
+            ),
+            value(PHRASE, tag(PHRASE)),
+        ))
+        .parse(i)
+    }) else {
+        return (condition.to_string(), false, false);
     };
     // ASCII-only phrase → byte offsets in `condition` align with `lower`.
     let start = before_lower.len();
@@ -503,7 +514,9 @@ fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
     // Collapse any leading / trailing / double whitespace introduced by
     // removing the phrase.
     let stripped = joined.split_whitespace().collect::<Vec<_>>().join(" ");
-    (stripped, true)
+    let is_per_opponent = matched_phrase == PHRASE_PER_OPPONENT;
+    let is_first_time_each_turn = matched_phrase == PHRASE || is_per_opponent;
+    (stripped, is_first_time_each_turn, is_per_opponent)
 }
 
 /// CR 608.2c + CR 506.2: "attack a player" — the attacked player is the
@@ -702,8 +715,11 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // before the condition is dispatched. Scoped to condition text (NOT full
     // text) so triggers whose EFFECT text coincidentally contains the phrase
     // aren't retroactively constrained.
-    let (condition_text_stripped, first_time_each_turn_in_condition) =
-        strip_first_time_each_turn_qualifier(&condition_text_raw);
+    let (
+        condition_text_stripped,
+        first_time_each_turn_in_condition,
+        first_time_each_turn_per_opponent,
+    ) = strip_first_time_each_turn_qualifier(&condition_text_raw);
     let condition_text: &str = &condition_text_stripped;
 
     let effect_lower = effect_text.to_lowercase();
@@ -841,6 +857,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             intervening_if: if_condition,
             trigger_subject,
             first_time_each_turn: first_time_each_turn_in_condition,
+            first_time_each_turn_per_opponent,
             constraint,
             has_up_to,
             effect_lower: effect_lower.to_string(),
@@ -943,6 +960,10 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // CR-uniform: apply OncePerTurn as fallback.
     if modifiers.first_time_each_turn && def.constraint.is_none() {
         def.constraint = Some(TriggerConstraint::OncePerTurn);
+    }
+    // Apply OncePerOpponentPerTurn for "for the first time during each of their turns".
+    if modifiers.first_time_each_turn_per_opponent && def.constraint.is_none() {
+        def.constraint = Some(TriggerConstraint::OncePerOpponentPerTurn);
     }
     constrain_triggering_spell_with_nth_filter(&mut def);
 
@@ -8978,10 +8999,11 @@ fn attach_event_timing_tail(def: &mut TriggerDefinition, tail: &str) {
 
 /// Nom combinator for a complete timing-tail clause: matches unrestricted
 /// per-turn tails ("each turn", "in a turn") and player-scoped turn tails
-/// ("during each opponent's turn", "during their turn", "during each of your
-/// turns", "during your turn"). Wrapped in `all_consuming` so it succeeds only
-/// when the clause consumes the entire (already-trimmed) input. Shared by the
-/// nth-spell, nth-draw, and related event timing classifiers.
+/// ("during each opponent's turn", "during their turn", "during each of their
+/// turns", "during each of your turns", "during your turn"). Wrapped in
+/// `all_consuming` so it succeeds only when the clause consumes the entire
+/// (already-trimmed) input. Shared by the nth-spell, nth-draw, and related
+/// event timing classifiers.
 fn parse_timing_tail(i: &str) -> OracleResult<'_, NthEventTimingKind> {
     all_consuming(alt((
         value(NthEventTimingKind::Unrestricted, tag("each turn")),
@@ -8995,7 +9017,7 @@ fn parse_timing_tail(i: &str) -> OracleResult<'_, NthEventTimingKind> {
         ),
         value(
             NthEventTimingKind::Restricted(PlayerFilter::TriggeringPlayer),
-            tag("during their turn"),
+            alt((tag("during their turn"), tag("during each of their turns"))),
         ),
         value(
             NthEventTimingKind::Restricted(PlayerFilter::Controller),

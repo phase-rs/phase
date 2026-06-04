@@ -60,6 +60,8 @@ pub(crate) struct TriggerModifiers {
     pub(crate) trigger_subject: TargetFilter,
     /// Whether "for the first time each turn" was stripped from condition text.
     pub(crate) first_time_each_turn: bool,
+    /// Whether "for the first time during each of their turns" was stripped from condition text.
+    pub(crate) first_time_each_turn_per_opponent: bool,
     /// Constraint parsed from full trigger text.
     pub(crate) constraint: Option<TriggerConstraint>,
     /// Whether effect text contains "up to one".
