@@ -9936,25 +9936,10 @@ pub enum TriggerCondition {
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
-    /// CR 508.1a + CR 603.2c: "Whenever ~ and at least N other creatures attack"
-    /// and "whenever N or more <typed> creatures attack".
+    /// CR 508.1a + CR 603.2c: "Whenever ~ and at least N other creatures attack".
     /// True when combat is active and at least `minimum` other creatures
-    /// controlled by the same player — and matching `filter` when present — are
-    /// also attacking.
-    ///
-    /// `filter` is the condition-level type axis: when `Some(f)`, only attackers
-    /// whose object matches `f` (per `target_filter_matches_object`) are counted.
-    /// This is what prevents "two or more Dinosaurs attack" from over-firing on
-    /// one Dinosaur plus one unrelated attacker — the untyped `valid_card` matcher
-    /// alone cannot enforce "N of the SAME filtered class". When `None`, every
-    /// co-attacker controlled by the trigger controller is counted (the original
-    /// untyped "two or more creatures attack" / Exalted "attacks alone" behavior,
-    /// preserved byte-for-byte).
-    MinCoAttackers {
-        minimum: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        filter: Option<TargetFilter>,
-    },
+    /// controlled by the same player are also attacking.
+    MinCoAttackers { minimum: u32 },
     /// CR 719.2: Intervening-if for Case auto-solve.
     /// True when the source Case is unsolved AND its solve condition is met.
     SolveConditionMet,
