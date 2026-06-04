@@ -93,6 +93,7 @@ mod mana_drain_refund;
 mod mass_phase_out_1792_repro;
 mod master_of_ceremonies;
 mod militant_angel_attacked_opponents;
+mod mogg_war_marshal_echo_dies_trigger;
 mod morophon_chosen_type_1653;
 mod multi_upkeep_triggers_suspend;
 mod mycoloth_upkeep_trigger;

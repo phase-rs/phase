@@ -231,6 +231,12 @@ impl KeywordTriggerInstaller {
             // static-on-battlefield ability that fires from the granted-from
             // moment on.
             Keyword::Graft(_) => vec![build_graft_enters_trigger()],
+            // CR 702.45a: Bushido N — fires on both "blocks" and "becomes
+            // blocked". CR 702.45b: each instance separately; one trigger per event.
+            Keyword::Bushido(n) => vec![
+                build_bushido_trigger(TriggerMode::Blocks, *n),
+                build_bushido_trigger(TriggerMode::BecomesBlocked, *n),
+            ],
             Keyword::Dethrone => vec![build_dethrone_trigger()],
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
@@ -270,6 +276,7 @@ impl KeywordTriggerInstaller {
             // strips the Graft enters-trigger when the granted keyword is
             // removed.
             Keyword::Graft(_) => is_graft_enters_trigger(trigger),
+            Keyword::Bushido(n) => is_bushido_trigger(trigger, *n),
             Keyword::Dethrone => is_dethrone_attack_trigger(trigger),
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
@@ -2627,6 +2634,14 @@ pub fn synthesize_exalted(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Exalted));
 }
 
+/// CR 702.45a: Bushido N — "Whenever this creature blocks or becomes blocked, it
+/// gets +N/+N until end of turn." Two self-triggers (blocks + becomes-blocked),
+/// since there is no combined block trigger mode. CR 702.45b: each instance
+/// triggers separately, so one pair is synthesized per `Keyword::Bushido`.
+pub fn synthesize_bushido(face: &mut CardFace) {
+    KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Bushido(_)));
+}
+
 /// CR 702.101a: Extort — a spell-cast trigger that lets you pay {W/B} to drain
 /// each opponent for 1 life. CR 702.101b: each instance triggers separately,
 /// so one trigger is synthesized per `Keyword::Extort` instance.
@@ -3123,6 +3138,54 @@ fn is_exalted_trigger(t: &TriggerDefinition) -> bool {
                 target: TargetFilter::TriggeringSource,
                 ..
             })
+        )
+}
+
+/// CR 702.45a: Build one Bushido self-trigger for the given block event
+/// (`Blocks` or `BecomesBlocked`): "this creature gets +N/+N until end of turn."
+/// Scoped to the source creature via `valid_card` (the field block matchers read)
+/// and pumps `SelfRef`, mirroring self-trigger handling in `build_dethrone_trigger`.
+fn build_bushido_trigger(mode: TriggerMode, n: u32) -> TriggerDefinition {
+    // CR 702.45a: "it gets +N/+N" — the Bushido creature itself. Target `SelfRef`,
+    // NOT `TriggeringSource`: for a `BecomesBlocked` event the triggering source
+    // resolves to the *blocker* (ambiguous/None with multiple blockers), so
+    // `TriggeringSource` would pump the wrong creature. The pending trigger's
+    // own source is this creature, so `SelfRef` is correct on both the blocks
+    // and becomes-blocked halves. Mirrors the self-trigger Dethrone, not Exalted
+    // (which watches other attacking creatures).
+    let pump = Effect::Pump {
+        power: PtValue::Fixed(n as i32),
+        toughness: PtValue::Fixed(n as i32),
+        target: TargetFilter::SelfRef,
+    };
+    let execute = AbilityDefinition::new(AbilityKind::Spell, pump).description(format!(
+        "CR 702.45a: Bushido {n} — +{n}/+{n} until end of turn"
+    ));
+    TriggerDefinition::new(mode)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(execute)
+        .description(format!(
+            "CR 702.45a: Bushido {n} — whenever this creature blocks or becomes \
+             blocked, it gets +{n}/+{n} until end of turn."
+        ))
+}
+
+/// CR 702.45a: A Bushido `n` trigger — a self-scoped (`valid_card: SelfRef`)
+/// block / becomes-blocked trigger that pumps the source creature +n/+n. Used
+/// by `RemoveKeyword` symmetric removal so a granted-then-removed `Bushido(n)`
+/// strips exactly its own triggers — parameterized by `n` (and asserting
+/// `valid_card`) so it never matches a different Bushido level or a coincidental
+/// printed block-pump on the same face.
+fn is_bushido_trigger(t: &TriggerDefinition, n: u32) -> bool {
+    matches!(t.mode, TriggerMode::Blocks | TriggerMode::BecomesBlocked)
+        && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Pump {
+                power: PtValue::Fixed(p),
+                toughness: PtValue::Fixed(tough),
+                target: TargetFilter::SelfRef,
+            }) if *p == n as i32 && *tough == n as i32
         )
 }
 
@@ -4994,6 +5057,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // Double team is an Arena/Alchemy attack trigger creating one tapped
     // attacking copy. Each instance triggers separately.
     synthesize_double_team(face);
+    // CR 702.45a: Bushido N — self blocks / becomes-blocked triggers that pump
+    // the creature +N/+N until end of turn.
+    synthesize_bushido(face);
     // CR 702.95a: Soulbond — two optional ETB triggers that create pair
     // relationships under the resolution checks in CR 702.95c-d.
     synthesize_soulbond(face);
@@ -8131,6 +8197,69 @@ mod exalted_synthesis_tests {
             .filter(|t| is_exalted_trigger(t))
             .count();
         assert_eq!(count, 2);
+    }
+}
+
+#[cfg(test)]
+mod bushido_synthesis_tests {
+    //! CR 702.45a shape tests: two self-scoped triggers (Blocks +
+    //! BecomesBlocked), each an `Effect::Pump` on `SelfRef` of +N/+N.
+    use super::*;
+
+    #[test]
+    fn synthesize_bushido_adds_block_and_becomes_blocked_triggers() {
+        // CR 702.45a: Bushido N installs two self-triggers (blocks + becomes
+        // blocked), each pumping the source +N/+N until end of turn.
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Bushido(2));
+        synthesize_bushido(&mut face);
+
+        let bushido: Vec<_> = face
+            .triggers
+            .iter()
+            .filter(|t| is_bushido_trigger(t, 2))
+            .collect();
+        assert_eq!(bushido.len(), 2, "blocks + becomes-blocked");
+        assert!(bushido
+            .iter()
+            .any(|t| matches!(t.mode, TriggerMode::Blocks)));
+        assert!(bushido
+            .iter()
+            .any(|t| matches!(t.mode, TriggerMode::BecomesBlocked)));
+        for t in &bushido {
+            assert!(matches!(t.valid_card, Some(TargetFilter::SelfRef)));
+            let Some(Effect::Pump {
+                power,
+                toughness,
+                target,
+            }) = t.execute.as_deref().map(|a| &*a.effect)
+            else {
+                panic!("bushido execute must be Effect::Pump");
+            };
+            assert!(matches!(power, PtValue::Fixed(2)));
+            assert!(matches!(toughness, PtValue::Fixed(2)));
+            assert!(matches!(target, TargetFilter::SelfRef));
+        }
+    }
+
+    #[test]
+    fn synthesize_bushido_is_idempotent_and_noop_without_keyword() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Bushido(1));
+        synthesize_bushido(&mut face);
+        synthesize_bushido(&mut face);
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| is_bushido_trigger(t, 1))
+                .count(),
+            2,
+            "two triggers (blocks + becomes-blocked), deduped across passes"
+        );
+
+        let mut bare = CardFace::default();
+        synthesize_bushido(&mut bare);
+        assert!(bare.triggers.iter().all(|t| !is_bushido_trigger(t, 1)));
     }
 }
 

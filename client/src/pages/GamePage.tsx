@@ -119,6 +119,8 @@ import {
   type PlayerSlot,
 } from "../stores/multiplayerStore.ts";
 import { useMultiplayerDraftStore } from "../stores/multiplayerDraftStore.ts";
+import { SpectatorChrome } from "../components/spectator/SpectatorChrome.tsx";
+import { useSpectatorMode } from "../hooks/useSpectatorMode.ts";
 import { GameProvider } from "../providers/GameProvider.tsx";
 import { useCanActForWaitingState, usePerspectivePlayerId, usePlayerId } from "../hooks/usePlayerId.ts";
 import { abilityChoiceLabel, formatAbilityCost } from "../viewmodel/costLabel.ts";
@@ -202,18 +204,22 @@ export function GamePage() {
   );
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" =
+  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate" | "playtest" =
     rawMode === "p2p-host"
       ? "p2p-host"
       : rawMode === "p2p-join"
         ? "p2p-join"
         : rawMode === "draft-match"
           ? "draft-match"
-          : rawMode === "host" || rawMode === "join"
-            ? "online"
-            : rawMode === "ai"
-              ? "ai"
-              : "local";
+          : rawMode === "spectate"
+            ? "spectate"
+            : rawMode === "playtest"
+              ? "playtest"
+              : rawMode === "host" || rawMode === "join"
+                ? "online"
+                : rawMode === "ai"
+                  ? "ai"
+                  : "local";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
@@ -374,7 +380,11 @@ export function GamePage() {
         // Store-level side effects (isSpectator, toast) already handled in ws-adapter
         break;
       case "spectatorJoined":
-        // Could show a toast, but not critical — no UI for this yet
+        useMultiplayerStore.setState((s) => ({
+          spectators: s.spectators.includes(event.name)
+            ? s.spectators
+            : [...s.spectators, event.name],
+        }));
         break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
@@ -583,12 +593,12 @@ export function GamePage() {
       roomName={roomNameParam ?? undefined}
       source={sourceParam}
       draftId={draftIdParam}
-      onWsEvent={mode === "online" ? handleWsEvent : undefined}
+      onWsEvent={mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
       }
       onReady={
-        mode === "online" || mode === "p2p-host" || mode === "p2p-join"
+        mode === "online" || mode === "spectate" || mode === "p2p-host" || mode === "p2p-join"
           ? handleReady
           : undefined
       }
@@ -599,7 +609,7 @@ export function GamePage() {
       <GamePageContent
         gameId={gameId}
         mode={rawMode}
-        isOnlineMode={mode === "online"}
+        isOnlineMode={mode === "online" || mode === "spectate"}
         hostGameCode={hostGameCode}
         waitingForOpponent={waitingForOpponent}
         opponentDisconnected={opponentDisconnected}
@@ -742,6 +752,7 @@ function GamePageContent({
 
   const playerId = usePlayerId();
   const perspectivePlayerId = usePerspectivePlayerId();
+  const isSpectatorMode = useSpectatorMode();
   const canActForWaitingState = useCanActForWaitingState();
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
@@ -1015,6 +1026,7 @@ function GamePageContent({
         setBoardContextMenu({ x: e.clientX, y: e.clientY });
       }}
     >
+      <SpectatorChrome />
       <BattlefieldBackground />
       <StackDisplay />
 
@@ -1143,11 +1155,15 @@ function GamePageContent({
         {showFlowHelpNudge && <FlowHelpNudge />}
         {showSandboxToolsNudge && <SandboxToolsNudge />}
         <CombatPhaseIndicator />
-        <div className="flex items-center gap-1.5">
-          <HandBadge />
-          <FullControlToggle />
-        </div>
-        <ActionButton />
+        {!isSpectatorMode && (
+          <>
+            <div className="flex items-center gap-1.5">
+              <HandBadge />
+              <FullControlToggle />
+            </div>
+            <ActionButton />
+          </>
+        )}
       </div>
 
       <GameLogPanel />
@@ -1547,10 +1563,12 @@ function GamePageContent({
             onConfirm={handleConcede}
             onCancel={onHideConcedeDialog}
           />
-          <EmoteOverlay
-            onSendEmote={handleSendEmote}
-            receivedEmote={receivedEmote}
-          />
+          {!isSpectatorMode && (
+            <EmoteOverlay
+              onSendEmote={handleSendEmote}
+              receivedEmote={receivedEmote}
+            />
+          )}
           {/* Per-player timer display */}
           {Object.entries(timerRemaining).map(([pid, secs]) =>
             secs > 0 ? (
