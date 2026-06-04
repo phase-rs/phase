@@ -1244,9 +1244,12 @@ fn copy_probe_spec(
 /// This is the single shared count-modification application point that the
 /// predefined `Effect::Token` path uses (`resolve` → `replace_event` →
 /// `create_token_applier`). `Effect::CopyTokenOf` delegates here so the
-/// doubling sees copy-token creation uniformly — the CR is explicit on this
-/// (CR 614.1a example: "create a token that's a copy of Voice of All" +
-/// Doubling Season creates two copies, each entering with its own ETB).
+/// doubling sees copy-token creation uniformly: token-count doublers (Doubling
+/// Season, Parallel Lives, Adrix and Nev, Anointed Procession, Mondrak) are
+/// CR 614.1a replacement effects that modify the number of tokens created, and
+/// copy-token creation (CR 707.5 / CR 707.2) is itself a token-creation event,
+/// so the same `CreateToken` replacement applies to it. Each resulting copy
+/// enters with its own ETB.
 ///
 /// The probe spec is built from the copy source's resolved copiable values so
 /// subtype-scoped doublers (Chatterfang-class) and owner-scoped doublers

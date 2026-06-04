@@ -196,15 +196,16 @@ pub fn resolve(
         let name = values.name.clone();
         // CR 614.1a: Route this copy source's creation count through the SAME
         // `ProposedEvent::CreateToken` replacement pipeline the predefined
-        // `Effect::Token` path uses, so every token-count-doubling replacement
-        // (Doubling Season, Adrix and Nev, Parallel Lives, Anointed Procession,
-        // Mondrak) applies to copy-token creation. The probe spec is built from
-        // this source's resolved copiable values so subtype-/owner-scoped
-        // doublers match the copy's true characteristics. Computed per source
-        // (not once for the whole batch) because distinct sources may have
-        // distinct characteristics that scoped doublers gate on. (CR 614.1a
-        // example: "create a token that's a copy of Voice of All" + Doubling
-        // Season → two copies, each with its own ETB.)
+        // `Effect::Token` path uses. Token-count doublers (Doubling Season,
+        // Parallel Lives, Adrix and Nev, Anointed Procession, Mondrak) are
+        // CR 614.1a replacement effects that modify the number of tokens
+        // created; copy-token creation (CR 707.5 / CR 707.2) is a token-creation
+        // event, so the same `CreateToken` replacement applies. The probe spec
+        // is built from this source's resolved copiable values so
+        // subtype-/owner-scoped doublers match the copy's true characteristics.
+        // Computed per source (not once for the whole batch) because distinct
+        // sources may have distinct characteristics that scoped doublers gate
+        // on. Each resulting copy enters with its own ETB.
         let effective_count = super::token::copy_token_count_after_replacement(
             state,
             ability,
@@ -965,9 +966,10 @@ mod tests {
     /// CR 614.1a + CR 707.2: A token-count-doubling replacement (Doubling
     /// Season / Adrix and Nev / Parallel Lives / Anointed Procession / Mondrak)
     /// applies to a token that's a *copy* of a permanent, exactly as it applies
-    /// to a predefined `Effect::Token`. The CR is explicit (CR 614.1a example,
-    /// "create a token that's a copy of Voice of All" + Doubling Season): the
-    /// doubling is applied first, then each of the two copies enters with its
+    /// to a predefined `Effect::Token`. Such doublers are CR 614.1a replacement
+    /// effects that modify the number of tokens created; copy-token creation
+    /// (CR 707.5 / CR 707.2) is a token-creation event, so the same replacement
+    /// applies: the doubling is applied first, then each copy enters with its
     /// own ETB. Issue #1511 regression: `CopyTokenOf` previously created exactly
     /// `count` copies, bypassing the `ProposedEvent::CreateToken` replacement
     /// pipeline, so the doubler never saw the copy.
