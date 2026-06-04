@@ -32374,6 +32374,25 @@ mod tests {
         assert_eq!(text, "draw a card if the moon is full");
     }
 
+    #[test]
+    fn strip_suffix_conditional_parses_lki_combat_status() {
+        let (cond, text) = strip_suffix_conditional(
+            "draw a card if it was attacking",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(text, "draw a card");
+        let cond = cond.expect("should parse 'it was attacking' as LKI combat status");
+        match cond {
+            AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(ref tf),
+                use_lki: true,
+            } => {
+                assert_eq!(tf.properties, vec![FilterProp::Attacking]);
+            }
+            other => panic!("expected TargetMatchesFilter(Attacking, lki=true), got {other:?}"),
+        }
+    }
+
     // --- StaticCondition → AbilityCondition bridge tests ---
 
     #[test]

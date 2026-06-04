@@ -2483,6 +2483,41 @@ pub(super) fn try_nom_condition_as_ability_condition(
         }
     }
 
+    // CR 508.1 + CR 509.1 + CR 400.7: "it was/wasn't attacking/blocking" — past-tense
+    // combat-status check on the trigger subject via LKI. Used by dies-triggers
+    // that condition on the creature's combat state before it left the battlefield
+    // (e.g., Garna, Bloodfist of Keld: "draw a card if it was attacking").
+    {
+        let mut parse_status = (
+            alt((
+                value(
+                    true,
+                    alt((
+                        tag::<_, _, OracleError<'_>>("it wasn't "),
+                        tag("it was not "),
+                    )),
+                ),
+                value(false, tag("it was ")),
+            )),
+            alt((
+                value(FilterProp::Attacking, tag("attacking")),
+                value(FilterProp::Blocking, tag("blocking")),
+            )),
+        );
+        if let Ok((rest, (negated, prop))) = parse_status.parse(lower.as_str()) {
+            if rest.trim().is_empty() {
+                let cond = AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        properties: vec![prop],
+                        ..Default::default()
+                    }),
+                    use_lki: true,
+                };
+                return Some(maybe_negate(cond, negated));
+            }
+        }
+    }
+
     let (negated, rest_after_prefix) = if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>("it's not a ").parse(lower.as_str())
     {
