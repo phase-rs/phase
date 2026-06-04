@@ -281,6 +281,54 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // --- "Untap this <permanent> during each other player's untap step." ---
+    // CR 502.3 + CR 113.6: the self-referential Seedborn-class variant (Bender's
+    // Waterskin: "Untap this artifact during each other player's untap step").
+    // Shares the runtime of the "untap all" form
+    // (`StaticMode::UntapsDuringEachOtherPlayersUntapStep`), but the affected
+    // filter is the source itself (`SelfRef`) so its controller untaps only it
+    // during every other player's untap step. Ordered after the "untap all" arm
+    // — the typed "you control" subject and these self-reference subjects are
+    // disjoint, so neither shadows the other.
+    if let Some(rest) = nom_tag_tp(&tp, "untap ") {
+        let self_subject = nom_on_lower(rest.original, rest.lower, |i| {
+            value(
+                (),
+                alt((
+                    tag("this artifact"),
+                    tag("this creature"),
+                    tag("this permanent"),
+                    tag("this enchantment"),
+                    tag("this land"),
+                    tag("~"),
+                )),
+            )
+            .parse(i)
+        });
+        if let Some(((), remainder)) = self_subject {
+            let remainder_lower = remainder.to_lowercase();
+            let tail = remainder_lower.trim().trim_end_matches('.');
+            let during_ok = nom_on_lower(tail, tail, |i| {
+                value(
+                    (),
+                    alt((
+                        tag("during each other player's untap step"),
+                        tag("during each other player\u{2019}s untap step"),
+                    )),
+                )
+                .parse(i)
+            })
+            .is_some();
+            if during_ok {
+                return Some(
+                    StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
+                        .affected(TargetFilter::SelfRef)
+                        .description(text.to_string()),
+                );
+            }
+        }
+    }
+
     // --- "Play with the top card of your library revealed" ---
     // CR 400.2: Continuous effect making top card public information.
     if nom_primitives::scan_contains(tp.lower, "play with the top card") {
