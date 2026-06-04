@@ -5099,6 +5099,79 @@ mod tests {
     }
 
     #[test]
+    fn typed_exiled_by_source_matches_only_linked_exiled_cards() {
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Battlefield,
+        );
+        let linked_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Linked Creature".into(),
+            Zone::Exile,
+        );
+        let unlinked_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Unlinked Creature".into(),
+            Zone::Exile,
+        );
+        let battlefield_creature = add_creature(&mut state, PlayerId(1), "Battlefield Creature");
+
+        for id in [linked_creature, unlinked_creature] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        // CR 607.2a: "exiled this way" targets are linked to cards exiled by
+        // the same source, not every object matching the typed phrase.
+        state.exile_links.push(ExileLink {
+            exiled_id: linked_creature,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::ExiledBySource,
+            ],
+        };
+
+        assert!(matches_target_filter(
+            &state,
+            linked_creature,
+            &filter,
+            source
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            unlinked_creature,
+            &filter,
+            source
+        ));
+        assert!(!matches_target_filter(
+            &state,
+            battlefield_creature,
+            &filter,
+            source
+        ));
+    }
+
+    #[test]
     fn shares_quality_creature_type_passes_with_shared_subtype() {
         let mut state = setup();
         state.all_creature_types = vec!["Elf".to_string()];

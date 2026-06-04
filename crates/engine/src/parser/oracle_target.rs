@@ -1938,7 +1938,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     // and "each card" forms are handled at the top of `parse_target` since
     // they bypass type-phrase parsing entirely.
     //
-    // Two grammars share the same lowering:
+    // These grammars share the same lowering:
     //   * `exiled with this <type>` / `exiled with ~` — explicit-source linkage
     //     (CR 406.6). The trailing type word is informational and consumed as
     //     a single non-space run via `take_till1` so it doesn't leak.
@@ -1947,6 +1947,12 @@ pub fn parse_type_phrase_with_ctx<'a>(
     //     exile instruction within the same effect; the resolver maps it to
     //     the same `ExiledBySource` predicate, since the link is established
     //     by the linked-exile bookkeeping at exile time.
+    //   * bare `exiled this way` — the same CR 607.2a linkage as a reduced
+    //     past-participle adjective with no relative pronoun (Espers to
+    //     Magicite: "choose up to one target creature card exiled this way").
+    //     Without this arm the qualifier is dropped and the target degrades to
+    //     a battlefield "creature card", which resolves against on-battlefield
+    //     creatures instead of the cards this spell exiled.
     let mut exiled_by_source = false;
     let remaining_exiled = lower[pos..].trim_start();
     let exiled_offset = lower[pos..].len() - remaining_exiled.len();
@@ -1966,6 +1972,7 @@ pub fn parse_type_phrase_with_ctx<'a>(
     } else if let Ok((rest, _)) = alt((
         tag::<_, _, OracleError<'_>>("that were exiled this way"),
         tag::<_, _, OracleError<'_>>("that was exiled this way"),
+        tag::<_, _, OracleError<'_>>("exiled this way"),
     ))
     .parse(remaining_exiled)
     {
@@ -7162,6 +7169,37 @@ mod tests {
         let (f, rest) = parse_target("cards they own exiled with it");
         assert_eq!(f, TargetFilter::ExiledBySource);
         assert_eq!(rest, "");
+    }
+
+    /// Issue #547 — Espers to Magicite: "choose up to one target creature card
+    /// exiled this way". The bare past-participle "exiled this way" (no relative
+    /// "that was/were") must still compose the `ExiledBySource` linkage onto the
+    /// typed filter, or the target degrades to a battlefield creature.
+    #[test]
+    fn singular_creature_card_exiled_this_way_composes_exiled_by_source() {
+        let (f, rest) = parse_target("target creature card exiled this way");
+        assert_eq!(rest, "");
+        assert!(
+            f.references_exiled_by_source(),
+            "bare \"exiled this way\" must attach ExiledBySource, got {f:?}"
+        );
+        match f {
+            TargetFilter::And { filters } => {
+                assert!(
+                    filters.contains(&TargetFilter::ExiledBySource),
+                    "And must include ExiledBySource, got {filters:?}"
+                );
+                assert!(
+                    filters.iter().any(|inner| matches!(
+                        inner,
+                        TargetFilter::Typed(tf)
+                            if tf.type_filters.contains(&TypeFilter::Creature)
+                    )),
+                    "And must include a Typed creature filter, got {filters:?}"
+                );
+            }
+            other => panic!("expected And {{ Typed, ExiledBySource }}, got {other:?}"),
+        }
     }
 
     #[test]

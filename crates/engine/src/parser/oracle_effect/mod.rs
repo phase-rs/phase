@@ -10568,6 +10568,17 @@ fn cast_filter_has_typed_leaf(filter: &TargetFilter) -> bool {
     }
 }
 
+fn cast_filter_has_meaningful_typed_leaf(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(cast_filter_has_meaningful_typed_leaf)
+        }
+        TargetFilter::Not { filter } => cast_filter_has_meaningful_typed_leaf(filter),
+        _ => false,
+    }
+}
+
 fn add_cast_target_props(
     filter: &mut TargetFilter,
     props: &[FilterProp],
@@ -10660,17 +10671,17 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     // `cast_filter_has_typed_leaf` would treat `[Card]` as non-empty;
     // `TypedFilter::has_meaningful_type_constraint` is the canonical
     // accessor that excludes Card/Any noise.
-    let meaningful = match &typed_filter {
-        TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
-        _ => cast_filter_has_typed_leaf(&typed_filter),
-    };
+    let meaningful = cast_filter_has_meaningful_typed_leaf(&typed_filter);
 
-    Some(if meaningful {
+    Some(if !meaningful {
+        TargetFilter::ExiledBySource
+    } else if typed_filter.references_exiled_by_source() {
+        typed_filter.normalized()
+    } else {
         TargetFilter::And {
             filters: vec![TargetFilter::ExiledBySource, typed_filter],
         }
-    } else {
-        TargetFilter::ExiledBySource
+        .normalized()
     })
 }
 
