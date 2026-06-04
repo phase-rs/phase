@@ -4581,8 +4581,8 @@ pub struct GameState {
         with = "tuple_key_map"
     )]
     pub trigger_fire_counts_this_turn: HashMap<(ObjectId, usize), u32>,
-    /// "for the first time during each of their turns" — tracks per-opponent-per-turn
-    /// firing for OncePerOpponentPerTurn constraint. Keyed by (object_id, trigger_index, opponent_id).
+    /// CR 603.2: Tracks per-opponent-per-turn firing for
+    /// OncePerOpponentPerTurn. Keyed by (object_id, trigger_index, opponent_id).
     #[serde(default)]
     pub triggers_fired_this_turn_per_opponent: HashSet<(ObjectId, usize, PlayerId)>,
     #[serde(default)]

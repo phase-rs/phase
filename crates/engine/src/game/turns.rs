@@ -1437,8 +1437,11 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // city blessing (CR 702.131b) and other SBA-granted designations are
                 // applied before trigger conditions like "if you have the city's blessing"
                 // are evaluated (Twilight Prophet #1375).
+                let waiting_before_sba = state.waiting_for.clone();
                 super::sba::check_state_based_actions(state, events);
-                if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+                if state.waiting_for != waiting_before_sba
+                    && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+                {
                     return state.waiting_for.clone();
                 }
                 // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
@@ -1698,6 +1701,7 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::card_type::Supertype;
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
     use std::sync::Arc;
@@ -3700,6 +3704,43 @@ mod tests {
             waiting,
             WaitingFor::Priority {
                 player: PlayerId(0)
+            }
+        ));
+    }
+
+    #[test]
+    fn auto_advance_returns_upkeep_sba_waiting_state() {
+        let mut state = setup();
+        state.phase = Phase::Untap;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+
+        for card_id in [1, 2] {
+            let legend = create_object(
+                &mut state,
+                CardId(card_id),
+                PlayerId(0),
+                "Mirror Legend".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&legend)
+                .unwrap()
+                .card_types
+                .supertypes
+                .push(Supertype::Legendary);
+        }
+
+        let mut events = Vec::new();
+        let waiting = auto_advance(&mut state, &mut events);
+
+        assert_eq!(state.phase, Phase::Upkeep);
+        assert!(matches!(
+            waiting,
+            WaitingFor::ChooseLegend {
+                player: PlayerId(0),
+                ..
             }
         ));
     }

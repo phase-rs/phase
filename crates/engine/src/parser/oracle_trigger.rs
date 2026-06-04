@@ -12,7 +12,7 @@ use super::oracle_effect::{
     try_parse_exile_top_each_library_with_collection_counter,
 };
 use super::oracle_ir::context::ParseContext;
-use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
+use super::oracle_ir::trigger::{FirstTimeLimit, TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::condition::parse_source_has_counters;
 use super::oracle_nom::error::{oracle_err, OracleResult};
@@ -471,9 +471,9 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
     )]
 }
 
-/// Part D: If `"for the first time each turn"` appears as a word-boundary
-/// phrase in `condition`, strip it and return `(stripped, true)`; otherwise
-/// return `(condition, false)` unchanged.
+/// Part D: If a `"for the first time ..."` qualifier appears as a
+/// word-boundary phrase in `condition`, strip it and return the corresponding
+/// trigger-event limit; otherwise return `(condition, None)` unchanged.
 ///
 /// Stripping is load-bearing. The generic cycle-trigger handlers in
 /// `try_parse_player_trigger` (and several other condition-level handlers)
@@ -487,24 +487,22 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
 /// Implementation: `scan_preceded` locates the phrase at a word boundary
 /// (consistent with `scan_contains`), returning both the prefix and
 /// post-phrase remainder in a single pass — no `str::find` fallback.
-/// Returns (stripped_text, is_first_time_each_turn, is_per_opponent) where
-/// is_per_opponent is true if "for the first time during each of their turns"
-/// was detected.
-fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool, bool) {
+/// Returns stripped text and the detected "for the first time ..." trigger-event limit.
+fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, Option<FirstTimeLimit>) {
     const PHRASE: &str = "for the first time each turn";
     const PHRASE_PER_OPPONENT: &str = "for the first time during each of their turns";
     let lower = condition.to_lowercase();
     let Some((before_lower, matched_phrase, rest_lower)) = scan_preceded(&lower, |i| {
         alt((
             value(
-                PHRASE_PER_OPPONENT,
+                FirstTimeLimit::EachOpponentTurn,
                 tag::<_, _, OracleError<'_>>(PHRASE_PER_OPPONENT),
             ),
-            value(PHRASE, tag(PHRASE)),
+            value(FirstTimeLimit::EachTurn, tag(PHRASE)),
         ))
         .parse(i)
     }) else {
-        return (condition.to_string(), false, false);
+        return (condition.to_string(), None);
     };
     // ASCII-only phrase → byte offsets in `condition` align with `lower`.
     let start = before_lower.len();
@@ -515,9 +513,7 @@ fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool, bool)
     // Collapse any leading / trailing / double whitespace introduced by
     // removing the phrase.
     let stripped = joined.split_whitespace().collect::<Vec<_>>().join(" ");
-    let is_per_opponent = matched_phrase == PHRASE_PER_OPPONENT;
-    let is_first_time_each_turn = matched_phrase == PHRASE || is_per_opponent;
-    (stripped, is_first_time_each_turn, is_per_opponent)
+    (stripped, Some(matched_phrase))
 }
 
 /// CR 608.2c + CR 506.2: "attack a player" — the attacked player is the
@@ -716,11 +712,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // before the condition is dispatched. Scoped to condition text (NOT full
     // text) so triggers whose EFFECT text coincidentally contains the phrase
     // aren't retroactively constrained.
-    let (
-        condition_text_stripped,
-        first_time_each_turn_in_condition,
-        first_time_each_turn_per_opponent,
-    ) = strip_first_time_each_turn_qualifier(&condition_text_raw);
+    let (condition_text_stripped, first_time_limit) =
+        strip_first_time_each_turn_qualifier(&condition_text_raw);
     let condition_text: &str = &condition_text_stripped;
 
     let effect_lower = effect_text.to_lowercase();
@@ -857,8 +850,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
             unless_pay,
             intervening_if: if_condition,
             trigger_subject,
-            first_time_each_turn: first_time_each_turn_in_condition,
-            first_time_each_turn_per_opponent,
+            first_time_limit,
             constraint,
             has_up_to,
             effect_lower: effect_lower.to_string(),
@@ -958,13 +950,12 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // Text-based constraints take precedence; fall back to condition-parser constraint.
     def.constraint = modifiers.constraint.clone().or(def.constraint.take());
 
-    // CR-uniform: apply OncePerTurn as fallback.
-    if modifiers.first_time_each_turn && def.constraint.is_none() {
-        def.constraint = Some(TriggerConstraint::OncePerTurn);
-    }
-    // Apply OncePerOpponentPerTurn for "for the first time during each of their turns".
-    if modifiers.first_time_each_turn_per_opponent && def.constraint.is_none() {
-        def.constraint = Some(TriggerConstraint::OncePerOpponentPerTurn);
+    // CR 603.2: Apply trigger-event frequency limits as a fallback.
+    if let (Some(limit), None) = (modifiers.first_time_limit, def.constraint.as_ref()) {
+        def.constraint = Some(match limit {
+            FirstTimeLimit::EachTurn => TriggerConstraint::OncePerTurn,
+            FirstTimeLimit::EachOpponentTurn => TriggerConstraint::OncePerOpponentPerTurn,
+        });
     }
     constrain_triggering_spell_with_nth_filter(&mut def);
 
@@ -23820,6 +23811,21 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::Attacks);
         assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    }
+
+    #[test]
+    fn first_time_during_each_opponent_turn_sets_per_opponent_constraint() {
+        // CR 603.2: the "first time during each of their turns" text is part
+        // of the trigger event, not a generic once-per-turn limit.
+        let def = parse_trigger_line(
+            "Whenever an opponent loses life for the first time during each of their turns, put a +1/+1 counter on ~.",
+            "Valgavoth, Harrower of Souls",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::OncePerOpponentPerTurn)
+        );
     }
 
     #[test]

@@ -58,10 +58,8 @@ pub(crate) struct TriggerModifiers {
     pub(crate) intervening_if: Option<TriggerCondition>,
     /// CR 608.2k: Trigger subject for pronoun resolution in effect text.
     pub(crate) trigger_subject: TargetFilter,
-    /// CR 603.2i: "for the first time each turn" qualifier.
-    pub(crate) first_time_each_turn: bool,
-    /// CR 603.2i: "for the first time during each of their turns" qualifier.
-    pub(crate) first_time_each_turn_per_opponent: bool,
+    /// CR 603.2: "for the first time ..." qualifier in the trigger event.
+    pub(crate) first_time_limit: Option<FirstTimeLimit>,
     /// Constraint parsed from full trigger text.
     pub(crate) constraint: Option<TriggerConstraint>,
     /// Whether effect text contains "up to one".
@@ -78,4 +76,10 @@ pub(crate) struct TriggerModifiers {
     /// against the damaged/attacked player stamped on the resolving ability from
     /// the triggering event.
     pub(crate) relative_player_scope: Option<ControllerRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum FirstTimeLimit {
+    EachTurn,
+    EachOpponentTurn,
 }
