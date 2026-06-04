@@ -1,4 +1,4 @@
-use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::game::filter::{matches_target_filter, player_matches_target_filter, FilterContext};
 use engine::game::players;
 use engine::types::ability::{Effect, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;
@@ -85,7 +85,9 @@ impl TacticalPolicy for HandDisruptionPolicy {
 
 fn score_reveal_hand_player_target(ctx: &PolicyContext<'_>, target_player: PlayerId) -> f64 {
     let effects = ctx.effects();
-    if !effects.iter().any(reveal_hand_uses_chosen_player_target) {
+    if !effects.iter().any(|effect| {
+        reveal_hand_matches_chosen_player_target(effect, target_player, ctx.ai_player)
+    }) {
         return 0.0;
     }
 
@@ -112,19 +114,15 @@ fn score_reveal_hand_player_target(ctx: &PolicyContext<'_>, target_player: Playe
     1.25 + (unrevealed * 0.20) + (revealed * 0.02)
 }
 
-fn reveal_hand_uses_chosen_player_target(effect: &&Effect) -> bool {
+fn reveal_hand_matches_chosen_player_target(
+    effect: &Effect,
+    target_player: PlayerId,
+    source_controller: PlayerId,
+) -> bool {
     let Effect::RevealHand { target, .. } = effect else {
         return false;
     };
-    target_filter_can_select_player(target)
-}
-
-fn target_filter_can_select_player(target: &TargetFilter) -> bool {
-    match target {
-        TargetFilter::Any | TargetFilter::Player => true,
-        TargetFilter::Typed(filter) => filter.type_filters.is_empty(),
-        _ => false,
-    }
+    player_matches_target_filter(target, target_player, Some(source_controller))
 }
 
 pub(crate) fn disruption_window_score(
@@ -254,8 +252,8 @@ mod tests {
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef,
-        TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, ResolvedAbility, TargetFilter,
+        TargetRef, TypeFilter, TypedFilter,
     };
     use engine::types::format::FormatConfig;
     use engine::types::game_state::{GameState, PendingCast, TargetSelectionSlot, WaitingFor};
@@ -600,12 +598,36 @@ mod tests {
     }
 
     #[test]
-    fn typed_filters_only_select_players_when_type_filters_are_empty() {
-        assert!(target_filter_can_select_player(&TargetFilter::Typed(
-            TypedFilter::default().controller(engine::types::ability::ControllerRef::Opponent)
-        )));
-        assert!(!target_filter_can_select_player(&TargetFilter::Typed(
-            TypedFilter::creature()
-        )));
+    fn reveal_hand_target_matching_uses_player_filter_semantics() {
+        let opponent_reveal = Effect::RevealHand {
+            target: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            card_filter: TargetFilter::Any,
+            count: None,
+            random: false,
+            choice_optional: false,
+        };
+        assert!(reveal_hand_matches_chosen_player_target(
+            &opponent_reveal,
+            PlayerId(1),
+            PlayerId(0)
+        ));
+        assert!(!reveal_hand_matches_chosen_player_target(
+            &opponent_reveal,
+            PlayerId(0),
+            PlayerId(0)
+        ));
+
+        let creature_reveal = Effect::RevealHand {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            card_filter: TargetFilter::Any,
+            count: None,
+            random: false,
+            choice_optional: false,
+        };
+        assert!(!reveal_hand_matches_chosen_player_target(
+            &creature_reveal,
+            PlayerId(1),
+            PlayerId(0)
+        ));
     }
 }
