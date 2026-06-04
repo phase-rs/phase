@@ -78,7 +78,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CantBeBlockedByMoreThan { .. }
             // CR 301.5 + CR 303.4 + CR 701.3a: AttachmentRestriction carries the
             // `TargetFilter` of legal hosts (Strata Scythe, Konda's Banner).
-            // Enforced by direct read in effects/attach.rs::attachment_illegality.
+            // Enforced via active static definitions in effects/attach.rs::attachment_illegality.
             | StaticMode::AttachmentRestriction { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
             | StaticMode::CantBeActivated { .. }

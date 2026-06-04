@@ -840,8 +840,8 @@ pub enum StaticMode {
     /// power/toughness N or greater"), Konda's Banner ("a legendary creature").
     ///
     /// Data-carrying variant (holds `TargetFilter`) — not registry-registered
-    /// (see `coverage::is_data_carrying_static`); enforced by direct read of the
-    /// attachment's own statics in `game/effects/attach.rs::attachment_illegality`.
+    /// (see `coverage::is_data_carrying_static`); enforced via the attachment's
+    /// active static definitions in `game/effects/attach.rs::attachment_illegality`.
     /// A candidate host that does not match `filter` is an illegal attach/equip
     /// target (CR 301.5b / CR 303.4j: the attachment doesn't move).
     AttachmentRestriction {
