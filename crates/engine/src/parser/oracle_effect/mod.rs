@@ -2062,13 +2062,7 @@ fn parse_unless_player_have_deal_damage_cost(after_unless: &str) -> Option<Abili
     .ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>("deal ").parse(rest).ok()?;
     let (amount, tail) = super::oracle_util::parse_count_expr(rest)?;
-    let tail = tail
-        .strip_prefix("damage to ")
-        .map(str::trim)
-        .map(|s| s.trim_end_matches('.'))?;
-    if tail != "them" {
-        return None;
-    }
+    parse_deal_damage_to_them_tail(tail)?;
     Some(AbilityCost::EffectCost {
         effect: Box::new(Effect::DealDamage {
             amount,
@@ -16293,6 +16287,20 @@ pub(super) fn parse_unless_payment(lower: &str) -> Option<AbilityCost> {
     Some(AbilityCost::Mana { cost })
 }
 
+/// CR 118.12a: Tail of "deal N damage to them" unless-cost alternatives.
+fn parse_deal_damage_to_them_tail(input: &str) -> Option<()> {
+    all_consuming(terminated(
+        (
+            tag::<_, _, OracleError<'_>>("damage to "),
+            tag::<_, _, OracleError<'_>>("them"),
+        ),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(input)
+    .ok()
+    .map(|_| ())
+}
+
 /// CR 118.12a: "unless that creature's controller has [~] deal N damage to them"
 /// (Blazing Salvo) — the controller may take the damage instead of the creature.
 fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost> {
@@ -16305,13 +16313,7 @@ fn parse_unless_have_deal_damage_cost(after_unless: &str) -> Option<AbilityCost>
     // `take_until` leaves the matched delimiter on the input (" deal N ...").
     let (rest, _) = tag::<_, _, OracleError<'_>>(" deal ").parse(rest).ok()?;
     let (amount, tail) = super::oracle_util::parse_count_expr(rest)?;
-    let tail = tail
-        .strip_prefix("damage to ")
-        .map(str::trim)
-        .map(|s| s.trim_end_matches('.'))?;
-    if tail != "them" {
-        return None;
-    }
+    parse_deal_damage_to_them_tail(tail)?;
     Some(AbilityCost::EffectCost {
         effect: Box::new(Effect::DealDamage {
             amount,
