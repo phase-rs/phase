@@ -177,16 +177,16 @@ fn colors_produced_by_land(land: &game_object::GameObject) -> Vec<engine::types:
     use engine::types::ability::ManaProduction;
     let mut colors = Vec::new();
     for ability in land.abilities.iter() {
-        if let engine::types::ability::Effect::Mana { produced, .. } = &*ability.effect {
-            match produced {
+        if let engine::types::ability::Effect::Mana {
+            produced:
                 ManaProduction::Fixed {
                     colors: produced_colors,
                     ..
-                } => {
-                    colors.extend(produced_colors.clone());
-                }
-                _ => {}
-            }
+                },
+            ..
+        } = &*ability.effect
+        {
+            colors.extend(produced_colors.clone());
         }
     }
     colors

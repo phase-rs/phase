@@ -105,7 +105,7 @@ fn has_mill_with_conditional_payoff(ctx: &PolicyContext<'_>) -> bool {
 
                 // Check if there's a sub-ability that retrieves cards from the milled zone
                 // This checks for patterns like "put card from among cards milled this way"
-                let has_retrieval = ability.sub_ability.as_ref().map_or(false, |sub| {
+                let has_retrieval = ability.sub_ability.as_ref().is_some_and(|sub| {
                     matches!(*sub.effect, Effect::Draw { .. } | Effect::ChangeZone { .. })
                 });
 
