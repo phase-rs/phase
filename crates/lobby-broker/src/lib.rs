@@ -22,8 +22,9 @@ pub use broker::{
 pub use env::BrokerEnv;
 pub use inbound_guard::{
     guard_create_game_settings_inbound, guard_inbound, guard_join_game_with_password_inbound,
-    validate_create_game_settings_inbound_fields, validate_deck_payload, CreateGameSettingsInbound,
-    JoinGameWithPasswordInbound,
+    guard_lookup_join_target_inbound, validate_create_game_settings_inbound_fields,
+    validate_deck_payload, CreateGameSettingsInbound, JoinGameWithPasswordInbound,
+    LookupJoinTargetInbound,
 };
 pub use lobby::{
     JoinTargetInfo, LobbyManager, LobbyReservation, RegisterGameRequest, PUBLIC_SEAT_RESERVATION_MS,

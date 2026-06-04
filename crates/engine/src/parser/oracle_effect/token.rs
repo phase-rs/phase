@@ -12,6 +12,7 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, Effect, FilterProp, PtValue, QuantityExpr, QuantityRef,
     StaticDefinition, TargetFilter,
 };
+use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
@@ -127,7 +128,9 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         owner: TargetFilter::Controller,
         attach_to: token.attach_to,
         enters_attacking: token.enters_attacking,
-        supertypes: vec![],
+        // CR 205.4a: Carry parsed supertypes (e.g. "legendary" for Marit Lage)
+        // onto the token so the legend rule (CR 704.5j) applies.
+        supertypes: token.supertypes,
         static_abilities: token.static_abilities,
         enter_with_counters: vec![],
     })
@@ -328,7 +331,8 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
         break;
     }
 
-    rest = strip_token_supertypes(rest);
+    let (supertypes, rest_after_supertypes) = strip_token_supertypes(rest);
+    rest = rest_after_supertypes;
 
     let (mut power, mut toughness, rest) =
         if let Ok((rest, (power, toughness))) = nom_primitives::parse_pt_value.parse(rest) {
@@ -445,6 +449,7 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
         power,
         toughness,
         types,
+        supertypes,
         colors,
         keywords,
         tapped,
@@ -502,20 +507,29 @@ fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
     Some((name.to_string(), rest))
 }
 
-fn strip_token_supertypes(mut text: &str) -> &str {
+/// CR 205.4a: Strip leading supertype words from the token description and
+/// return the captured supertypes alongside the remaining text. Previously the
+/// supertypes were discarded; capturing them lets legendary/snow tokens (Marit
+/// Lage etc.) carry their supertype through to `Effect::Token` — load-bearing
+/// for the legend rule (CR 704.5j).
+fn strip_token_supertypes(mut text: &str) -> (Vec<Supertype>, &str) {
+    let mut supertypes = Vec::new();
     loop {
         let trimmed = text.trim_start();
         let trimmed_lower = trimmed.to_lowercase();
-        let Some((_, stripped)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
+        let Some((supertype, stripped)) = nom_on_lower(trimmed, &trimmed_lower, |i| {
             alt((
-                value((), tag("legendary ")),
-                value((), tag("snow ")),
-                value((), tag("basic ")),
+                value(Supertype::Legendary, tag("legendary ")),
+                value(Supertype::Snow, tag("snow ")),
+                value(Supertype::Basic, tag("basic ")),
             ))
             .parse(i)
         }) else {
-            return trimmed;
+            return (supertypes, trimmed);
         };
+        if !supertypes.contains(&supertype) {
+            supertypes.push(supertype);
+        }
         text = stripped;
     }
 }
@@ -1506,6 +1520,45 @@ mod tests {
             },
             "die-roll result count must resolve to EventContextAmount, not Variable"
         );
+    }
+
+    /// CR 205.4a + CR 704.5j: A "legendary" (or "snow"/"basic") supertype in the
+    /// inline token grammar must be captured onto `Effect::Token.supertypes`, not
+    /// silently stripped. Covers the whole class of legendary tokens (Marit Lage
+    /// from Dark Depths, the Pia Nalaar Construct, etc.) so the legend rule
+    /// applies. Building-block-level: exercises the supertype-capture path, not a
+    /// single card's full Oracle text.
+    #[test]
+    fn token_captures_legendary_supertype() {
+        use crate::types::card_type::Supertype;
+
+        let effect = try_parse_token(
+            "create marit lage, a legendary 20/20 black avatar creature token with flying and indestructible",
+            "create Marit Lage, a legendary 20/20 black Avatar creature token with flying and indestructible",
+            &mut ParseContext::default(),
+        )
+        .expect("expected Token effect");
+        let Effect::Token {
+            name,
+            supertypes,
+            power,
+            toughness,
+            keywords,
+            ..
+        } = effect
+        else {
+            panic!("expected Token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Marit Lage");
+        assert_eq!(
+            supertypes,
+            vec![Supertype::Legendary],
+            "the 'legendary' supertype must be captured, not discarded"
+        );
+        assert_eq!(power, PtValue::Fixed(20));
+        assert_eq!(toughness, PtValue::Fixed(20));
+        assert!(keywords.contains(&Keyword::Flying));
+        assert!(keywords.contains(&Keyword::Indestructible));
     }
 
     #[test]

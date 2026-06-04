@@ -27,6 +27,7 @@ import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { ensureCardDatabase } from "../services/cardData";
 import { loadDraftRun } from "../services/quickDraftPersistence";
+import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import { detectServerUrl } from "../services/serverDetection";
 import {
@@ -380,7 +381,7 @@ function scheduleStoreReset(reset: () => void): void {
 
 export interface GameProviderProps {
   gameId: string;
-  mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match";
+  mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate";
   difficulty?: string;
   joinCode?: string;
   formatConfig?: FormatConfig;
@@ -505,7 +506,8 @@ export function GameProvider({
     const { initGame, resumeGame, resumeP2PHost, reset, setGameMode } = useGameStore.getState();
     setGameMode(mode);
 
-    const isOnline = mode === "online";
+    const isOnline = mode === "online" || mode === "spectate";
+    const isSpectate = mode === "spectate";
     const isP2P = mode === "p2p-host" || mode === "p2p-join";
     if (!isOnline && !isP2P) {
       if (mode === "ai") {
@@ -833,15 +835,20 @@ export function GameProvider({
     let cancelled = false;
 
     if (isOnline || isReconnect) {
-      const parsedDeck = loadActiveDeck();
-      const deck = parsedDeck
-        ? parsedDeckToDeckData(parsedDeck)
-        : { main_deck: [], sideboard: [] };
+      const parsedDeck = isSpectate ? null : loadActiveDeck();
+      const deck = isSpectate
+        ? { main_deck: [], sideboard: [] }
+        : parsedDeck
+          ? parsedDeckToDeckData(parsedDeck)
+          : { main_deck: [], sideboard: [] };
 
       const mpStore = useMultiplayerStore.getState();
       mpStore.setConnectionStatus("connecting");
+      if (isSpectate) {
+        mpStore.setIsSpectator(true);
+      }
 
-      const wsMode = joinCode ? "join" : "host";
+      const wsMode = isSpectate ? "spectate" : joinCode ? "join" : "host";
 
       // Track adapter for cleanup (needed for StrictMode double-mount)
       let wsAdapter: WebSocketAdapter | null = null;
@@ -891,6 +898,9 @@ export function GameProvider({
         wsUnsubscribe = wsAdapter.onEvent((event) => {
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
+            if (isSpectate || event.playerId === SPECTATOR_PLAYER_ID) {
+              useMultiplayerStore.getState().setIsSpectator(true);
+            }
             useMultiplayerStore.getState().setOpponentDisplayName(event.opponentName);
             if (event.playerNames) {
               useMultiplayerStore.setState({
@@ -986,8 +996,10 @@ export function GameProvider({
 
         // Start auto-pass controller for multiplayer (safe before game state
         // exists — onWaitingForChanged returns early when waitingFor is null)
-        controller = createGameLoopController({ mode: "online" });
-        controller.start();
+        if (!isSpectate) {
+          controller = createGameLoopController({ mode: "online" });
+          controller.start();
+        }
 
         if (isReconnect) {
           const session = loadWsSession();
@@ -1023,6 +1035,8 @@ export function GameProvider({
         useMultiplayerStore.getState().setConnectionStatus("disconnected");
         useMultiplayerStore.getState().setActionPending(false);
         useMultiplayerStore.getState().setLatency(null);
+        useMultiplayerStore.getState().setIsSpectator(false);
+        useMultiplayerStore.getState().setSpectators([]);
         audioManager.setContext("menu");
         reset();
       };
@@ -1051,7 +1065,7 @@ export function GameProvider({
           // absent on resume (e.g. navigating directly to a saved game URL).
           const resumedPlayerCount = savedState.players?.length ?? playerCount;
           controller = createGameLoopController({
-            mode,
+            mode: mode === "local" ? "local" : "ai",
             difficulty,
             aiSeats: resolveAiSeatBindings(gameId, resumedPlayerCount, difficulty),
             playerCount: resumedPlayerCount,
@@ -1097,7 +1111,7 @@ export function GameProvider({
               onCardDataMissingRef.current?.();
             }
             controller = createGameLoopController({
-              mode,
+              mode: mode === "local" ? "local" : "ai",
               difficulty,
               aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
               playerCount,
@@ -1136,7 +1150,7 @@ export function GameProvider({
           await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
           if (cancelled) return;
           controller = createGameLoopController({
-            mode,
+            mode: mode === "local" ? "local" : "ai",
             difficulty,
             aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
             playerCount,
@@ -1162,7 +1176,7 @@ export function GameProvider({
             await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
             if (cancelled) return;
             controller = createGameLoopController({
-              mode,
+              mode: mode === "local" ? "local" : "ai",
               difficulty,
               aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
               playerCount,
@@ -1198,13 +1212,21 @@ export function GameProvider({
         return;
       }
       try {
-        await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+        await initGame(
+          gameId,
+          adapter,
+          deckList,
+          formatConfig,
+          playerCount,
+          matchConfig,
+          firstPlayer,
+        );
         if (cancelled) return;
         if (!adapter.cardDbLoaded) {
           onCardDataMissingRef.current?.();
         }
         controller = createGameLoopController({
-          mode,
+          mode: mode === "local" ? "local" : "ai",
           difficulty,
           aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
           playerCount,

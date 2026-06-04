@@ -450,6 +450,7 @@ fn discard_applier(
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
+            face_down_profile: None,
             applied,
         }),
         other => ApplyResult::Modified(other),
@@ -1002,6 +1003,13 @@ fn destroy_applier(
     ApplyResult::Prevented
 }
 
+// clippy::result_large_err: both arms of this Result carry a `ProposedEvent`
+// (the replacement pipeline returns the modified event on success and the
+// unmodified event in `ApplyResult::Modified` on the no-op path), so the Err
+// size is inherent to the design — boxing one arm of every applier would
+// ripple across the whole pipeline. The `ZoneChange` variant is the largest
+// `ProposedEvent` shape; see the note on `ProposedEvent::ZoneChange.face_down_profile`.
+#[allow(clippy::result_large_err)]
 fn apply_shield_counter_replacement(
     state: &mut GameState,
     event: ProposedEvent,
@@ -1651,6 +1659,7 @@ fn create_token_applier(
     if let ProposedEvent::CreateToken {
         owner,
         mut spec,
+        mut copy,
         enter_tapped,
         count,
         applied,
@@ -1680,6 +1689,9 @@ fn create_token_applier(
         // and end up attacking the player who now controls it.
         if owner != original_owner {
             spec.controller = owner;
+            if let Some(copy) = copy.as_mut() {
+                copy.controller = owner;
+            }
         }
         // CR 614.1a: Modify token count per replacement effect.
         let new_count = match modification {
@@ -1730,6 +1742,7 @@ fn create_token_applier(
             let extra_proposed = ProposedEvent::CreateToken {
                 owner,
                 spec: extra,
+                copy: None,
                 enter_tapped: EtbTapState::Unspecified,
                 count: new_count,
                 applied: applied_on_extra,
@@ -1786,6 +1799,7 @@ fn create_token_applier(
                 let extra_proposed = ProposedEvent::CreateToken {
                     owner,
                     spec: Box::new(extra),
+                    copy: None,
                     enter_tapped: EtbTapState::Unspecified,
                     count: new_count,
                     applied: applied_on_extra,
@@ -1806,6 +1820,7 @@ fn create_token_applier(
         ApplyResult::Modified(ProposedEvent::CreateToken {
             owner,
             spec,
+            copy,
             enter_tapped,
             count: new_count,
             applied,
@@ -1936,6 +1951,9 @@ fn empty_mana_pool_applier(
 /// `Keep` (CR 614.6, `StepEndManaAction::Retain`) or `Recolor(_)`
 /// (CR 614.1a, `StepEndManaAction::Transform(_)`). Records the handler on
 /// the event's `applied` set so CR 614.5 prevents re-application.
+// clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
+// arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[allow(clippy::result_large_err)]
 fn apply_empty_mana_pool_replacement(
     state: &mut GameState,
     proposed: ProposedEvent,
@@ -3748,6 +3766,9 @@ fn optional_decline_is_noop(
     tap_already && counters_already && redirect_noop
 }
 
+// clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
+// arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[allow(clippy::result_large_err)]
 fn apply_single_replacement(
     state: &mut GameState,
     mut proposed: ProposedEvent,
@@ -4887,6 +4908,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
         let result = replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(event) = result else {
@@ -4916,6 +4938,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                face_down_profile: None,
             },
         ))
     }
@@ -5973,6 +5996,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
 
         let result = replace_event(&mut state, proposed.clone(), &mut events);
@@ -6178,6 +6202,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ))
             .destination_zone(Zone::Graveyard)
@@ -6397,6 +6422,7 @@ mod tests {
                 PlayerId(0),
                 crate::types::card_type::CoreType::Creature,
             )),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             applied: HashSet::new(),
         };
@@ -6420,6 +6446,7 @@ mod tests {
                 PlayerId(1),
                 crate::types::card_type::CoreType::Creature,
             )),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             applied: HashSet::new(),
         };
@@ -6931,6 +6958,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
+            face_down_profile: None,
         };
 
         let replaced = apply_single_replacement(
@@ -7038,6 +7066,7 @@ mod tests {
                 PlayerId(0),
                 crate::types::card_type::CoreType::Creature,
             )),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             applied: HashSet::new(),
         };
@@ -7077,6 +7106,7 @@ mod tests {
             owner: PlayerId(0),
             count: 1,
             spec: Box::new(spec),
+            copy: None,
             enter_tapped: EtbTapState::Tapped,
             applied: HashSet::new(),
         };
@@ -8781,6 +8811,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(plant_spec),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 2,
             applied: HashSet::new(),
@@ -8873,6 +8904,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(treasure),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),
@@ -8986,6 +9018,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(food_spec),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),
@@ -9160,6 +9193,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(treasure),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),
@@ -9297,6 +9331,7 @@ mod tests {
                 controller: PlayerId(0),
                 attach_to: None,
             }),
+            copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),

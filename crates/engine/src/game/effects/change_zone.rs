@@ -236,6 +236,7 @@ pub(crate) fn deliver_replaced_zone_change(
         enter_tapped: should_tap,
         enter_with_counters,
         controller_override: ctrl_override,
+        face_down_profile,
         ..
     } = event
     {
@@ -260,6 +261,23 @@ pub(crate) fn deliver_replaced_zone_change(
         zones::move_to_zone(state, object_id, to, events);
         if to == Zone::Battlefield || from == Zone::Battlefield {
             crate::game::layers::mark_layers_full(state);
+        }
+        // CR 708.3: An object put onto the battlefield face down is turned face
+        // down BEFORE it enters, so its ETB abilities don't trigger and its
+        // characteristics are the face-down profile (CR 708.2a), not the real
+        // card's. Mirror `manifest_card`'s sequence: snapshot the real face into
+        // `back_face`, overwrite with the face-down 2/2 (+ any specified extra
+        // types/subtypes), then store the snapshot so the original is restorable.
+        // Done before the controller-override and ETB-counter/trigger blocks
+        // below so triggers (if any later applied) see the face-down state.
+        if to == Zone::Battlefield {
+            if let Some(profile) = &face_down_profile {
+                if let Some(obj) = state.objects.get_mut(&object_id) {
+                    let original = crate::game::printed_cards::snapshot_object_face(obj);
+                    crate::game::morph::apply_face_down_creature_characteristics(obj, profile);
+                    obj.back_face = Some(original);
+                }
+            }
         }
         // CR 712.14a: Apply transformation if entering the battlefield transformed.
         if should_transform && to == Zone::Battlefield {
@@ -438,6 +456,7 @@ pub(crate) fn execute_zone_move(
     effect_enter_tapped: bool,
     controller_override: Option<PlayerId>,
     effect_enter_with_counters: &[(CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     track_exiled_by_source: bool,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
@@ -475,6 +494,19 @@ pub(crate) fn execute_zone_move(
         } = proposed
         {
             *co = Some(ctrl);
+        }
+    }
+
+    // CR 708.2a + CR 708.3: Carry the face-down profile on the proposed event so
+    // the object is turned face down before it enters the battlefield (after the
+    // replacement pipeline runs, in `deliver_replaced_zone_change`).
+    if let Some(profile) = face_down_profile {
+        if let ProposedEvent::ZoneChange {
+            face_down_profile: ref mut fdp,
+            ..
+        } = proposed
+        {
+            *fdp = Some(Box::new(profile.clone()));
         }
     }
 
@@ -622,6 +654,7 @@ pub fn resolve(
         effect_enters_attacking,
         up_to,
         effect_enter_with_counters,
+        face_down_profile,
     ) = match &ability.effect {
         Effect::ChangeZone {
             origin,
@@ -633,6 +666,7 @@ pub fn resolve(
             enters_attacking,
             up_to,
             enter_with_counters,
+            face_down_profile,
             ..
         } => {
             // CR 122.1 + CR 614.1c: Resolve `QuantityExpr` counts to concrete
@@ -671,6 +705,7 @@ pub fn resolve(
                 *enters_attacking,
                 *up_to,
                 resolved_counters,
+                face_down_profile.clone(),
             )
         }
         _ => return Err(EffectError::MissingParam("Destination".to_string())),
@@ -803,6 +838,26 @@ pub fn resolve(
             })
             .map(|(id, _)| *id)
             .collect();
+        let eligible: Vec<ObjectId> = if dest_zone == Zone::Exile {
+            eligible
+                .into_iter()
+                .filter(|id| {
+                    let acting_player = state
+                        .objects
+                        .get(id)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(ability.controller);
+                    !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                        state,
+                        ability,
+                        *id,
+                        acting_player,
+                    )
+                })
+                .collect()
+        } else {
+            eligible
+        };
 
         if eligible.is_empty() {
             if !up_to {
@@ -837,6 +892,7 @@ pub fn resolve(
                 effect_enter_tapped,
                 enters_under_player,
                 &effect_enter_with_counters,
+                face_down_profile.as_ref(),
                 track_exiled_by_source,
                 events,
             ) {
@@ -885,6 +941,7 @@ pub fn resolve(
                 effect_enter_tapped,
                 enters_under_player,
                 &effect_enter_with_counters,
+                face_down_profile.as_ref(),
                 track_exiled_by_source,
                 events,
             ) {
@@ -958,6 +1015,22 @@ pub fn resolve(
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
 
     for (i, obj_id) in targeted_objects.iter().enumerate() {
+        if dest_zone == Zone::Exile {
+            let acting_player = state
+                .objects
+                .get(obj_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(ability.controller);
+            if crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                state,
+                ability,
+                *obj_id,
+                acting_player,
+            ) {
+                continue;
+            }
+        }
+
         match process_one_zone_move(state, &ctx, *obj_id, events) {
             ZoneMoveResult::Done => {}
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
@@ -1077,6 +1150,13 @@ pub(crate) fn process_one_zone_move(
     // CR 110.2a: `enters_under_player` was pre-resolved at resolver entry;
     // pass it straight to the zone-move pipeline so replacement effects see
     // the correct controller without re-evaluating the `ControllerRef`.
+    // NOTE: `face_down_profile` is not yet threaded through the interactive
+    // single-selection carriers (`ChangeZoneIterationCtx`,
+    // `PendingChangeZoneIteration`, `WaitingFor::EffectZoneChoice`). The only
+    // current face-down-on-entry effect (Cyber-Controller) resolves via the mass
+    // `resolve_all` path, so this multi-target/interactive single path passes
+    // `None`. Latent: threading it here would extend face-down entry to
+    // interactive single-card "put X face down" effects if any are added.
     let result = execute_zone_move(
         state,
         obj_id,
@@ -1088,6 +1168,7 @@ pub(crate) fn process_one_zone_move(
         ctx.enter_tapped,
         ctx.enters_under_player,
         &ctx.enter_with_counters,
+        None,
         ctx.track_exiled_by_source,
         events,
     );
@@ -1123,6 +1204,7 @@ pub fn resolve_all(
             target,
             enters_under: _,
             enter_tapped,
+            face_down_profile: _,
         } => {
             let extracted = target.extract_zones();
             let scan_zones = if extracted.len() > 1 {
@@ -1190,6 +1272,16 @@ pub fn resolve_all(
         _ => None,
     };
 
+    // CR 708.2a + CR 708.3: Carry the face-down profile so each entering object
+    // is turned face down before it enters the battlefield (Cyber-Controller:
+    // "Put all creature cards milled this way onto the battlefield face down ...").
+    let face_down_profile: Option<crate::types::ability::FaceDownProfile> = match &ability.effect {
+        Effect::ChangeZoneAll {
+            face_down_profile, ..
+        } => face_down_profile.clone(),
+        _ => None,
+    };
+
     // Collect matching object IDs from the origin zone.
     // Explicit filter-controller override (e.g., "creature that player controls")
     // — use `from_ability_with_controller` so target-inheriting predicates like
@@ -1244,6 +1336,26 @@ pub fn resolve_all(
             .map(|(id, _)| *id)
             .collect()
     };
+    let matching: Vec<_> = if dest_zone == Zone::Exile {
+        matching
+            .into_iter()
+            .filter(|id| {
+                let acting_player = state
+                    .objects
+                    .get(id)
+                    .map(|obj| obj.controller)
+                    .unwrap_or(ability.controller);
+                !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                    state,
+                    ability,
+                    *id,
+                    acting_player,
+                )
+            })
+            .collect()
+    } else {
+        matching
+    };
 
     // Clean up consumed tracked set after scanning.
     if let TargetFilter::TrackedSet { id } = &effective_filter {
@@ -1276,6 +1388,7 @@ pub fn resolve_all(
             enter_tapped,
             enters_under_player,
             &[],
+            face_down_profile.as_ref(),
             track_exiled_by_source,
             events,
         ) {
@@ -1392,11 +1505,11 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::game_state::ZoneChangeRecord;
+    use crate::types::game_state::{StackEntry, StackEntryKind, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
     use std::sync::Arc;
 
     fn make_hand_choice_ability(up_to: bool) -> ResolvedAbility {
@@ -1412,6 +1525,7 @@ mod tests {
                 enters_attacking: false,
                 up_to,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -1441,6 +1555,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -1517,6 +1632,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(entering)],
             ObjectId(100),
@@ -1588,6 +1704,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(entering)],
             ObjectId(100),
@@ -1655,6 +1772,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -1722,6 +1840,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -1792,6 +1911,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -1912,6 +2032,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(aura_id), TargetRef::Object(other_card)],
             ObjectId(100),
@@ -1996,6 +2117,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -2089,6 +2211,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -2154,6 +2277,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -2201,6 +2325,7 @@ mod tests {
                     CounterType::Generic("egg".to_string()),
                     QuantityExpr::Fixed { value: 3 },
                 )],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -2244,6 +2369,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -2279,6 +2405,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(target_id)],
             source_id,
@@ -2323,6 +2450,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(target_id)],
             ObjectId(100),
@@ -2358,6 +2486,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(target_id)],
             ObjectId(100),
@@ -2435,6 +2564,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -2479,6 +2609,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -2523,6 +2654,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![], // empty targets — SelfRef means source_id
             source_id,
@@ -2577,6 +2709,7 @@ mod tests {
             false,
             None,
             &[],
+            None,
             false,
             &mut events,
         );
@@ -2656,6 +2789,7 @@ mod tests {
                 target: TargetFilter::None,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -2704,6 +2838,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(500),
@@ -2726,6 +2861,99 @@ mod tests {
             Zone::Graveyard,
             "controller's graveyard must be untouched"
         );
+    }
+
+    #[test]
+    fn change_zone_all_triggered_muzzle_skips_creature_tokens() {
+        // CR 603.2 + CR 609.3: The Master, Multiplied-style statics suppress
+        // triggered mass-exile effects for protected objects while the effect
+        // still does as much as possible for unprotected objects.
+        let mut state = GameState::new_two_player(42);
+        let master = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "The Master, Multiplied".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&master)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::CantCauseSacrificeOrExile {
+                    cause: ProhibitionScope::Controller,
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .properties(vec![FilterProp::Token])
+                        .controller(ControllerRef::You),
+                )),
+            );
+
+        let token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Copied Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token).unwrap();
+            obj.is_token = true;
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let nontoken = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Real Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&nontoken)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                enters_under: None,
+                enter_tapped: false,
+                face_down_profile: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(101),
+            controller: PlayerId(0),
+            source_id: ObjectId(100),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(100),
+                ability: Box::new(ability.clone()),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+            },
+        });
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&token].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&nontoken].zone, Zone::Exile);
+        assert_eq!(state.last_effect_count, Some(1));
     }
 
     #[test]
@@ -2769,6 +2997,7 @@ mod tests {
                 }),
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -2830,6 +3059,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(500),
@@ -2901,6 +3131,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: true,
+                face_down_profile: None,
             },
             vec![],
             ObjectId(500),
@@ -2931,6 +3162,7 @@ mod tests {
                 target: TargetFilter::Player,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(500),
@@ -3002,6 +3234,7 @@ mod tests {
                 }),
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             source_id,
@@ -3103,6 +3336,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             source_id,
@@ -3155,6 +3389,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj_id)],
             source_id,
@@ -3209,6 +3444,7 @@ mod tests {
                 enters_attacking: true,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj_id)],
             source_id,
@@ -3259,6 +3495,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             obj_id,
@@ -3315,6 +3552,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -3440,6 +3678,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(200),
@@ -3458,6 +3697,7 @@ mod tests {
                     }),
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(200),
@@ -3544,6 +3784,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(200),
@@ -3596,6 +3837,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(200),
@@ -3668,6 +3910,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(200),
@@ -3730,6 +3973,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![], // zero targets chosen
             ObjectId(900),
@@ -3784,6 +4028,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![], // zero targets chosen
             ObjectId(900),
@@ -3836,6 +4081,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source_id,
@@ -4058,6 +4304,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             obj_id,
@@ -4103,6 +4350,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             obj_id,
@@ -4151,6 +4399,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )));
         state
@@ -4240,6 +4489,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(999),
@@ -4487,6 +4737,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(opp_creature)],
             ObjectId(999),
@@ -4558,6 +4809,7 @@ mod tests {
                 target: TargetFilter::Controller,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             ObjectId(500),
@@ -4631,6 +4883,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::You),
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -4680,6 +4933,7 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature()),
                 enters_under: Some(ControllerRef::Opponent),
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -4776,6 +5030,7 @@ mod tests {
                 ),
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             // Parent target supplies the "that name" referent.
             vec![TargetRef::Object(seed)],
@@ -4920,6 +5175,7 @@ mod tests {
                     ])),
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 },
                 vec![TargetRef::Object(seed)],
                 ObjectId(100),
@@ -4939,6 +5195,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
                 vec![TargetRef::Object(seed)],
                 ObjectId(100),
@@ -5049,6 +5306,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![], // Empty targets: search failed to find, no card to put.
             ObjectId(100),
@@ -5118,6 +5376,7 @@ mod tests {
                 },
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -5131,6 +5390,176 @@ mod tests {
             Zone::Battlefield,
             "Exiled creature must return to the battlefield when TrackedSetId(0) is resolved"
         );
+    }
+
+    /// CR 708.2a + CR 708.3 + CR 110.2a: Cyber-Controller's mass put-step — "Put
+    /// all creature cards milled this way onto the battlefield face down under
+    /// your control. They're 2/2 Cyberman artifact creatures." The
+    /// `ChangeZoneAll { target: TrackedSetFiltered{creature}, enters_under: You,
+    /// face_down_profile: Some(...) }` must move every creature card in the
+    /// milled set to the battlefield FACE DOWN under the ability controller
+    /// (P0), apply the profile, and leave non-creature cards in the milled zone.
+    #[test]
+    fn change_zone_all_face_down_under_controller_applies_profile() {
+        use crate::types::ability::{ControllerRef, FaceDownProfile, TypeFilter, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        // Milled cards live in P1's (the opponent's) graveyard. The ability
+        // controller is P0.
+        let mut creature_ids = Vec::new();
+        for i in 0..2 {
+            let id = create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                format!("Milled Creature {i}"),
+                Zone::Graveyard,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+            creature_ids.push(id);
+        }
+        // A land in the same milled set must NOT move.
+        let land = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(1),
+            "Milled Land".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
+
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        let mut milled = creature_ids.clone();
+        milled.push(land);
+        state.tracked_object_sets.insert(set_id, milled);
+
+        let creature_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![],
+        });
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(creature_filter),
+                },
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: false,
+                face_down_profile: Some(FaceDownProfile {
+                    power: Some(2),
+                    toughness: Some(2),
+                    extra_core_types: vec![CoreType::Artifact],
+                    subtypes: vec!["Cyberman".to_string()],
+                }),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        for id in &creature_ids {
+            let obj = &state.objects[id];
+            assert_eq!(obj.zone, Zone::Battlefield, "creature card must enter");
+            assert!(obj.face_down, "must be face down (CR 708.3)");
+            assert_eq!(obj.controller, PlayerId(0), "CR 110.2a: under controller");
+            assert_eq!(obj.power, Some(2));
+            assert_eq!(obj.toughness, Some(2));
+            assert_eq!(
+                obj.card_types.core_types,
+                vec![CoreType::Creature, CoreType::Artifact]
+            );
+            assert_eq!(obj.card_types.subtypes, vec!["Cyberman".to_string()]);
+        }
+        // The land stays in P1's graveyard.
+        assert_eq!(state.objects[&land].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&land].owner, PlayerId(1));
+    }
+
+    /// CR 708.2a: An empty milled set (no eligible cards) is a clean no-op.
+    #[test]
+    fn change_zone_all_face_down_empty_set_noop() {
+        use crate::types::ability::{ControllerRef, FaceDownProfile, TypeFilter, TypedFilter};
+        let mut state = GameState::new_two_player(42);
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![]);
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSetFiltered {
+                    id: TrackedSetId(0),
+                    filter: Box::new(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: None,
+                        properties: vec![],
+                    })),
+                },
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: false,
+                face_down_profile: Some(FaceDownProfile::vanilla_2_2()),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        // Empty set → no panic, no moves.
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+    }
+
+    /// CR 708.2a / CR 708.3: the singular `ChangeZone` path also consumes
+    /// `face_down_profile` — the direct single-eligible branch turns the moved
+    /// card face down on battlefield entry.
+    #[test]
+    fn change_zone_single_eligible_applies_face_down_profile() {
+        use crate::types::ability::FaceDownProfile;
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Lone Creature".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&card).unwrap().card_types.core_types = vec![CoreType::Creature];
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                face_down_profile: Some(FaceDownProfile::vanilla_2_2()),
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = &state.objects[&card];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(
+            obj.face_down,
+            "singular ChangeZone must turn the card face down"
+        );
+        assert_eq!(obj.power, Some(2));
+        assert_eq!(obj.toughness, Some(2));
+        assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
     }
 
     /// CR 614.12b + CR 614.1c + CR 614.13: when a multi-target ChangeZone
@@ -5204,6 +5633,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(shock_a), TargetRef::Object(shock_b)],
             ObjectId(100),
@@ -5335,6 +5765,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(shock_a), TargetRef::Object(shock_b)],
             ObjectId(100),
@@ -5393,6 +5824,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![
                 TargetRef::Object(s1),
@@ -5602,6 +6034,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj_id)],
             ObjectId(100),
@@ -5703,6 +6136,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: true,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),

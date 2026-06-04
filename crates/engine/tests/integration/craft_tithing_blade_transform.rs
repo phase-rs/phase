@@ -98,6 +98,7 @@ fn craft_ability(cost: ManaCost) -> AbilityDefinition {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: Vec::new(),
+            face_down_profile: None,
         },
     )
     .cost(AbilityCost::Composite {

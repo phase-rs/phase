@@ -206,3 +206,59 @@ fn branch_descriptions(branches: &[AbilityDefinition]) -> Vec<String> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ability::{
+        AbilityKind, Comparator, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
+        QuantityRef, TargetFilter,
+    };
+    use crate::types::format::FormatConfig;
+
+    #[test]
+    fn life_lost_player_attribute_chooser_prompts_only_matching_opponents() {
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[1].life_lost_this_turn = 3;
+        state.players[2].life_lost_this_turn = 2;
+
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::ScopedPlayer,
+                    }),
+                    comparator: Comparator::GE,
+                    value: Box::new(QuantityExpr::Fixed { value: 3 }),
+                },
+                branches: vec![branch],
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ChooseOneOfBranch {
+                player,
+                remaining_players,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert!(remaining_players.is_empty());
+            }
+            other => panic!("expected ChooseOneOfBranch, got {other:?}"),
+        }
+    }
+}

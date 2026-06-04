@@ -893,6 +893,27 @@ pub(crate) fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> 
         return Some(def);
     }
 
+    // CR 604.1 + CR 508.1d: a trailing "unless you control <X>" clause makes a
+    // rule-static (e.g. "attacks each combat if able") conditional — the
+    // requirement/restriction applies only while the controller does NOT control
+    // <X>. Class: Reckless Cohort ("…unless you control another Ally"), Marauding
+    // Maulhorn, and any rule-static with the same "unless you control" rider.
+    // Strip the clause, classify the base predicate, and attach the negated
+    // control presence via the shared `parse_control_conditions` building block.
+    let pred_tp = TextPair::new(predicate_text, &pred_lower);
+    if let Some((base, unless)) = pred_tp.split_around(" unless ") {
+        if let Ok(("", control)) = crate::parser::oracle_nom::condition::parse_control_conditions(
+            unless.lower.trim_end_matches('.'),
+        ) {
+            let predicate = parse_rule_static_predicate(base.original)?;
+            let mut def = lower_rule_static(predicate, affected, text);
+            def.condition = Some(StaticCondition::Not {
+                condition: Box::new(control),
+            });
+            return Some(def);
+        }
+    }
+
     let predicate = parse_rule_static_predicate(predicate_text)?;
     // CR 502.3: Extract trailing condition for CantUntap statics (e.g., "as long as [condition]")
     if matches!(predicate, RuleStaticPredicate::CantUntap) {

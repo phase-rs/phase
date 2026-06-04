@@ -684,7 +684,7 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
     : selected.size === data.keep_count;
 
   const destLabel =
-    isReorderOnly
+    data.kept_destination === "Library"
       ? t("cardChoice.dig.destinationTop")
       : data.kept_destination === "Battlefield"
       ? t("cardChoice.dig.destinationBattlefield")

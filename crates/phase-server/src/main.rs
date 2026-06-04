@@ -33,6 +33,9 @@ use lobby_broker::{
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
 use server_core::ai_seats_wire_guard::{guard_create_ai_seats, MAX_FULL_GAME_PLAYER_COUNT};
 use server_core::client_hello_guard::guard_client_hello;
+use server_core::client_message_wire_guard::{
+    guard_broker_projection_inbound, guard_client_message_before_dispatch,
+};
 use server_core::draft_action_payload_guard::guard_draft_action_payload;
 use server_core::draft_session::DraftSessionManager;
 use server_core::draft_wire_guard::{
@@ -42,10 +45,13 @@ use server_core::draft_wire_guard::{
 use server_core::emote_guard::guard_emote;
 use server_core::game_action_payload_guard::guard_game_action_payload;
 use server_core::game_reconnect_guard::guard_game_reconnect;
+use server_core::game_state_snapshot_wire_guard::{
+    guard_game_state_for_broadcast, guard_state_snapshot_broadcast, StateSnapshotParts,
+};
 use server_core::legacy_deck_guard::guard_legacy_deck;
 use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
-use server_core::lookup_join_guard::guard_lookup_join_target;
+use server_core::lobby_subscriber_wire_guard::guard_lobby_subscriber_capacity;
 use server_core::protocol::{
     build_commit, ClientMessage, RankedPlayerResult, ServerMessage, ServerMode,
     MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
@@ -92,6 +98,22 @@ type SharedDraftSpectators = Arc<
 >;
 /// Spectator senders keyed by game code (live games only).
 type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
+
+async fn reserve_lobby_subscriber_slot(
+    lobby_subscribers: &SharedLobbySubscribers,
+    tx: &mpsc::UnboundedSender<ServerMessage>,
+) -> Result<(), String> {
+    let mut subs = lobby_subscribers.lock().await;
+    subs.retain(|sender| !sender.is_closed());
+
+    if subs.iter().any(|sender| sender.same_channel(tx)) {
+        return Ok(());
+    }
+
+    guard_lobby_subscriber_capacity(subs.len())?;
+    subs.push(tx.clone());
+    Ok(())
+}
 
 async fn remove_game_spectator_sender(
     game_spectators: &SharedGameSpectators,
@@ -265,7 +287,10 @@ fn build_game_started_messages(session: &mut GameSession) -> Vec<(PlayerId, Serv
         .collect()
 }
 
-fn build_state_update_message(result: &ActionResult, player: PlayerId) -> ServerMessage {
+fn build_state_update_message(
+    result: &ActionResult,
+    player: PlayerId,
+) -> Result<ServerMessage, String> {
     let (
         raw_state,
         events,
@@ -275,11 +300,19 @@ fn build_state_update_message(result: &ActionResult, player: PlayerId) -> Server
         spell_costs,
         legal_actions_by_object,
     ) = result;
+    guard_state_snapshot_broadcast(StateSnapshotParts {
+        state: raw_state,
+        events,
+        log_entries,
+        legal_actions,
+        legal_actions_by_object,
+        spell_costs,
+    })?;
     let is_actor = raw_state.waiting_for.acting_players().contains(&player);
     let filtered = server_core::filter_state_for_player(raw_state, player);
     let derived = derive_views(&filtered, Some(player));
 
-    ServerMessage::StateUpdate {
+    Ok(ServerMessage::StateUpdate {
         state: filtered,
         events: events.clone(),
         legal_actions: if is_actor {
@@ -301,18 +334,19 @@ fn build_state_update_message(result: &ActionResult, player: PlayerId) -> Server
             HashMap::new()
         },
         derived,
-    }
+    })
 }
 
 /// Build the public spectator view for an in-progress game.
 ///
 /// Spectators are modeled as a non-seat viewer (`PlayerId(u8::MAX)`), which
 /// keeps all seat-private data redacted and guarantees no legal-action payload.
-fn build_spectator_game_started_message(session: &GameSession) -> ServerMessage {
+fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerMessage, String> {
+    guard_game_state_for_broadcast(&session.state)?;
     let filtered = server_core::filter_state_for_player(&session.state, SPECTATOR_PLAYER_ID);
     let derived = derive_views(&filtered, None);
 
-    ServerMessage::GameStarted {
+    Ok(ServerMessage::GameStarted {
         state: filtered,
         your_player: SPECTATOR_PLAYER_ID,
         opponent_name: None,
@@ -324,19 +358,27 @@ fn build_spectator_game_started_message(session: &GameSession) -> ServerMessage 
         derived,
         player_token: None,
         events: Vec::new(),
-    }
+    })
 }
 
 fn build_spectator_state_update_message(
     raw_state: &GameState,
     events: &[GameEvent],
     log_entries: &[GameLogEntry],
-) -> ServerMessage {
+) -> Result<ServerMessage, String> {
+    guard_state_snapshot_broadcast(StateSnapshotParts {
+        state: raw_state,
+        events,
+        log_entries,
+        legal_actions: &[],
+        legal_actions_by_object: &HashMap::new(),
+        spell_costs: &HashMap::new(),
+    })?;
     let filtered = server_core::filter_state_for_player(raw_state, SPECTATOR_PLAYER_ID);
     let derived = derive_views(&filtered, None);
     let eliminated_players = raw_state.eliminated_players.clone();
 
-    ServerMessage::StateUpdate {
+    Ok(ServerMessage::StateUpdate {
         state: filtered,
         events: events.to_vec(),
         legal_actions: Vec::new(),
@@ -346,7 +388,7 @@ fn build_spectator_state_update_message(
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
         derived,
-    }
+    })
 }
 
 /// Server's advertised role, selected at startup via `--lobby-only`. Copied
@@ -631,8 +673,8 @@ fn guard_full_create_game_settings_inbound(
 /// variants, which is the wrong default for a security-relevant gate.
 ///
 /// Rejected variants:
-/// - `GeneratePairings`: server-hosted draft match play is not yet implemented;
-///   pairings will be computed server-internal once that path lands.
+/// - `GeneratePairings`: draft match pairings are server-internal; accepting this
+///   from clients would let a player force pairing generation out of sequence.
 /// - `SetSeatConnected`: engine state plumbing. The server-internal runtime in
 ///   `server-core/src/draft_session.rs` broadcasts connection state via
 ///   `draft_core::session::apply` directly. Accepting it from a client would
@@ -644,7 +686,7 @@ fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction)
     use draft_core::types::DraftAction;
     match action {
         DraftAction::GeneratePairings { .. } => {
-            Some("Server-hosted draft match play is not available yet".to_string())
+            Some("GeneratePairings is server-internal; not allowed from client".to_string())
         }
         DraftAction::SetSeatConnected { .. } => {
             Some("SetSeatConnected is server-internal; not allowed from client".to_string())
@@ -1641,6 +1683,10 @@ async fn dispatch_broker(
     tx: &mpsc::UnboundedSender<ServerMessage>,
     identity: &mut SocketIdentity,
 ) {
+    if let Err(reason) = guard_broker_projection_inbound(msg) {
+        let _ = tx.send(ServerMessage::Error { message: reason });
+        return;
+    }
     let Some(lobby_msg) = to_lobby_client_message(msg) else {
         return;
     };
@@ -1701,12 +1747,14 @@ async fn apply_outbounds(
                 broadcast_to_lobby_subscribers(lobby_subscribers, to_server_message(msg)).await;
             }
             Outbound::AddSubscriber => {
-                let mut subs = lobby_subscribers.lock().await;
-                subs.push(tx.clone());
+                if let Err(reason) = reserve_lobby_subscriber_slot(lobby_subscribers, tx).await {
+                    let _ = tx.send(ServerMessage::Error { message: reason });
+                    continue;
+                }
             }
             Outbound::RemoveSubscriber => {
                 let mut subs = lobby_subscribers.lock().await;
-                subs.retain(|s| !s.is_closed());
+                subs.retain(|s| !s.same_channel(tx) && !s.is_closed());
             }
             Outbound::SendPlayerCountToSelf => {
                 let count = player_count.load(Ordering::Relaxed);
@@ -1996,6 +2044,72 @@ async fn report_draft_game_over(
     }
 }
 
+/// When the draft pod is pairing or in match play, generate pairings (server-internal)
+/// and spawn 2-player game sessions for each pending table.
+async fn maybe_spawn_draft_matches(
+    draft_code: &str,
+    draft_state: &SharedDraftState,
+    game_state: &SharedState,
+    db: &SharedDb,
+    connections: &SharedConnections,
+) {
+    let spawns = {
+        let mut draft_mgr = draft_state.lock().await;
+        let mut game_mgr = game_state.lock().await;
+        if let Err(error) = draft_mgr.ensure_pairings_generated(draft_code) {
+            warn!(
+                draft = %draft_code,
+                error = %error,
+                "failed to generate draft pairings"
+            );
+            return;
+        }
+        let round = draft_mgr
+            .sessions
+            .get(draft_code)
+            .map(|s| s.session.current_round)
+            .unwrap_or(1);
+        match draft_mgr.spawn_match_games_for_round(draft_code, &mut game_mgr, db, round) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(draft = %draft_code, error = %e, "draft match spawn skipped");
+                return;
+            }
+        }
+    };
+
+    if spawns.is_empty() {
+        return;
+    }
+
+    let conns = connections.lock().await;
+    let Some(players) = conns.get(draft_code) else {
+        return;
+    };
+
+    for spawn in spawns {
+        info!(
+            draft = %draft_code,
+            match_id = %spawn.match_id,
+            game = %spawn.game_code,
+            "draft match game spawned"
+        );
+        for (player, seat) in [(&spawn.player_a, 0usize), (&spawn.player_b, 1usize)] {
+            let msg = ServerMessage::DraftMatchStart {
+                match_id: spawn.match_id.clone(),
+                round: spawn.round,
+                game_code: spawn.game_code.clone(),
+                player_token: player.game_token.clone(),
+                your_player: player.game_player,
+                opponent_name: spawn.opponent_names[seat].clone(),
+            };
+            if let Some(sender) = players.get(&PlayerId(player.draft_seat)) {
+                let _ = sender.send(msg);
+            }
+        }
+    }
+}
+
 /// Broadcast `DraftStateUpdate` to all connected sockets in a draft pod.
 /// Iterates the connections map and filters by `identity.draft_code` match.
 /// Because `SocketIdentity` is per-socket state (not stored globally), we
@@ -2214,6 +2328,14 @@ async fn broadcast_game_started(
         }
     }
 
+    let spectator_msg = match spectator_msg {
+        Ok(msg) => msg,
+        Err(reason) => {
+            warn!(game = %game_code, %reason, "skipping spectator GameStarted: snapshot too large");
+            return;
+        }
+    };
+
     let mut specs = game_spectators.lock().await;
     if let Some(spectators) = specs.get_mut(game_code) {
         spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
@@ -2379,6 +2501,14 @@ async fn handle_client_message(
         let msg = ServerMessage::Error {
             message: reason.to_string(),
         };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = socket.send(Message::text(json)).await;
+        }
+        return;
+    }
+
+    if let Err(reason) = guard_client_message_before_dispatch(&client_msg, mode) {
+        let msg = ServerMessage::Error { message: reason };
         if let Ok(json) = serde_json::to_string(&msg) {
             let _ = socket.send(Message::text(json)).await;
         }
@@ -2664,6 +2794,22 @@ async fn handle_client_message(
                                 ranked_result_for_duel(game_db, &game_code, &players, winner)
                             });
 
+                    if let Err(reason) = guard_state_snapshot_broadcast(StateSnapshotParts {
+                        state: &raw_state,
+                        events: &events,
+                        log_entries: &log_entries,
+                        legal_actions: &legal_actions,
+                        legal_actions_by_object: &legal_actions_by_object,
+                        spell_costs: &spell_costs,
+                    }) {
+                        warn!(game = %game_code, %reason, "action snapshot too large to broadcast");
+                        let msg = ServerMessage::Error { message: reason };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
+
                     // Filter state per-player outside the lock
                     let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
                         .map(|i| {
@@ -2728,9 +2874,9 @@ async fn handle_client_message(
                             }
                         }
                     }
+                    if let Ok(spectator_msg) =
+                        build_spectator_state_update_message(&raw_state, &events, &log_entries)
                     {
-                        let spectator_msg =
-                            build_spectator_state_update_message(&raw_state, &events, &log_entries);
                         let mut specs = game_spectators.lock().await;
                         if let Some(spectators) = specs.get_mut(&game_code) {
                             spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
@@ -2752,6 +2898,18 @@ async fn handle_client_message(
                             ai_spell_costs,
                             ai_by_object,
                         ) = result;
+                        if guard_state_snapshot_broadcast(StateSnapshotParts {
+                            state: ai_raw_state,
+                            events: ai_events,
+                            log_entries: ai_log_entries,
+                            legal_actions: ai_legal,
+                            legal_actions_by_object: ai_by_object,
+                            spell_costs: ai_spell_costs,
+                        })
+                        .is_err()
+                        {
+                            continue;
+                        }
                         let is_last = i == ai_results.len() - 1;
 
                         // Filter AI state per-player outside the lock
@@ -2803,16 +2961,18 @@ async fn handle_client_message(
                             }
                         }
                         let (ai_raw_state, ai_events, _, ai_log_entries, _, _, _) = result;
-                        let spectator_msg = build_spectator_state_update_message(
+                        if let Ok(spectator_msg) = build_spectator_state_update_message(
                             ai_raw_state,
                             ai_events,
                             ai_log_entries,
-                        );
-                        let mut specs = game_spectators.lock().await;
-                        if let Some(spectators) = specs.get_mut(&game_code) {
-                            spectators.retain(|sender| sender.send(spectator_msg.clone()).is_ok());
-                            if spectators.is_empty() {
-                                specs.remove(&game_code);
+                        ) {
+                            let mut specs = game_spectators.lock().await;
+                            if let Some(spectators) = specs.get_mut(&game_code) {
+                                spectators
+                                    .retain(|sender| sender.send(spectator_msg.clone()).is_ok());
+                                if spectators.is_empty() {
+                                    specs.remove(&game_code);
+                                }
                             }
                         }
                     }
@@ -2974,7 +3134,9 @@ async fn handle_client_message(
                         if let Some(game_conns) = conns.get(&game_code) {
                             for (&pid, sender) in game_conns.iter() {
                                 if pid != player {
-                                    let _ = sender.send(build_state_update_message(&result, pid));
+                                    if let Ok(msg) = build_state_update_message(&result, pid) {
+                                        let _ = sender.send(msg);
+                                    }
                                 }
                             }
                         }
@@ -2991,11 +3153,35 @@ async fn handle_client_message(
             }
         }
 
-        ClientMessage::SubscribeLobby | ClientMessage::UnsubscribeLobby => {
+        ClientMessage::SubscribeLobby => {
+            if let Err(reason) = reserve_lobby_subscriber_slot(lobby_subscribers, tx).await {
+                let msg = ServerMessage::Error { message: reason };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
+            // Mode-agnostic: lobby subscription behaves identically on Full and
+            // LobbyOnly servers, so the broker is the single authority for the
+            // LobbyUpdate snapshot + PlayerCount. The subscriber slot is reserved
+            // before broker state is absorbed so a capacity rejection cannot leave
+            // a ghost subscription in SocketIdentity.
+            dispatch_broker(
+                &client_msg,
+                lobby,
+                lobby_subscribers,
+                player_count,
+                tx,
+                identity,
+            )
+            .await;
+        }
+
+        ClientMessage::UnsubscribeLobby => {
             // Mode-agnostic: lobby (un)subscription behaves identically on Full
             // and LobbyOnly servers, so the broker is the single authority for
-            // both. AddSubscriber/RemoveSubscriber + the LobbyUpdate snapshot +
-            // PlayerCount come back as ordered outbounds.
+            // RemoveSubscriber.
             dispatch_broker(
                 &client_msg,
                 lobby,
@@ -3411,15 +3597,14 @@ async fn handle_client_message(
         } => {
             info!(game = %game_code, "LookupJoinTarget");
 
-            if let Err(reason) =
-                guard_lookup_join_target(&lobby_broker::LobbyClientMessage::LookupJoinTarget {
-                    game_code: game_code.clone(),
-                    password: password.clone(),
-                    reserve,
-                    display_name: display_name.clone(),
-                    release_reservation_token: release_reservation_token.clone(),
-                })
-            {
+            if let Err(reason) = lobby_broker::guard_lookup_join_target_inbound(
+                lobby_broker::LookupJoinTargetInbound {
+                    game_code: &game_code,
+                    password: password.as_deref(),
+                    display_name: display_name.as_deref(),
+                    release_reservation_token: release_reservation_token.as_deref(),
+                },
+            ) {
                 let msg = ServerMessage::Error { message: reason };
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.send(Message::text(json)).await;
@@ -4189,7 +4374,7 @@ async fn handle_client_message(
                 let mgr = state.lock().await;
                 match mgr.sessions.get(&game_code) {
                     Some(session) if session.game_started => {
-                        Ok(build_spectator_game_started_message(session))
+                        build_spectator_game_started_message(session)
                     }
                     Some(_) => Err("Game has not started yet".to_string()),
                     None => Err(format!("Game not found: {game_code}")),
@@ -4796,25 +4981,8 @@ async fn handle_client_message(
                         );
                     }
 
-                    // Check if pairings were generated (status transitioned to MatchInProgress)
-                    {
-                        let mgr = draft_state.lock().await;
-                        if let Some(session) = mgr.sessions.get(&draft_code) {
-                            if session.session.status
-                                == draft_core::types::DraftStatus::MatchInProgress
-                            {
-                                // Pairings generated — send DraftMatchStart to each paired player
-                                // (This is a simplified stub; full game session spawning
-                                // requires deck resolution and session creation which
-                                // depends on the deckbuilding flow from Plan 03/04)
-                                info!(
-                                    draft = %draft_code,
-                                    pairings = session.session.pairings.len(),
-                                    "pairings generated — match spawning deferred to Plan 03/04"
-                                );
-                            }
-                        }
-                    }
+                    maybe_spawn_draft_matches(&draft_code, draft_state, state, db, connections)
+                        .await;
 
                     // Persist draft session after mutation
                     persist_draft_session_async(game_db, &draft_code, draft_state).await;
@@ -5035,6 +5203,98 @@ mod ranked_tests {
 }
 
 #[cfg(test)]
+mod lobby_subscriber_tests {
+    use super::*;
+    use server_core::lobby_subscriber_wire_guard::MAX_LOBBY_SUBSCRIBERS;
+
+    #[tokio::test]
+    async fn lobby_subscriber_reservation_rejects_when_at_cap() {
+        let subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(Vec::new()));
+        let mut receivers = Vec::new();
+        {
+            let mut subs = subscribers.lock().await;
+            for _ in 0..MAX_LOBBY_SUBSCRIBERS {
+                let (tx, rx) = mpsc::unbounded_channel();
+                subs.push(tx);
+                receivers.push(rx);
+            }
+        }
+        let (overflow_tx, _overflow_rx) = mpsc::unbounded_channel();
+
+        let err = reserve_lobby_subscriber_slot(&subscribers, &overflow_tx)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("maximum"));
+        assert_eq!(subscribers.lock().await.len(), MAX_LOBBY_SUBSCRIBERS);
+        drop(receivers);
+    }
+
+    #[tokio::test]
+    async fn lobby_subscriber_reservation_prunes_closed_senders_before_cap_check() {
+        let subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(Vec::new()));
+        {
+            let mut subs = subscribers.lock().await;
+            for _ in 0..MAX_LOBBY_SUBSCRIBERS {
+                let (tx, rx) = mpsc::unbounded_channel();
+                drop(rx);
+                subs.push(tx);
+            }
+        }
+        let (new_tx, _new_rx) = mpsc::unbounded_channel();
+
+        reserve_lobby_subscriber_slot(&subscribers, &new_tx)
+            .await
+            .expect("closed senders should be pruned before enforcing cap");
+
+        assert_eq!(subscribers.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn lobby_subscriber_reservation_is_idempotent_for_same_channel() {
+        let subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(Vec::new()));
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        reserve_lobby_subscriber_slot(&subscribers, &tx)
+            .await
+            .unwrap();
+        reserve_lobby_subscriber_slot(&subscribers, &tx)
+            .await
+            .unwrap();
+
+        assert_eq!(subscribers.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn remove_subscriber_outbound_removes_current_channel_and_closed_senders() {
+        let subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(Vec::new()));
+        let player_count = Arc::new(AtomicU32::new(0));
+        let (current_tx, _current_rx) = mpsc::unbounded_channel();
+        let (live_tx, _live_rx) = mpsc::unbounded_channel();
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        drop(closed_rx);
+        {
+            let mut subs = subscribers.lock().await;
+            subs.push(current_tx.clone());
+            subs.push(live_tx.clone());
+            subs.push(closed_tx);
+        }
+
+        apply_outbounds(
+            vec![Outbound::RemoveSubscriber],
+            &current_tx,
+            &subscribers,
+            &player_count,
+        )
+        .await;
+
+        let subs = subscribers.lock().await;
+        assert_eq!(subs.len(), 1);
+        assert!(subs[0].same_channel(&live_tx));
+    }
+}
+
+#[cfg(test)]
 mod live_spectator_tests {
     use super::*;
     use server_core::spectator_wire_guard::{
@@ -5046,7 +5306,7 @@ mod live_spectator_tests {
         let mut state = GameState::new_two_player(42);
         state.eliminated_players.push(PlayerId(1));
 
-        let msg = build_spectator_state_update_message(&state, &[], &[]);
+        let msg = build_spectator_state_update_message(&state, &[], &[]).expect("fixture snapshot");
 
         match msg {
             ServerMessage::StateUpdate {
@@ -5754,13 +6014,12 @@ mod handshake_tests {
     #[test]
     fn client_forbidden_draft_action_rejects_generate_pairings() {
         // Regression coverage: this rejection predates GH #1254 and must
-        // continue to fire. The user-facing reason ("not available yet")
-        // is distinct from SetSeatConnected ("server-internal"); both
-        // are forbidden but for different reasons.
+        // continue to fire. GeneratePairings is server-internal because
+        // match spawning now drives it after deck submission.
         let action = draft_core::types::DraftAction::GeneratePairings { round: 1 };
         let reason = client_forbidden_draft_action_reason(&action);
         assert!(reason.is_some());
-        assert!(reason.unwrap().contains("not available yet"));
+        assert!(reason.unwrap().contains("server-internal"));
     }
 
     #[test]

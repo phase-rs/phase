@@ -424,6 +424,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(1),
             spec: Box::new(token_spec),
+            copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),
@@ -517,6 +518,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(1),
             spec: Box::new(token_spec),
+            copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),
@@ -600,6 +602,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(token_spec),
+            copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),
