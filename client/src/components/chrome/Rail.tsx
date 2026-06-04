@@ -21,18 +21,23 @@ export function Rail({ onSettings }: RailProps) {
 
   return (
     <nav
-      className="fixed inset-y-0 left-0 z-50 hidden w-[92px] flex-col items-center gap-2 border-r border-hairline-strong bg-[rgba(6,10,22,0.72)] px-2 py-[18px] backdrop-blur-xl min-[820px]:flex"
+      // Structural left column (≥820px): a sticky, full-viewport-height cell that
+      // pins as the document scrolls and scrolls INTERNALLY when its own content
+      // exceeds the viewport (e.g. landscape phones ~390px tall). At short heights
+      // it also compacts (icon-only, tighter spacing) so scrolling is rarely
+      // needed; `overflow-y-auto` is the safety net for the very shortest devices.
+      className="sticky top-0 z-30 hidden h-[100dvh] w-[92px] shrink-0 self-start flex-col items-center gap-2 overflow-y-auto border-r border-hairline-strong bg-[rgba(6,10,22,0.72)] px-2 py-[18px] backdrop-blur-xl min-[820px]:flex [@media(max-height:540px)]:gap-1 [@media(max-height:540px)]:py-2"
       aria-label={t("nav.label")}
     >
       <button
         onClick={() => navigate("/")}
-        className="mb-2.5 cursor-pointer border-0 bg-transparent p-0"
+        className="mb-2.5 cursor-pointer border-0 bg-transparent p-0 [@media(max-height:540px)]:mb-1"
         aria-label={t("nav.home")}
       >
         <img
           src="/logo_only.webp"
           alt="phase.rs"
-          className="w-11 drop-shadow-[0_0_14px_rgba(251,146,60,0.45)]"
+          className="w-11 drop-shadow-[0_0_14px_rgba(251,146,60,0.45)] [@media(max-height:540px)]:w-8"
         />
       </button>
 
@@ -44,7 +49,7 @@ export function Rail({ onSettings }: RailProps) {
               key={key}
               to={path}
               aria-current={on ? "page" : undefined}
-              className={`group relative flex flex-col items-center gap-1.5 rounded-[14px] px-1 py-[11px] transition-colors duration-150 ${
+              className={`group relative flex flex-col items-center gap-1.5 rounded-[14px] px-1 py-[11px] transition-colors duration-150 [@media(max-height:540px)]:gap-0.5 [@media(max-height:540px)]:py-1.5 ${
                 on
                   ? "bg-white/[0.07] text-white"
                   : "text-fg-meta hover:bg-white/[0.04] hover:text-slate-300"
@@ -78,16 +83,20 @@ export function Rail({ onSettings }: RailProps) {
         })}
       </div>
 
-      <div className="mt-auto flex w-full flex-col items-center gap-2 border-t border-hairline-strong pt-2.5">
+      <div className="mt-auto flex w-full flex-col items-center gap-2 border-t border-hairline-strong pt-2.5 [@media(max-height:540px)]:gap-1 [@media(max-height:540px)]:pt-1.5">
         <button
           onClick={onSettings}
-          className="flex w-full flex-col items-center gap-1 rounded-[14px] px-1 py-2 text-fg-meta transition-colors hover:bg-white/[0.04] hover:text-slate-300"
+          className="flex w-full flex-col items-center gap-1 rounded-[14px] px-1 py-2 text-fg-meta transition-colors hover:bg-white/[0.04] hover:text-slate-300 [@media(max-height:540px)]:py-1"
         >
           <img src="/icons/sections/settings.png" alt="" aria-hidden="true" draggable={false} className="h-6 w-6 opacity-50" />
           <span className="text-[10.5px] font-semibold tracking-[0.02em]">{t("nav.settings")}</span>
         </button>
 
-        <BuildBadge compact />
+        {/* Version/update chip is non-essential during landscape play; hide it at
+            short heights to keep the rail fully visible without scrolling. */}
+        <div className="[@media(max-height:540px)]:hidden">
+          <BuildBadge compact />
+        </div>
       </div>
     </nav>
   );

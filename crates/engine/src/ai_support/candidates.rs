@@ -1552,6 +1552,25 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        // CR 702.140c + CR 730.2a: Mutate merge — the controller chooses whether
+        // the mutating spell goes on top of or under the target creature. Both
+        // sides are always legal options.
+        WaitingFor::MutateMergeChoice { player, .. } => vec![
+            candidate(
+                GameAction::ChooseMutateMergeSide {
+                    side: crate::game::merge::MergeSide::Top,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::ChooseMutateMergeSide {
+                    side: crate::game::merge::MergeSide::Bottom,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         WaitingFor::CastingVariantChoice {
             player, options, ..
         } => options
@@ -5065,6 +5084,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         )
         .cost(AbilityCost::Mana {

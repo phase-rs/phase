@@ -427,6 +427,7 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 target: TargetFilter::TrackedSet { id: real_id },
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             };
         }
         _ => {}
@@ -551,6 +552,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         );
         let ability = ResolvedAbility::new(
@@ -641,6 +643,7 @@ mod tests {
                 target: TargetFilter::Any,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
         );
         let ability = ResolvedAbility::new(
@@ -699,6 +702,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         );
         let ability = ResolvedAbility::new(

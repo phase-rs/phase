@@ -7,11 +7,12 @@
 
 use lobby_broker::inbound_guard::{
     guard_create_game_settings_inbound, guard_join_game_with_password_inbound,
-    CreateGameSettingsInbound, JoinGameWithPasswordInbound,
+    guard_lookup_join_target_inbound, CreateGameSettingsInbound, JoinGameWithPasswordInbound,
+    LookupJoinTargetInbound,
 };
 use lobby_broker::validation::{
-    validate_lookup_join_target_fields, validate_unregister_lobby_fields,
-    validate_update_lobby_metadata_fields, LookupJoinTargetFields, UpdateLobbyMetadataFields,
+    validate_unregister_lobby_fields, validate_update_lobby_metadata_fields,
+    UpdateLobbyMetadataFields,
 };
 
 use crate::ai_seats_wire_guard::guard_create_ai_seats;
@@ -97,7 +98,7 @@ pub fn guard_client_message_before_dispatch(
             display_name,
             release_reservation_token,
             ..
-        } => validate_lookup_join_target_fields(LookupJoinTargetFields {
+        } => guard_lookup_join_target_inbound(LookupJoinTargetInbound {
             game_code,
             password: password.as_deref(),
             display_name: display_name.as_deref(),
@@ -203,7 +204,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             display_name,
             release_reservation_token,
             ..
-        } => validate_lookup_join_target_fields(LookupJoinTargetFields {
+        } => guard_lookup_join_target_inbound(LookupJoinTargetInbound {
             game_code,
             password: password.as_deref(),
             display_name: display_name.as_deref(),
@@ -221,7 +222,19 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             consumed_reservation_tokens,
         }),
         ClientMessage::UnregisterLobby { game_code } => validate_unregister_lobby_fields(game_code),
-        _ => Ok(()),
+        ClientMessage::CreateGame { .. }
+        | ClientMessage::JoinGame { .. }
+        | ClientMessage::Action { .. }
+        | ClientMessage::Reconnect { .. }
+        | ClientMessage::Concede
+        | ClientMessage::Emote { .. }
+        | ClientMessage::SpectatorJoin { .. }
+        | ClientMessage::SeatMutate { .. }
+        | ClientMessage::CreateDraftWithSettings { .. }
+        | ClientMessage::JoinDraftWithPassword { .. }
+        | ClientMessage::DraftAction { .. }
+        | ClientMessage::ReconnectDraft { .. }
+        | ClientMessage::SpectateDraft { .. } => Ok(()),
     }
 }
 

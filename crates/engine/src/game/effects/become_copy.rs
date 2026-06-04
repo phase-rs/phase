@@ -1341,4 +1341,187 @@ mod tests {
             "Myriad attack trigger should be synthesized when keyword is granted"
         );
     }
+
+    // ── Issue #1514: Dark Depths copied by Thespian's Stage → Marit Lage ──────
+    //
+    // CR 707.2: A copy does not copy counters, so Thespian's Stage becoming a
+    // copy of Dark Depths produces a Dark Depths with ZERO ice counters. CR
+    // 603.8: the copied state-triggered ability ("When Dark Depths has no ice
+    // counters on it, sacrifice it. If you do, create Marit Lage") is re-checked
+    // when a player would receive priority; with no ice counters it fires
+    // immediately. Resolving the trigger sacrifices the copy and creates the
+    // 20/20 flying indestructible legendary Avatar token.
+    //
+    // This drives the real runtime path: BecomeCopy resolution → layer
+    // evaluation → check_state_triggers (via the priority window) → stack
+    // resolution of the Sacrifice + "if you do, create" chain.
+    #[test]
+    fn copying_dark_depths_with_zero_counters_creates_marit_lage() {
+        use crate::game::scenario::GameRunner;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::card_type::{CoreType, Supertype};
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::keywords::Keyword;
+        use crate::types::triggers::TriggerMode;
+
+        const DARK_DEPTHS_TEXT: &str = "Dark Depths enters the battlefield with ten ice counters on it.\n{3}: Remove an ice counter from Dark Depths.\nWhen Dark Depths has no ice counters on it, sacrifice it. If you do, create Marit Lage, a legendary 20/20 black Avatar creature token with flying and indestructible.";
+
+        let parsed = parse_oracle_text(
+            DARK_DEPTHS_TEXT,
+            "Dark Depths",
+            &[],
+            &["Land".to_string()],
+            &[],
+        );
+        // Sanity: the parser yields the state-triggered "has no ice counters"
+        // ability that the copy must inherit (CR 603.8).
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .any(|t| t.mode == TriggerMode::StateCondition),
+            "Dark Depths must parse a StateCondition trigger; got {:?}",
+            parsed.triggers
+        );
+
+        let mut state = GameState::new_two_player(42);
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Helper to install Dark Depths' parsed printed abilities onto a land.
+        let install_dark_depths =
+            |state: &mut GameState, id: crate::types::identifiers::ObjectId| {
+                let obj = state.objects.get_mut(&id).unwrap();
+                obj.base_card_types = CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Land],
+                    subtypes: vec![],
+                };
+                obj.card_types = obj.base_card_types.clone();
+                obj.base_abilities = Arc::new(parsed.abilities.clone());
+                obj.base_trigger_definitions = Arc::new(parsed.triggers.clone());
+                obj.base_replacement_definitions = Arc::new(parsed.replacements.clone());
+            };
+
+        // Target: a real Dark Depths on the battlefield with its 10 ice counters.
+        let dark_depths = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dark Depths".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&dark_depths).unwrap().base_name = "Dark Depths".to_string();
+        install_dark_depths(&mut state, dark_depths);
+        state
+            .objects
+            .get_mut(&dark_depths)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("ice".to_string()), 10);
+
+        // Source: Thespian's Stage (a Land). Its "{2}, {T}: becomes a copy of
+        // target land, except it has this ability" produces a BecomeCopy effect.
+        let stage = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Thespian's Stage".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&stage).unwrap();
+            obj.base_name = "Thespian's Stage".to_string();
+            obj.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Land],
+                subtypes: vec![],
+            };
+            obj.card_types = obj.base_card_types.clone();
+        }
+
+        evaluate_layers(&mut state);
+
+        // Thespian's Stage becomes a copy of Dark Depths (CR 707.2). The copy
+        // inherits Dark Depths' abilities but NOT its ice counters.
+        let mut events = Vec::new();
+        let ability = make_copy_ability(dark_depths, stage, PlayerId(0), None);
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        // The copy is a Dark Depths with zero ice counters and the state trigger.
+        let stage_obj = state.objects.get(&stage).unwrap();
+        assert_eq!(stage_obj.name, "Dark Depths", "copy is named Dark Depths");
+        assert_eq!(
+            stage_obj
+                .counters
+                .get(&CounterType::Generic("ice".to_string()))
+                .copied()
+                .unwrap_or(0),
+            0,
+            "CR 707.2: a copy does not copy counters — the Stage copy has no ice counters"
+        );
+        assert!(
+            stage_obj
+                .trigger_definitions
+                .iter_all()
+                .any(|t| t.mode == TriggerMode::StateCondition),
+            "the copy must inherit Dark Depths' state-triggered ability (CR 603.8)"
+        );
+
+        // Drive the runtime: granting priority runs `check_state_triggers`,
+        // which sees zero ice counters and puts the sacrifice trigger on the
+        // stack; resolving it sacrifices the copy and creates Marit Lage.
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        // CR 603.8 + CR 117.1: state triggers are checked whenever a player would
+        // receive priority. Run the engine's state-trigger check (the same call
+        // the priority pipeline makes), which puts the sacrifice trigger on the
+        // stack, then drain the stack to resolve the Sacrifice + "if you do,
+        // create Marit Lage" chain.
+        crate::game::triggers::check_state_triggers(&mut state);
+        let mut runner = GameRunner::from_state(state);
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+
+        // The copy must have been sacrificed (CR 603.8 → CR 701.21 Sacrifice).
+        assert!(
+            !state.battlefield.contains(&stage),
+            "the Dark Depths copy must be sacrificed when it has no ice counters"
+        );
+
+        // A Marit Lage token (legendary 20/20 black Avatar, flying + indestructible)
+        // must have been created (CR 111.1 / 707.2 combo payoff).
+        let marit_lage = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|obj| obj.is_token && obj.name == "Marit Lage")
+            .expect("Marit Lage token must be created");
+        assert_eq!(marit_lage.power, Some(20), "Marit Lage is 20 power");
+        assert_eq!(marit_lage.toughness, Some(20), "Marit Lage is 20 toughness");
+        assert!(
+            marit_lage
+                .card_types
+                .supertypes
+                .contains(&Supertype::Legendary),
+            "Marit Lage is legendary"
+        );
+        assert!(
+            marit_lage.card_types.subtypes.iter().any(|s| s == "Avatar"),
+            "Marit Lage is an Avatar"
+        );
+        assert!(
+            marit_lage.keywords.contains(&Keyword::Flying),
+            "Marit Lage has flying"
+        );
+        assert!(
+            marit_lage.keywords.contains(&Keyword::Indestructible),
+            "Marit Lage has indestructible"
+        );
+    }
 }

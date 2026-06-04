@@ -82,7 +82,7 @@ pub struct PendingTrigger {
     /// on its own stack entry (in a later apply(), after the original
     /// resolution scope cleared) can re-stamp `die_result_this_resolution`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub die_result: Option<u8>,
+    pub die_result: Option<i32>,
 }
 
 pub(super) struct TriggerEventContextSnapshot {
@@ -327,9 +327,19 @@ fn collect_matching_triggers(
             Vec::new()
         };
 
+    let source_phase_out_event = matches!(
+        event,
+        GameEvent::PermanentPhasedOut { object_id, .. } if *object_id == obj_id
+    );
+
     // CR 702.26b + CR 114.4: `active_trigger_definitions` owns the phased-out /
     // command-zone gate. CR 603.4 intervening-if is still the two-point check
     // inside this function (condition block below) and at resolution.
+    //
+    // CR 702.26b: a permanent's own "phases out" trigger is checked for the
+    // phase-out event that made it phased out. `phase_out_object` emits the event
+    // after the status flip, so this one event must read only PhaseOut definitions
+    // directly from the source while leaving all other phased-out abilities inert.
     //
     // Synthesized off-zone granted-keyword triggers are appended after the
     // printed set with indices offset past `obj.trigger_definitions.len()` so
@@ -339,9 +349,21 @@ fn collect_matching_triggers(
         usize,
         &TriggerDefinition,
         Option<crate::types::keywords::KeywordKind>,
-    )> = super::functioning_abilities::active_trigger_definitions(state, source_obj)
-        .map(|(idx, def)| (idx, def, None))
-        .collect();
+    )> = if source_phase_out_event {
+        source_obj
+            .trigger_definitions
+            .iter_all()
+            .enumerate()
+            .filter(|(_, def)| {
+                matches!(&def.mode, TriggerMode::PhaseOut | TriggerMode::PhaseOutAll)
+            })
+            .map(|(idx, def)| (idx, def, None))
+            .collect()
+    } else {
+        super::functioning_abilities::active_trigger_definitions(state, source_obj)
+            .map(|(idx, def)| (idx, def, None))
+            .collect()
+    };
     let all_triggers = printed_triggers.into_iter().chain(
         granted_off_zone_triggers
             .iter()
@@ -461,6 +483,13 @@ fn collect_matching_triggers(
                     .into_iter()
                     .map(|trigger_event| vec![trigger_event])
                     .collect()
+            } else if matches!(trig_def.mode, TriggerMode::BecomesBlocked) {
+                super::trigger_matchers::matching_becomes_blocked_events(
+                    event, trig_def, obj_id, state,
+                )
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else if matches!(trig_def.mode, TriggerMode::DamageDoneOnceByController) {
                 // CR 603.2c: One aggregate combat-damage event may satisfy this
                 // trigger once, while CR 608.2c makes the filtered source set
@@ -1608,6 +1637,57 @@ fn collect_pending_triggers(
                     die_result: None,
                 }));
             }
+
+            // CR 702.56a: Replicate's copy trigger is synthesized onto printed
+            // Replicate cards by `synthesize_replicate`. Dynamically granted
+            // Replicate (StaticMode::CastWithKeyword) has no face-level trigger,
+            // so mirror the dynamic Casualty seam here and reuse the canonical
+            // Replicate ability definition.
+            let dynamically_granted_replicate = state
+                .objects
+                .get(cast_obj_id)
+                .filter(|obj| {
+                    !obj.keywords
+                        .iter()
+                        .any(|k| matches!(k, Keyword::Replicate(_)))
+                })
+                .and_then(|obj| {
+                    let payment_count = obj.additional_cost_payment_count;
+                    (payment_count > 0).then_some((obj.controller, payment_count))
+                })
+                .and_then(|(controller, payment_count)| {
+                    let has_replicate =
+                        super::casting::effective_spell_keywords(state, controller, *cast_obj_id)
+                            .iter()
+                            .any(|keyword| matches!(keyword, Keyword::Replicate(_)));
+                    has_replicate.then_some((controller, payment_count))
+                });
+            if let Some((controller, payment_count)) = dynamically_granted_replicate {
+                let mut replicate_ability = build_resolved_from_def(
+                    &crate::database::synthesis::replicate_copy_ability_definition(),
+                    *cast_obj_id,
+                    controller,
+                );
+                replicate_ability.context.additional_cost_paid = true;
+                replicate_ability.context.additional_cost_payment_count = payment_count;
+                let timestamp = state.next_timestamp() as u32;
+                pending.push(PendingTriggerContext::single(PendingTrigger {
+                    source_id: *cast_obj_id,
+                    controller,
+                    condition: None,
+                    ability: replicate_ability,
+                    timestamp,
+                    target_constraints: Vec::new(),
+                    distribute: None,
+                    trigger_event: Some(event.clone()),
+                    modal: None,
+                    mode_abilities: vec![],
+                    description: Some("Replicate".to_string()),
+                    may_trigger_origin: None,
+                    subject_match_count: None,
+                    die_result: None,
+                }));
+            }
         }
 
         // CR 725.2: At the beginning of the monarch's end step, that player draws a card.
@@ -1674,6 +1754,39 @@ fn collect_pending_triggers(
                         subject_match_count: None,
                         die_result: None,
                     }));
+                }
+            }
+        }
+
+        // CR 702.173a + CR 608.2i: Record the controller of any Assassin
+        // creature OR commander that just dealt combat damage to a player. The
+        // ledger is snapshot at damage-time per CR 608.2i ("looks back in
+        // time") — a source that later stops being an Assassin/commander does
+        // NOT invalidate the permission granted by this ledger entry. Read at
+        // cast preparation by `casting_variant_candidates` to surface
+        // `CastingVariant::Freerunning` for spells in hand.
+        if let GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Player(_),
+            is_combat: true,
+            ..
+        } = event
+        {
+            if let Some(source_obj) = state.objects.get(source_id) {
+                let is_assassin_creature = source_obj
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Creature)
+                    && source_obj
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|s| s == "Assassin");
+                let is_commander = source_obj.is_commander;
+                if is_assassin_creature || is_commander {
+                    state
+                        .assassin_or_commander_dealt_combat_damage_this_turn
+                        .insert(source_obj.controller);
                 }
             }
         }
@@ -3042,7 +3155,7 @@ fn dispatch_pending_trigger_context(
 /// `deferred_triggers`. Mid-resolution `Priority` from player-scope iteration,
 /// `repeat_for`, or replacement continuations must not drain (or offer CR
 /// 603.3b ordering) until those continuations finish.
-pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
+fn can_drain_deferred_triggers(state: &GameState, allow_spell_on_stack: bool) -> bool {
     if state.deferred_triggers.is_empty() {
         return false;
     }
@@ -3064,14 +3177,19 @@ pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
     // CR 603.3b + issue #1793: observer triggers parked during a spell's
     // resolution must wait until that spell leaves the stack — draining while
     // a `Spell` entry remains would offer ordering mid player_scope iteration.
-    if state
-        .stack
-        .iter()
-        .any(|entry| matches!(entry.kind, StackEntryKind::Spell { .. }))
+    if !allow_spell_on_stack
+        && state
+            .stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::Spell { .. }))
     {
         return false;
     }
     true
+}
+
+pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
+    can_drain_deferred_triggers(state, false)
 }
 
 /// CR 113.2c + CR 603.2 + CR 603.3b: Drain the deferred-trigger queue after
@@ -3094,6 +3212,30 @@ pub(crate) fn drain_deferred_trigger_queue(
         return None;
     }
 
+    drain_deferred_trigger_queue_unchecked(state, events_out)
+}
+
+/// CR 601.2h + CR 602.2b + CR 603.3: Cost-payment triggers collected while a
+/// spell or ability announcement was paused go on the stack at the first
+/// priority point after that stack object is fully announced, even though that
+/// spell or ability itself is still on the stack. Resolution-time callers must
+/// keep using `drain_deferred_trigger_queue`, whose spell-on-stack guard
+/// prevents mid-resolution drains.
+pub(crate) fn drain_deferred_triggers_after_stack_object_announcement(
+    state: &mut GameState,
+    events_out: &mut Vec<GameEvent>,
+) -> Option<crate::types::game_state::WaitingFor> {
+    if !can_drain_deferred_triggers(state, true) {
+        return None;
+    }
+
+    drain_deferred_trigger_queue_unchecked(state, events_out)
+}
+
+fn drain_deferred_trigger_queue_unchecked(
+    state: &mut GameState,
+    events_out: &mut Vec<GameEvent>,
+) -> Option<crate::types::game_state::WaitingFor> {
     let pending = std::mem::take(&mut state.deferred_triggers);
     match begin_trigger_ordering(state, pending) {
         TriggerOrderingDisposition::PromptForChoice(wf) => {
@@ -3686,7 +3828,7 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::EchoDue => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.echo_due),
-        // CR 508.1a: Count co-attackers excluding the source creature.
+        // CR 508.1a + CR 603.2c: Count co-attackers excluding the source creature.
         TriggerCondition::MinCoAttackers { minimum } => {
             state.combat.as_ref().is_some_and(|combat| {
                 let co_attacker_count = combat
@@ -3705,20 +3847,36 @@ pub(crate) fn check_trigger_condition(
         }
         // CR 508.1 + CR 603.2c: Count attackers in the triggering AttackersDeclared
         // batch whose controller matches `scope` relative to the trigger controller.
-        TriggerCondition::AttackersDeclaredMin { scope, minimum } => {
+        TriggerCondition::AttackersDeclaredMin {
+            scope,
+            minimum,
+            filter,
+        } => {
             let Some(GameEvent::AttackersDeclared { attacker_ids, .. }) = trigger_event else {
                 return false;
             };
             let count = attacker_ids
                 .iter()
                 .filter(|id| {
-                    state.objects.get(id).is_some_and(|obj| match scope {
+                    let scope_ok = state.objects.get(id).is_some_and(|obj| match scope {
                         ControllerRef::You => obj.controller == controller,
                         ControllerRef::Opponent => obj.controller != controller,
                         // Other ControllerRef variants are not used by the attacks-with-N
                         // combinator; treat as permissive to avoid silently dropping matches.
                         _ => true,
-                    })
+                    });
+                    // CR 508.1: only attackers matching the filtered class count
+                    // toward the typed minimum, preventing "attack with two or more
+                    // Dinosaurs" from over-firing on mixed attacker batches.
+                    scope_ok
+                        && filter.as_ref().is_none_or(|f| {
+                            crate::game::trigger_matchers::target_filter_matches_object(
+                                state,
+                                **id,
+                                f,
+                                source_id.unwrap_or(ObjectId(0)),
+                            )
+                        })
                 })
                 .count();
             count >= *minimum as usize
@@ -4667,6 +4825,103 @@ pub mod tests {
         obj.power = Some(power);
         obj.toughness = Some(toughness);
         id
+    }
+
+    #[test]
+    fn becomes_blocked_trigger_collects_once_per_non_flanking_blocker() {
+        let mut state = setup();
+        let attacker = make_creature(&mut state, PlayerId(0), "Knight of Valor", 2, 2);
+        let first_blocker = make_creature(&mut state, PlayerId(1), "First Blocker", 2, 2);
+        let second_blocker = make_creature(&mut state, PlayerId(1), "Second Blocker", 2, 2);
+        let flanking_blocker = make_creature(&mut state, PlayerId(1), "Flanking Blocker", 2, 2);
+        state
+            .objects
+            .get_mut(&flanking_blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flanking);
+        let trigger = TriggerDefinition::new(TriggerMode::BecomesBlocked)
+            .valid_card(TargetFilter::SelfRef)
+            .valid_target(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![FilterProp::WithoutKeyword {
+                    value: Keyword::Flanking,
+                }],
+            )))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Pump {
+                    power: crate::types::ability::PtValue::Fixed(-1),
+                    toughness: crate::types::ability::PtValue::Fixed(-1),
+                    target: TargetFilter::TriggeringSource,
+                },
+            ));
+        let obj = state.objects.get_mut(&attacker).unwrap();
+        obj.trigger_definitions.push(trigger.clone());
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        let events = vec![GameEvent::BlockersDeclared {
+            assignments: vec![
+                (first_blocker, attacker),
+                (second_blocker, attacker),
+                (flanking_blocker, attacker),
+            ],
+        }];
+
+        let pending = collect_pending_triggers(&mut state, &events);
+        let trigger_events: Vec<_> = pending
+            .iter()
+            .filter(|ctx| ctx.pending.source_id == attacker)
+            .filter_map(|ctx| ctx.pending.trigger_event.as_ref())
+            .collect();
+
+        assert_eq!(trigger_events.len(), 2);
+        assert_eq!(
+            trigger_events,
+            vec![
+                &GameEvent::BlockersDeclared {
+                    assignments: vec![(first_blocker, attacker)]
+                },
+                &GameEvent::BlockersDeclared {
+                    assignments: vec![(second_blocker, attacker)]
+                },
+            ]
+        );
+
+        let mut stack_events = Vec::new();
+        for ctx in pending
+            .into_iter()
+            .filter(|ctx| ctx.pending.source_id == attacker)
+        {
+            push_pending_trigger_to_stack_with_event_batch(
+                &mut state,
+                ctx.pending,
+                ctx.trigger_events,
+                &mut stack_events,
+            );
+        }
+        let stack_trigger_events: Vec<_> = state
+            .stack
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                StackEntryKind::TriggeredAbility {
+                    source_id,
+                    trigger_event,
+                    ..
+                } if *source_id == attacker => trigger_event.as_ref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stack_trigger_events,
+            vec![
+                &GameEvent::BlockersDeclared {
+                    assignments: vec![(first_blocker, attacker)]
+                },
+                &GameEvent::BlockersDeclared {
+                    assignments: vec![(second_blocker, attacker)]
+                },
+            ],
+            "CR 702.25a creates one stack trigger per qualifying blocker"
+        );
     }
 
     /// Places a battlefield commander object with the given owner/controller.
@@ -7138,6 +7393,7 @@ pub mod tests {
                                 enters_attacking: false,
                                 up_to: false,
                                 enter_with_counters: vec![],
+                                face_down_profile: None,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -7427,6 +7683,7 @@ pub mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             execute.multi_target = Some(MultiTargetSpec::fixed(0, 3));
@@ -7532,6 +7789,7 @@ pub mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         );
         execute.multi_target = Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
@@ -7729,6 +7987,7 @@ pub mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             execute.multi_target = Some(MultiTargetSpec::fixed(0, 3));
@@ -7842,6 +8101,7 @@ pub mod tests {
                                 enters_attacking: false,
                                 up_to: false,
                                 enter_with_counters: vec![],
+                                face_down_profile: None,
                             },
                         )
                         .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -7916,6 +8176,7 @@ pub mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            face_down_profile: None,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -7976,6 +8237,7 @@ pub mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            face_down_profile: None,
                         },
                     ))
                     .valid_card(TargetFilter::SelfRef)
@@ -8126,6 +8388,7 @@ pub mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             )));
             obj.trigger_definitions.push(trigger);
@@ -8199,6 +8462,7 @@ pub mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             )));
             obj.trigger_definitions.push(trigger);
@@ -8471,6 +8735,7 @@ pub mod tests {
                                     enters_attacking: false,
                                     up_to: false,
                                     enter_with_counters: vec![],
+                                    face_down_profile: None,
                                 },
                             )
                             .duration(crate::types::ability::Duration::UntilHostLeavesPlay),
@@ -9390,6 +9655,7 @@ pub mod tests {
                 FilterProp::HasAttachment {
                     kind: crate::types::ability::AttachmentKind::Aura,
                     controller: None,
+                    exclude_source: false,
                 },
             ])),
         };
@@ -9697,6 +9963,7 @@ pub mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -9719,6 +9986,7 @@ pub mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
@@ -9799,6 +10067,7 @@ pub mod tests {
             alt_ability_cost: None,
             constraint: None,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_none(),
@@ -9829,6 +10098,7 @@ pub mod tests {
             alt_ability_cost: None,
             constraint: None,
             duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
         };
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
@@ -9998,6 +10268,56 @@ pub mod tests {
             crate::game::game_object::PhaseOutCause::Directly,
             &mut events,
         );
+    }
+
+    #[test]
+    fn phase_out_self_trigger_is_collected_after_status_flip() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let source = make_creature(&mut state, PlayerId(0), "Teferi's Imp Stand-In", 1, 1);
+        let trigger = TriggerDefinition::new(TriggerMode::PhaseOut)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.trigger_definitions.push(trigger.clone());
+        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+
+        crate::types::game_state::TriggerIndex::rebuild_from_battlefield(&mut state);
+
+        let mut events = Vec::new();
+        crate::game::phasing::phase_out_object(
+            &mut state,
+            source,
+            crate::game::game_object::PhaseOutCause::Directly,
+            &mut events,
+        );
+        assert!(
+            state.objects.get(&source).unwrap().is_phased_out(),
+            "producer must flip phase status before emitting PermanentPhasedOut"
+        );
+
+        let pending = collect_pending_triggers(&mut state, &events);
+        let source_triggers: Vec<_> = pending
+            .iter()
+            .filter(|context| context.pending.source_id == source)
+            .collect();
+        assert_eq!(
+            source_triggers.len(),
+            1,
+            "the source's own PhaseOut trigger must survive the post-flip candidate and \
+             definition gates"
+        );
+        assert!(matches!(
+            &source_triggers[0].pending.trigger_event,
+            Some(GameEvent::PermanentPhasedOut { object_id, .. }) if *object_id == source
+        ));
     }
 
     #[test]
@@ -10524,6 +10844,7 @@ pub mod tests {
             false, // effect_enter_tapped
             None,  // controller_override
             &[],   // effect_enter_with_counters
+            None,  // face_down_profile
             false, // track_exiled_by_source
             &mut events,
         );
@@ -11886,6 +12207,7 @@ pub mod tests {
         let cond = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::You,
             minimum: 2,
+            filter: None,
         };
         assert!(check_trigger_condition(
             &state,
@@ -11899,6 +12221,7 @@ pub mod tests {
         let cond3 = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::You,
             minimum: 3,
+            filter: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -11939,6 +12262,7 @@ pub mod tests {
         let cond = TriggerCondition::AttackersDeclaredMin {
             scope: ControllerRef::Opponent,
             minimum: 2,
+            filter: None,
         };
         assert!(!check_trigger_condition(
             &state,
@@ -11947,6 +12271,104 @@ pub mod tests {
             None,
             Some(&event),
         ));
+    }
+
+    // CR 508.1 + CR 603.2c: Over-fire guard for the condition-level type axis on
+    // `AttackersDeclaredMin` ("you attack with two or more Dinosaurs"). The
+    // count must include ONLY attackers matching `filter` — so 1 Dinosaur + 1
+    // non-Dinosaur attacker must NOT satisfy `minimum: 2`, but 2 Dinosaurs must.
+    #[test]
+    fn attackers_declared_min_typed_filter_no_over_fire() {
+        let mut state = setup();
+        let trigger_controller = PlayerId(0);
+        let dino1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dino1".to_string(),
+            Zone::Battlefield,
+        );
+        let dino2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Dino2".to_string(),
+            Zone::Battlefield,
+        );
+        let goblin = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, subtype) in [(dino1, "Dinosaur"), (dino2, "Dinosaur"), (goblin, "Goblin")] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = vec![subtype.to_string()];
+        }
+
+        let dino_filter =
+            TargetFilter::Typed(TypedFilter::creature().subtype("Dinosaur".to_string()));
+        let cond = TriggerCondition::AttackersDeclaredMin {
+            scope: ControllerRef::You,
+            minimum: 2,
+            filter: Some(dino_filter),
+        };
+
+        // 1 Dinosaur attacking → only 1 matching attacker → must NOT fire.
+        let lone_dino = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino1],
+            defending_player: PlayerId(1),
+            attacks: vec![(
+                dino1,
+                crate::game::combat::AttackTarget::Player(PlayerId(1)),
+            )],
+        };
+        assert!(
+            !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&lone_dino)),
+            "1 Dinosaur must NOT satisfy minimum=2 Dinosaurs (off-by-one guard)"
+        );
+
+        // 1 Dinosaur + 1 Goblin attacking → only 1 matching attacker → must NOT fire.
+        let mixed = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino1, goblin],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (
+                    dino1,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+                (
+                    goblin,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+        };
+        assert!(
+            !check_trigger_condition(&state, &cond, trigger_controller, None, Some(&mixed)),
+            "1 Dinosaur + 1 Goblin must NOT satisfy minimum=2 Dinosaurs (over-fire guard)"
+        );
+
+        // 2 Dinosaurs attacking → 2 matching attackers → must fire.
+        let both_dinos = GameEvent::AttackersDeclared {
+            attacker_ids: vec![dino1, dino2],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (
+                    dino1,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+                (
+                    dino2,
+                    crate::game::combat::AttackTarget::Player(PlayerId(1)),
+                ),
+            ],
+        };
+        assert!(
+            check_trigger_condition(&state, &cond, trigger_controller, None, Some(&both_dinos)),
+            "2 Dinosaurs must satisfy minimum=2 Dinosaurs"
+        );
     }
 
     // CR 506.2 + CR 508.1b: Unit tests for `NoneOfAttackersTargetedYou`.
@@ -15933,6 +16355,7 @@ pub mod tests {
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             Vec::new(),
             ObjectId(9002),
@@ -16313,6 +16736,7 @@ pub mod tests {
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             Vec::new(),
             ObjectId(9100),
@@ -16552,6 +16976,7 @@ pub mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
                 .valid_card(valid_card)
@@ -16678,6 +17103,7 @@ pub mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             let trig = TriggerDefinition::new(TriggerMode::ChangesZone)
                 .valid_card(valid_card)
@@ -16701,6 +17127,96 @@ pub mod tests {
             !state.stack.is_empty() || state.pending_trigger.is_some(),
             "Jackdaw Savior trigger must fire via SelfRef when Jackdaw Savior itself dies \
              and a lower-CMC creature card exists in the graveyard (issue #887)"
+        );
+    }
+
+    /// CR 603.4 + CR 508.1 (issue #1487, Fire Lord Azula + Sunscorch Regent):
+    /// "Whenever you cast a spell while ~ is attacking, copy that spell." The
+    /// `while ~ is attacking` gate restricts the trigger to combat. Drives the
+    /// real `process_triggers` path with Azula's parsed trigger and a
+    /// `SpellCast` event, asserting the copy trigger lands on the stack ONLY
+    /// while Azula is an attacker. Before the fix the gate was dropped, so the
+    /// trigger fired on every spell cast — regardless of combat state.
+    #[test]
+    fn cast_while_attacking_trigger_gated_on_combat_state() {
+        use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+        fn build_azula_state(attacking: bool) -> (GameState, ObjectId) {
+            let mut state = setup();
+            state.active_player = PlayerId(0);
+            state.priority_player = PlayerId(0);
+
+            // Azula on the battlefield, controlled by P0, with her real trigger.
+            let azula = make_creature(&mut state, PlayerId(0), "Fire Lord Azula", 4, 4);
+            let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+                "Whenever you cast a spell while Fire Lord Azula is attacking, copy that spell. \
+                 You may choose new targets for the copy.",
+                "Fire Lord Azula",
+            );
+            assert_eq!(
+                trigger.condition,
+                Some(TriggerCondition::SourceIsAttacking),
+                "precondition: the parsed trigger must carry the SourceIsAttacking gate"
+            );
+            state
+                .objects
+                .get_mut(&azula)
+                .unwrap()
+                .trigger_definitions
+                .push(trigger);
+
+            // CR 508.1: enter combat with Azula declared as an attacker only in
+            // the attacking case.
+            if attacking {
+                state.combat = Some(CombatState {
+                    attackers: vec![AttackerInfo::new(
+                        azula,
+                        AttackTarget::Player(PlayerId(1)),
+                        PlayerId(1),
+                    )],
+                    ..CombatState::default()
+                });
+            }
+            (state, azula)
+        }
+
+        // CR 601.2a: P0 casts a spell — the SpellCast event the trigger watches.
+        let cast_event = |controller: PlayerId| GameEvent::SpellCast {
+            card_id: CardId(999),
+            object_id: ObjectId(999),
+            controller,
+        };
+
+        // Attacking: the copy trigger lands on the stack.
+        let (mut attacking_state, azula) = build_azula_state(true);
+        process_triggers(&mut attacking_state, &[cast_event(PlayerId(0))]);
+        let attacking_triggers = attacking_state
+            .stack
+            .iter()
+            .filter(|e| {
+                matches!(&e.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == azula)
+            })
+            .count();
+        assert_eq!(
+            attacking_triggers, 1,
+            "Azula's copy trigger must fire while she is attacking"
+        );
+
+        // Not attacking: the copy trigger must NOT fire.
+        let (mut idle_state, azula_idle) = build_azula_state(false);
+        process_triggers(&mut idle_state, &[cast_event(PlayerId(0))]);
+        let idle_triggers = idle_state
+            .stack
+            .iter()
+            .filter(|e| {
+                matches!(&e.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == azula_idle)
+            })
+            .count();
+        assert_eq!(
+            idle_triggers, 0,
+            "Azula's copy trigger must NOT fire when she is not attacking (CR 603.4)"
         );
     }
 }
@@ -16916,6 +17432,498 @@ mod dedup_regression_tests {
         assert_eq!(
             observer_triggers, 1,
             "SpellCast observer should register exactly one trigger per SpellCast event"
+        );
+    }
+
+    /// CR 104.3e + CR 119 + CR 603.4 + CR 603.7c: Ezio Auditore da Firenze —
+    /// "Whenever ~ deals combat damage to a player, if that player has 10 or
+    /// less life, you may pay {W}{U}{B}{R}{G}. When you do, that player loses
+    /// the game."
+    ///
+    /// Issue #1962 regression for the game-state-corruption half:
+    /// the parser must lift "if that player has 10 or less life" to a
+    /// `TriggerCondition` (CR 603.4), and `Effect::LoseTheGame` must carry
+    /// `TargetFilter::TriggeringPlayer` so the resolver eliminates the
+    /// **damaged** player (CR 603.7c), not Ezio's controller.
+    ///
+    /// This integration test stops short of driving combat damage through
+    /// the full combat runner; it parses Ezio's trigger, fires the
+    /// observer via `process_triggers` with a synthetic combat-damage
+    /// event, and asserts the trigger gate honors the life predicate.
+    #[test]
+    fn ezio_combat_damage_trigger_does_not_fire_when_damaged_player_above_10() {
+        use crate::parser::oracle_trigger::parse_trigger_line;
+
+        const EZIO_ORACLE: &str = "Whenever ~ deals combat damage to a player, if that player has 10 or less life, you may pay {W}{U}{B}{R}{G}. When you do, that player loses the game.";
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // P1 has 15 life — above the 10-or-less gate, so the trigger must
+        // NOT fire (CR 603.4 — intervening-if checks at fire time).
+        state.players[1].life = 15;
+
+        let ezio = make_creature(&mut state, PlayerId(0), "Ezio Auditore da Firenze", 4, 4);
+        let trigger = parse_trigger_line(EZIO_ORACLE, "Ezio Auditore da Firenze");
+        {
+            let obj = state.objects.get_mut(&ezio).unwrap();
+            obj.trigger_definitions.push(trigger.clone());
+            obj.base_trigger_definitions = std::sync::Arc::new(vec![trigger.clone()]);
+        }
+        // CR 603.6a: re-register the trigger index for the new trigger.
+        state.trigger_index.remove(ezio);
+        let defs: smallvec::SmallVec<[TriggerDefinition; 4]> = smallvec::smallvec![trigger];
+        state.trigger_index.add(ezio, &defs, false);
+
+        // Synthesize the combat damage event Ezio observes.
+        let event = GameEvent::DamageDealt {
+            source_id: ezio,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 4,
+            is_combat: true,
+            excess: 0,
+        };
+        process_triggers(&mut state, &[event]);
+
+        // CR 603.4: intervening-if false → no ability lands on the stack at
+        // all, and no optional prompt is queued.
+        assert!(
+            state.stack.is_empty(),
+            "trigger must not fire when damaged player has > 10 life; stack was {:?}",
+            state.stack,
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "no optional choice should be pending; waiting_for was {:?}",
+            state.waiting_for,
+        );
+        assert!(
+            !state.players[1].is_eliminated,
+            "P1 must not be eliminated when the intervening-if blocks the trigger",
+        );
+        assert!(
+            !state.players[0].is_eliminated,
+            "P0 (Ezio's controller) must not be eliminated either",
+        );
+    }
+
+    /// CR 104.3e + CR 603.7c: companion case to the gate test above.
+    /// When the damaged player's life ≤ 10, the trigger fires and an
+    /// optional `you may pay {WUBRG}` lands on the stack. Specifically
+    /// validates that `Effect::LoseTheGame.target` is wired through the
+    /// trigger machinery so the damaged player (`TriggeringPlayer`), not
+    /// Ezio's controller, is bound for the eventual elimination.
+    #[test]
+    fn ezio_combat_damage_trigger_fires_when_damaged_player_at_or_below_10() {
+        use crate::parser::oracle_trigger::parse_trigger_line;
+
+        const EZIO_ORACLE: &str = "Whenever ~ deals combat damage to a player, if that player has 10 or less life, you may pay {W}{U}{B}{R}{G}. When you do, that player loses the game.";
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        // P1 at 5 life — the intervening-if (LE 10) is satisfied.
+        state.players[1].life = 5;
+
+        let ezio = make_creature(&mut state, PlayerId(0), "Ezio Auditore da Firenze", 4, 4);
+        let trigger = parse_trigger_line(EZIO_ORACLE, "Ezio Auditore da Firenze");
+
+        // Sanity: the parsed trigger must carry the directed-loss target on
+        // its reflexive sub-ability. The full structural assertion lives in
+        // `parse_ezio_damage_trigger_full_structure`; here we re-check the
+        // single load-bearing invariant for this integration path.
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("Ezio trigger must have an execute body");
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("Ezio trigger must have a reflexive 'When you do' sub-ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::LoseTheGame { target: Some(f) } if *f == TargetFilter::TriggeringPlayer
+            ),
+            "Ezio's reflexive sub-ability must lower to LoseTheGame {{ target: Some(TriggeringPlayer) }}; \
+             got {:?} — without this binding, win_lose::resolve_lose routes elimination to ability.controller",
+            sub.effect,
+        );
+
+        {
+            let obj = state.objects.get_mut(&ezio).unwrap();
+            obj.trigger_definitions.push(trigger.clone());
+            obj.base_trigger_definitions = std::sync::Arc::new(vec![trigger.clone()]);
+        }
+        state.trigger_index.remove(ezio);
+        let defs: smallvec::SmallVec<[TriggerDefinition; 4]> = smallvec::smallvec![trigger];
+        state.trigger_index.add(ezio, &defs, false);
+
+        let event = GameEvent::DamageDealt {
+            source_id: ezio,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 4,
+            is_combat: true,
+            excess: 0,
+        };
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+
+        // CR 603.4 + CR 603.3: the intervening-if is satisfied, so the
+        // ability lands on the stack. At minimum exactly one trigger from
+        // Ezio must be pending (it may either sit at priority or be on the
+        // way to an OptionalEffectChoice, depending on the dispatch state).
+        assert!(
+            !state.stack.is_empty()
+                || matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "trigger must fire when damaged player has ≤ 10 life; stack/waiting_for: {:?} / {:?}",
+            state.stack,
+            state.waiting_for,
+        );
+    }
+
+    /// CR 104.3e + CR 608.2c + CR 603.7c + CR 603.12: Ezio Auditore da
+    /// Firenze — VERBATIM printed Oracle text (post-effect `if` form):
+    /// "Whenever ~ deals combat damage to a player, you may pay
+    /// {W}{U}{B}{R}{G} if that player has 10 or less life. When you do,
+    /// that player loses the game."
+    ///
+    /// Issue #1962 hardening (TEST-ONLY): the companion integration tests
+    /// `ezio_combat_damage_trigger_does_not_fire_when_damaged_player_above_10`
+    /// and `ezio_combat_damage_trigger_fires_when_damaged_player_at_or_below_10`
+    /// exercise the *normalized* leading-`if` form (CR 603.4
+    /// intervening-if, detection-time gate). This test locks the
+    /// *verbatim* printed Oracle text, which uses the post-effect `if`
+    /// form and is re-homed onto `execute.condition` (CR 608.2c,
+    /// resolution-time gate) by `strip_suffix_conditional`. Without this
+    /// test, a regression in the post-effect re-homer would silently
+    /// strand the life predicate (allowing the loss at any life total)
+    /// while the leading-`if` regression tests above continue to pass.
+    ///
+    /// The key invariant is the **elimination outcome**: at any life
+    /// total above 10, P1 must not be eliminated regardless of which
+    /// re-home path the parser uses (def.condition vs execute.condition).
+    #[test]
+    fn ezio_verbatim_oracle_text_does_not_eliminate_damaged_player_above_10_life() {
+        use crate::parser::oracle_trigger::parse_trigger_line;
+
+        const EZIO_VERBATIM: &str = "Whenever ~ deals combat damage to a player, you may pay {W}{U}{B}{R}{G} if that player has 10 or less life. When you do, that player loses the game.";
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        // P1 has 15 life — above the 10-or-less gate, so the
+        // resolution-time `execute.condition` must block the cost and the
+        // reflexive sub-ability. P1 must NOT be eliminated.
+        state.players[1].life = 15;
+
+        let ezio = make_creature(&mut state, PlayerId(0), "Ezio Auditore da Firenze", 4, 4);
+        let trigger = parse_trigger_line(EZIO_VERBATIM, "Ezio Auditore da Firenze");
+        {
+            let obj = state.objects.get_mut(&ezio).unwrap();
+            obj.trigger_definitions.push(trigger.clone());
+            obj.base_trigger_definitions = std::sync::Arc::new(vec![trigger.clone()]);
+        }
+        state.trigger_index.remove(ezio);
+        let defs: smallvec::SmallVec<[TriggerDefinition; 4]> = smallvec::smallvec![trigger];
+        state.trigger_index.add(ezio, &defs, false);
+
+        let event = GameEvent::DamageDealt {
+            source_id: ezio,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 4,
+            is_combat: true,
+            excess: 0,
+        };
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+
+        // Drive the stack to completion, declining any optional prompts
+        // (controller would never voluntarily pay an unpayable cost
+        // anyway — P0 has zero mana). The exact drain path doesn't
+        // matter — the load-bearing invariant is that *no path*
+        // through resolution ends with P1 eliminated when life > 10.
+        for _ in 0..40 {
+            match state.waiting_for {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    if crate::game::engine::apply_as_current(
+                        &mut state,
+                        GameAction::DecideOptionalEffect { accept: false },
+                    )
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
+                WaitingFor::GameOver { .. } => break,
+                _ => {
+                    if state.stack.is_empty()
+                        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                    {
+                        break;
+                    }
+                    if crate::game::engine::apply_as_current(&mut state, GameAction::PassPriority)
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // The load-bearing invariant: regardless of whether the parser
+        // hoisted the gate to def.condition (intervening-if, no stack
+        // entry) or re-homed it to execute.condition (resolution-time
+        // failure), the elimination outcome must be the same — P1 not
+        // eliminated.
+        assert!(
+            !state.players[1].is_eliminated,
+            "P1 (15 life) must NOT be eliminated — the life-total gate \
+             must block the loss whether evaluated at detection (CR 603.4) \
+             or at resolution (CR 608.2c); waiting_for = {:?}",
+            state.waiting_for,
+        );
+        assert!(
+            !state.players[0].is_eliminated,
+            "P0 (Ezio's controller) must NOT be eliminated either — \
+             the directed-loss target (TriggeringPlayer) must never fall \
+             through to the ability controller (issue #1962 root cause)",
+        );
+    }
+
+    /// CR 104.3e + CR 608.2c + CR 603.7c + CR 603.12: Ezio Auditore da
+    /// Firenze — VERBATIM printed Oracle text, low-life path. Same setup
+    /// as the above test but P1 starts at 5 life and P0 holds {WUBRG}.
+    /// After accepting the optional and paying the cost, the reflexive
+    /// "When you do, that player loses the game" sub-ability must fire
+    /// and eliminate P1 (the damaged player — `TriggeringPlayer`), not
+    /// P0 (the ability controller).
+    ///
+    /// Issue #1962 hardening (TEST-ONLY): paired with the above
+    /// high-life test, this locks both sides of the elimination outcome
+    /// for the verbatim Oracle text — without it, a regression that
+    /// dropped the directed-loss target (the original root cause) would
+    /// silently let the controller eliminate themselves.
+    #[test]
+    fn ezio_verbatim_oracle_text_eliminates_damaged_player_when_optional_paid() {
+        use crate::game::engine::apply_as_current;
+        use crate::parser::oracle_trigger::parse_trigger_line;
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        const EZIO_VERBATIM: &str = "Whenever ~ deals combat damage to a player, you may pay {W}{U}{B}{R}{G} if that player has 10 or less life. When you do, that player loses the game.";
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.players[1].life = 5;
+        // Seed P0's mana pool with WUBRG so the optional cost is payable.
+        for color in [
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ] {
+            state.players[0].mana_pool.add(ManaUnit {
+                color,
+                source_id: ObjectId(0),
+                snow: false,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+
+        let ezio = make_creature(&mut state, PlayerId(0), "Ezio Auditore da Firenze", 4, 4);
+        let trigger = parse_trigger_line(EZIO_VERBATIM, "Ezio Auditore da Firenze");
+        {
+            let obj = state.objects.get_mut(&ezio).unwrap();
+            obj.trigger_definitions.push(trigger.clone());
+            obj.base_trigger_definitions = std::sync::Arc::new(vec![trigger.clone()]);
+        }
+        state.trigger_index.remove(ezio);
+        let defs: smallvec::SmallVec<[TriggerDefinition; 4]> = smallvec::smallvec![trigger];
+        state.trigger_index.add(ezio, &defs, false);
+
+        let event = GameEvent::DamageDealt {
+            source_id: ezio,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 4,
+            is_combat: true,
+            excess: 0,
+        };
+        process_triggers(&mut state, &[event]);
+        super::drain_order_triggers_with_identity(&mut state);
+
+        // Drive the resolution: accept every optional prompt (the
+        // controller pays the WUBRG cost), and otherwise pass priority
+        // until either game-over fires or the stack drains. The drive
+        // loop is bounded to prevent runaway state on regression.
+        for _ in 0..80 {
+            if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+                break;
+            }
+            match state.waiting_for {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    if apply_as_current(
+                        &mut state,
+                        GameAction::DecideOptionalEffect { accept: true },
+                    )
+                    .is_err()
+                    {
+                        break;
+                    }
+                }
+                WaitingFor::Priority { .. } => {
+                    if state.stack.is_empty() && state.players[1].is_eliminated {
+                        break;
+                    }
+                    if apply_as_current(&mut state, GameAction::PassPriority).is_err() {
+                        break;
+                    }
+                }
+                _ => {
+                    // Unexpected/unhandled waiting_for — break and assert
+                    // outcome below. If the engine can't reach P1
+                    // elimination through this path, the assert will fail
+                    // and surface the broken state.
+                    break;
+                }
+            }
+        }
+
+        // The load-bearing invariant for the verbatim-text path: with
+        // life ≤ 10 + optional accepted + cost paid, the directed loss
+        // (CR 603.7c — `TargetFilter::TriggeringPlayer`) must land on
+        // P1 (the damaged player), NOT P0 (the ability controller).
+        assert!(
+            state.players[1].is_eliminated,
+            "P1 (damaged player, 5 life, with WUBRG paid) must be eliminated; \
+             waiting_for = {:?}, stack = {:?}",
+            state.waiting_for, state.stack,
+        );
+        assert!(
+            !state.players[0].is_eliminated,
+            "P0 (Ezio's controller) must NOT be eliminated — issue #1962 root cause \
+             was that LoseTheGame fell through to ability.controller when the \
+             directed-loss target was dropped; verbatim Oracle text must wire \
+             `TargetFilter::TriggeringPlayer` end-to-end",
+        );
+    }
+
+    /// CR 702.173a + CR 608.2i: The Freerunning eligibility ledger
+    /// (`assassin_or_commander_dealt_combat_damage_this_turn`) must
+    /// observe the **type/role gate** in `collect_pending_triggers` — a
+    /// generic (non-Assassin, non-commander) creature dealing combat
+    /// damage to a player must NOT seed the ledger. Otherwise every
+    /// combat damage event would unlock Freerunning for every spell,
+    /// silently breaking the keyword's gating semantics.
+    ///
+    /// Issue #1962 hardening (TEST-ONLY): the type-and-commander gate at
+    /// triggers.rs:1696-1709 is currently exercised only indirectly
+    /// (through casting tests that assume the ledger is populated). This
+    /// test pins down the **negative** branch directly: a vanilla
+    /// Creature with no Assassin subtype and `is_commander == false`
+    /// must leave the ledger empty after a combat-damage event.
+    #[test]
+    fn vanilla_creature_combat_damage_does_not_seed_freerunning_ledger() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // A vanilla creature: no Assassin subtype, not the commander.
+        // `make_creature` (this mod's helper) builds a bare Creature with
+        // no subtypes attached.
+        let vanilla = make_creature(&mut state, PlayerId(0), "Grizzly Bears", 2, 2);
+        assert!(
+            !state.objects[&vanilla].is_commander,
+            "test fixture sanity: vanilla creature must not be the commander"
+        );
+        assert!(
+            !state.objects[&vanilla]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|s| s == "Assassin"),
+            "test fixture sanity: vanilla creature must not be an Assassin"
+        );
+
+        // Pre-event sanity: the ledger starts empty.
+        assert!(
+            state
+                .assassin_or_commander_dealt_combat_damage_this_turn
+                .is_empty(),
+            "ledger must start empty"
+        );
+
+        let event = GameEvent::DamageDealt {
+            source_id: vanilla,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        process_triggers(&mut state, &[event]);
+
+        // The key invariant: the ledger must NOT contain the vanilla
+        // creature's controller, because the source is neither an
+        // Assassin creature nor a commander.
+        assert!(
+            !state
+                .assassin_or_commander_dealt_combat_damage_this_turn
+                .contains(&PlayerId(0)),
+            "vanilla (non-Assassin, non-commander) combat damage must NOT seed the \
+             Freerunning eligibility ledger; ledger = {:?}",
+            state.assassin_or_commander_dealt_combat_damage_this_turn,
+        );
+    }
+
+    /// CR 702.173a + CR 608.2i: Companion to the vanilla-creature ledger
+    /// test above — locks the **affirmative** branch of the type gate.
+    /// An Assassin creature dealing combat damage to a player MUST seed
+    /// the ledger with its controller, enabling Freerunning casts that
+    /// turn.
+    ///
+    /// Issue #1962 hardening (TEST-ONLY): paired with the vanilla test,
+    /// this fences in the full Assassin gate — a regression that flipped
+    /// the polarity of the type check (or accidentally widened it to
+    /// all creatures) would be caught by exactly one of the two tests.
+    #[test]
+    fn assassin_creature_combat_damage_seeds_freerunning_ledger() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let assassin = make_creature(&mut state, PlayerId(0), "Royal Assassin", 1, 1);
+        {
+            // `make_creature` (this mod's helper) stamps `base_card_types`
+            // before subtypes are attached. `process_triggers` calls
+            // `flush_layers`, which restores `card_types` from
+            // `base_card_types` — so the Assassin subtype must live on
+            // BOTH the current and base type rows to survive the flush.
+            let obj = state.objects.get_mut(&assassin).unwrap();
+            obj.card_types.subtypes.push("Assassin".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let event = GameEvent::DamageDealt {
+            source_id: assassin,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: true,
+            excess: 0,
+        };
+        process_triggers(&mut state, &[event]);
+
+        assert!(
+            state
+                .assassin_or_commander_dealt_combat_damage_this_turn
+                .contains(&PlayerId(0)),
+            "Assassin combat damage must seed the Freerunning eligibility ledger \
+             with the source's controller (P0); ledger = {:?}",
+            state.assassin_or_commander_dealt_combat_damage_this_turn,
         );
     }
 
@@ -18777,6 +19785,7 @@ mod push_first_contract_tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)

@@ -154,11 +154,21 @@ pub enum TriggerEventKey {
     ManifestDreadResolved,
     /// CR 701.44: An explore resolution.
     Explored,
+    /// CR 701.57a: A discover resolution.
+    DiscoverResolved,
+    /// CR 701.46a: An adapt resolution.
+    AdaptResolved,
+    /// CR 701.43d: A creature was exerted.
+    Exerted,
+    /// CR 702.143a: A card was foretold.
+    Foretold,
     /// CR 701.14: A fight resolution (separate from generic deals-damage
     /// because the matcher dispatches on `EffectResolved { kind: Fight }`).
     Fight,
     /// CR 702.26c: A permanent phased in.
     PhaseIn,
+    /// CR 702.26b: A permanent phased out.
+    PhaseOut,
 }
 
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.

@@ -9,7 +9,7 @@ use crate::types::ability::{
     PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
     MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor, ZoneChangeRecord,
@@ -1050,6 +1050,35 @@ fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
     }
 }
 
+/// CR 608.2c: Whether a parent effect computes its own "if you do" outcome
+/// signal (`optional_effect_performed`) rather than that signal meaning "the
+/// mandatory action occurred."
+///
+/// For most effects, "[Action]. If you do, [rider]." means the rider fires iff
+/// the action was performed. An *optional* ("you may") parent sets the flag when
+/// the controller accepts. A handful of effects instead compute the flag from a
+/// random/choice OUTCOME — a coin flip's win/loss, a clash's win/tie, a dig's
+/// kept selection — and resolve their gated branch against that computed flag
+/// (see `flip_coin.rs`, `clash.rs`, `engine_resolution_choices.rs`). For those,
+/// a mandatory parent does NOT imply "performed" (a lost flip is mandatory but
+/// did not "win"), so the default-true rule below must exclude them.
+fn effect_manages_own_outcome_flag(effect: &Effect) -> bool {
+    // Redundant-but-safe: coin/die win-loss riders gate on `EventOutcomeWon` /
+    // `WhenYouDo`, which are NOT in `condition_depends_on_effect_performed`, so
+    // the seed-block guard above would already skip them. Excluding the
+    // FlipCoin*/RollDie/Clash/Dig set here is defensive belt-and-suspenders — a
+    // future reader should not assume those paths depend on this exclusion.
+    matches!(
+        effect,
+        Effect::FlipCoin { .. }
+            | Effect::FlipCoins { .. }
+            | Effect::FlipCoinUntilLose { .. }
+            | Effect::Clash
+            | Effect::RollDie { .. }
+            | Effect::Dig { .. }
+    )
+}
+
 fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> bool {
     match ability.condition {
         Some(AbilityCondition::Not { ref condition })
@@ -1760,8 +1789,8 @@ pub fn resolve_effect(
         Effect::CreateDamageReplacement { .. } => {
             create_damage_replacement::resolve(state, ability, events)
         }
-        Effect::LoseTheGame => win_lose::resolve_lose(state, ability, events),
-        Effect::WinTheGame => win_lose::resolve_win(state, ability, events),
+        Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
+        Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => roll_die::resolve(state, ability, events),
         Effect::FlipCoin { .. } => flip_coin::resolve(state, ability, events),
         Effect::FlipCoins { .. } => flip_coin::resolve_flip_coins(state, ability, events),
@@ -2144,6 +2173,123 @@ fn affected_objects_from_events(
                 })
                 .collect()
         }
+    }
+}
+
+fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> bool {
+    match effect {
+        Effect::Destroy { .. } | Effect::DestroyAll { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    from: Some(crate::types::zones::Zone::Battlefield),
+                    ..
+                }
+            )
+        }),
+        Effect::Sacrifice { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PermanentSacrificed { .. })),
+        Effect::Mill { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ExileFromTopUntil { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. })),
+        Effect::Counter { .. } | Effect::CounterAll { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::SpellCountered { .. })),
+        Effect::DealDamage { .. } | Effect::DamageAll { .. } | Effect::Fight { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamageDealt { .. })),
+        Effect::Discard { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::Discarded { .. })),
+        Effect::AddCounter { .. }
+        | Effect::PutCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::MoveCounters { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterAdded { .. })),
+        Effect::RemoveCounter { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CounterRemoved { .. })),
+        Effect::Token { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+        Effect::Tap { .. } | Effect::TapAll { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PermanentTapped { .. })),
+        Effect::Untap { .. } | Effect::UntapAll { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PermanentUntapped { .. })),
+        Effect::GainLife { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::LifeChanged { amount, .. } if *amount > 0)),
+        Effect::LoseLife { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::LifeChanged { amount, .. } if *amount < 0)),
+        Effect::Draw { .. } => events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardDrawn { .. })),
+        Effect::Scry { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Scry,
+                    ..
+                }
+            )
+        }),
+        Effect::Surveil { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Surveil,
+                    ..
+                }
+            )
+        }),
+        Effect::Investigate => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Investigate,
+                    ..
+                }
+            )
+        }),
+        Effect::Proliferate => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::Proliferate,
+                    ..
+                }
+            )
+        }),
+        Effect::Shuffle { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )
+        }),
+        Effect::SearchLibrary { .. } => events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::SearchedLibrary,
+                    ..
+                }
+            )
+        }),
+        _ => true,
     }
 }
 
@@ -2723,6 +2869,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
 }
 
 fn previous_effect_amount_from_events(
+    state: &GameState,
     ability: &ResolvedAbility,
     events: &[GameEvent],
 ) -> Option<i32> {
@@ -2783,22 +2930,12 @@ fn previous_effect_amount_from_events(
                 _ => None,
             })
             .sum(),
-        // CR 706.2 + CR 608.2c: A die roll's *actual* result (natural + modifier,
-        // clamped at 0) is the numeric value a follow-up `PreviousEffectAmount`
-        // condition reads. Unlike damage/life amounts, the relevant amount is
-        // always defined — even a clamped-to-zero result is a valid
-        // sub-ability gate (Deck of Many Things' "if the result is 0 or less,
-        // discard your hand"). We short-circuit on the first DieRolled event
-        // (the one this RollDie effect emitted; any nested rolls happen inside
-        // a deeper chain that clears `last_effect_amount` on entry, but their
-        // events still appear later in the slice and must be ignored here so
-        // the OUTER RollDie's actual is what the OUTER sub_ability sees).
-        Effect::RollDie { .. } => {
-            return events.iter().find_map(|event| match event {
-                GameEvent::DieRolled { result, .. } => Some(*result as i32),
-                _ => None,
-            });
-        }
+        // CR 706.2 + CR 706.4 + CR 608.2c: `roll_die::resolve` is the single
+        // authority for the scalar value a follow-up `PreviousEffectAmount` or
+        // `EventContextAmount` consumer reads. That avoids re-deriving from an
+        // event slice that may contain result-table branch effects or nested
+        // rolls interleaved with the outer dice.
+        Effect::RollDie { .. } => return state.die_result_this_resolution,
         _ => 0,
     };
 
@@ -3127,7 +3264,7 @@ fn resolve_chain_body(
             state.last_effect_amount = state.last_effect_count;
             state.last_effect_counts_by_player = counts_by_player;
         } else if let Some(amount) =
-            previous_effect_amount_from_events(&scoped_template, scoped_events)
+            previous_effect_amount_from_events(state, &scoped_template, scoped_events)
         {
             state.last_effect_amount = Some(amount);
         }
@@ -3897,7 +4034,9 @@ fn resolve_chain_body(
     // counters and also deals damage, but "damage dealt this way" must read only
     // `DamageDealt`; Coalition Relic's "counter removed this way" must read only
     // `CounterRemoved`.
-    if let Some(amount) = previous_effect_amount_from_events(ability, &events[events_before..]) {
+    if let Some(amount) =
+        previous_effect_amount_from_events(state, ability, &events[events_before..])
+    {
         state.last_effect_amount = Some(amount);
     }
 
@@ -3982,6 +4121,52 @@ fn resolve_chain_body(
     };
     let effect_context_object =
         parent_referent_context_from_events(state, &events[events_before..]);
+
+    // CR 608.2c: "[Mandatory action]. If you do, [rider]." — seed the
+    // performed-flag for a mandatory parent whose action just occurred.
+    //
+    // The "if you do" gate (`EffectOutcome { OptionalEffectPerformed }`) means
+    // "if the preceding instruction's event happened." For an *optional* parent
+    // ("you may …") the flag is set when the controller accepts; for effects
+    // that compute their own win/loss/selection outcome (coin flip, clash, dig —
+    // see `effect_manages_own_outcome_flag`) the branch handlers set it; for an
+    // unless-pay / "if a player does" alternative the payment flow sets it. But a
+    // plain *mandatory* action (Sacrifice, Mill, Destroy, …) whose rider is a
+    // SEPARATE SENTENCE ("Sacrifice it. If you do, create Marit Lage.") has no
+    // such hook — and per CR 608.2c that sentence is the next printed
+    // instruction, gating on whether the prior action happened. We restrict to
+    // `SubAbilityLink::SequentialSibling` precisely so the within-clause
+    // `ContinuationStep` alternatives that ride on a payment / opponent choice
+    // (unless-pay, `IfAPlayerDoes`) are NOT affected. When the action was not
+    // signalled as failed (`cost_payment_failed_flag`, e.g. nothing eligible to
+    // sacrifice), set the flag on the parent's context so it propagates to the
+    // sub via `apply_parent_chain_context` and survives the sub's own chain-body
+    // condition re-check. Covers the whole mandatory-rider class, not one card.
+    // NOTE: this seed fires for any `EffectOutcome`-gated `SequentialSibling`,
+    // including a `CurrentScopeSucceeded` gate. Seeding `optional_effect_performed`
+    // there is a harmless no-op: a `CurrentScopeSucceeded` rider resolves against
+    // `!cost_payment_failed_flag` (not this flag), and that guard already requires
+    // `!cost_payment_failed_flag` — the same condition gating this seed.
+    let mandatory_rider_owned;
+    let ability = if !ability.optional
+        && !ability.context.optional_effect_performed
+        && !state.cost_payment_failed_flag
+        && mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
+        && !effect_manages_own_outcome_flag(&ability.effect)
+        && ability.sub_ability.as_ref().is_some_and(|sub| {
+            sub.sub_link == SubAbilityLink::SequentialSibling
+                && sub
+                    .condition
+                    .as_ref()
+                    .is_some_and(condition_depends_on_effect_performed)
+        }) {
+        let mut owned = ability.clone();
+        owned.context.optional_effect_performed = true;
+        mandatory_rider_owned = owned;
+        &mandatory_rider_owned
+    } else {
+        ability
+    };
 
     // Follow typed sub_ability chain, propagating parent targets when sub has none.
     // This allows sub-abilities like "its controller gains life" to access the object
@@ -5545,6 +5730,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source_id,
@@ -5616,6 +5802,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source_id,
@@ -5692,6 +5879,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             )
             .optional(),
@@ -5781,6 +5969,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             )
             .optional(),
@@ -6829,6 +7018,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(creature)],
             ObjectId(100),
@@ -6894,6 +7084,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -7003,6 +7194,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(100),
@@ -7516,6 +7708,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 )),
                 uses_tracked_set: true,
@@ -7536,6 +7729,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj1), TargetRef::Object(obj2)],
             ObjectId(100),
@@ -7585,6 +7779,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 )),
                 uses_tracked_set: false,
@@ -7605,6 +7800,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(obj)],
             ObjectId(100),
@@ -7680,6 +7876,7 @@ mod tests {
                     target: TargetFilter::Any,
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(900),
@@ -7940,6 +8137,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 )),
                 uses_tracked_set: true,
@@ -7960,6 +8158,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![], // no targets
             ObjectId(100),
@@ -8125,6 +8324,7 @@ mod tests {
                     },
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(900),
@@ -8215,6 +8415,7 @@ mod tests {
                     },
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 },
                 vec![],
                 ObjectId(901),
@@ -8279,6 +8480,7 @@ mod tests {
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             ObjectId(902),
@@ -9333,6 +9535,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(9000),
@@ -9541,6 +9744,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             ObjectId(9000),
@@ -10073,6 +10277,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -10134,6 +10339,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -10210,6 +10416,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 enters_under: None,
                 enter_tapped: false,
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -10233,6 +10440,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -12180,6 +12388,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source,
@@ -12431,6 +12640,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![TargetRef::Object(permanent)],
             ObjectId(100),
@@ -13491,8 +13701,12 @@ mod tests {
 
         // WIN scenario: library = 1, devotion = 2 → 2 >= 1 → true.
         let state_win = build_state(1);
-        let ability_win =
-            ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(9001), PlayerId(0));
+        let ability_win = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(9001),
+            PlayerId(0),
+        );
         assert!(
             evaluate_condition(&condition, &state_win, &ability_win),
             "WIN scenario: devotion=2, library=1 should satisfy GE",
@@ -13500,8 +13714,12 @@ mod tests {
 
         // NO-WIN scenario: library = 50, devotion = 2 → 2 >= 50 → false.
         let state_no_win = build_state(50);
-        let ability_no_win =
-            ResolvedAbility::new(Effect::WinTheGame, vec![], ObjectId(9002), PlayerId(0));
+        let ability_no_win = ResolvedAbility::new(
+            Effect::WinTheGame { target: None },
+            vec![],
+            ObjectId(9002),
+            PlayerId(0),
+        );
         assert!(
             !evaluate_condition(&condition, &state_no_win, &ability_no_win),
             "NO-WIN scenario: devotion=2, library=50 must NOT satisfy GE",

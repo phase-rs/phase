@@ -566,7 +566,13 @@ fn check_lethal_damage(
 /// Mirror Box's "permanents you control", Cadric / Sliver Gravemother's
 /// type-scoped variants). The candidate is passed as the target object so
 /// type-scoped exemptions are evaluated per-permanent, not per-player.
-fn legend_rule_exempt(
+///
+/// This is the single authority the legend-rule SBA consults; it is public so
+/// rules-aware consumers (e.g. the AI's anti-self-harm policy) can ask the same
+/// per-permanent question without duplicating the exemption logic. Callers that
+/// reason about a prospective duplicate should evaluate the already-controlled
+/// same-name permanents the same way the SBA filters them before grouping.
+pub fn legend_rule_exempt(
     state: &GameState,
     permanent_id: crate::types::identifiers::ObjectId,
 ) -> bool {
@@ -1567,6 +1573,83 @@ mod tests {
 
         assert!(!state.battlefield.contains(&aura_id));
         assert!(state.players[0].graveyard.contains(&aura_id));
+    }
+
+    /// CR 303.4c + CR 702.5a: "Enchant creature with another Aura attached to
+    /// it" is rechecked after the Aura resolves. The Aura itself cannot satisfy
+    /// "another" once it is attached to the host.
+    #[test]
+    fn sba_another_aura_enchant_filter_excludes_source_attachment() {
+        use crate::types::ability::{AttachmentKind, FilterProp, TargetFilter, TypedFilter};
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let host = create_creature(&mut state, CardId(1), PlayerId(0), "Bear", 2, 2);
+
+        let first_aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rancor".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura = state.objects.get_mut(&first_aura).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.attached_to = Some(host.into());
+        }
+
+        let daybreak = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Daybreak Coronet".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura = state.objects.get_mut(&daybreak).unwrap();
+            aura.card_types.core_types.push(CoreType::Enchantment);
+            aura.card_types.subtypes.push("Aura".to_string());
+            aura.keywords.push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::HasAttachment {
+                    kind: AttachmentKind::Aura,
+                    controller: None,
+                    exclude_source: true,
+                }]),
+            )));
+            aura.attached_to = Some(host.into());
+        }
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .attachments
+            .extend([first_aura, daybreak]);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+        assert!(
+            state.battlefield.contains(&daybreak),
+            "Daybreak-style Aura should remain legal while another Aura is attached"
+        );
+
+        state.objects.get_mut(&first_aura).unwrap().attached_to = None;
+        state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .attachments
+            .retain(|id| *id != first_aura);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.battlefield.contains(&daybreak),
+            "Daybreak-style Aura must not count itself as the required other Aura"
+        );
+        assert!(state.players[0].graveyard.contains(&daybreak));
     }
 
     /// Issue #537 SBA SHAPE test (5d) — **explicitly labeled SHAPE**: this
