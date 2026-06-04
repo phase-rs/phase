@@ -126,12 +126,14 @@ fn transform_effect_in_place(effect: &mut Effect) {
             enters_attacking: _, // dropped: hidden-zone exile, combat irrelevant
             up_to: _,         // dropped: ChangeZoneAll has no count semantics
             enter_with_counters: _, // dropped: hidden-zone exile, no counters
+            face_down_profile: _, // dropped: overload corpus is hidden-zone exile, never face-down entry
         } => Effect::ChangeZoneAll {
             origin,
             destination,
             target,
             enters_under: None,
             enter_tapped: false,
+            face_down_profile: None,
         },
         // Effects without an all-matching counterpart (e.g. `Counter` for
         // Counterflux) are preserved as-is. No overload corpus card has a
@@ -271,6 +273,7 @@ mod tests {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         });
         transform_ability_def(&mut def);
         match *def.effect {

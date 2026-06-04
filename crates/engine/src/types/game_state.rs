@@ -4023,6 +4023,10 @@ pub struct StackPaidSnapshot {
     pub additional_cost_paid: bool,
     #[serde(default, skip_serializing_if = "CastingVariant::is_normal")]
     pub casting_variant: CastingVariant,
+    /// CR 310.11b + CR 712.14a: Exile alt-cost casts that were explicitly cast
+    /// transformed resolve onto the battlefield back face up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cast_transformed: bool,
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub convoked_creatures: usize,
 }
@@ -5115,7 +5119,6 @@ pub struct GameState {
     /// CR 725: The initiative designation (like monarch — one player at a time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initiative: Option<PlayerId>,
-
     /// CR 510.2 + CR 615.7: Transient per-shield combat-damage prevention tally.
     /// Set to `Some(empty)` by `apply_combat_damage` for the duration of one
     /// simultaneous combat-damage batch. While `Some`, the `Prevention::All`

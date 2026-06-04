@@ -169,6 +169,7 @@ pub fn resolve(
             ability.controller,
             card,
             constraint.clone(),
+            cast_transformed,
             cleanup,
             events,
         )

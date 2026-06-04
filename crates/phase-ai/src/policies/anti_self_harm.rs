@@ -923,6 +923,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: Vec::new(),
+                face_down_profile: None,
             },
         )));
         state
@@ -2768,6 +2769,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
                 Vec::new(),
                 ObjectId(200),
@@ -2876,6 +2878,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
                 Vec::new(),
                 ObjectId(200),

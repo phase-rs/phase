@@ -1201,6 +1201,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 ))
                 .description("Rest in Peace".to_string()),
@@ -1321,6 +1322,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: std::collections::HashSet::new(),
+            face_down_profile: None,
         };
         let mut events = Vec::new();
         crate::game::sacrifice::apply_sacrifice_after_replacement(&mut state, event, &mut events);
@@ -1823,6 +1825,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: std::collections::HashSet::new(),
+            face_down_profile: None,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::NeedsChoice(player) = result else {
@@ -2001,6 +2004,7 @@ mod tests {
             controller_override: None,
             enter_transformed: false,
             applied: std::collections::HashSet::new(),
+            face_down_profile: None,
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
         let ReplacementResult::Execute(event) = result else {

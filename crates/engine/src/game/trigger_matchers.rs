@@ -36,6 +36,10 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         // CR 701.43d: linked "when you do" trigger fires when the source creature
         // is exerted as it attacks.
         TriggerMode::Exerted => match_exerted,
+        TriggerMode::Discover => match_discover,
+        TriggerMode::Adapt => match_adapt,
+        TriggerMode::Foretell => match_foretell,
+        TriggerMode::DamagePreventedOnce => match_unimplemented,
         TriggerMode::AttackersDeclared | TriggerMode::AttackersDeclaredOneTarget => {
             match_attackers_declared
         }
@@ -66,6 +70,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::Scry
         | TriggerMode::Surveil
         | TriggerMode::CollectEvidence
+        | TriggerMode::Investigated
         | TriggerMode::PlayerPerformedAction => match_player_action,
         TriggerMode::LeavesBattlefield => match_leaves_battlefield,
         TriggerMode::BecomesBlocked => match_becomes_blocked,
@@ -137,22 +142,19 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::PhaseIn => match_phase_in,
         // CR 702.26b: Phasing triggers fire when a permanent phases out.
         TriggerMode::PhaseOut => match_phase_out,
-        TriggerMode::DamagePreventedOnce
-        | TriggerMode::AbilityCast
+        // CR 107.14: "Whenever you get one or more {E}" — batched player-counter trigger.
+        TriggerMode::CounterPlayerAddedAll => match_counter_player_added_all,
+        TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
         | TriggerMode::AbilityTriggered
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
-        | TriggerMode::CounterPlayerAddedAll
         | TriggerMode::CounterTypeAddedAll
         | TriggerMode::PayLife
         | TriggerMode::PhaseOutAll
         | TriggerMode::NewGame
         | TriggerMode::Championed
         | TriggerMode::Enlisted
-        | TriggerMode::Adapt
-        | TriggerMode::Foretell
-        | TriggerMode::Investigated
         | TriggerMode::PlanarDice
         | TriggerMode::PlaneswalkedFrom
         | TriggerMode::PlaneswalkedTo
@@ -163,7 +165,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::ClaimPrize
         | TriggerMode::CrankContraption
         | TriggerMode::Devoured
-        | TriggerMode::Discover
         | TriggerMode::Forage
         | TriggerMode::GiveGift
         | TriggerMode::Mentored
@@ -220,6 +221,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::SpellCast, match_spell_cast);
     r.insert(TriggerMode::SpellCastOrCopy, match_spell_cast);
     r.insert(TriggerMode::Attacks, match_attacks);
+    r.insert(TriggerMode::Exerted, match_exerted);
     r.insert(TriggerMode::AttackersDeclared, match_attackers_declared);
     r.insert(
         TriggerMode::AttackersDeclaredOneTarget,
@@ -264,6 +266,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::Scry, match_player_action);
     r.insert(TriggerMode::Surveil, match_player_action);
     r.insert(TriggerMode::CollectEvidence, match_player_action);
+    r.insert(TriggerMode::Investigated, match_player_action);
     r.insert(TriggerMode::PlayerPerformedAction, match_player_action);
 
     // Zone-based: leaves the battlefield
@@ -386,8 +389,17 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 702.26c: Phasing triggers fire when a permanent phases in.
     r.insert(TriggerMode::PhaseIn, match_phase_in);
 
+    r.insert(TriggerMode::Discover, match_discover);
+    r.insert(TriggerMode::Adapt, match_adapt);
+    r.insert(TriggerMode::Foretell, match_foretell);
     // CR 702.26b: Phasing triggers fire when a permanent phases out.
     r.insert(TriggerMode::PhaseOut, match_phase_out);
+
+    // CR 107.14: "Whenever you get one or more {E}" — batched player-counter trigger.
+    r.insert(
+        TriggerMode::CounterPlayerAddedAll,
+        match_counter_player_added_all,
+    );
 
     // Remaining trigger modes: recognized but not yet matched against events.
     let unimplemented_modes = [
@@ -397,7 +409,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::AbilityTriggered,
         TriggerMode::SpellAbilityCast,
         TriggerMode::SpellAbilityCopy,
-        TriggerMode::CounterPlayerAddedAll,
+        // TriggerMode::CounterPlayerAddedAll — moved to real matcher above
         TriggerMode::CounterTypeAddedAll,
         TriggerMode::PayLife,
         // TriggerMode::PhaseOut — moved to real matcher above
@@ -406,15 +418,11 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         // TriggerMode::TakesInitiative — moved to real matcher above
         // TriggerMode::LosesGame — moved to real matcher above
         TriggerMode::Championed,
-        TriggerMode::Exerted,
         // TriggerMode::Crewed — moved to real matcher below
         // TriggerMode::Saddled — moved to real matcher below
         // TriggerMode::Evolve — moved to real matcher below
         // TriggerMode::Evolved — moved to real matcher below
         TriggerMode::Enlisted,
-        TriggerMode::Adapt,
-        TriggerMode::Foretell,
-        TriggerMode::Investigated,
         // TriggerMode::DungeonCompleted — moved to real matcher above
         // TriggerMode::RoomEntered — moved to real matcher above
         TriggerMode::PlanarDice,
@@ -427,7 +435,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::ClaimPrize,
         TriggerMode::CrankContraption,
         TriggerMode::Devoured,
-        TriggerMode::Discover,
         TriggerMode::Forage,
         TriggerMode::GiveGift,
         TriggerMode::Mentored,
@@ -840,7 +847,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
         | GameEvent::DebugPermissionRevoked { .. }
-        | GameEvent::StartingPlayerContest { .. } => 0,
+        | GameEvent::StartingPlayerContest { .. }
+        | GameEvent::Foretold { .. } => 0,
     }
 }
 
@@ -1735,6 +1743,22 @@ pub(super) fn match_life_changed(
     }
 }
 
+/// CR 107.14: Match energy gain events.
+/// Fires on `GameEvent::EnergyChanged { delta > 0 }` when the triggering player
+/// matches `valid_target` (typically `Controller`).
+pub(super) fn match_counter_player_added_all(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match event {
+        GameEvent::EnergyChanged { player, delta } if *delta > 0 => {
+            valid_player_matches(trigger, state, *player, source_id)
+        }
+        _ => false,
+    }
+}
 pub(super) fn match_drawn(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -1766,6 +1790,7 @@ pub(super) fn match_player_action(
         TriggerMode::Scry => *action == PlayerActionKind::Scry,
         TriggerMode::Surveil => *action == PlayerActionKind::Surveil,
         TriggerMode::CollectEvidence => *action == PlayerActionKind::CollectEvidence,
+        TriggerMode::Investigated => *action == PlayerActionKind::Investigate,
         TriggerMode::PlayerPerformedAction => trigger
             .player_actions
             .as_ref()
@@ -2474,6 +2499,72 @@ pub(super) fn match_explored(
         }
     } else {
         false
+    }
+}
+
+/// CR 701.57a: Discover — fires when a discover effect resolves.
+pub(super) fn match_discover(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::EffectResolved {
+        kind: EffectKind::Discover,
+        source_id: discoverer_id,
+    } = event
+    else {
+        return false;
+    };
+    if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, *discoverer_id, source_id)
+    } else {
+        true
+    }
+}
+
+/// CR 701.46a: Adapt — fires when a permanent adapts.
+pub(super) fn match_adapt(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::EffectResolved {
+        kind: EffectKind::Adapt,
+        source_id: adapted_id,
+    } = event
+    else {
+        return false;
+    };
+    if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, *adapted_id, source_id)
+    } else {
+        *adapted_id == source_id
+    }
+}
+
+/// CR 702.143a: Foretell — fires when a player foretells a card.
+pub(super) fn match_foretell(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::Foretold {
+        player_id,
+        object_id,
+    } = event
+    else {
+        return false;
+    };
+    if !valid_player_matches(trigger, state, *player_id, source_id) {
+        return false;
+    }
+    if trigger.valid_card.is_some() {
+        valid_card_matches(trigger, state, *object_id, source_id)
+    } else {
+        true
     }
 }
 
@@ -3579,7 +3670,7 @@ mod tests {
         CastingVariant, GameState, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::player::PlayerId;
+    use crate::types::player::{PlayerCounterKind, PlayerId};
     use crate::types::zones::Zone;
 
     fn setup() -> GameState {
@@ -6846,6 +6937,69 @@ mod tests {
                 indirect: false,
             },
             &self_ref_trigger,
+            source,
+            &state
+        ));
+    }
+
+    #[test]
+    fn counter_player_added_all_matcher_matches_energy_gain() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fabrication Module".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::CounterPlayerAddedAll);
+        trigger.valid_target = Some(TargetFilter::Controller);
+        let registry = build_trigger_registry();
+
+        assert!(trigger_matcher(TriggerMode::CounterPlayerAddedAll).is_some());
+        assert!(registry.contains_key(&TriggerMode::CounterPlayerAddedAll));
+
+        // Should fire on energy gain for the controller
+        assert!(match_counter_player_added_all(
+            &GameEvent::EnergyChanged {
+                player: PlayerId(0),
+                delta: 2,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+
+        // Should NOT fire on energy loss (delta <= 0)
+        assert!(!match_counter_player_added_all(
+            &GameEvent::EnergyChanged {
+                player: PlayerId(0),
+                delta: -1,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+
+        // Should NOT fire on non-energy player counters.
+        assert!(!match_counter_player_added_all(
+            &GameEvent::PlayerCounterChanged {
+                player: PlayerId(0),
+                counter_kind: PlayerCounterKind::Poison,
+                delta: 1,
+            },
+            &trigger,
+            source,
+            &state
+        ));
+
+        // Should NOT fire for a different player
+        assert!(!match_counter_player_added_all(
+            &GameEvent::EnergyChanged {
+                player: PlayerId(1),
+                delta: 3,
+            },
+            &trigger,
             source,
             &state
         ));

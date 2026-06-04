@@ -815,6 +815,13 @@ pub(crate) fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreT
     let (input, is_plural) = alt((
         value(false, alt((tag("it's still "), tag("that's still ")))),
         value(true, tag("they're still ")),
+        // CR 205.1b: relative-clause retention attached to a plural/singular
+        // subject — "[plural] that are still lands", "[singular] that is still
+        // a land". Distinct from the standalone-sentence forms above so the
+        // animation building block can keep land/artifact types when the
+        // retention rides on the same clause rather than a new sentence.
+        value(true, tag("that are still ")),
+        value(false, tag("that is still ")),
     ))
     .parse(input)?;
 

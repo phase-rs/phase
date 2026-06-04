@@ -831,6 +831,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
@@ -845,6 +846,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             source_id,
@@ -1165,6 +1167,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         sub_ability: Some(Box::new(shuffle_ability)),
         ..ResolvedAbility::new(
@@ -1179,6 +1182,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![],
             enchantment_id,
@@ -1842,6 +1846,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         controller_override: Some(P0),
         enter_transformed: false,
         applied: std::collections::HashSet::new(),
+        face_down_profile: None,
     };
 
     let mut events = Vec::new();
@@ -1916,6 +1921,7 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         controller_override: None,
         enter_transformed: false,
         applied: std::collections::HashSet::new(),
+        face_down_profile: None,
     };
 
     let mut events = Vec::new();
@@ -1981,6 +1987,7 @@ fn build_earthbend_ability(
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
     );
 
@@ -2242,6 +2249,7 @@ fn earthbended_land_returns_tapped_after_exile() {
             target: TargetFilter::SpecificObject { id: land_id },
             enters_under: None,
             enter_tapped: false,
+            face_down_profile: None,
         },
         vec![TargetRef::Object(land_id)],
         exile_source,

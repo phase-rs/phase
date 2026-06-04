@@ -709,6 +709,15 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
+    // CR 613.1d + CR 613.4b: "[Subject] lands are [P/T] creatures that are still
+    // lands" — continuous land animation (Living Plane, Nature's Revolt). Must
+    // come before parse_land_type_change: both split on "are", but the land
+    // animation form carries a creature descriptor the type-change parser can't
+    // claim. The "creature" guard lets land *type* lines fall through.
+    if let Some(def) = parse_land_animation(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 305.7: "[Subject] lands are [type]" — land type-changing statics.
     // Must come before parse_subject_continuous_static (which splits on "gets/has/gains"
     // verbs and would not match "are" predicates).
@@ -1182,6 +1191,15 @@ pub(crate) fn parse_static_line_inner(
     // NOT on the activator scope (`who = AllPlayers`) — per CR 602.5, the prohibition is
     // on the ability itself, not a specific activator.
     if let Some(def) = parse_filter_scoped_cant_be_activated(&tp, &text) {
+        return Some(def);
+    }
+
+    // --- "~ can be attached only to {filter}" ---
+    // CR 301.5 + CR 303.4 + CR 701.3a: Positive attachment restriction on an
+    // Aura/Equipment — the source can only attach to a host matching the parsed
+    // `TargetFilter` (Strata Scythe, Brass Knuckles, Konda's Banner). Enforced in
+    // game/effects/attach.rs::attachment_illegality.
+    if let Some(def) = parse_attach_only_restriction(&tp, &text) {
         return Some(def);
     }
 

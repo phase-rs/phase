@@ -1512,6 +1512,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking,
             up_to: false,
             enter_with_counters,
+            face_down_profile: None,
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {
@@ -1529,6 +1530,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         TargetedImperativeAst::ReturnAllToZone {
             target,
@@ -1548,6 +1550,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 target,
                 enters_under,
                 enter_tapped,
+                face_down_profile: None,
             }
         }
         TargetedImperativeAst::Fight { target } => Effect::Fight {
@@ -2032,6 +2035,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             ])),
             enters_under: None,
             enter_tapped: false,
+            face_down_profile: None,
         },
     }
 }
@@ -3486,6 +3490,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     target,
                     enters_under: None,
                     enter_tapped,
+                    face_down_profile: None,
                 }
             } else {
                 Effect::ChangeZone {
@@ -3501,6 +3506,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     enters_attacking,
                     up_to,
                     enter_with_counters,
+                    face_down_profile: None,
                 }
             }
         }
@@ -3906,6 +3912,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             with_shuffle_sub_ability(effect)
         }
@@ -3932,6 +3939,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             with_shuffle_sub_ability(effect)
         }
@@ -4042,6 +4050,7 @@ pub(super) fn lower_multi_filter_search_library(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        face_down_profile: None,
     };
 
     // CR 107.1c + CR 701.23d: Wrap the count in `UpTo` once at the helper's
@@ -4204,6 +4213,7 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
         target: TargetFilter::Controller,
         enters_under: None,
         enter_tapped: false,
+        face_down_profile: None,
     }
 }
 
@@ -6909,6 +6919,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     target,
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 }
             } else {
                 Effect::ChangeZone {
@@ -6922,6 +6933,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters,
+                    face_down_profile: None,
                 }
             }
         }
@@ -8422,6 +8434,7 @@ mod tests {
                 target: TargetFilter::Or { filters },
                 enters_under: None,
                 enter_tapped,
+                face_down_profile: None,
             } => {
                 assert_eq!(origin, None);
                 assert_eq!(destination, Zone::Battlefield);

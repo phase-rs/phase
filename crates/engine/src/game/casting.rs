@@ -643,6 +643,10 @@ pub fn handle_foretell(
             turn_foretold: state.turn_number,
         });
     }
+    events.push(GameEvent::Foretold {
+        player_id: player,
+        object_id,
+    });
 
     Ok(WaitingFor::Priority { player })
 }
@@ -1103,6 +1107,31 @@ pub(super) fn selected_exile_alt_cost_permission_accepts_resulting_mv(
     };
 
     exile_alt_cost_permission_supports_cast(state, obj, player, permission, Some(resulting_mv))
+}
+
+pub(super) fn selected_exile_alt_cost_permission_casts_transformed(
+    state: &GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+
+    obj.casting_permissions
+        .iter()
+        .find(|permission| {
+            exile_alt_cost_permission_supports_cast(state, obj, player, permission, None)
+        })
+        .is_some_and(|permission| {
+            matches!(
+                permission,
+                crate::types::ability::CastingPermission::ExileWithAltCost {
+                    cast_transformed: true,
+                    ..
+                }
+            )
+        })
 }
 
 pub(super) fn exile_alt_cost_permissions_accept_resulting_mv(
@@ -5541,10 +5570,11 @@ pub fn handle_cast_spell_as_madness_with_payment_mode(
 /// cast-during-resolution `ExileWithAltCost` permission and drives the cast.
 ///
 /// Pushes a cost-zeroing `ExileWithAltCost` permission carrying `constraint`
-/// (the resulting-MV gate, evaluated at finalization once X is known) and
-/// `cleanup` (the misses + reject disposition, so a cast-time rejection can
-/// still bottom/hand the hit). Then prepares and continues the cast on the
-/// `Auto` payment mode. The returned `WaitingFor` falls through
+/// (the resulting-MV gate, evaluated at finalization once X is known),
+/// `cast_transformed` (for Siege victory casts), and `cleanup` (the misses +
+/// reject disposition, so a cast-time rejection can still bottom/hand the hit).
+/// Then prepares and continues the cast on the `Auto` payment mode. The
+/// returned `WaitingFor` falls through
 /// `run_post_action_pipeline` normally, which fires the hit's own cast-triggers
 /// (CR 702.85a, etc.) and returns priority to the active player — satisfying CR
 /// 608.2g's "no player receives priority after it's cast" without any explicit
@@ -5563,6 +5593,7 @@ pub(super) fn initiate_cast_during_resolution(
     player: PlayerId,
     hit_card: ObjectId,
     constraint: Option<crate::types::ability::CastPermissionConstraint>,
+    cast_transformed: bool,
     cleanup: crate::types::ability::ResolutionCastCleanup,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -5578,7 +5609,7 @@ pub(super) fn initiate_cast_during_resolution(
         obj.casting_permissions
             .push(CastingPermission::ExileWithAltCost {
                 cost: ManaCost::zero(),
-                cast_transformed: false,
+                cast_transformed,
                 constraint,
                 granted_to: Some(player),
                 resolution_cleanup: Some(cleanup),
@@ -6675,6 +6706,33 @@ fn continue_with_prepared(
                 prepared.mana_cost,
                 Some(prepared.base_mana_cost.clone()),
                 casualty_cost,
+                SpellCostSource::Other,
+                prepared.casting_variant,
+                prepared.cast_timing_permission,
+                prepared
+                    .ability_def
+                    .as_ref()
+                    .and_then(|a| a.distribute.clone()),
+                prepared.origin_zone,
+                prepared.payment_mode,
+                events,
+            );
+        }
+
+        // CR 702.56a: Replicate is a repeatable optional additional cost, so it
+        // must be declared before targets are chosen just like Casualty.
+        if let Some(replicate_cost) =
+            casting_costs::effective_replicate_additional_cost(state, player, prepared.object_id)
+        {
+            return casting_costs::begin_optional_cost_before_targets(
+                state,
+                player,
+                prepared.object_id,
+                prepared.card_id,
+                resolved,
+                prepared.mana_cost,
+                Some(prepared.base_mana_cost.clone()),
+                replicate_cost,
                 SpellCostSource::Other,
                 prepared.casting_variant,
                 prepared.cast_timing_permission,
@@ -17854,6 +17912,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
         ));
         spell.casting_options.push(
@@ -22042,6 +22101,7 @@ mod tests {
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
+                        face_down_profile: None,
                     },
                 )
                 .sub_ability(
@@ -22058,6 +22118,7 @@ mod tests {
                             enters_attacking: false,
                             up_to: false,
                             enter_with_counters: vec![],
+                            face_down_profile: None,
                         },
                     )
                     .condition(AbilityCondition::AdditionalCostPaidInstead),
@@ -22800,6 +22861,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ));
             obj.modal = Some(crate::types::ability::ModalChoice {
@@ -22963,6 +23025,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ));
             // Mode 1: return target creature with mana value X or less to its owner's hand.
@@ -22988,6 +23051,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             ));
             obj.modal = Some(crate::types::ability::ModalChoice {
@@ -23370,6 +23434,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             let mode1 = AbilityDefinition::new(
@@ -23385,6 +23450,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             Arc::make_mut(&mut obj.abilities).push(
@@ -31478,6 +31544,7 @@ mod tests {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters: vec![],
+                    face_down_profile: None,
                 },
             );
             put_in_hand_def.sub_ability = Some(Box::new(shuffle_def));
