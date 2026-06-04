@@ -14435,6 +14435,19 @@ pub(crate) fn parse_effect_chain_ir(
             .or(turn_cond)
             .or(keyword_instead_cond)
             .or(suffix_cond);
+        // CR 608.2c + CR 608.2d: When NO typed condition matched any pass above,
+        // fall back to a structural-only strip that removes an unrepresentable
+        // `If <X>, ` head ONLY when the body begins with `"you may "`. This
+        // preserves the optional choice on patterns like Amareth ("If it shares
+        // a card type with that permanent, you may reveal …") and Tithe ("If
+        // target opponent controls more lands than you, you may search …"). The
+        // condition is intentionally dropped — the Condition_If swallow detector
+        // still flags it as unsupported. Issue #2277.
+        let text = if condition.is_none() {
+            strip_unrecognized_conditional_head_when_body_optional(&text)
+        } else {
+            text
+        };
         // CR 608.2c + CR 400.7: "unless ~ entered this turn" — strip suffix and
         // replace condition with SourceDidNotEnterThisTurn. The IfYouDo condition
         // is redundant when the parent is optional (optional already gates the sub).

@@ -30,11 +30,17 @@
 //! 4. Removal of the corresponding linear `strip_*` helper at its call
 //!    sites.
 //!
-//! ## Specialized-phrase blocklist
+//! ## Specialized-phrase blocklist (CR 608.2d)
 //!
 //! "you may " in Oracle text isn't always a generic optional-effect modal.
-//! Several specialized constructions share the same prefix:
+//! Several specialized constructions share the same prefix. The disambiguation
+//! is on the BODY SHAPE after the verb, not the verb itself — a bare
+//! imperative like "you may reveal that card and put it into your hand" must
+//! peel as a generic optional effect, while "you may reveal a creature card
+//! from your hand" must NOT peel because `RevealFromHand` needs the full
+//! surface form to dispatch.
 //!
+//! Head-only specialized phrases (always block on these verb heads):
 //! - `you may pay {X} rather than ...` — alternative cost
 //! - `you may cast ... as though ...` — static permission grant
 //! - `you may play that card ...` — impulse draw permission
@@ -42,14 +48,18 @@
 //! - `you may choose new targets for ...` — retarget effect
 //! - `you may instead ...` — Dig alternative selection
 //! - `you may repeat this process` — directive (no effect)
-//! - `you may search ... for ...` — search-with-may
-//! - `you may reveal ... from your hand` — reveal-with-may
 //! - `you may look at ...` — peek-with-may
-//! - `you may put ... from among them ...` — Dig-keep
 //!
-//! Each has a dedicated body parser that needs to see the full phrase to
-//! produce the correct AST. The shell treats these as opaque and leaves the
-//! `you may ` prefix attached, deferring to those parsers.
+//! Shape-gated specialized phrases (block only when the body matches):
+//! - `you may reveal {your hand | ... from your hand | ... from outside the
+//!   game | ... from among ... | ... opening hand}` — specialized reveal
+//!   handlers; anaphoric `reveal that card`/`reveal it` peels through.
+//! - `you may put ... {from among | of them | of those cards}` — Dig
+//!   keep-from-among grammar; generic `put it onto the battlefield` peels
+//!   through.
+//!
+//! `search` and bare anaphoric `reveal`/`put` are intentionally NOT blocked
+//! — they peel cleanly and reach the generic optional-effect path.
 
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
@@ -57,7 +67,9 @@ use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::Parser;
 
-use super::oracle_effect::conditions::strip_leading_general_conditional;
+use super::oracle_effect::conditions::{
+    strip_leading_general_conditional, strip_unrecognized_conditional_head_when_body_optional,
+};
 use super::oracle_effect::strip_trailing_duration;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
@@ -73,8 +85,9 @@ use crate::types::ability::{AbilityCondition, Duration};
 /// slot value directly via accessors like `duration()`) before returning.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ClauseContext {
-    /// CR 117.3a + CR 609.3: "you may [verb]" — controller-choice optional
-    /// effect. Set when `peel_clause` strips a "you may " prefix.
+    /// CR 608.2d: "you may [verb]" — controller-choice optional effect made
+    /// during the spell/ability's resolution. Set when `peel_clause` strips
+    /// a "you may " prefix.
     pub(crate) optional: bool,
     /// CR 611.2 + CR 514.2: "... this turn" / "... until end of turn" /
     /// "... until your next turn" / "... for as long as ~ remains tapped"
@@ -172,11 +185,24 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
         }
     }
 
+    // CR 608.2c + CR 608.2d: Unrepresentable `If <X>, ` head fallback — strips
+    // ONLY when the body begins with `"you may "` so the recursive call's
+    // step-1 optional-prefix peel captures the may-choice. Runs after the
+    // typed strip so any recognized condition wins; the condition is
+    // intentionally dropped (the Condition_If swallow detector still flags
+    // it). Issue #2277.
+    if ctx.condition.is_none() && !ctx.optional {
+        let stripped = strip_unrecognized_conditional_head_when_body_optional(&text);
+        if stripped.len() < text.len() {
+            return peel_inner(stripped, ctx);
+        }
+    }
+
     // Termination: no stripper matched.
     (text, ctx)
 }
 
-/// CR 117.3a: Strip a leading bare "you may " when it precedes a fresh
+/// CR 608.2d: Strip a leading bare "you may " when it precedes a fresh
 /// imperative. Returns the remainder text on a match, `None` when the
 /// "you may " phrase is part of a specialized construction handled by a
 /// dedicated body parser (see `is_specialized_you_may_phrase`).
@@ -231,38 +257,90 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
     head.is_ok()
 }
 
-/// Suffixes after "you may " that have specialized parsing elsewhere in
-/// the parser. Stripping the prefix in front of these would prevent the
+/// CR 608.2d: Suffixes after "you may " that have specialized parsing elsewhere
+/// in the parser. Stripping the prefix in front of these would prevent the
 /// dedicated parser from matching its full pattern.
+///
+/// The disambiguation is on the BODY SHAPE after the verb, not the verb itself.
+/// A bare imperative like "you may reveal that card and put it into your hand"
+/// must peel — the inner anaphoric reveal is a generic optional effect, NOT
+/// the specialized `RevealFromHand`/`RevealUntil`/etc. constructions that
+/// require the full surface form. Generic `you may search your library for X`
+/// likewise peels cleanly; the from-among continuation is handled by the
+/// prior sub_ability path (sequence.rs), not parse_effect_clause.
 fn is_specialized_you_may_phrase(rest_lower: &str) -> bool {
-    let head = alt((
+    // Head-only blocklist: phrases whose dedicated body parsers need the full
+    // `you may <verb>` surface present in their input to dispatch correctly.
+    let head: nom::IResult<&str, (), OracleError<'_>> = alt((
         // "you may have target creature get ..." — causative
-        value((), tag::<_, _, OracleError<'_>>("have ")),
+        value((), tag("have ")),
         // "you may cast ... as though ..." — static permission grant
-        value((), tag::<_, _, OracleError<'_>>("cast ")),
+        value((), tag("cast ")),
         // "you may play that card ..." — impulse draw permission
-        value((), tag::<_, _, OracleError<'_>>("play ")),
+        value((), tag("play ")),
         // "you may choose new targets for ..." — retarget effect
-        value((), tag::<_, _, OracleError<'_>>("choose new targets ")),
-        value((), tag::<_, _, OracleError<'_>>("choose new target ")),
+        value((), tag("choose new targets ")),
+        value((), tag("choose new target ")),
         // "you may instead ..." — Dig alternative selection
-        value((), tag::<_, _, OracleError<'_>>("instead ")),
+        value((), tag("instead ")),
         // "you may repeat this process" — repetition directive
-        value((), tag::<_, _, OracleError<'_>>("repeat ")),
+        value((), tag("repeat ")),
         // "you may pay {X} rather than pay this spell's mana cost" — alt cost
-        value((), tag::<_, _, OracleError<'_>>("pay ")),
-        // "you may search ... for ..." — search-with-may; specialized search parser
-        value((), tag::<_, _, OracleError<'_>>("search ")),
-        // "you may reveal a [type] card from your hand" — reveal-with-may
-        value((), tag::<_, _, OracleError<'_>>("reveal ")),
+        value((), tag("pay ")),
         // "you may look at ..." — peek-with-may
-        value((), tag::<_, _, OracleError<'_>>("look ")),
+        value((), tag("look ")),
     ))
     .parse(rest_lower);
-    head.is_ok() || is_specialized_you_may_put_phrase(rest_lower)
+    if head.is_ok() {
+        return true;
+    }
+    // Body-shape sub-checks: only block when the body after the verb matches
+    // a specialized shape; anaphoric/conjunctive forms peel through as generic
+    // optional effects (CR 608.2d).
+    is_specialized_reveal_body(rest_lower) || is_specialized_put_body(rest_lower)
 }
 
-fn is_specialized_you_may_put_phrase(rest_lower: &str) -> bool {
+/// CR 701.20 (Reveal): `reveal `-headed phrases are specialized ONLY when
+/// the body matches a hand/outside/from-among/opening-hand shape. Anaphoric
+/// reveals (`reveal that card`, `reveal it`, `reveal those cards`, etc.) are
+/// generic optional effects — peel the `you may ` prefix and let the generic
+/// reveal handler take over.
+fn is_specialized_reveal_body(rest_lower: &str) -> bool {
+    let Ok((after_reveal, _)) = tag::<_, _, OracleError<'_>>("reveal ").parse(rest_lower) else {
+        return false;
+    };
+    // Specialized shapes:
+    //   "your hand"                  — RevealHand
+    //   "... from your hand"         — RevealFromHand
+    //   "... from outside the game"  — SearchOutsideGame / reveal-outside
+    //   "... from among ..."         — Dig keep-from-among
+    //   "... opening hand"           — opening-hand reveal
+    let starts_with_your_hand: nom::IResult<&str, (), OracleError<'_>> =
+        value((), tag("your hand")).parse(after_reveal);
+    if starts_with_your_hand.is_ok() {
+        return true;
+    }
+    take_until::<_, _, OracleError<'_>>("from your hand")
+        .parse(after_reveal)
+        .is_ok()
+        || take_until::<_, _, OracleError<'_>>("from outside the game")
+            .parse(after_reveal)
+            .is_ok()
+        || take_until::<_, _, OracleError<'_>>("from among")
+            .parse(after_reveal)
+            .is_ok()
+        || take_until::<_, _, OracleError<'_>>("opening hand")
+            .parse(after_reveal)
+            .is_ok()
+}
+
+/// CR 608.2d: `put `-headed phrases are specialized ONLY when
+/// the body contains a `from among …` / ` of them` / ` of those cards`
+/// continuation — keep-from-among grammar that the dedicated handler
+/// needs the full surface for. All other `you may put …` forms (onto the
+/// battlefield from hand, onto the battlefield with anaphor, etc.) peel as
+/// generic optional effects.
+fn is_specialized_put_body(rest_lower: &str) -> bool {
     let Ok((after_put, _)) = tag::<_, _, OracleError<'_>>("put ").parse(rest_lower) else {
         return false;
     };
@@ -332,6 +410,63 @@ mod tests {
     #[test]
     fn peel_skips_specialized_you_may_put_from_among() {
         let input = "you may put a creature card from among them onto the battlefield";
+        let (peeled, ctx) = peel_clause(input);
+        assert_eq!(peeled, input);
+        assert!(!ctx.optional);
+    }
+
+    /// CR 608.2d: An anaphoric reveal (`reveal that card …`) is a generic
+    /// optional effect, NOT a specialized `RevealFromHand`/`RevealUntil`
+    /// construction. The `you may ` prefix must peel and `ctx.optional`
+    /// must be set so the controller chooses during resolution.
+    /// Regression for issue #2277 (Amareth-pattern reveal-and-put).
+    #[test]
+    fn peel_optional_prefix_strips_anaphoric_reveal() {
+        let input = "you may reveal that card and put it into your hand";
+        let (peeled, ctx) = peel_clause(input);
+        assert_eq!(peeled, "reveal that card and put it into your hand");
+        assert!(ctx.optional);
+    }
+
+    /// CR 608.2d: Generic `you may search your library for X` is an optional
+    /// effect — the from-among continuation is on the prior sub_ability path
+    /// (sequence.rs), not parse_effect_clause. The prefix must peel.
+    /// Regression for issue #2277 (Tithe-pattern optional search).
+    #[test]
+    fn peel_optional_prefix_strips_search_library() {
+        let input = "you may search your library for an additional plains card";
+        let (peeled, ctx) = peel_clause(input);
+        assert_eq!(peeled, "search your library for an additional plains card");
+        assert!(ctx.optional);
+    }
+
+    /// CR 608.2d: Generic `you may put it onto the battlefield` (no
+    /// `from among`/`of them`/`of those cards` continuation) is an optional
+    /// effect — the prefix must peel.
+    #[test]
+    fn peel_optional_prefix_strips_anaphoric_put_onto_battlefield() {
+        let input = "you may put it onto the battlefield";
+        let (peeled, ctx) = peel_clause(input);
+        assert_eq!(peeled, "put it onto the battlefield");
+        assert!(ctx.optional);
+    }
+
+    /// CR 701.20 (Reveal): `reveal a [type] card from your hand` is the
+    /// specialized `RevealFromHand` shape — the dedicated body parser needs the
+    /// full `you may reveal …` surface to dispatch. Must NOT peel.
+    #[test]
+    fn peel_skips_specialized_reveal_from_hand() {
+        let input = "you may reveal an instant card from your hand";
+        let (peeled, ctx) = peel_clause(input);
+        assert_eq!(peeled, input);
+        assert!(!ctx.optional);
+    }
+
+    /// CR 701.20: `reveal a card from among them` is the specialized Dig
+    /// keep-from-among shape — must NOT peel.
+    #[test]
+    fn peel_skips_specialized_reveal_from_among() {
+        let input = "you may reveal a creature card from among them";
         let (peeled, ctx) = peel_clause(input);
         assert_eq!(peeled, input);
         assert!(!ctx.optional);
