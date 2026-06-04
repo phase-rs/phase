@@ -772,6 +772,21 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             })
         }
 
+        // CR 510.1d + CR 702.22k: a banded blocker's damage is divided by the
+        // ACTIVE player among the attackers it blocks. There is no lethal rule
+        // (CR 510.1d), so the simplest legal division dumps the blocker's full
+        // power onto the first blocked attacker — mirroring the engine's
+        // ai_support::candidates AssignBlockerDamage arm.
+        WaitingFor::AssignBlockerDamage {
+            total_damage,
+            attackers,
+            ..
+        } => attackers
+            .first()
+            .map(|first| GameAction::AssignBlockerDamage {
+                assignments: vec![(*first, *total_damage)],
+            }),
+
         // X value: pick max (CR 107.1c + CR 601.2f). The engine has already
         // capped `max` to the maximum legally-payable X for this cast (see
         // `engine::game::casting_costs::max_x_value`), so picking max is always
@@ -1757,7 +1772,10 @@ fn validated_declare_attackers(
         engine::game::combat::AttackTarget,
     )>,
 ) -> GameAction {
-    let candidate = GameAction::DeclareAttackers { attacks };
+    let candidate = GameAction::DeclareAttackers {
+        attacks,
+        bands: vec![],
+    };
     let mut sim = state.clone();
     if engine::game::engine::apply_as_current(&mut sim, candidate.clone()).is_ok() {
         return candidate;
@@ -1767,6 +1785,7 @@ fn validated_declare_attackers(
         .find(|action| matches!(action, GameAction::DeclareAttackers { .. }))
         .unwrap_or(GameAction::DeclareAttackers {
             attacks: Vec::new(),
+            bands: vec![],
         })
 }
 
@@ -2550,7 +2569,7 @@ mod tests {
         let action = validated_declare_attackers(&state, vec![(creature, target)]);
 
         match action {
-            GameAction::DeclareAttackers { attacks } => assert!(
+            GameAction::DeclareAttackers { attacks, .. } => assert!(
                 !attacks.iter().any(|(id, _)| *id == creature),
                 "guard must drop the illegal (tapped) attacker, got {attacks:?}"
             ),

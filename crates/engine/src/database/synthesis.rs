@@ -10806,6 +10806,7 @@ mod myriad_runtime_tests {
             state,
             GameAction::DeclareAttackers {
                 attacks: vec![(attacker_id, AttackTarget::Player(defender))],
+                bands: vec![],
             },
         )
         .expect("declare attacker");

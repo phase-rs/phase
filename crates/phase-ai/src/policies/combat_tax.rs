@@ -208,7 +208,7 @@ fn extract_tax_state(waiting_for: &WaitingFor) -> Option<TaxSnapshot> {
 fn total_declared_count(waiting_for: &WaitingFor) -> usize {
     match waiting_for {
         WaitingFor::CombatTaxPayment { pending, .. } => match pending {
-            engine::types::game_state::CombatTaxPending::Attack { attacks } => attacks.len(),
+            engine::types::game_state::CombatTaxPending::Attack { attacks, .. } => attacks.len(),
             engine::types::game_state::CombatTaxPending::Block { assignments } => assignments.len(),
         },
         _ => 0,
@@ -310,6 +310,7 @@ mod tests {
                         engine::game::combat::AttackTarget::Player(PlayerId(1)),
                     ),
                 ],
+                bands: vec![],
             },
         };
         assert_eq!(total_declared_count(&waiting), 2);

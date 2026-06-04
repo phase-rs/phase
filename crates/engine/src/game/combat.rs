@@ -3226,6 +3226,7 @@ mod tests {
             PlayerId(0),
             GameAction::DeclareAttackers {
                 attacks: vec![(id, AttackTarget::Player(PlayerId(1)))],
+                bands: vec![],
             },
         )
         .expect("declaring the no-longer-sick creature should succeed");

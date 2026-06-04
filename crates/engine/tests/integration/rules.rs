@@ -25,6 +25,26 @@ pub fn run_combat(
     attacker_ids: Vec<ObjectId>,
     blocker_assignments: Vec<(ObjectId, ObjectId)>,
 ) {
+    run_combat_with_blocker_divisions(runner, attacker_ids, blocker_assignments, &[]);
+}
+
+/// Banding-aware variant of [`run_combat`] (CR 702.22k): drives the same
+/// DeclareAttackers → damage path but also resolves the interactive
+/// `WaitingFor::AssignBlockerDamage` prompt the engine raises when a blocker is
+/// blocking a banding attacker (the active player divides that blocker's damage
+/// among the attackers it blocks).
+///
+/// `blocker_divisions` maps a `blocker_id` to the `(attacker_id, damage)` split
+/// the test wants submitted for that blocker. Any blocker not listed (or when an
+/// `AssignBlockerDamage` prompt names attackers none of the divisions cover) is
+/// resolved with an even auto-split that sums to the blocker's power, so callers
+/// that don't care about a specific division still resolve cleanly.
+pub fn run_combat_with_blocker_divisions(
+    runner: &mut GameRunner,
+    attacker_ids: Vec<ObjectId>,
+    blocker_assignments: Vec<(ObjectId, ObjectId)>,
+    blocker_divisions: &[(ObjectId, Vec<(ObjectId, u32)>)],
+) {
     runner.pass_both_players();
 
     let attacks: Vec<_> = attacker_ids
@@ -33,7 +53,10 @@ pub fn run_combat(
         .collect();
 
     runner
-        .act(GameAction::DeclareAttackers { attacks })
+        .act(GameAction::DeclareAttackers {
+            attacks,
+            bands: vec![],
+        })
         .expect("DeclareAttackers should succeed");
 
     // CR 508.2: Active player gets priority after attackers — pass through it.
@@ -61,38 +84,81 @@ pub fn run_combat(
         runner.pass_both_players();
     }
 
-    // CR 510.1c: Handle interactive damage assignment for 2+ blocker scenarios.
-    while let WaitingFor::AssignCombatDamage {
-        blockers,
-        total_damage,
-        trample,
-        ..
-    } = &runner.state().waiting_for
-    {
-        let mut remaining = *total_damage;
-        let mut assignments: Vec<(ObjectId, u32)> = Vec::new();
-        for slot in blockers {
-            let assign = remaining.min(slot.lethal_minimum);
-            assignments.push((slot.blocker_id, assign));
-            remaining = remaining.saturating_sub(assign);
-        }
-        // Non-trample: dump remainder to last blocker so total == power.
-        if trample.is_none() && remaining > 0 {
-            if let Some(last) = assignments.last_mut() {
-                last.1 += remaining;
-                remaining = 0;
+    // CR 510.1c / CR 510.1d + CR 702.22j/k: Handle interactive damage assignment.
+    // The engine raises `AssignCombatDamage` for an attacker dividing its damage
+    // among multiple blockers, and `AssignBlockerDamage` for a blocker dividing
+    // its damage among multiple banded attackers. Both can appear (and re-appear
+    // across the first-strike/regular sub-steps), so loop until neither remains.
+    loop {
+        match &runner.state().waiting_for {
+            WaitingFor::AssignCombatDamage {
+                blockers,
+                total_damage,
+                trample,
+                ..
+            } => {
+                let mut remaining = *total_damage;
+                let mut assignments: Vec<(ObjectId, u32)> = Vec::new();
+                for slot in blockers {
+                    let assign = remaining.min(slot.lethal_minimum);
+                    assignments.push((slot.blocker_id, assign));
+                    remaining = remaining.saturating_sub(assign);
+                }
+                // Non-trample: dump remainder to last blocker so total == power.
+                if trample.is_none() && remaining > 0 {
+                    if let Some(last) = assignments.last_mut() {
+                        last.1 += remaining;
+                        remaining = 0;
+                    }
+                }
+                let trample_damage = if trample.is_some() { remaining } else { 0 };
+                runner
+                    .act(GameAction::AssignCombatDamage {
+                        mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
+                        assignments,
+                        trample_damage,
+                        controller_damage: 0,
+                    })
+                    .expect("AssignCombatDamage should succeed");
             }
+            WaitingFor::AssignBlockerDamage {
+                blocker_id,
+                total_damage,
+                attackers,
+                ..
+            } => {
+                // Use a caller-provided division for this blocker if present,
+                // else fall back to an even auto-split (first attacker gets the
+                // remainder) so the total equals the blocker's power (CR 510.1e).
+                let assignments: Vec<(ObjectId, u32)> = blocker_divisions
+                    .iter()
+                    .find(|(bid, _)| bid == blocker_id)
+                    .map(|(_, div)| div.clone())
+                    .unwrap_or_else(|| even_split(*total_damage, attackers));
+                runner
+                    .act(GameAction::AssignBlockerDamage { assignments })
+                    .expect("AssignBlockerDamage should succeed");
+            }
+            _ => break,
         }
-        let trample_damage = if trample.is_some() { remaining } else { 0 };
-        runner
-            .act(GameAction::AssignCombatDamage {
-                mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
-                assignments,
-                trample_damage,
-                controller_damage: 0,
-            })
-            .expect("AssignCombatDamage should succeed");
     }
+}
+
+/// Evenly divide `total` damage among `targets` (first target absorbs the
+/// remainder) so the assignment sums to `total` (CR 510.1e). Used as the
+/// harness's default when a test doesn't dictate a specific banded division.
+fn even_split(total: u32, targets: &[ObjectId]) -> Vec<(ObjectId, u32)> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let n = targets.len() as u32;
+    let base = total / n;
+    let remainder = total % n;
+    targets
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, base + if (i as u32) < remainder { 1 } else { 0 }))
+        .collect()
 }
 
 // Mechanic test modules (stubs -- populated in Plans 02 and 03)
