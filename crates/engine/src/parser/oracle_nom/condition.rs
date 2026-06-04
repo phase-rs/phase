@@ -3251,12 +3251,10 @@ fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, 
 /// Recognizes "the amount of mana you spent is [comparator] this creature's
 /// power or toughness" (SOS Increment reminder text). The natural-language
 /// "or" means *either* threshold — `A > (P or T)` is satisfied when `A > P`
-/// **or** `A > T`. Produces `StaticCondition::Or` over two
-/// `QuantityComparison`s so the existing `Or`/`QuantityComparison` bridge in
-/// `static_condition_to_trigger_condition` carries it directly to
-/// `TriggerCondition::Or`. Also accepts the single-property forms
-/// ("greater than this creature's power", "greater than this creature's
-/// toughness") so future cards using only one side compose cleanly.
+/// **or** `A > T`. The "this creature's" subject, including the normalized
+/// "~'s" self-reference form, carries Increment's implicit source-is-creature
+/// intervening-if; "this permanent's" stays as a plain P/T comparison for
+/// non-Increment siblings.
 fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticCondition> {
     // Subject: "the amount of mana you spent is "
     let (rest, _) = tag("the amount of mana you spent is ").parse(input)?;
@@ -3268,10 +3266,10 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
     ))
     .parse(rest)?;
     // Object: subject × property, with optional "or [other property]" disjunction.
-    let (rest, _) = alt((
-        tag("this creature's "),
-        tag("this permanent's "),
-        tag("~'s "),
+    let (rest, requires_creature_source) = alt((
+        value(true, tag("this creature's ")),
+        value(false, tag("this permanent's ")),
+        value(true, tag("~'s ")),
     ))
     .parse(rest)?;
     let (rest, first) = alt((
@@ -3322,11 +3320,23 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
         comparator,
         rhs: QuantityExpr::Ref { qty },
     };
-    let result = match second {
+    let comparison = match second {
         Some(second) if second != first => StaticCondition::Or {
             conditions: vec![build(first), build(second)],
         },
         _ => build(first),
+    };
+    let result = if requires_creature_source {
+        StaticCondition::And {
+            conditions: vec![
+                StaticCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                comparison,
+            ],
+        }
+    } else {
+        comparison
     };
     Ok((rest, result))
 }
@@ -9024,8 +9034,8 @@ mod tests {
         ));
     }
 
-    /// CR 601.2h + CR 603.4: Increment intervening-if parses as `Or` over two
-    /// `QuantityComparison`s — mana spent vs self power, mana spent vs self toughness.
+    /// CR 601.2h + CR 603.4 + CR 702.191a: Increment intervening-if parses as
+    /// `And { SourceMatchesFilter(creature), Or { mana spent > self P/T } }`.
     #[test]
     fn test_parse_condition_increment_mana_spent_vs_self_pt() {
         let (rest, c) = parse_condition(
@@ -9034,8 +9044,17 @@ mod tests {
         .unwrap();
         assert_eq!(rest, "");
         match c {
-            StaticCondition::Or { conditions } => {
-                assert_eq!(conditions.len(), 2, "expected two disjuncts");
+            StaticCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 2, "expected two conjuncts");
+                assert!(matches!(
+                    &conditions[0],
+                    StaticCondition::SourceMatchesFilter {
+                        filter: TargetFilter::Typed(tf),
+                    } if tf.type_filters.contains(&TypeFilter::Creature)
+                ));
+                let StaticCondition::Or { conditions } = &conditions[1] else {
+                    panic!("expected P/T disjunction, got {:?}", conditions[1]);
+                };
                 let expected_lhs = QuantityExpr::Ref {
                     qty: QuantityRef::ManaSpentToCast {
                         scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
@@ -9067,7 +9086,7 @@ mod tests {
                     scope: crate::types::ability::ObjectScope::Source
                 }));
             }
-            other => panic!("expected Or, got {other:?}"),
+            other => panic!("expected And, got {other:?}"),
         }
     }
 
@@ -9199,32 +9218,91 @@ mod tests {
         .unwrap();
         assert_eq!(rest, "");
         match c {
-            StaticCondition::QuantityComparison {
-                lhs,
-                comparator,
-                rhs,
-            } => {
+            StaticCondition::And { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(
+                    &conditions[0],
+                    StaticCondition::SourceMatchesFilter {
+                        filter: TargetFilter::Typed(tf),
+                    } if tf.type_filters.contains(&TypeFilter::Creature)
+                ));
+                let StaticCondition::QuantityComparison {
+                    lhs,
+                    comparator,
+                    rhs,
+                } = &conditions[1]
+                else {
+                    panic!("expected QuantityComparison, got {:?}", conditions[1]);
+                };
                 assert_eq!(
                     lhs,
-                    QuantityExpr::Ref {
+                    &QuantityExpr::Ref {
                         qty: QuantityRef::ManaSpentToCast {
                             scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
                             metric: crate::types::ability::CastManaSpentMetric::Total
                         }
                     }
                 );
-                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(*comparator, Comparator::GT);
                 assert_eq!(
                     rhs,
-                    QuantityExpr::Ref {
+                    &QuantityExpr::Ref {
                         qty: QuantityRef::Power {
                             scope: crate::types::ability::ObjectScope::Source
                         }
                     }
                 );
             }
-            other => panic!("expected QuantityComparison, got {other:?}"),
+            other => panic!("expected And, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_condition_mana_spent_vs_this_permanent_pt_has_no_creature_gate() {
+        let (rest, c) = parse_condition(
+            "if the amount of mana you spent is greater than this permanent's power",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Source
+                    }
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_condition_mana_spent_vs_normalized_self_pt_has_creature_gate() {
+        let (rest, c) =
+            parse_condition("if the amount of mana you spent is greater than ~'s power").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::And {
+                conditions,
+            } if matches!(
+                conditions.as_slice(),
+                [
+                    StaticCondition::SourceMatchesFilter {
+                        filter: TargetFilter::Typed(tf),
+                    },
+                    StaticCondition::QuantityComparison {
+                        rhs: QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: crate::types::ability::ObjectScope::Source
+                            },
+                        },
+                        ..
+                    },
+                ] if tf.type_filters.contains(&TypeFilter::Creature)
+            )
+        ));
     }
 
     /// CR 601.2h: "N or more mana was spent to cast that spell" — threshold

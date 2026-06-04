@@ -10,14 +10,15 @@ use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, Bracke
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, AdditionalCostPaymentSource, AggregateFunction,
-    CardPlayMode, CastVariantPaid, ChoiceType, Comparator, ContinuousModification, ControllerRef,
-    CopyRetargetPermission, CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp,
-    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
-    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint, StaticCondition,
-    StaticDefinition, TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier,
+    CardPlayMode, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
+    Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CounterTriggerFilter, DamageKindFilter, Duration, Effect, FilterProp, KickerVariant,
+    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
+    NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    RuntimeHandler, SearchSelectionConstraint, StaticCondition, StaticDefinition,
+    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -241,6 +242,7 @@ impl KeywordTriggerInstaller {
             Keyword::Evolve => vec![build_evolve_trigger()],
             Keyword::Exalted => vec![build_exalted_trigger()],
             Keyword::Extort => vec![build_extort_trigger()],
+            Keyword::Increment => vec![build_increment_trigger()],
             Keyword::Myriad => vec![build_myriad_trigger()],
             Keyword::DoubleTeam => vec![build_double_team_trigger()],
             Keyword::Soulbond => build_soulbond_triggers(),
@@ -281,6 +283,7 @@ impl KeywordTriggerInstaller {
             Keyword::Evolve => is_evolve_trigger(trigger),
             Keyword::Exalted => is_exalted_trigger(trigger),
             Keyword::Extort => is_extort_trigger(trigger),
+            Keyword::Increment => is_increment_trigger(trigger),
             Keyword::Myriad => is_myriad_attack_trigger(trigger),
             Keyword::DoubleTeam => is_double_team_attack_trigger(trigger),
             Keyword::Soulbond => is_soulbond_trigger(trigger),
@@ -2649,6 +2652,30 @@ pub fn synthesize_extort(face: &mut CardFace) {
     KeywordTriggerInstaller::install_matching(face, |kw| matches!(kw, Keyword::Extort));
 }
 
+/// CR 702.191a: Increment — spell-cast trigger that puts a +1/+1 counter on this
+/// creature when mana spent to cast the spell exceeds its power or toughness.
+/// CR 702.191b: each instance triggers separately.
+pub fn synthesize_increment(face: &mut CardFace) {
+    // `install_matching` dedupes exact synthesized trigger values. Increment can
+    // also arrive from parsed reminder text, whose trigger is semantically the
+    // same but not necessarily structurally identical, so count by Increment
+    // identity instead.
+    let desired = face
+        .keywords
+        .iter()
+        .filter(|kw| matches!(kw, Keyword::Increment))
+        .count();
+    let existing = face
+        .triggers
+        .iter()
+        .filter(|t| is_increment_trigger(t))
+        .count();
+
+    for _ in existing..desired {
+        face.triggers.push(build_increment_trigger());
+    }
+}
+
 /// CR 702.105a: Dethrone — an attack trigger that fires whenever this creature
 /// attacks the player with the most life or tied for most life, putting a +1/+1
 /// counter on it. CR 702.105b: each instance triggers separately.
@@ -3291,6 +3318,88 @@ fn is_extort_trigger(t: &TriggerDefinition) -> bool {
         && t.execute
             .as_deref()
             .is_some_and(|a| a.optional && a.cost.is_some())
+}
+
+/// CR 702.191a: Intervening-if — this permanent is a creature and mana spent to
+/// cast the spell exceeds its power or toughness.
+fn increment_mana_spent_exceeds_self_pt_condition() -> TriggerCondition {
+    TriggerCondition::And {
+        conditions: vec![
+            TriggerCondition::SourceMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            TriggerCondition::Or {
+                conditions: vec![
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ManaSpentToCast {
+                                scope: CastManaObjectScope::TriggeringSpell,
+                                metric: CastManaSpentMetric::Total,
+                            },
+                        },
+                        comparator: Comparator::GT,
+                        rhs: QuantityExpr::Ref {
+                            qty: QuantityRef::Power {
+                                scope: ObjectScope::Source,
+                            },
+                        },
+                    },
+                    TriggerCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ManaSpentToCast {
+                                scope: CastManaObjectScope::TriggeringSpell,
+                                metric: CastManaSpentMetric::Total,
+                            },
+                        },
+                        comparator: Comparator::GT,
+                        rhs: QuantityExpr::Ref {
+                            qty: QuantityRef::Toughness {
+                                scope: ObjectScope::Source,
+                            },
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+}
+
+/// CR 702.191a: Synthesized Increment spell-cast trigger identity.
+fn is_increment_trigger(t: &TriggerDefinition) -> bool {
+    matches!(t.mode, TriggerMode::SpellCast)
+        && matches!(t.valid_target, Some(TargetFilter::Controller))
+        && t.condition.as_ref() == Some(&increment_mana_spent_exceeds_self_pt_condition())
+        && matches!(
+            t.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            })
+        )
+}
+
+/// CR 702.191a: Increment — whenever you cast a spell, if this permanent is a
+/// creature and mana spent to cast that spell exceeds its power or toughness,
+/// put a +1/+1 counter on this creature.
+fn build_increment_trigger() -> TriggerDefinition {
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .description("Put a +1/+1 counter on this creature".to_string());
+
+    TriggerDefinition::new(TriggerMode::SpellCast)
+        .valid_target(TargetFilter::Controller)
+        .condition(increment_mana_spent_exceeds_self_pt_condition())
+        .execute(execute)
+        .description(
+            "CR 702.191a: Increment — whenever you cast a spell, if mana spent to cast that spell is greater than this creature's power or toughness, put a +1/+1 counter on it.".to_string(),
+        )
 }
 
 fn build_extort_trigger() -> TriggerDefinition {
@@ -5041,6 +5150,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     // CR 702.101a: Extort — spell-cast trigger that lets you pay {W/B} to drain
     // each opponent for 1 life. CR 702.101b: each instance triggers separately.
     synthesize_extort(face);
+    // CR 702.191a: Increment — spell-cast trigger when mana spent exceeds P/T.
+    // CR 702.191b: each instance triggers separately.
+    synthesize_increment(face);
     // CR 702.105a: Dethrone — attack trigger that puts a +1/+1 counter on the
     // creature whenever it attacks the player with the most life or tied for
     // most life. CR 702.105b: each instance triggers separately.
@@ -8402,6 +8514,169 @@ mod extort_synthesis_tests {
         assert_eq!(state.players[0].life, 22);
         assert_eq!(state.players[1].life, 19);
         assert_eq!(state.players[2].life, 19);
+    }
+}
+
+#[cfg(test)]
+mod increment_synthesis_tests {
+    use super::*;
+
+    fn increment_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Increment);
+        face
+    }
+
+    fn increment_atomic_card(text: &str) -> AtomicCard {
+        AtomicCard {
+            name: "Topiary Lecturer".to_string(),
+            mana_cost: Some("{2}{G}".to_string()),
+            colors: vec!["G".to_string()],
+            color_identity: vec!["G".to_string()],
+            text: Some(text.to_string()),
+            power: Some("2".to_string()),
+            toughness: Some("3".to_string()),
+            loyalty: None,
+            defense: None,
+            layout: "normal".to_string(),
+            type_line: Some("Creature — Plant Employee".to_string()),
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Plant".to_string(), "Employee".to_string()],
+            supertypes: Vec::new(),
+            keywords: Some(vec!["Increment".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 3.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_oracle_id: Some("increment-dedupe-test".to_string()),
+                scryfall_id: Some("increment-dedupe-test-face".to_string()),
+            },
+            foreign_data: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn synthesize_increment_adds_spell_cast_trigger_with_intervening_if() {
+        let mut face = increment_face();
+        synthesize_increment(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| is_increment_trigger(t))
+            .expect("increment should add a SpellCast trigger");
+
+        assert!(matches!(trigger.mode, TriggerMode::SpellCast));
+        assert!(matches!(
+            trigger.valid_target,
+            Some(TargetFilter::Controller)
+        ));
+        assert!(
+            matches!(trigger.condition, Some(TriggerCondition::And { .. })),
+            "increment must gate on creature check and mana spent vs source P/T"
+        );
+
+        let Some(execute) = trigger.execute.as_deref() else {
+            panic!("execute body required");
+        };
+        assert!(matches!(
+            &*execute.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn synthesize_increment_is_idempotent() {
+        let mut face = increment_face();
+        synthesize_increment(&mut face);
+        synthesize_increment(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_increment_trigger(t))
+            .count();
+        assert_eq!(count, 1, "increment trigger should be deduped");
+    }
+
+    #[test]
+    fn synthesize_increment_emits_one_trigger_per_instance() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Increment);
+        face.keywords.push(Keyword::Increment);
+        synthesize_increment(&mut face);
+        let count = face
+            .triggers
+            .iter()
+            .filter(|t| is_increment_trigger(t))
+            .count();
+        assert_eq!(count, 2, "CR 702.191b: each instance triggers separately");
+    }
+
+    #[test]
+    fn build_oracle_face_dedupes_increment_keyword_and_reminder_body() {
+        let mtgjson = increment_atomic_card(
+            "Increment (Whenever you cast a spell, if the amount of mana you spent is greater than this creature's power or toughness, put a +1/+1 counter on this creature.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert!(face
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Increment)));
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_increment_trigger(trigger))
+                .count(),
+            1,
+            "Increment keyword synthesis should recognize the parsed reminder trigger"
+        );
+        assert_eq!(
+            face.triggers.len(),
+            1,
+            "Increment reminder parsing and keyword synthesis should not create duplicate triggers"
+        );
+    }
+
+    #[test]
+    fn build_oracle_face_preserves_repeated_increment_instances_from_oracle_text() {
+        let mtgjson = increment_atomic_card(
+            "Increment, increment (Whenever you cast a spell, if the amount of mana you spent is greater than this creature's power or toughness, put a +1/+1 counter on this creature.)",
+        );
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|keyword| matches!(keyword, Keyword::Increment))
+                .count(),
+            2,
+            "Oracle text must recover repeated Increment instances that MTGJSON dedupes"
+        );
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|trigger| is_increment_trigger(trigger))
+                .count(),
+            2,
+            "CR 702.191b: each recovered Increment instance triggers separately"
+        );
+        assert_eq!(
+            face.triggers.len(),
+            2,
+            "repeated Increment should produce exactly one trigger per printed instance"
+        );
     }
 }
 

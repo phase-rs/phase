@@ -2315,6 +2315,15 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             Some(TriggerCondition::ControlsType { filter: f })
         }
 
+        // CR 603.4 + CR 608.2c: Source-bound intervening-if predicates bridge
+        // directly; the trigger evaluator checks the ability source at
+        // detection and resolution.
+        StaticCondition::SourceMatchesFilter { filter } => {
+            Some(TriggerCondition::SourceMatchesFilter {
+                filter: filter.clone(),
+            })
+        }
+
         // Not combinator — handle common negation patterns.
         StaticCondition::Not { condition } => match condition.as_ref() {
             StaticCondition::DuringYourTurn => Some(TriggerCondition::Not {
@@ -2439,7 +2448,6 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
-        | StaticCondition::SourceMatchesFilter { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
@@ -21440,6 +21448,17 @@ mod tests {
     fn bridge_is_present_none_filter_returns_none() {
         let sc = StaticCondition::IsPresent { filter: None };
         assert!(static_condition_to_trigger_condition(&sc).is_none());
+    }
+
+    #[test]
+    fn bridge_source_matches_filter() {
+        let filter = TargetFilter::Typed(TypedFilter::creature());
+        assert_eq!(
+            static_condition_to_trigger_condition(&StaticCondition::SourceMatchesFilter {
+                filter: filter.clone(),
+            }),
+            Some(TriggerCondition::SourceMatchesFilter { filter }),
+        );
     }
 
     #[test]

@@ -842,14 +842,8 @@ pub enum Keyword {
     /// (combat-damage-this-turn predicate) is not yet wired.
     Freerunning(ManaCost),
 
-    /// RUNTIME: TODO — converter accepts this keyword but engine has no
-    /// behavioral handler (spell-cast trigger not wired).
-    /// CR 702.191a: Increment — triggered ability. "Whenever you cast a
-    /// spell, if this permanent is a creature and the amount of mana
-    /// spent to cast that spell is greater than this creature's power
-    /// or this creature's toughness, put a +1/+1 counter on this
-    /// creature." Bare keyword; ETB / spell-cast trigger is not yet
-    /// wired.
+    /// CR 702.191a: Increment — spell-cast trigger synthesized in
+    /// `database::synthesis::synthesize_increment`.
     Increment,
 
     /// RUNTIME: TODO — converter accepts this keyword but engine has no
@@ -1123,7 +1117,9 @@ impl Keyword {
     ///   triggered abilities whose instance count is consumed by `for _ in 0..count`
     ///   loops in `game/triggers.rs`.
     /// - Myriad (CR 702.116a: a triggered ability; CR 702.116b: each instance
-    ///   triggers separately) / Exalted (CR 702.83a: a triggered ability;
+    ///   triggers separately) / Increment (CR 702.191a: a triggered ability;
+    ///   CR 702.191b: each instance triggers separately) / Exalted (CR 702.83a:
+    ///   a triggered ability;
     ///   per-instance multiplicity grounded in the general CR 113.2c rule, since
     ///   CR 702.83 has no card-specific multiplicity clause) — one trigger is
     ///   installed per face `Keyword` instance by
@@ -1141,6 +1137,7 @@ impl Keyword {
             Keyword::Cascade
                 | Keyword::Storm
                 | Keyword::Myriad
+                | Keyword::Increment
                 | Keyword::Exalted
                 | Keyword::DoubleTeam
         )
@@ -1876,6 +1873,7 @@ impl FromStr for Keyword {
             "totemarmor" => Ok(Keyword::TotemArmor),
             "evolve" => Ok(Keyword::Evolve),
             "extort" => Ok(Keyword::Extort),
+            "increment" => Ok(Keyword::Increment),
             "exploit" => Ok(Keyword::Exploit),
             "explore" => Ok(Keyword::Explore),
             "ascend" => Ok(Keyword::Ascend),
@@ -2157,6 +2155,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Flanking" => Ok(Keyword::Flanking),
         "Evolve" => Ok(Keyword::Evolve),
         "Extort" => Ok(Keyword::Extort),
+        "Increment" => Ok(Keyword::Increment),
         "Exploit" => Ok(Keyword::Exploit),
         "Explore" => Ok(Keyword::Explore),
         "Ascend" => Ok(Keyword::Ascend),
@@ -3204,6 +3203,15 @@ mod tests {
         ));
     }
 
+    /// CR 702.191: MTGJSON keyword ingestion must parse Increment, not Unknown.
+    #[test]
+    fn increment_from_str_and_keyword_from_tagged() {
+        assert_eq!(Keyword::from_str("Increment").unwrap(), Keyword::Increment);
+        assert_eq!(Keyword::from_str("increment").unwrap(), Keyword::Increment);
+        let kw = keyword_from_tagged("Increment", &serde_json::Value::Null).unwrap();
+        assert_eq!(kw, Keyword::Increment);
+    }
+
     #[test]
     fn parse_hexproof_from_keywords() {
         // CR 702.11d: "hexproof from [quality]" variants
@@ -3351,6 +3359,7 @@ mod tests {
             "Totem Armor",
             "Evolve",
             "Extort",
+            "Increment",
             "Exploit",
             "Explore",
             "Ascend",
