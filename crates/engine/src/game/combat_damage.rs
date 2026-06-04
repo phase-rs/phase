@@ -139,6 +139,9 @@ pub fn resolve_combat_damage(
         // sub-step is resumed once the stack drains and all players pass, via the
         // empty-stack completeness gate in priority.rs.
         if !state.stack.is_empty() {
+            // reset_priority here is defensive — unlike the sibling regular-substep entry in
+            // turns.rs, this returns mid-step after the first-strike substep, so we explicitly
+            // clear any stale passes before the CR 510.3 priority window (harmless if already clear).
             crate::game::priority::reset_priority(state);
             return Some(WaitingFor::Priority {
                 player: state.active_player,
