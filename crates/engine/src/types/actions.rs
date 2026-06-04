@@ -499,6 +499,13 @@ pub enum GameAction {
     ChooseTopOrBottom {
         top: bool,
     },
+    /// CR 702.140c + CR 730.2a: As a mutating creature spell resolves with a
+    /// legal target, the spell's controller chooses whether the spell is placed
+    /// on top of or under the target creature. Resolved by
+    /// `merge::handle_mutate_merge_choice`.
+    ChooseMutateMergeSide {
+        side: crate::game::merge::MergeSide,
+    },
     /// CR 704.5j: Choose which legendary permanent to keep.
     ChooseLegend {
         keep: ObjectId,
@@ -1228,6 +1235,7 @@ impl GameAction {
             | GameAction::DiscoverChoice { .. }
             | GameAction::CascadeChoice { .. }
             | GameAction::ChooseTopOrBottom { .. }
+            | GameAction::ChooseMutateMergeSide { .. }
             | GameAction::ChooseClashOpponent { .. }
             | GameAction::ChooseBattleProtector { .. }
             | GameAction::SetAutoPass { .. }

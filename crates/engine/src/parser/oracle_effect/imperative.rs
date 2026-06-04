@@ -1512,6 +1512,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking,
             up_to: false,
             enter_with_counters,
+            face_down_profile: None,
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {
@@ -1529,6 +1530,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enters_attacking: false,
             up_to: false,
             enter_with_counters: vec![],
+            face_down_profile: None,
         },
         TargetedImperativeAst::ReturnAllToZone {
             target,
@@ -1548,6 +1550,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 target,
                 enters_under,
                 enter_tapped,
+                face_down_profile: None,
             }
         }
         TargetedImperativeAst::Fight { target } => Effect::Fight {
@@ -1796,6 +1799,7 @@ pub(super) fn parse_search_and_creation_ast(
                 power,
                 toughness,
                 types,
+                supertypes,
                 colors,
                 keywords,
                 tapped,
@@ -1810,6 +1814,7 @@ pub(super) fn parse_search_and_creation_ast(
                     power: Some(power),
                     toughness: Some(toughness),
                     types,
+                    supertypes,
                     colors,
                     keywords,
                     tapped,
@@ -1997,7 +2002,8 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             owner: TargetFilter::Controller,
             attach_to: token.attach_to,
             enters_attacking: token.enters_attacking,
-            supertypes: vec![],
+            // CR 205.4a: Preserve parsed token supertypes (legendary/snow).
+            supertypes: token.supertypes,
             static_abilities: token.static_abilities,
             enter_with_counters: vec![],
         },
@@ -2032,6 +2038,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             ])),
             enters_under: None,
             enter_tapped: false,
+            face_down_profile: None,
         },
     }
 }
@@ -3486,6 +3493,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     target,
                     enters_under: None,
                     enter_tapped,
+                    face_down_profile: None,
                 }
             } else {
                 Effect::ChangeZone {
@@ -3501,6 +3509,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     enters_attacking,
                     up_to,
                     enter_with_counters,
+                    face_down_profile: None,
                 }
             }
         }
@@ -3906,6 +3915,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             with_shuffle_sub_ability(effect)
         }
@@ -3932,6 +3942,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             };
             with_shuffle_sub_ability(effect)
         }
@@ -4042,6 +4053,7 @@ pub(super) fn lower_multi_filter_search_library(
         enters_attacking: false,
         up_to: false,
         enter_with_counters: vec![],
+        face_down_profile: None,
     };
 
     // CR 107.1c + CR 701.23d: Wrap the count in `UpTo` once at the helper's
@@ -4204,6 +4216,7 @@ fn change_zone_all_to_library_effect(origin: Zone) -> Effect {
         target: TargetFilter::Controller,
         enters_under: None,
         enter_tapped: false,
+        face_down_profile: None,
     }
 }
 
@@ -6547,9 +6560,12 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
             target: TargetFilter::Any,
         },
-        ImperativeFamilyAst::ForceAttack { duration } => Effect::ForceAttack {
+        ImperativeFamilyAst::ForceAttack {
+            duration,
+            required_player,
+        } => Effect::ForceAttack {
             target: TargetFilter::Any,
-            required_player: TargetFilter::Controller,
+            required_player,
             duration,
         },
         // CR 701.15a: Goad target creature. Subject injection fills target from parsed text.
@@ -6603,8 +6619,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::Clash => Effect::Clash,
         ImperativeFamilyAst::GainKeyword(effect) => effect,
         ImperativeFamilyAst::LoseKeyword(effect) => effect,
-        ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame,
-        ImperativeFamilyAst::WinTheGame => Effect::WinTheGame,
+        ImperativeFamilyAst::LoseTheGame => Effect::LoseTheGame { target: None },
+        ImperativeFamilyAst::WinTheGame => Effect::WinTheGame { target: None },
         ImperativeFamilyAst::RollDie {
             count,
             sides,
@@ -6909,6 +6925,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     target,
                     enters_under: None,
                     enter_tapped: false,
+                    face_down_profile: None,
                 }
             } else {
                 Effect::ChangeZone {
@@ -6922,6 +6939,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                     enters_attacking: false,
                     up_to: false,
                     enter_with_counters,
+                    face_down_profile: None,
                 }
             }
         }
@@ -7135,9 +7153,29 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
         }));
     }
 
-    let targeted: Result<(&str, Duration), nom::Err<OracleError<'_>>> = (
+    let targeted: Result<(&str, (TargetFilter, Duration)), nom::Err<OracleError<'_>>> = (
         alt((tag("attacks"), tag("attack"))),
-        preceded(tag(" "), tag("you")),
+        preceded(
+            tag(" "),
+            // CR 508.1d: the required player. "you" binds the resolving ability
+            // controller; "that player" references the opponent chosen earlier
+            // in the same resolution — Ruhan of the Fomori, Raving Dead, Knight
+            // Rampager ("choose an opponent at random. This creature attacks
+            // that player this combat if able."). CR 608.2c: the choose+attack
+            // resolve together, so the resolution-scoped ChosenPlayer { index }
+            // (read from chosen_players) is the correct reference, not the
+            // durable SourceChosenPlayer. The opponent choice is the single
+            // preceding choice in every card of this class, so index 0.
+            alt((
+                value(TargetFilter::Controller, tag("you")),
+                value(
+                    TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+                    ),
+                    tag("that player"),
+                ),
+            )),
+        ),
         preceded(
             tag(" "),
             alt((
@@ -7153,12 +7191,15 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
             )),
         ),
     )
-        .map(|(_, _, duration)| duration)
+        .map(|(_, required_player, duration)| (required_player, duration))
         .parse(trimmed);
 
-    if let Ok((rest, duration)) = targeted {
+    if let Ok((rest, (required_player, duration))) = targeted {
         if rest.is_empty() {
-            return Some(ImperativeFamilyAst::ForceAttack { duration });
+            return Some(ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_player,
+            });
         }
     }
 
@@ -8422,6 +8463,7 @@ mod tests {
                 target: TargetFilter::Or { filters },
                 enters_under: None,
                 enter_tapped,
+                face_down_profile: None,
             } => {
                 assert_eq!(origin, None);
                 assert_eq!(destination, Zone::Battlefield);
@@ -10006,11 +10048,94 @@ mod tests {
             "Should parse 'attacks you this combat if able'"
         );
         match result.unwrap() {
-            ImperativeFamilyAst::ForceAttack { duration } => {
+            ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_player,
+            } => {
                 assert_eq!(duration, Duration::UntilEndOfCombat);
+                assert_eq!(required_player, TargetFilter::Controller);
             }
             other => panic!("Expected ForceAttack, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_attack_that_player_this_combat_if_able() {
+        // CR 508.1d: Ruhan of the Fomori / Raving Dead / Knight Rampager —
+        // "attacks that player" references the opponent chosen earlier in the
+        // same resolution, lowered to ControllerRef::ChosenPlayer { index: 0 }.
+        let result = try_parse_attack_if_able("attacks that player this combat if able")
+            .expect("should parse 'attacks that player this combat if able'");
+        match result {
+            ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_player,
+            } => {
+                assert_eq!(duration, Duration::UntilEndOfCombat);
+                assert_eq!(
+                    required_player.chosen_player_index(),
+                    Some(0),
+                    "that player must reference the chosen player at index 0, got {required_player:?}"
+                );
+            }
+            other => panic!("Expected ForceAttack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ruhan_choose_opponent_then_force_attack_composes() {
+        use crate::types::ability::{ChoiceType, Effect};
+
+        // CR 608.2c: The full Ruhan-class trigger composes the opponent choice
+        // with a forced attack at that opponent. Both resolve together, so the
+        // sub-ability references the resolution-scoped ChosenPlayer { index }.
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "At the beginning of combat on your turn, choose an opponent at random. ~ attacks that player this combat if able.",
+            "Ruhan of the Fomori",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let trigger = parsed
+            .triggers
+            .first()
+            .expect("should produce one triggered ability");
+        let execute = trigger
+            .execute
+            .as_ref()
+            .expect("trigger has an execute chain");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent,
+                    ..
+                }
+            ),
+            "parent must be an opponent choice, got {:?}",
+            execute.effect
+        );
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("the force-attack must chain as the sub-ability");
+        // The forced attacker is the source (~ → SelfRef), forced to attack the
+        // resolution-scoped chosen opponent (chosen_players[0]).
+        let Effect::ForceAttack {
+            target,
+            required_player,
+            duration,
+        } = &*sub.effect
+        else {
+            panic!("sub-ability must be a ForceAttack, got {:?}", sub.effect);
+        };
+        assert_eq!(*target, TargetFilter::SelfRef);
+        assert_eq!(*duration, Duration::UntilEndOfCombat);
+        assert_eq!(
+            required_player.chosen_player_index(),
+            Some(0),
+            "must force attacking the chosen player, got {required_player:?}"
+        );
     }
 
     /// CR 508.1d / CR 509.1c: the standalone-combat-requirement recognizer

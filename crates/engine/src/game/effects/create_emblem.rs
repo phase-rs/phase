@@ -189,6 +189,7 @@ mod tests {
                 enters_attacking: false,
                 up_to: false,
                 enter_with_counters: vec![],
+                face_down_profile: None,
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],
             ObjectId(200),

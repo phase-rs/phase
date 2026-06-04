@@ -65,6 +65,16 @@ pub struct PreparedState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BestowFormState;
 
+/// CR 702.140a-c: Mutate form marker — `Some(_)` while this object is a
+/// mutating creature spell on the stack (cast for its mutate cost). Parallels
+/// `BestowFormState`: an empty typed marker (not a bool) set when the mutate
+/// cost is paid (`apply_mutate_form`) and cleared by `revert_mutate_form` when
+/// the spell's target is illegal at resolution (CR 702.140b) so the spell
+/// resolves as a plain creature spell. It does NOT persist onto the merged
+/// permanent — the merge identity lives in `GameObject::merged_components`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MutateFormState;
+
 /// CR 702.160a: Prototype form marker — `Some(_)` means this object was cast
 /// prototyped and should use the secondary power, toughness, and mana cost
 /// characteristics while it is a spell or permanent on the battlefield.
@@ -523,6 +533,30 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prototype_form: Option<PrototypeFormState>,
 
+    /// CR 702.140a-c: `Some(_)` while this object is a mutating creature spell on
+    /// the stack (cast for its mutate cost). Set by `apply_mutate_form`; cleared
+    /// by `revert_mutate_form` when the target is illegal at resolution
+    /// (CR 702.140b). Does not persist onto the merged permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutate_form: Option<MutateFormState>,
+
+    /// CR 730.2 + CR 702.140c: The ordered list of card/token `ObjectId`s that
+    /// represent this merged permanent. EMPTY for non-merged objects. Convention:
+    /// element `[0]` is the TOPMOST component (supplies copiable characteristics
+    /// per CR 730.2a); later elements are progressively lower in the stack. The
+    /// merged permanent itself always keeps the original target creature's
+    /// `ObjectId` (CR 730.2c continuity) regardless of which component is topmost.
+    /// Each component retains its ORIGINAL owner so CR 730.3 routes each to the
+    /// correct player's zone when the merged permanent leaves the battlefield.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_components: Vec<ObjectId>,
+
+    /// CR 730.2a + CR 702.140e: Stable id of the layer-1 copy effect that
+    /// represents this merged permanent's topmost copiable values plus component
+    /// ability union. `None` for non-merged objects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_layer_effect_id: Option<u64>,
+
     /// CR 702.148a-b + CR 612: `Some(_)` while this object's cleave
     /// text-changing effect is live (the spell was cast for its cleave cost).
     /// Carries the printed-form ability snapshot captured before the swap so the
@@ -946,6 +980,9 @@ impl GameObject {
             convoked_creatures: Vec::new(),
             bestow_form: None,
             prototype_form: None,
+            mutate_form: None,
+            merged_components: Vec::new(),
+            merge_layer_effect_id: None,
             cleave_form: None,
             cleave_variant: None,
             unimplemented_mechanics: Vec::new(),
@@ -1127,6 +1164,17 @@ impl GameObject {
         // stuck in Aura form because the revert block would skip it. The
         // SBA path (CR 702.103f override) handles the in-place battlefield
         // revert explicitly.
+        // CR 730.3: A merged permanent's components are split into their owners'
+        // zones by `merge::split_merged_permanent_on_leave` at the battlefield-
+        // exit seam, BEFORE this reset runs on the surviving object. The merge
+        // identity is battlefield-scoped (CR 400.7), so clear it here so a
+        // re-entering object is not stuck carrying stale component ids. `mutate_form`
+        // (stack-only, paralleling `bestow_form`) is intentionally NOT cleared here.
+        self.merged_components.clear();
+        // CR 730.3 + CR 400.7: merge copy effects are battlefield-scoped and are
+        // pruned at the battlefield-exit seam before this reset. Clear the stored
+        // id so a re-entering object cannot point at a stale transient effect.
+        self.merge_layer_effect_id = None;
         self.room_unlocks = None;
     }
 

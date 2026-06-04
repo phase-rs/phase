@@ -5,8 +5,9 @@ use super::restriction::*;
 use super::support::*;
 use super::*;
 use crate::types::ability::{
-    AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect, ObjectProperty,
-    PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation, TypeFilter, ZoneRef,
+    ActivationRestriction, AggregateFunction, CardTypeSetSource, CountScope, Duration, Effect,
+    ObjectProperty, PlayerScope, PtStat, PtValueScope, SharedQuality, SharedQualityRelation,
+    TypeFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::keywords::Keyword;
@@ -579,6 +580,59 @@ fn static_cant_be_blocked_by_more_than_two_creatures() {
     let def = parse_static_line("~ can't be blocked by more than two creatures.").unwrap();
     assert_eq!(def.mode, StaticMode::CantBeBlockedByMoreThan { max: 2 });
     assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn static_attach_only_restriction_power_ge_lowers_to_filter() {
+    // CR 301.5 + CR 303.4 + CR 701.3a: Strata Scythe class — a positive
+    // attachment restriction lowers to `AttachmentRestriction` whose `filter` is
+    // the reused `TargetFilter` for "a creature with power 3 or greater".
+    let def =
+        parse_static_line("~ can be attached only to a creature with power 3 or greater.").unwrap();
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(
+            &def.mode,
+            StaticMode::AttachmentRestriction { filter }
+            if matches!(
+                filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&TypeFilter::Creature)
+                        && tf.properties.contains(&FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            scope: PtValueScope::Current,
+                            comparator: Comparator::GE,
+                            value: QuantityExpr::Fixed { value: 3 },
+                        })
+            )
+        ),
+        "Expected AttachmentRestriction with PtComparison(Power, GE, 3), got {:?}",
+        def.mode
+    );
+}
+
+#[test]
+fn static_attach_only_restriction_legendary_lowers_to_filter() {
+    // CR 301.5 + CR 303.4 + CR 701.3a: Konda's Banner class — "a legendary
+    // creature" host whitelist via the reused `TargetFilter` legendary property.
+    let def = parse_static_line("~ can be attached only to a legendary creature.").unwrap();
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(
+            &def.mode,
+            StaticMode::AttachmentRestriction { filter }
+            if matches!(
+                filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.contains(&TypeFilter::Creature)
+                        && tf.properties.contains(&FilterProp::HasSupertype {
+                            value: crate::types::card_type::Supertype::Legendary,
+                        })
+            )
+        ),
+        "Expected AttachmentRestriction with Legendary creature filter, got {:?}",
+        def.mode
+    );
 }
 
 #[test]
@@ -2770,6 +2824,42 @@ fn this_land_is_the_chosen_type() {
 }
 
 #[test]
+fn enchanted_land_is_the_chosen_type() {
+    // CR 305.7 + CR 305.6: Phantasmal Terrain / Convincing Mirage. The Aura's
+    // continuous static must set the enchanted land's subtype to the chosen
+    // basic land type with replacement semantics (SetChosenBasicLandType), not
+    // additive (AddChosenSubtype) — that variant clears the land's old types and
+    // rules-text abilities, which AddChosenSubtype does not.
+    let def = parse_static_line("Enchanted land is the chosen type.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::land().properties(vec![FilterProp::EnchantedBy])
+        ))
+    );
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::SetChosenBasicLandType]
+    );
+
+    // Tail variants ("and loses its other land types"/"types") parse identically
+    // — CR 305.7 already removes the old land types, so the tail is cosmetic.
+    for line in [
+        "Enchanted land is the chosen type",
+        "Enchanted land is the chosen type and loses its other land types.",
+        "Enchanted land is the chosen type and loses its other types.",
+    ] {
+        let def = parse_static_line(line).unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetChosenBasicLandType],
+            "line did not parse to SetChosenBasicLandType: {line}"
+        );
+    }
+}
+
+#[test]
 fn this_creature_is_the_chosen_type() {
     let def = parse_static_line("This creature is the chosen type in addition to its other types.")
         .unwrap();
@@ -2896,6 +2986,34 @@ fn static_tarmogoyf_cda() {
                 offset: 1,
             },
         }));
+}
+
+#[test]
+fn attacks_each_combat_unless_you_control_is_conditional_must_attack() {
+    // CR 508.1d + CR 604.1: Reckless Cohort — "attacks each combat if able
+    // unless you control another Ally" is a MustAttack rule-static gated by a
+    // negated control-presence condition (the requirement applies only while you
+    // do NOT control another Ally).
+    let def = parse_static_line(
+        "This creature attacks each combat if able unless you control another Ally.",
+    )
+    .unwrap();
+    assert_eq!(def.mode, StaticMode::MustAttack);
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert!(
+        matches!(def.condition, Some(StaticCondition::Not { .. })),
+        "expected a negated control-presence condition, got {:?}",
+        def.condition
+    );
+}
+
+#[test]
+fn attacks_each_combat_if_able_unconditional_has_no_condition() {
+    // Regression: the plain rule-static (no "unless") still parses to an
+    // unconditional MustAttack.
+    let def = parse_static_line("This creature attacks each combat if able.").unwrap();
+    assert_eq!(def.mode, StaticMode::MustAttack);
+    assert!(def.condition.is_none());
 }
 
 #[test]
@@ -3458,6 +3576,77 @@ fn quoted_ability_sacrifice_cost_separator() {
 }
 
 #[test]
+fn quoted_ability_preserves_activation_restrictions() {
+    // CR 602.5c: A granted activated ability carrying a trailing use
+    // restriction inside its quoted text must surface that restriction on the
+    // acquired ability — not drop it as an unparsed sentence. CR 602.5d:
+    // "Activate only as a sorcery" → AsSorcery timing gate. This is the path
+    // for Skygames ("Enchanted land has \"{T}: ... Activate only as a
+    // sorcery.\""), Mindwhip Sliver, and Squirrel anthem cards.
+    let def =
+        parse_static_line("Enchanted land has \"{T}: Draw a card. Activate only as a sorcery.\"")
+            .unwrap();
+    let grant = def
+        .modifications
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("should grant the quoted activated ability");
+    let ContinuousModification::GrantAbility { definition } = grant else {
+        unreachable!();
+    };
+    assert_eq!(definition.kind, AbilityKind::Activated);
+    assert!(definition.cost.is_some(), "should retain the tap cost");
+    assert!(
+        definition.sorcery_speed,
+        "AsSorcery must set sorcery_speed on the granted ability"
+    );
+    assert!(
+        definition
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery),
+        "granted ability must carry AsSorcery, got {:?}",
+        definition.activation_restrictions
+    );
+    assert!(
+        !matches!(
+            *definition.effect,
+            crate::types::ability::Effect::Unimplemented { .. }
+        ),
+        "the draw effect must still parse, got {:?}",
+        definition.effect
+    );
+
+    // CR 602.5b: Non-sorcery restrictions use the same single-authority
+    // extractor and must surface on the granted copy too.
+    let once = parse_static_line(
+        "Creatures you control have \"{T}: Draw a card. Activate only during your turn and only once each turn.\"",
+    )
+    .unwrap();
+    let grant = once
+        .modifications
+        .iter()
+        .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        .expect("should grant the quoted activated ability");
+    let ContinuousModification::GrantAbility { definition } = grant else {
+        unreachable!();
+    };
+    assert!(
+        definition
+            .activation_restrictions
+            .contains(&ActivationRestriction::DuringYourTurn),
+        "granted ability must carry DuringYourTurn, got {:?}",
+        definition.activation_restrictions
+    );
+    assert!(
+        definition
+            .activation_restrictions
+            .contains(&ActivationRestriction::OnlyOnceEachTurn),
+        "granted ability must carry OnlyOnceEachTurn, got {:?}",
+        definition.activation_restrictions
+    );
+}
+
+#[test]
 fn quoted_self_rule_static_grants_static_mode() {
     let modifications = parse_quoted_ability_modifications(
         "It gains \"This creature attacks each combat if able.\"",
@@ -3601,6 +3790,7 @@ fn static_during_your_turn_equipped_creatures_you_control_have_double_strike() {
                 .properties(vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Equipment,
                     controller: None,
+                    exclude_source: false,
                 }]),
         ))
     );
@@ -3725,6 +3915,46 @@ fn static_legend_rule_routes_through_classifier() {
     ));
     assert!(crate::parser::oracle_classifier::is_static_pattern(
         "the \"legend rule\" doesn't apply."
+    ));
+}
+
+#[test]
+fn static_legend_rule_creature_tokens_scope() {
+    // CR 704.5j: The Master, Multiplied — "doesn't apply to creature tokens you control."
+    let def =
+        parse_static_line("The \"legend rule\" doesn't apply to creature tokens you control.")
+            .unwrap();
+    assert_eq!(def.mode, StaticMode::LegendRuleDoesntApply);
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::Token)
+    ));
+}
+
+#[test]
+fn static_cant_cause_sacrifice_or_exile_creature_tokens() {
+    // CR 603.2 + CR 609.3: The Master, Multiplied.
+    let def = parse_static_line(
+        "Triggered abilities you control can't cause you to sacrifice or exile creature tokens you control.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::CantCauseSacrificeOrExile {
+            cause: ProhibitionScope::Controller,
+        }
+    );
+    assert!(matches!(
+        def.affected,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            properties,
+            ..
+        })) if properties.contains(&FilterProp::Token)
     ));
 }
 
@@ -4958,6 +5188,8 @@ fn exile_cast_permission_maralen_fae_ascendant() {
             frequency: CastFrequency::OncePerTurn,
             play_mode: CardPlayMode::Cast,
             cost: ExileCastCost::WithoutPayingManaCost,
+            pool: ExileCardPool::ThisTurn,
+            timing: ExileCastTiming::AnyTime,
         },
         "expected ExileCastPermission, got {:?}",
         def.mode
@@ -5001,6 +5233,8 @@ fn exile_cast_permission_during_each_of_your_turns_synonym() {
                 frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
                 cost: ExileCastCost::WithoutPayingManaCost,
+                pool: ExileCardPool::ThisTurn,
+                timing: ExileCastTiming::AnyTime,
             }
         ),
         "expected ExileCastPermission(OncePerTurn, Cast, free), got {:?}",
@@ -5039,6 +5273,66 @@ fn exile_cast_permission_not_intercepted_by_graveyard_branch() {
     assert!(try_parse_exile_cast_permission(text, &lower).is_some());
 }
 
+/// CR 113.6b + CR 305.1 + CR 406.6 + CR 117.1c: The Matrix-of-Time persistent
+/// exile-play line lowers to `ExileCastPermission { pool: Persistent, play_mode:
+/// Play, frequency: Unlimited, timing: YourTurnOnly }` with `affected: Any`.
+#[test]
+fn persistent_exile_play_permission_matrix_form() {
+    let text =
+        "During your turn, you may play lands and cast spells from among cards exiled with ~.";
+    let def = parse_static_line(text).expect("Matrix-class static must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+        },
+        "expected persistent your-turn Play permission, got {:?}",
+        def.mode
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Any),
+        "the persistent pool is the scope; affected must be Any"
+    );
+}
+
+/// CR 601.3f + CR 305.1: The "you may look at cards exiled with ~, and you may
+/// play lands and cast spells from among those cards." variant lowers to the
+/// same persistent Play permission, but without the your-turn timing gate.
+#[test]
+fn persistent_exile_play_permission_look_at_variant() {
+    let text = "You may look at cards exiled with ~, and you may play lands and cast spells from among those cards.";
+    let def = parse_static_line(text).expect("look-at variant must parse");
+    assert_eq!(
+        def.mode,
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::AnyTime,
+        },
+        "expected persistent any-time Play permission, got {:?}",
+        def.mode
+    );
+}
+
+/// CR 113.6b: The persistent handler must NOT swallow the Maralen "this turn"
+/// per-turn-pool line — that belongs to `try_parse_exile_cast_permission`.
+#[test]
+fn persistent_exile_play_permission_rejects_maralen_this_turn() {
+    let text = "Once each turn, you may cast a spell from among cards exiled with ~ this turn.";
+    let lower = text.to_lowercase();
+    assert!(
+        try_parse_persistent_exile_play_permission(text, &lower).is_none(),
+        "the per-turn Maralen line must not match the persistent class"
+    );
+}
+
 #[test]
 fn graveyard_cast_permission_no_rider_leaves_filter_clean() {
     // Lurrus / Muldrotha / Karador / Conduit / Yawgmoth's Will regression:
@@ -5073,6 +5367,7 @@ fn hand_cast_free_omniscience() {
         def.mode,
         StaticMode::CastFromHandFree {
             frequency: CastFrequency::Unlimited,
+            origin: CastFreeOrigin::Hand,
         }
     );
     assert_eq!(def.affected, Some(TargetFilter::Any));
@@ -5096,6 +5391,7 @@ fn hand_cast_free_zaffai_once_per_turn() {
             def.mode,
             StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
+                origin: CastFreeOrigin::Hand,
             }
         ),
         "expected CastFromHandFree {{ OncePerTurn }}, got: {:?}",
@@ -5126,7 +5422,8 @@ fn hand_cast_free_zaffai_not_intercepted_by_graveyard_branch() {
 
 // CR 601.2 + CR 118.9a: B10 Dracogenesis — Omniscience-class static with
 // the zone qualifier omitted ("you may cast Dragon spells without paying
-// their mana costs"). Implicit cast zone defaults to hand per CR 601.2.
+// their mana costs"). The mana-cost replacement applies from built-in cast
+// zones already authorized for that spell, including CR 903.8 command zone casts.
 #[test]
 fn cast_free_dracogenesis_no_zone_qualifier() {
     let text = "You may cast Dragon spells without paying their mana costs.";
@@ -5135,6 +5432,7 @@ fn cast_free_dracogenesis_no_zone_qualifier() {
         def.mode,
         StaticMode::CastFromHandFree {
             frequency: CastFrequency::Unlimited,
+            origin: CastFreeOrigin::DefaultCastPermission,
         }
     );
     // Dragon subtype filter must survive.
@@ -7148,6 +7446,30 @@ fn lands_you_control_are_plains_celestial_dawn() {
 }
 
 #[test]
+fn all_mountains_are_plains_conversion() {
+    // CR 305.7: Conversion / Glaciers — "All Mountains are Plains" sets every
+    // Mountain (any controller) to Plains via SetBasicLandType. Covers the
+    // "All <basic land type> are <type>" subject class.
+    let def = parse_static_line("All Mountains are Plains.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(matches!(
+        def.modifications.as_slice(),
+        [ContinuousModification::SetBasicLandType { land_type }]
+        if *land_type == BasicLandType::Plains
+    ));
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Land));
+            assert!(tf
+                .type_filters
+                .contains(&TypeFilter::Subtype("Mountain".to_string())));
+            assert_eq!(tf.controller, None, "battlefield-wide, any controller");
+        }
+        _ => panic!("Expected Typed land filter with Mountain subtype"),
+    }
+}
+
+#[test]
 fn each_land_is_a_swamp_in_addition_urborg() {
     let def =
         parse_static_line("Each land is a Swamp in addition to its other land types.").unwrap();
@@ -7164,6 +7486,81 @@ fn each_land_is_a_swamp_in_addition_urborg() {
             assert!(tf.controller.is_none());
         }
         _ => panic!("Expected Typed land filter (all lands)"),
+    }
+}
+
+#[test]
+fn all_lands_are_creatures_living_plane() {
+    use crate::types::card_type::CoreType;
+
+    // CR 613.1d + CR 613.4b + CR 205.1b: Living Plane / Nature's Revolt —
+    // a continuous static animating every land into a creature while it stays
+    // a land. P/T is set (Layer 7b), the creature type is added (Layer 4), and
+    // the land type is retained (additive types, confirmed by "that are still
+    // lands").
+    let def = parse_static_line("All lands are 1/1 creatures that are still lands.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let mods = &def.modifications;
+    assert!(
+        mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddType { core_type } if *core_type == CoreType::Creature
+        )),
+        "must add the Creature type (Layer 4): {mods:?}"
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::SetPower { value } if *value == 1)),
+        "must set power to 1 (Layer 7b): {mods:?}"
+    );
+    assert!(
+        mods.iter()
+            .any(|m| matches!(m, ContinuousModification::SetToughness { value } if *value == 1)),
+        "must set toughness to 1 (Layer 7b): {mods:?}"
+    );
+    // No SetBasicLandType / type replacement — the land keeps its land type.
+    assert!(
+        !mods.iter().any(|m| matches!(
+            m,
+            ContinuousModification::SetBasicLandType { .. }
+                | ContinuousModification::SetCardTypes { .. }
+        )),
+        "must not replace types (CR 205.1b retention): {mods:?}"
+    );
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Land));
+            assert!(tf.controller.is_none(), "all lands — no controller scope");
+        }
+        _ => panic!("Expected Typed land filter (all lands)"),
+    }
+}
+
+#[test]
+fn lands_you_control_are_creatures_scope_and_pt() {
+    use crate::types::card_type::CoreType;
+
+    // Same building block, controller-scoped subject + a different P/T proves
+    // the animation spec (not a hardcoded 1/1) drives the result.
+    let def =
+        parse_static_line("Lands you control are 2/2 creatures that are still lands.").unwrap();
+    let mods = &def.modifications;
+    assert!(mods.iter().any(|m| matches!(
+        m,
+        ContinuousModification::AddType { core_type } if *core_type == CoreType::Creature
+    )));
+    assert!(mods
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::SetPower { value } if *value == 2)));
+    assert!(mods
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::SetToughness { value } if *value == 2)));
+    match &def.affected {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Land));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        }
+        _ => panic!("Expected Typed land filter scoped to you"),
     }
 }
 
@@ -7990,7 +8387,8 @@ fn creatures_you_control_that_are_enchanted() {
                 tf.properties.as_slice(),
                 [FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
-                    controller: None
+                    controller: None,
+                    exclude_source: false
                 }]
             ));
         }
@@ -10802,6 +11200,7 @@ fn static_enchanted_creatures_you_control_uses_attachment_predicate() {
                 .properties(vec![FilterProp::HasAttachment {
                     kind: AttachmentKind::Aura,
                     controller: None,
+                    exclude_source: false,
                 }])
         ))
     );

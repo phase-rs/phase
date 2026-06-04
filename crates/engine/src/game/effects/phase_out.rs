@@ -19,13 +19,11 @@ use crate::game::filter::{
 use crate::game::game_object::PhaseOutCause;
 use crate::game::phasing::{phase_in_object, phase_in_player, phase_out_object, phase_out_player};
 use crate::types::ability::{
-    ControllerRef, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-    TypedFilter,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
-use crate::types::player::PlayerId;
 
 /// CR 702.26a: Resolve `Effect::PhaseOut` by phasing out every targeted
 /// permanent (or every permanent matching the effect's mass filter, e.g.
@@ -49,7 +47,8 @@ pub fn resolve(
     // `Player`) expands to the matching set of player ids. This dispatches
     // before the object branch so a player target never silently becomes a
     // no-op via `collect_object_targets`.
-    let player_targets = collect_player_targets(state, ability, &target);
+    let player_targets =
+        crate::game::ability_utils::collect_player_targets(state, ability, &target);
     for pid in &player_targets {
         phase_out_player(state, *pid, events);
     }
@@ -88,7 +87,8 @@ pub fn resolve_phase_in(
     // players don't appear in the targeting choke point, so callers wanting
     // to phase them back in must use an explicit `TargetRef::Player` target
     // (or a player-typed mass filter such as `Controller`).
-    let player_targets = collect_player_targets(state, ability, &target);
+    let player_targets =
+        crate::game::ability_utils::collect_player_targets(state, ability, &target);
     for pid in &player_targets {
         phase_in_player(state, *pid, events);
     }
@@ -107,76 +107,6 @@ pub fn resolve_phase_in(
         source_id: ability.source_id,
     });
     Ok(())
-}
-
-/// Resolve the target player set for a `PhaseOut`/`PhaseIn` effect.
-///
-/// Explicit `TargetRef::Player` targets win. Otherwise a player-typed mass
-/// filter (`Controller`, `Player`, or a `Typed` filter with no `type_filters`
-/// and an optional `controller` ref) expands to the matching player ids.
-/// Returns an empty vec if the filter doesn't refer to players (the object
-/// branch will handle it).
-fn collect_player_targets(
-    state: &GameState,
-    ability: &ResolvedAbility,
-    target: &TargetFilter,
-) -> Vec<PlayerId> {
-    let from_targets: Vec<PlayerId> = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Player(pid) => Some(*pid),
-            TargetRef::Object(_) => None,
-        })
-        .collect();
-    if !from_targets.is_empty() {
-        return from_targets;
-    }
-
-    match target {
-        TargetFilter::Controller => vec![ability.scoped_player.unwrap_or(ability.controller)],
-        TargetFilter::Player => state.players.iter().map(|p| p.id).collect(),
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller,
-            ..
-        }) if type_filters.is_empty() => {
-            state
-                .players
-                .iter()
-                .filter(|p| match controller {
-                    Some(ControllerRef::You) => p.id == ability.controller,
-                    Some(ControllerRef::Opponent) => p.id != ability.controller,
-                    Some(ControllerRef::ScopedPlayer) => {
-                        p.id == ability.scoped_player.unwrap_or(ability.controller)
-                    }
-                    // CR 109.4: TargetPlayer is ambiguous here (phase_out targets are
-                    // resolved from ability.targets directly); fail closed.
-                    Some(ControllerRef::TargetPlayer) => false,
-                    Some(ControllerRef::ParentTargetController) => false,
-                    Some(ControllerRef::DefendingPlayer) => false,
-                    // CR 613.1: no phase-out card scopes to a persisted chosen
-                    // player; fail closed (mirrors DefendingPlayer).
-                    Some(ControllerRef::SourceChosenPlayer) => false,
-                    // CR 608.2c + CR 109.4: Player chosen by an earlier
-                    // `Choose(Player)` in this resolution.
-                    Some(ControllerRef::ChosenPlayer { index }) => {
-                        ability.chosen_players.get(*index as usize).copied() == Some(p.id)
-                    }
-                    // CR 603.2 + CR 109.4: The triggering player. Resolved against
-                    // the current trigger event; fail closed when there is none.
-                    Some(ControllerRef::TriggeringPlayer) => {
-                        state.current_trigger_event.as_ref().and_then(|e| {
-                            crate::game::targeting::extract_player_from_event(e, state)
-                        }) == Some(p.id)
-                    }
-                    None => true,
-                })
-                .map(|p| p.id)
-                .collect()
-        }
-        _ => Vec::new(),
-    }
 }
 
 /// True when `oid` is attached to another permanent that is also in `targets`.
@@ -262,8 +192,10 @@ fn collect_phase_in_targets(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{ControllerRef, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
     fn add_creature(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {

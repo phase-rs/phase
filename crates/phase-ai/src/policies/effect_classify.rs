@@ -143,7 +143,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::DestroyAll { .. }
         | Effect::DamageAll { .. }
         | Effect::BounceAll { .. }
-        | Effect::LoseTheGame => EffectPolarity::Harmful,
+        | Effect::LoseTheGame { .. } => EffectPolarity::Harmful,
         // ChangeZone: depends on destination
         Effect::ChangeZone { destination, .. } => match destination {
             Zone::Exile | Zone::Graveyard => EffectPolarity::Harmful,
