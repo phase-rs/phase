@@ -91,7 +91,7 @@ fn deliver_card_draw(
 ) -> Result<(), EffectError> {
     // CR 614.1a + CR 614.6 + CR 704.3: Route through the single-authority
     // helper so post-replacement continuations drain in the same step.
-    let (_, _) = super::draw::draw_through_replacement(
+    let _ = super::draw::draw_through_replacement(
         state,
         opponent,
         1,

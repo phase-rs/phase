@@ -96,7 +96,7 @@ pub fn apply_debug_action(
             // CR 614.6 + CR 614.11 + CR 704.3: route through the single-authority
             // helper so post-replacement continuations (Jace WinTheGame,
             // Abundance reveal-until) drain in the same step as the draw.
-            let (_, _) = super::effects::draw::draw_through_replacement(
+            let _ = super::effects::draw::draw_through_replacement(
                 state,
                 player_id,
                 count,

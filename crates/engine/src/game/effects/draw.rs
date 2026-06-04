@@ -86,23 +86,8 @@ pub fn resolve(
         _ => (1, ability.controller),
     };
 
-    // Stash the original sub_ability before replacement to preserve it if the
-    // replacement pipeline filters out the continuation (e.g., simple count modifier).
-    // See issue #1964: Teferi's Ageless Insight replacement removes discard sub_ability.
-    let had_sub_ability = ability.sub_ability.is_some();
-    // CR 614.1a + CR 614.6: Stash the original sub_ability before replacement to preserve it
-    // if the replacement pipeline filters out the continuation (e.g., simple count modifier).
-    if let Some(ref sub_ability) = ability.sub_ability {
-        let mut sub = (**sub_ability).clone();
-        // Copy targets from parent ability if sub has no targets
-        if sub.targets.is_empty() && !ability.targets.is_empty() {
-            sub.targets = ability.targets.clone();
-        }
-        state.original_sub_ability_before_replacement = Some(sub);
-    }
-
     // CR 614.1a: Route draw through replacement pipeline (e.g. Dredge, Abundance).
-    let (result, continuation_drained) = draw_through_replacement(
+    let result = draw_through_replacement(
         state,
         drawing_player,
         num_cards,
@@ -111,39 +96,7 @@ pub fn resolve(
     );
     match result {
         ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
-        ReplacementResult::NeedsChoice(_) => {
-            // Clear the stashed sub_ability if replacement pauses for player choice
-            state.original_sub_ability_before_replacement = None;
-            return Ok(());
-        }
-    }
-
-    // If the replacement filtered out the continuation (continuation was not drained)
-    // but we had a sub_ability, resolve it directly using resolve_effect to bypass
-    // the guard in resolve_chain_body that would skip sub_ability resolution.
-    // Only do this if a replacement effect actually applied to the draw event.
-    // CR 614.1a + CR 614.6: Verify if the event was modified by any replacement.
-    if had_sub_ability && !continuation_drained {
-        let proposed = ProposedEvent::Draw {
-            player_id: drawing_player,
-            count: num_cards,
-            applied: HashSet::new(),
-        };
-        let replacement_applied = match &result {
-            ReplacementResult::Execute(event) => event != &proposed,
-            _ => true,
-        };
-        if replacement_applied {
-            if let Some(stashed_sub) = state.original_sub_ability_before_replacement.take() {
-                // Resolve the sub_ability directly using resolve_effect
-                let _ = crate::game::effects::resolve_effect(state, &stashed_sub, events);
-            }
-        } else {
-            state.original_sub_ability_before_replacement = None;
-        }
-    } else {
-        // Clear the stash if the replacement preserved the continuation
-        state.original_sub_ability_before_replacement = None;
+        ReplacementResult::NeedsChoice(_) => return Ok(()),
     }
 
     events.push(GameEvent::EffectResolved {
@@ -174,42 +127,35 @@ pub fn resolve(
 /// On `NeedsChoice`, sets `state.waiting_for` to the replacement-choice
 /// prompt before returning so callers only need to bail. On `Prevented`,
 /// `apply_executed` is not called.
-///
-/// Returns (ReplacementResult, bool) where the bool indicates whether a
-/// post-replacement continuation was drained.
 pub(crate) fn draw_through_replacement(
     state: &mut GameState,
     player_id: crate::types::player::PlayerId,
     count: u32,
     events: &mut Vec<GameEvent>,
     apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
-) -> (replacement::ReplacementResult, bool) {
+) -> replacement::ReplacementResult {
     let proposed = ProposedEvent::Draw {
         player_id,
         count,
         applied: HashSet::new(),
     };
     let result = replacement::replace_event(state, proposed, events);
-    let continuation_drained = match &result {
+    match &result {
         ReplacementResult::Execute(event) => {
             apply_executed(state, event.clone(), events);
             if state.post_replacement_continuation.is_some() {
                 let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
                     state, None, None, None, events,
                 );
-                true
-            } else {
-                false
             }
         }
-        ReplacementResult::Prevented => false,
+        ReplacementResult::Prevented => {}
         ReplacementResult::NeedsChoice(player) => {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(*player, state);
-            false
         }
     };
-    (result, continuation_drained)
+    result
 }
 
 /// CR 121.1: Apply a post-replacement `ProposedEvent::Draw` to the game state.
@@ -549,8 +495,10 @@ mod tests {
             sub.sub_link = SubAbilityLink::ContinuationStep;
         }
 
+        // Drive through the full pipeline via resolve_ability_chain
         let mut events = Vec::new();
-        resolve(&mut state, &resolved, &mut events).unwrap();
+        crate::game::effects::resolve_ability_chain(&mut state, &resolved, &mut events, 0)
+            .unwrap();
 
         // Should have drawn 2 cards (Teferi replacement) then discarded 1
         assert_eq!(

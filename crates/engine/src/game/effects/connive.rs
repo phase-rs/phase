@@ -44,7 +44,7 @@ pub fn resolve(
     // Step 1: Draw `count` cards for the controller.
     // CR 614.1a + CR 614.6 + CR 704.3: Route through the single-authority
     // helper so post-replacement continuations drain in the same step.
-    let (result, _) = super::draw::draw_through_replacement(
+    let result = super::draw::draw_through_replacement(
         state,
         controller,
         count,
@@ -99,7 +99,7 @@ pub fn resolve(
             }
         },
     );
-    match result {
+    match &result {
         ReplacementResult::Execute(_) => {}
         ReplacementResult::Prevented => {
             // Draw was prevented — skip the discard step
