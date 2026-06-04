@@ -10181,7 +10181,7 @@ pub enum TriggerCondition {
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
-    /// CR 508.1a + CR 603.2c: "Whenever ~ and at least N other creatures attack".
+    /// CR 508.1a: "Whenever ~ and at least N other creatures attack".
     /// True when combat is active and at least `minimum` other creatures
     /// controlled by the same player are also attacking.
     MinCoAttackers { minimum: u32 },
