@@ -261,11 +261,14 @@ impl KeywordTriggerInstaller {
                 build_suspend_upkeep_removal_trigger(),
                 build_suspend_last_counter_cast_trigger(),
             ],
-            // CR 702.130a/b: Afflict N — one becomes-blocked trigger per instance.
+            // CR 702.130a: Afflict N — a becomes-blocked trigger.
+            // CR 702.130b: each Afflict instance triggers separately (one trigger per instance).
             Keyword::Afflict(n) => vec![build_afflict_trigger(*n)],
-            // CR 702.149a/b: Training — one attacks trigger per instance.
+            // CR 702.149a: Training — an attacks trigger.
+            // CR 702.149b: each Training instance triggers separately (one trigger per instance).
             Keyword::Training => vec![build_training_trigger()],
-            // CR 702.70a/b: Poisonous N — one combat-damage-to-player trigger per instance.
+            // CR 702.70a: Poisonous N — a combat-damage-to-player trigger.
+            // CR 702.70b: each Poisonous instance triggers separately (one trigger per instance).
             Keyword::Poisonous(n) => vec![build_poisonous_trigger(*n)],
             _ => Vec::new(),
         }
@@ -3744,8 +3747,8 @@ fn is_training_trigger(t: &TriggerDefinition) -> bool {
             t.condition.as_ref(),
             Some(TriggerCondition::MinCoAttackers {
                 minimum: 1,
-                filter: Some(_),
-            })
+                filter: Some(f),
+            }) if f == &training_higher_power_coattacker_filter()
         )
         && matches!(
             t.execute.as_deref().map(|a| &*a.effect),
