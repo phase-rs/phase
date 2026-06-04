@@ -569,11 +569,9 @@ fn check_lethal_damage(
 ///
 /// This is the single authority the legend-rule SBA consults; it is public so
 /// rules-aware consumers (e.g. the AI's anti-self-harm policy) can ask the same
-/// question — "would a same-name legendary be collapsed by the legend rule?" —
-/// without duplicating the exemption logic. Pass the `ObjectId` of an
-/// already-controlled same-name legendary permanent: a prospective duplicate
-/// shares its name, controller, and subtypes, so the exemption verdict is
-/// identical.
+/// per-permanent question without duplicating the exemption logic. Callers that
+/// reason about a prospective duplicate should evaluate the already-controlled
+/// same-name permanents the same way the SBA filters them before grouping.
 pub fn legend_rule_exempt(
     state: &GameState,
     permanent_id: crate::types::identifiers::ObjectId,

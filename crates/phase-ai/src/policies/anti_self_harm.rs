@@ -95,10 +95,9 @@ impl TacticalPolicy for AntiSelfHarmPolicy {
 fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
     // CR 704.5j: Penalise casting a legendary permanent when we already control one
     // with the same name — the legend rule SBA will force us to put one into the
-    // graveyard. Skip the penalty when a "legend rule doesn't apply" exemption
-    // (Mirror Gallery / Sakashima / Sliver Gravemother class) covers the existing
-    // copy: the duplicate shares its name, controller, and subtypes, so the engine's
-    // exemption verdict for the controlled copy is identical for the prospective one.
+    // graveyard. Skip same-name copies that the engine's legend-rule SBA would
+    // exclude under a "legend rule doesn't apply" exemption (Mirror Gallery /
+    // Sakashima / Sliver Gravemother class).
     // Reuse the engine's own legend-rule predicate (`engine::game::sba::legend_rule_exempt`)
     // rather than re-deriving the exemption logic in the AI — the engine owns the rule.
     let legend_penalty = ctx
@@ -108,16 +107,14 @@ fn score_pre_cast(ctx: &PolicyContext<'_>) -> f64 {
             ctx.state
                 .battlefield
                 .iter()
-                .copied()
-                .find(|&id| {
+                .any(|&id| {
                     ctx.state.objects.get(&id).is_some_and(|o| {
                         o.controller == ctx.ai_player
                             && o.card_types.supertypes.contains(&Supertype::Legendary)
                             && o.name == source.name
-                    })
+                    }) && !engine::game::sba::legend_rule_exempt(ctx.state, id)
                 })
-                .filter(|&existing| !engine::game::sba::legend_rule_exempt(ctx.state, existing))
-                .map(|_| -8.0)
+                .then_some(-8.0)
         })
         .unwrap_or(0.0);
 
